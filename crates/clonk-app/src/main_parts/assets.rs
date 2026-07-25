@@ -16,7 +16,8 @@ pub(crate) const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); //
 pub(crate) const PRESENTATION_BENCHMARK_ENV: &str = "LC_APP_PRESENTATION_BENCHMARK_SECONDS";
 pub(crate) const PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK_ENV: &str =
     "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK";
-pub(crate) const PRESENTATION_BENCHMARK_KEEP_RUNNING_ENV: &str = "LC_APP_PRESENTATION_BENCHMARK_KEEP_RUNNING";
+pub(crate) const PRESENTATION_BENCHMARK_KEEP_RUNNING_ENV: &str =
+    "LC_APP_PRESENTATION_BENCHMARK_KEEP_RUNNING";
 pub(crate) const PRESENTATION_BENCHMARK_WARMUP: Duration = Duration::from_secs(2);
 pub(crate) const SAVE_THUMBNAIL_WIDTH: u32 = 200;
 pub(crate) const SAVE_THUMBNAIL_HEIGHT: u32 = 150;
@@ -51,7 +52,10 @@ pub(crate) const MENU_DRAG_THRESHOLD: f32 = 5.0;
 /// C4Viewport.cpp:657-676).
 pub(crate) const CPP_DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
-pub(crate) fn classic_press_is_double_click(last_click: &mut Option<Instant>, now: Instant) -> bool {
+pub(crate) fn classic_press_is_double_click(
+    last_click: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
     if last_click
         .is_some_and(|last| now.saturating_duration_since(last) < CPP_DOUBLE_CLICK_INTERVAL)
     {
@@ -484,7 +488,10 @@ pub(crate) fn spawn_console_stdin_reader() -> Result<Receiver<ConsoleInputEvent>
     Ok(receiver)
 }
 
-pub(crate) fn run_console_event_loop(mut app: GameApp, commands: Receiver<ConsoleInputEvent>) -> Result<()> {
+pub(crate) fn run_console_event_loop(
+    mut app: GameApp,
+    commands: Receiver<ConsoleInputEvent>,
+) -> Result<()> {
     enum ConsoleLoopEvent {
         Input(ConsoleInputEvent),
         Network(NetworkEventWake),
@@ -1065,7 +1072,10 @@ pub(crate) struct CatalogHostLobbyPreloadArtifact {
 }
 
 impl CatalogHostLobbyPreloadArtifact {
-    pub(crate) fn take_matching_scenario(&mut self, key: &CatalogHostLobbyPreloadKey) -> Option<Scenario> {
+    pub(crate) fn take_matching_scenario(
+        &mut self,
+        key: &CatalogHostLobbyPreloadKey,
+    ) -> Option<Scenario> {
         if &self.key == key {
             self.scenario.take()
         } else {
@@ -2839,7 +2849,10 @@ fn load_classic_bitmap_font_image(
     anyhow::bail!("classic bitmap font `{filename}` is unavailable")
 }
 
-pub(crate) fn find_classic_named_entry(group: &Group, filename: &str) -> Result<Option<GroupEntry>> {
+pub(crate) fn find_classic_named_entry(
+    group: &Group,
+    filename: &str,
+) -> Result<Option<GroupEntry>> {
     let filename = clonk_script::c4_string_bytes(filename);
     Ok(find_classic_named_entry_from_entries(
         group.entries()?,
@@ -3633,7 +3646,10 @@ pub(crate) fn runtime_cp1252_byte(character: char) -> Result<u8> {
     Ok(byte)
 }
 
-pub(crate) fn runtime_flash_stored_bytes(text: &str, charset: RuntimeHelpCharset) -> Result<Vec<u8>> {
+pub(crate) fn runtime_flash_stored_bytes(
+    text: &str,
+    charset: RuntimeHelpCharset,
+) -> Result<Vec<u8>> {
     const C4_MAX_TITLE_BYTES: usize = 512;
     let mut encoded = match charset {
         RuntimeHelpCharset::Windows1252 => text
@@ -3654,7 +3670,10 @@ pub(crate) fn runtime_flash_stored_bytes(text: &str, charset: RuntimeHelpCharset
     Ok(encoded)
 }
 
-pub(crate) fn decode_runtime_flash_bytes(bytes: &[u8], charset: RuntimeHelpCharset) -> Result<String> {
+pub(crate) fn decode_runtime_flash_bytes(
+    bytes: &[u8],
+    charset: RuntimeHelpCharset,
+) -> Result<String> {
     match charset {
         RuntimeHelpCharset::Windows1252 => bytes
             .iter()
@@ -3688,7 +3707,10 @@ pub(crate) fn parse_runtime_help_language_table(
     Ok(parse_runtime_language_table(bytes, source)?.entries)
 }
 
-pub(crate) fn parse_runtime_language_table(bytes: &[u8], source: &str) -> Result<RuntimeLanguageTable> {
+pub(crate) fn parse_runtime_language_table(
+    bytes: &[u8],
+    source: &str,
+) -> Result<RuntimeLanguageTable> {
     let charset = runtime_help_table_charset(bytes, source)?;
     let entries = parse_runtime_help_language_table_with_charset(bytes, source, charset)?;
     Ok(RuntimeLanguageTable { charset, entries })
@@ -4265,7 +4287,9 @@ fn read_runtime_help_language_file(group: &Group, filename: &str) -> Option<Vec<
     (!bytes.is_empty()).then_some(bytes)
 }
 
-pub(crate) fn load_runtime_language_table(paths: Option<&AppPaths>) -> Result<RuntimeLanguageTable> {
+pub(crate) fn load_runtime_language_table(
+    paths: Option<&AppPaths>,
+) -> Result<RuntimeLanguageTable> {
     const EMBEDDED_US: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../planet/System.c4g/LanguageUS.txt"
@@ -4443,7 +4467,10 @@ pub(crate) fn format_resource_string(mut template: String, arguments: &[&str]) -
 /// Substitute template placeholders without rescanning inserted arguments.
 /// Goal names/descriptions are arbitrary definition text, so a literal `%s`
 /// inside either argument must not consume the next template placeholder.
-pub(crate) fn format_resource_string_with_opaque_arguments(template: String, arguments: &[&str]) -> String {
+pub(crate) fn format_resource_string_with_opaque_arguments(
+    template: String,
+    arguments: &[&str],
+) -> String {
     let mut output = String::with_capacity(template.len());
     let mut remainder = template.as_str();
     for argument in arguments {
@@ -4611,7 +4638,9 @@ fn validate_runtime_help_line_buffers(left: &str, right: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn build_runtime_help_columns(table: &HashMap<String, String>) -> Result<RuntimeHelpColumns> {
+pub(crate) fn build_runtime_help_columns(
+    table: &HashMap<String, String>,
+) -> Result<RuntimeHelpColumns> {
     let text = |key: &str| {
         table
             .get(key)
@@ -4729,7 +4758,9 @@ pub(crate) fn validate_classic_loader_graphics_config(paths: &AppPaths) -> Resul
     Ok(())
 }
 
-pub(crate) fn load_classic_loader_gamma_from_native(config: &[u8]) -> Option<clonk_graphics::GammaRamp> {
+pub(crate) fn load_classic_loader_gamma_from_native(
+    config: &[u8],
+) -> Option<clonk_graphics::GammaRamp> {
     if load_advanced_renderer_config(config).disable_gamma {
         return None;
     }
@@ -4740,11 +4771,15 @@ pub(crate) fn load_classic_loader_gamma_from_native(config: &[u8]) -> Option<clo
     ]))
 }
 
-pub(crate) fn load_classic_loader_gamma(paths: Option<&AppPaths>) -> Option<clonk_graphics::GammaRamp> {
+pub(crate) fn load_classic_loader_gamma(
+    paths: Option<&AppPaths>,
+) -> Option<clonk_graphics::GammaRamp> {
     load_classic_loader_gamma_from_native(&load_native_config_bytes(paths))
 }
 
-pub(crate) fn startup_loader_registrations(paths: &AppPaths) -> Result<Vec<LoaderGroupRegistration>> {
+pub(crate) fn startup_loader_registrations(
+    paths: &AppPaths,
+) -> Result<Vec<LoaderGroupRegistration>> {
     match mapped_classic_extra_group_path(paths)? {
         Some(extra_path) => match Group::open(&extra_path) {
             Ok(group) => Ok(vec![LoaderGroupRegistration {
@@ -4779,7 +4814,10 @@ fn classic_loader_resources(
     LoaderResources::new(fonts, progress)
 }
 
-pub(crate) fn build_startup_loader(paths: &AppPaths, assets: &FrontendAssets) -> Result<ClassicLoaderSetup> {
+pub(crate) fn build_startup_loader(
+    paths: &AppPaths,
+    assets: &FrontendAssets,
+) -> Result<ClassicLoaderSetup> {
     validate_classic_loader_graphics_config(paths)?;
     let graphics = main_graphics_group(paths)?;
     let registrations = startup_loader_registrations(paths)?;
@@ -5307,7 +5345,10 @@ impl AdmissionResourceStore {
             .or_insert(AdmissionResourceState::Loading { removed: false });
     }
 
-    pub(crate) fn register_join_data_resources(&mut self, join_data: &clonk_network::JoinDataEnvelope) {
+    pub(crate) fn register_join_data_resources(
+        &mut self,
+        join_data: &clonk_network::JoinDataEnvelope,
+    ) {
         self.register_lobby_resource(&join_data.parameters.scenario);
         for core in &join_data.parameters.game_resources {
             self.register_lobby_resource(core);
@@ -5318,7 +5359,10 @@ impl AdmissionResourceStore {
         }
     }
 
-    pub(crate) fn register_player_info_resources(&mut self, players: &[clonk_engine::ControlPlayerInfoEntry]) {
+    pub(crate) fn register_player_info_resources(
+        &mut self,
+        players: &[clonk_engine::ControlPlayerInfoEntry],
+    ) {
         for player in players {
             if player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
                 || player.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
@@ -5415,7 +5459,12 @@ impl AdmissionResourceStore {
         self.mark_complete_with_locality(resource_id, path, true);
     }
 
-    pub(crate) fn mark_complete_with_locality(&mut self, resource_id: i32, path: PathBuf, local: bool) {
+    pub(crate) fn mark_complete_with_locality(
+        &mut self,
+        resource_id: i32,
+        path: PathBuf,
+        local: bool,
+    ) {
         self.present_percent.insert(resource_id, 100);
         self.resources.insert(
             resource_id,
@@ -5936,7 +5985,9 @@ impl FrontendAssets {
         }
     }
 
-    pub(crate) fn options_dlg_assets(&self) -> Option<clonk_frontend::startup_options_dlg::OptionsDlgAssets> {
+    pub(crate) fn options_dlg_assets(
+        &self,
+    ) -> Option<clonk_frontend::startup_options_dlg::OptionsDlgAssets> {
         Some(clonk_frontend::startup_options_dlg::OptionsDlgAssets {
             background: self.menu_background()?,
             paper: self.dialog_image("StartupDlgPaper.png")?,
@@ -6007,7 +6058,10 @@ impl FrontendAssets {
     /// C4GraphicsResource.cpp:418-470), and restores the pristine startup
     /// sheet when the global group wins again. Returns whether any sheet
     /// was rebound.
-    pub(crate) fn apply_active_gui_sheet_overrides(&mut self, overrides: &[ClassicGuiSheetOverride]) -> bool {
+    pub(crate) fn apply_active_gui_sheet_overrides(
+        &mut self,
+        overrides: &[ClassicGuiSheetOverride],
+    ) -> bool {
         let by_stem: HashMap<&'static str, &ClassicGuiSheetOverride> =
             overrides.iter().map(|sheet| (sheet.stem, sheet)).collect();
         let mut changed = false;
@@ -6075,7 +6129,9 @@ impl FrontendAssets {
         LoaderResources::new(fonts, progress)
     }
 
-    pub(crate) fn context_menu_resources(&self) -> Result<clonk_frontend::context_menu::ContextMenuResources> {
+    pub(crate) fn context_menu_resources(
+        &self,
+    ) -> Result<clonk_frontend::context_menu::ContextMenuResources> {
         let fonts = self
             .clonk_fonts
             .as_deref()
@@ -6433,7 +6489,9 @@ impl FrontendAssets {
         )
     }
 
-    pub(crate) fn about_dlg_assets(&self) -> Option<clonk_frontend::startup_about_dlg::AboutDlgAssets> {
+    pub(crate) fn about_dlg_assets(
+        &self,
+    ) -> Option<clonk_frontend::startup_about_dlg::AboutDlgAssets> {
         Some(clonk_frontend::startup_about_dlg::AboutDlgAssets {
             background: self.dialog_image("LoaderWatercave1.png")?,
             caption: self.dialog_image("GUICaption.png")?,
@@ -6980,7 +7038,9 @@ impl FrontendAssets {
         hud
     }
 
-    pub(crate) fn liquid_animation_issue(error: &anyhow::Error) -> Option<ClassicGuiBootstrapIssue> {
+    pub(crate) fn liquid_animation_issue(
+        error: &anyhow::Error,
+    ) -> Option<ClassicGuiBootstrapIssue> {
         if error.to_string() != "failed to load game graphics resource `Liquid`" {
             return None;
         }
@@ -7294,7 +7354,10 @@ pub(crate) fn query_first_classic_reference(
         })
 }
 
-pub(crate) fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>) -> Result<()> {
+pub(crate) fn test_scenario_load(
+    path: &std::path::Path,
+    app_paths: Option<&Arc<AppPaths>>,
+) -> Result<()> {
     use std::time::Instant;
 
     println!("Testing scenario load from: {}", path.display());
@@ -7992,7 +8055,9 @@ fn startup_config_unsigned(config: &[u8], section: &str, key: &str, default: u32
         .unwrap_or(default)
 }
 
-pub(crate) fn load_advanced_renderer_config(config: &[u8]) -> clonk_frontend::AdvancedRendererConfig {
+pub(crate) fn load_advanced_renderer_config(
+    config: &[u8],
+) -> clonk_frontend::AdvancedRendererConfig {
     let defaults = clonk_frontend::AdvancedRendererConfig::DEFAULT;
     let boolean = |key: &str, default: bool| {
         clonk_app_netplay::configured_native_boolean(config, "Graphics", key).unwrap_or(default)
@@ -8257,4 +8322,3 @@ pub(crate) fn reconcile_deferred_fullscreen(window: &Window, mode: DisplayMode) 
         false
     }
 }
-

@@ -772,7 +772,10 @@ pub(in crate::command) fn resolve_command_physical(
     }])
 }
 
-pub(in crate::command) fn stamp_command_event_instances(events: &mut [CommandEvent], instance_id: u64) {
+pub(in crate::command) fn stamp_command_event_instances(
+    events: &mut [CommandEvent],
+    instance_id: u64,
+) {
     for event in events {
         let event_instance_id = match event {
             CommandEvent::ResolveCommandPhysical {
@@ -885,7 +888,9 @@ pub(crate) fn definition_id_to_c4id(definition: &str) -> Option<i32> {
     (raw != 0).then_some(raw as u32 as i32)
 }
 
-pub(in crate::command) fn command_data_to_definition_id(data: &CommandData) -> Option<DefinitionId> {
+pub(in crate::command) fn command_data_to_definition_id(
+    data: &CommandData,
+) -> Option<DefinitionId> {
     match data {
         CommandData::Integer(value) => c4id_to_definition_string(*value),
         CommandData::Text(text) if !text.is_empty() => Some(text.clone()),

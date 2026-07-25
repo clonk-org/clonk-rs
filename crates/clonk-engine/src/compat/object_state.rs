@@ -757,22 +757,25 @@ pub(crate) fn death_announce(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    try_with_host_context_mut("DeathAnnounce requires an active engine context", |context| {
-        context.register_message(MessageCommand::Add(MessageSpec {
-            kind: MessageKind::Target,
-            text,
-            target: Some(target),
-            player: None,
-            offset: Vector2::ZERO,
-            color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-            flags: 0,
-            width: None,
-            decoration: None,
-            frame_decoration: None,
-            portrait: None,
-        }));
-        Ok(Value::Bool(true))
-    })
+    try_with_host_context_mut(
+        "DeathAnnounce requires an active engine context",
+        |context| {
+            context.register_message(MessageCommand::Add(MessageSpec {
+                kind: MessageKind::Target,
+                text,
+                target: Some(target),
+                player: None,
+                offset: Vector2::ZERO,
+                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                flags: 0,
+                width: None,
+                decoration: None,
+                frame_decoration: None,
+                portrait: None,
+            }));
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 /// FnSimFlight (C4Script.cpp:5309-5330) and SimFlight
@@ -996,7 +999,6 @@ pub(crate) fn get_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if object.id() == target {
@@ -1026,16 +1028,18 @@ pub(crate) fn do_breath(args: &[Value]) -> Result<Value, RuntimeError> {
     let change = value_to_i32(args.first().unwrap_or(&Value::Nil), "DoBreath", "change")?;
     let target_id =
         parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "DoBreath", "target")?;
-    let target = try_with_host_context_mut("DoBreath requires an active engine context", |context| {
-        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
-        else {
-            return Ok(None);
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(None);
-        }
-        Ok(Some(target))
-    })?;
+    let target =
+        try_with_host_context_mut("DoBreath requires an active engine context", |context| {
+            let Some(target) =
+                target_id.or_else(|| context.object_context().map(|object| object.id()))
+            else {
+                return Ok(None);
+            };
+            if !context.ensure_object_scope(target) {
+                return Ok(None);
+            }
+            Ok(Some(target))
+        })?;
     let Some(target) = target else {
         return Ok(Value::Bool(false));
     };
@@ -1295,7 +1299,6 @@ pub(crate) fn get_con(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_scope(target) {
                 return Ok(Value::Int(construction_to_script_value(
@@ -1420,27 +1423,28 @@ pub(crate) fn set_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    let prepared = try_with_host_context_mut("SetPhysical requires an active engine context", |context| {
-        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
-        let Some(target) = target else {
-            return Ok(None);
-        };
-        if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
-            return Ok(None);
-        }
-        let Some(object) = context.object_scope_mut(target) else {
-            return Ok(None);
-        };
-        let base = matches!(mode, PHYS_TEMPORARY | PHYS_STACK_TEMPORARY)
-            .then(|| {
-                object
-                    .temporary_physical
-                    .is_none()
-                    .then(|| object.prepare_resolved_physical(false))
-            })
-            .flatten();
-        Ok(Some((target, base)))
-    })?;
+    let prepared =
+        try_with_host_context_mut("SetPhysical requires an active engine context", |context| {
+            let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+            let Some(target) = target else {
+                return Ok(None);
+            };
+            if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
+                return Ok(None);
+            }
+            let Some(object) = context.object_scope_mut(target) else {
+                return Ok(None);
+            };
+            let base = matches!(mode, PHYS_TEMPORARY | PHYS_STACK_TEMPORARY)
+                .then(|| {
+                    object
+                        .temporary_physical
+                        .is_none()
+                        .then(|| object.prepare_resolved_physical(false))
+                })
+                .flatten();
+            Ok(Some((target, base)))
+        })?;
     let Some((target, base)) = prepared else {
         return Ok(Value::Bool(false));
     };
@@ -1466,45 +1470,49 @@ pub(crate) fn train_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    try_with_host_context_mut("TrainPhysical requires an active engine context", |context| {
-        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
-        let Some(target) = target else {
-            return Ok(Value::Bool(false));
-        };
-        if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
-        let (trained, info_writeback) = {
-            let Some(object) = context.object_scope_mut(target) else {
+    try_with_host_context_mut(
+        "TrainPhysical requires an active engine context",
+        |context| {
+            let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+            let Some(target) = target else {
                 return Ok(Value::Bool(false));
             };
-            let has_info = object.has_physical_info();
-            let trained = object.train_physical(&name, train_by, max_train);
-            let info_writeback = (has_info && trained)
-                .then(|| object.info_link().zip(object.info_physical))
-                .flatten();
-            (trained, info_writeback)
-        };
-        if let Some((link, physical)) = info_writeback {
-            // The host mirrors the exact roster node so a later Retire,
-            // GrabObjectInfo or MakeCrewMember in this same VM call sees the
-            // trained values before the copied outcome reaches Engine.
-            let mut state = context.world.crew_info_state.borrow_mut();
-            if let Some(entry) = state.entries.get_mut(&link) {
-                entry.physical = physical;
+            if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
+                return Ok(Value::Bool(false));
             }
-            for entries in state.idle.values_mut() {
-                for (candidate, entry) in entries {
-                    if *candidate == link {
-                        entry.physical = physical;
+            let (trained, info_writeback) = {
+                let Some(object) = context.object_scope_mut(target) else {
+                    return Ok(Value::Bool(false));
+                };
+                let has_info = object.has_physical_info();
+                let trained = object.train_physical(&name, train_by, max_train);
+                let info_writeback = (has_info && trained)
+                    .then(|| object.info_link().zip(object.info_physical))
+                    .flatten();
+                (trained, info_writeback)
+            };
+            if let Some((link, physical)) = info_writeback {
+                // The host mirrors the exact roster node so a later Retire,
+                // GrabObjectInfo or MakeCrewMember in this same VM call sees the
+                // trained values before the copied outcome reaches Engine.
+                let mut state = context.world.crew_info_state.borrow_mut();
+                if let Some(entry) = state.entries.get_mut(&link) {
+                    entry.physical = physical;
+                }
+                for entries in state.idle.values_mut() {
+                    for (candidate, entry) in entries {
+                        if *candidate == link {
+                            entry.physical = physical;
+                        }
                     }
                 }
+                drop(state);
+                context
+                    .record_player_command(PlayerCommand::SetCrewInfoPhysical { link, physical });
             }
-            drop(state);
-            context.record_player_command(PlayerCommand::SetCrewInfoPhysical { link, physical });
-        }
-        Ok(Value::Bool(trained))
-    })
+            Ok(Value::Bool(trained))
+        },
+    )
 }
 
 /// `FnResetPhysical` (C4Script.cpp:613-636): `ResetPhysical(obj, name)` —
@@ -1517,18 +1525,21 @@ pub(crate) fn reset_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         .flatten();
     let name = physical_name_argument(args, 1, "ResetPhysical")?;
 
-    let prepared = try_with_host_context_mut("ResetPhysical requires an active engine context", |context| {
-        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
-        let Some(target) = target else {
-            return Ok(None);
-        };
-        if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
-            return Ok(None);
-        }
-        Ok(context
-            .object_scope_mut(target)
-            .map(|object| (target, object.begin_reset_physical(name.as_deref()))))
-    })?;
+    let prepared = try_with_host_context_mut(
+        "ResetPhysical requires an active engine context",
+        |context| {
+            let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+            let Some(target) = target else {
+                return Ok(None);
+            };
+            if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
+                return Ok(None);
+            }
+            Ok(context
+                .object_scope_mut(target)
+                .map(|object| (target, object.begin_reset_physical(name.as_deref()))))
+        },
+    )?;
     let Some((target, step)) = prepared else {
         return Ok(Value::Bool(false));
     };
@@ -1663,39 +1674,41 @@ pub(crate) fn do_energy_with_cause_override(
         ));
     }
 
-    let staged = try_with_host_context_mut("DoEnergy requires an active engine context", |context| {
-        // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
-        // (C4Script.cpp:496-497) — resolved in the caller's scope.
-        let caused_by = caused_by_override.unwrap_or_else(|| {
-            if caused_by_plus_one != 0 {
-                caused_by_plus_one - 1
-            } else {
-                context
-                    .object_context()
-                    .map(|object| object.controller())
-                    .unwrap_or(OWNER_NONE)
+    let staged =
+        try_with_host_context_mut("DoEnergy requires an active engine context", |context| {
+            // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
+            // (C4Script.cpp:496-497) — resolved in the caller's scope.
+            let caused_by = caused_by_override.unwrap_or_else(|| {
+                if caused_by_plus_one != 0 {
+                    caused_by_plus_one - 1
+                } else {
+                    context
+                        .object_context()
+                        .map(|object| object.controller())
+                        .unwrap_or(OWNER_NONE)
+                }
+            });
+            // `if (!pObj) pObj = cthr->Obj` is only the local-call default
+            // (C4Script.cpp:494) — a named target may be FOREIGN.
+            let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id()))
+            else {
+                return Ok(None);
+            };
+            if !context.ensure_object_scope(target) {
+                return Ok(None);
             }
-        });
-        // `if (!pObj) pObj = cthr->Obj` is only the local-call default
-        // (C4Script.cpp:494) — a named target may be FOREIGN.
-        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
-            return Ok(None);
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(None);
-        }
-        // Kill-trace mark before the effects hook (C4Object.cpp:1351-1353).
-        stage_energy_loss_cause(context, target, change, eng_type, caused_by);
-        let Some(scope) = context.object_scope(target) else {
-            return Ok(None);
-        };
-        Ok(Some((
-            target,
-            caused_by,
-            scope.alive(),
-            scope.energy() == 0,
-        )))
-    })?;
+            // Kill-trace mark before the effects hook (C4Object.cpp:1351-1353).
+            stage_energy_loss_cause(context, target, change, eng_type, caused_by);
+            let Some(scope) = context.object_scope(target) else {
+                return Ok(None);
+            };
+            Ok(Some((
+                target,
+                caused_by,
+                scope.alive(),
+                scope.energy() == 0,
+            )))
+        })?;
     let Some((target, caused_by, alive, was_zero)) = staged else {
         return Ok(Value::Bool(false));
     };
@@ -1790,16 +1803,20 @@ pub(crate) fn do_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let target = try_with_host_context_mut("DoMagicEnergy requires an active engine context", |context| {
-        // `if (!pObj) pObj = cthr->Obj; if (!pObj) return false` (:519).
-        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
-            return Ok(None);
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(None);
-        }
-        Ok(Some(target))
-    })?;
+    let target = try_with_host_context_mut(
+        "DoMagicEnergy requires an active engine context",
+        |context| {
+            // `if (!pObj) pObj = cthr->Obj; if (!pObj) return false` (:519).
+            let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id()))
+            else {
+                return Ok(None);
+            };
+            if !context.ensure_object_scope(target) {
+                return Ok(None);
+            }
+            Ok(Some(target))
+        },
+    )?;
     let Some(target) = target else {
         return Ok(Value::Bool(false));
     };
@@ -1875,38 +1892,45 @@ pub(crate) fn do_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(cap) = resolve_object_physical(target, false).map(|physical| physical.magic) else {
         return Ok(Value::Bool(false));
     };
-    try_with_host_context_mut("DoMagicEnergy requires an active engine context", |context| {
-        let Some(scope) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
-        };
-        let sum = scope.magic_energy().wrapping_add(change);
-        scope.set_magic_energy(if sum < 0 {
-            0
-        } else if sum > cap {
-            cap
-        } else {
-            sum
-        });
-        Ok(Value::Bool(true))
-    })
+    try_with_host_context_mut(
+        "DoMagicEnergy requires an active engine context",
+        |context| {
+            let Some(scope) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
+            let sum = scope.magic_energy().wrapping_add(change);
+            scope.set_magic_energy(if sum < 0 {
+                0
+            } else if sum > cap {
+                cap
+            } else {
+                sum
+            });
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 /// `FnGetMagicEnergy` (C4Script.cpp:546-550): MagicEnergy /
 /// MagicPhysicalFactor; 0 without an object (`return false`).
 pub(crate) fn get_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id = magic_energy_target(args.first(), "GetMagicEnergy")?;
-    try_with_host_context_mut("GetMagicEnergy requires an active engine context", |context| {
-        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
-            return Ok(Value::Int(0));
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(Value::Int(0));
-        }
-        let Some(scope) = context.object_scope(target) else {
-            return Ok(Value::Int(0));
-        };
-        Ok(Value::Int(scope.magic_energy() / MAGIC_PHYSICAL_FACTOR))
-    })
+    try_with_host_context_mut(
+        "GetMagicEnergy requires an active engine context",
+        |context| {
+            let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id()))
+            else {
+                return Ok(Value::Int(0));
+            };
+            if !context.ensure_object_scope(target) {
+                return Ok(Value::Int(0));
+            }
+            let Some(scope) = context.object_scope(target) else {
+                return Ok(Value::Int(0));
+            };
+            Ok(Value::Int(scope.magic_energy() / MAGIC_PHYSICAL_FACTOR))
+        },
+    )
 }
 
 /// The kill-trace mark of C4Object::DoEnergy (C4Object.cpp:1351-1353):
@@ -2184,7 +2208,6 @@ pub(crate) fn get_damage(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if object.id() == target {
@@ -2292,32 +2315,34 @@ pub(crate) fn do_damage_with_cause_override(
         ));
     }
 
-    let staged = try_with_host_context_mut("DoDamage requires an active engine context", |context| {
-        // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
-        // (C4Script.cpp:511) — resolved in the caller's scope.
-        let caused_by = caused_by_override.unwrap_or_else(|| {
-            if caused_by_plus_one != 0 {
-                caused_by_plus_one - 1
-            } else {
-                context
-                    .object_context()
-                    .map(|object| object.controller())
-                    .unwrap_or(OWNER_NONE)
+    let staged =
+        try_with_host_context_mut("DoDamage requires an active engine context", |context| {
+            // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
+            // (C4Script.cpp:511) — resolved in the caller's scope.
+            let caused_by = caused_by_override.unwrap_or_else(|| {
+                if caused_by_plus_one != 0 {
+                    caused_by_plus_one - 1
+                } else {
+                    context
+                        .object_context()
+                        .map(|object| object.controller())
+                        .unwrap_or(OWNER_NONE)
+                }
+            });
+            // `if (!pObj) pObj = cthr->Obj` is only the local-call default
+            // (C4Script.cpp:510) — a named target may be FOREIGN.
+            let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id()))
+            else {
+                return Ok(None);
+            };
+            if !context.ensure_object_scope(target) {
+                return Ok(None);
             }
-        });
-        // `if (!pObj) pObj = cthr->Obj` is only the local-call default
-        // (C4Script.cpp:510) — a named target may be FOREIGN.
-        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
-            return Ok(None);
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(None);
-        }
-        let Some(scope) = context.object_scope(target) else {
-            return Ok(None);
-        };
-        Ok(Some((target, caused_by, scope.alive())))
-    })?;
+            let Some(scope) = context.object_scope(target) else {
+                return Ok(None);
+            };
+            Ok(Some((target, caused_by, scope.alive())))
+        })?;
     let Some((target, caused_by, alive)) = staged else {
         return Ok(Value::Bool(false));
     };
@@ -2412,146 +2437,148 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         i32,
         Option<String>,
     )> = None;
-    let staged = try_with_host_context_mut("SetAction requires an active engine context", |context| {
-        // SetActionByName returns false without changing anything when the
-        // requested name is absent from the ActMap (C4Object.cpp:4218-4234).
-        // "Idle"/"ActIdle" are the one sentinel exception. ChangeDef swaps
-        // Def inline in C++, so a later same-call SetAction resolves against
-        // the pending NEW definition (the horse Death -> Dead path).
-        let action_exists = context.object_context().is_some_and(|object| {
-            name == "Idle"
-                || object
-                    .pending_update
-                    .change_def
-                    .as_deref()
-                    .and_then(|definition| context.world.definition_metadata(definition))
-                    .map(|metadata| metadata.action_library.contains(&name))
-                    .unwrap_or_else(|| object.action_library.contains(&name))
-        });
-        if !action_exists {
-            return Ok(Value::Bool(false));
-        }
-        let incomplete_activity = context
-            .object_context()
-            .and_then(|object| {
-                object
-                    .pending_update
-                    .change_def
-                    .as_deref()
-                    .or(object.definition_id.as_deref())
-            })
-            .and_then(|definition| context.world.definition_metadata(definition))
-            .is_some_and(|metadata| metadata.fire.incomplete_activity);
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
-        };
-
-        let current_action = object.effective_action_name().to_string();
-        let current_index = object.effective_action_index();
-        let current_phase = object.action_phase();
-        let callback_definition = object
-            .pending_update
-            .change_def
-            .clone()
-            .or_else(|| object.definition_id.clone());
-        let requested_index = object.action_library.named_action_index(&name);
-        let blocks_other_actions = object.effective_blocks_other_actions();
-        let requested_action_changed = name != current_action || requested_index != current_index;
-        if blocks_other_actions && requested_action_changed && !force {
-            return Ok(Value::Bool(false));
-        }
-
-        // C4Object::SetAction validates the requested slot and applies the
-        // old action's NoOtherAction gate first, then accepts the call but
-        // coerces its resulting numeric action to ActIdle when the object is
-        // incomplete and the live definition disallows incomplete activity
-        // (C4Object.cpp:4111-4130).
-        let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
-            crate::action::DEFAULT_ACTION_NAME
-        } else {
-            name.as_str()
-        };
-        let actual_index = object.action_library.named_action_index(actual_name);
-        let changed_action = actual_name != current_action || actual_index != current_index;
-
-        let update = object
-            .pending_update
-            .action
-            .get_or_insert_with(ActionUpdate::default);
-        update.set_name(actual_name.to_string());
-        update.set_force(force);
-        // C4Object::SetAction snaps fix_x/fix_y after changing the action
-        // (C4Object.cpp:4144). If it follows DoCon in this staged call, that
-        // later snap wins over DoCon's stale-fixed UpdatePos behavior.
-        object.pending_update.construction_preserves_fixed_position = false;
-        let position = object.effective_position();
-        object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
-
-        // SetActionByName carries the action targets, and C4Object::SetAction
-        // assigns them ONLY when non-null (C4Object.cpp:4123-4125:
-        // `if (pTarget) Action.Target = pTarget;`) — nil preserves. Its
-        // Idle/ActIdle sentinel branch discards both supplied target args
-        // before calling SetAction (C4Object.cpp:4225-4227).
-        if !builtin_idle {
-            if target1.is_some() {
-                object.set_action_target(0, target1);
+    let staged =
+        try_with_host_context_mut("SetAction requires an active engine context", |context| {
+            // SetActionByName returns false without changing anything when the
+            // requested name is absent from the ActMap (C4Object.cpp:4218-4234).
+            // "Idle"/"ActIdle" are the one sentinel exception. ChangeDef swaps
+            // Def inline in C++, so a later same-call SetAction resolves against
+            // the pending NEW definition (the horse Death -> Dead path).
+            let action_exists = context.object_context().is_some_and(|object| {
+                name == "Idle"
+                    || object
+                        .pending_update
+                        .change_def
+                        .as_deref()
+                        .and_then(|definition| context.world.definition_metadata(definition))
+                        .map(|metadata| metadata.action_library.contains(&name))
+                        .unwrap_or_else(|| object.action_library.contains(&name))
+            });
+            if !action_exists {
+                return Ok(Value::Bool(false));
             }
-            if target2.is_some() {
-                object.set_action_target(1, target2);
-            }
-        }
-        // SetAction always clears PhaseDelay, even when it selects the same
-        // numeric slot and Phase was already zero (C4Object.cpp:4142-4146).
-        // Action.Time resets only when the numeric slot changes.
-        if changed_action {
-            object.reset_action_ticks();
-        } else {
-            object.reset_action_phase_delay();
-        }
-        // `Action.Phase = Action.PhaseDelay = 0` runs UNCONDITIONALLY on
-        // every successful SetAction (C4Object.cpp:4132, outside the
-        // change guard) — a pre-change SetPhase must not leak into the
-        // new action (the GoldRush FireRifle ph6 -> LoadRifle ph0 case).
-        object.set_action_phase(0);
-
-        let procedure_changed = object.update_effective_action(actual_name);
-        if procedure_changed {
-            object.reset_action_data();
-        }
-        // C4Object::SetAction fires the calls with NO same-action gate
-        // (C4Object.cpp:4146-4183) — a same-name SetAction re-runs the
-        // StartCall once. Marking the update dispatched keeps the fold
-        // from ALSO queueing deferred Abort/Start events (C++ has no
-        // such queue; leaving same-name staging to the queue made the
-        // coach's Driving guard loop forever against stale state).
-        if let Some(update) = object.pending_update.action.as_mut() {
-            update.callbacks_dispatched = true;
-        }
-        sync_callbacks = Some((
-            object.id(),
-            (actual_name != crate::action::DEFAULT_ACTION_NAME)
-                .then(|| {
+            let incomplete_activity = context
+                .object_context()
+                .and_then(|object| {
                     object
-                        .action_library
-                        .start_callback_for_entry(actual_name, actual_index)
+                        .pending_update
+                        .change_def
+                        .as_deref()
+                        .or(object.definition_id.as_deref())
                 })
-                .flatten(),
-            object
-                .action_library
-                .abort_callback_for_entry(&current_action, current_index)
-                .filter(|_| !force),
-            current_phase,
-            callback_definition,
-        ));
-        let object_id = object.id();
-        // SetAction calls SetOCF before Start/Abort callbacks. Use the full
-        // live refresh so leaving an ObjectDisabled action can re-add
-        // OCF_FightReady rather than only clearing stale bits.
-        let _ = refresh_live_object_ocf(context, object_id);
+                .and_then(|definition| context.world.definition_metadata(definition))
+                .is_some_and(|metadata| metadata.fire.incomplete_activity);
+            let object = match context.object_context_mut() {
+                Some(object) => object,
+                None => return Ok(Value::Bool(false)),
+            };
 
-        Ok(Value::Bool(true))
-    })?;
+            let current_action = object.effective_action_name().to_string();
+            let current_index = object.effective_action_index();
+            let current_phase = object.action_phase();
+            let callback_definition = object
+                .pending_update
+                .change_def
+                .clone()
+                .or_else(|| object.definition_id.clone());
+            let requested_index = object.action_library.named_action_index(&name);
+            let blocks_other_actions = object.effective_blocks_other_actions();
+            let requested_action_changed =
+                name != current_action || requested_index != current_index;
+            if blocks_other_actions && requested_action_changed && !force {
+                return Ok(Value::Bool(false));
+            }
+
+            // C4Object::SetAction validates the requested slot and applies the
+            // old action's NoOtherAction gate first, then accepts the call but
+            // coerces its resulting numeric action to ActIdle when the object is
+            // incomplete and the live definition disallows incomplete activity
+            // (C4Object.cpp:4111-4130).
+            let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
+                crate::action::DEFAULT_ACTION_NAME
+            } else {
+                name.as_str()
+            };
+            let actual_index = object.action_library.named_action_index(actual_name);
+            let changed_action = actual_name != current_action || actual_index != current_index;
+
+            let update = object
+                .pending_update
+                .action
+                .get_or_insert_with(ActionUpdate::default);
+            update.set_name(actual_name.to_string());
+            update.set_force(force);
+            // C4Object::SetAction snaps fix_x/fix_y after changing the action
+            // (C4Object.cpp:4144). If it follows DoCon in this staged call, that
+            // later snap wins over DoCon's stale-fixed UpdatePos behavior.
+            object.pending_update.construction_preserves_fixed_position = false;
+            let position = object.effective_position();
+            object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
+
+            // SetActionByName carries the action targets, and C4Object::SetAction
+            // assigns them ONLY when non-null (C4Object.cpp:4123-4125:
+            // `if (pTarget) Action.Target = pTarget;`) — nil preserves. Its
+            // Idle/ActIdle sentinel branch discards both supplied target args
+            // before calling SetAction (C4Object.cpp:4225-4227).
+            if !builtin_idle {
+                if target1.is_some() {
+                    object.set_action_target(0, target1);
+                }
+                if target2.is_some() {
+                    object.set_action_target(1, target2);
+                }
+            }
+            // SetAction always clears PhaseDelay, even when it selects the same
+            // numeric slot and Phase was already zero (C4Object.cpp:4142-4146).
+            // Action.Time resets only when the numeric slot changes.
+            if changed_action {
+                object.reset_action_ticks();
+            } else {
+                object.reset_action_phase_delay();
+            }
+            // `Action.Phase = Action.PhaseDelay = 0` runs UNCONDITIONALLY on
+            // every successful SetAction (C4Object.cpp:4132, outside the
+            // change guard) — a pre-change SetPhase must not leak into the
+            // new action (the GoldRush FireRifle ph6 -> LoadRifle ph0 case).
+            object.set_action_phase(0);
+
+            let procedure_changed = object.update_effective_action(actual_name);
+            if procedure_changed {
+                object.reset_action_data();
+            }
+            // C4Object::SetAction fires the calls with NO same-action gate
+            // (C4Object.cpp:4146-4183) — a same-name SetAction re-runs the
+            // StartCall once. Marking the update dispatched keeps the fold
+            // from ALSO queueing deferred Abort/Start events (C++ has no
+            // such queue; leaving same-name staging to the queue made the
+            // coach's Driving guard loop forever against stale state).
+            if let Some(update) = object.pending_update.action.as_mut() {
+                update.callbacks_dispatched = true;
+            }
+            sync_callbacks = Some((
+                object.id(),
+                (actual_name != crate::action::DEFAULT_ACTION_NAME)
+                    .then(|| {
+                        object
+                            .action_library
+                            .start_callback_for_entry(actual_name, actual_index)
+                    })
+                    .flatten(),
+                object
+                    .action_library
+                    .abort_callback_for_entry(&current_action, current_index)
+                    .filter(|_| !force),
+                current_phase,
+                callback_definition,
+            ));
+            let object_id = object.id();
+            // SetAction calls SetOCF before Start/Abort callbacks. Use the full
+            // live refresh so leaving an ObjectDisabled action can re-add
+            // OCF_FightReady rather than only clearing stale bits.
+            let _ = refresh_live_object_ocf(context, object_id);
+
+            Ok(Value::Bool(true))
+        })?;
     // C4Object::SetAction runs the StartCall for the NEW action and then the
     // AbortCall for the OLD one SYNCHRONOUSLY inside the call
     // (SetActionByName defaults SAC_StartCall|SAC_AbortCall) — the
@@ -2692,37 +2719,40 @@ pub(crate) fn set_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    try_with_host_context_mut("SetActionData requires an active engine context", |context| {
-        let bridge_material = clamp_bridge_material(data, context.world.materials());
-        let Some(target) = target_id.or(context.script_object_context) else {
-            return Ok(Value::Bool(false));
-        };
-        if !context.object_status_present(target) || !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
-        let Some(object) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
-        };
-
-        let procedure = object.effective_action_procedure();
-        let mut next_data = data;
-        match procedure {
-            ActionProcedure::Bridge => {
-                next_data = encode_bridge_action_data(0, false, false, bridge_material);
+    try_with_host_context_mut(
+        "SetActionData requires an active engine context",
+        |context| {
+            let bridge_material = clamp_bridge_material(data, context.world.materials());
+            let Some(target) = target_id.or(context.script_object_context) else {
+                return Ok(Value::Bool(false));
+            };
+            if !context.object_status_present(target) || !context.ensure_object_scope(target) {
+                return Ok(Value::Bool(false));
             }
-            ActionProcedure::Attach => {
-                let primary_vertex = data & 0xFF;
-                let secondary_vertex = data >> 8;
-                if primary_vertex >= MAX_VERTEX_COUNT || secondary_vertex >= MAX_VERTEX_COUNT {
-                    return Ok(Value::Bool(false));
+            let Some(object) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
+
+            let procedure = object.effective_action_procedure();
+            let mut next_data = data;
+            match procedure {
+                ActionProcedure::Bridge => {
+                    next_data = encode_bridge_action_data(0, false, false, bridge_material);
                 }
+                ActionProcedure::Attach => {
+                    let primary_vertex = data & 0xFF;
+                    let secondary_vertex = data >> 8;
+                    if primary_vertex >= MAX_VERTEX_COUNT || secondary_vertex >= MAX_VERTEX_COUNT {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                _ => {}
             }
-            _ => {}
-        }
 
-        object.set_action_data(next_data);
-        Ok(Value::Bool(true))
-    })
+            object.set_action_data(next_data);
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 pub(crate) fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -2794,7 +2824,6 @@ pub(crate) fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
@@ -2847,7 +2876,6 @@ pub(crate) fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let action_time = |ticks: i32| Value::Int(ticks);
 
         if let Some(target) = target_id {
@@ -2885,7 +2913,6 @@ pub(crate) fn get_phase(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let object = if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
@@ -2989,7 +3016,6 @@ pub(crate) fn get_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
@@ -3025,7 +3051,6 @@ pub(crate) fn get_procedure(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let procedure_value = |name: Option<&str>| match name {
             Some(procedure) => Value::String(procedure.to_string().into()),
             None => Value::Nil,
@@ -3095,7 +3120,6 @@ pub(crate) fn get_action_target(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = object_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
@@ -3130,7 +3154,6 @@ pub(crate) fn get_vertex_num(args: &[Value]) -> Result<Value, RuntimeError> {
         .flatten();
 
     with_host_context(Ok(Value::Nil), |context| {
-
         match resolve_vertices(context, target_id) {
             Some((_position, vertices)) => Ok(Value::Int(truncate_to_i32(vertices.len() as u64))),
             None => Ok(Value::Nil),
@@ -3164,7 +3187,6 @@ pub(crate) fn get_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let (_position, vertices) = match resolve_vertices(context, target_id) {
             Some(value) => value,
             None => return Ok(Value::Nil),
@@ -3719,7 +3741,6 @@ pub(crate) fn get_vertex_contact(args: &[Value]) -> Result<Value, RuntimeError> 
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let (position, vertices) = match resolve_vertices(context, target_id) {
             Some(value) => value,
             None => return Ok(Value::Nil),
@@ -3769,7 +3790,6 @@ pub(crate) fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let (position, vertices) = match resolve_vertices(context, target_id) {
             Some(value) => value,
             None => return Ok(Value::Nil),
@@ -3895,96 +3915,99 @@ pub(crate) fn native_set_action_by_name_with_target(
     } else {
         name
     };
-    let callbacks = try_with_host_context_mut("native action requires an active engine context", |context| {
-        if !context.ensure_object_scope(target) {
-            return Ok(None);
-        }
-        let incomplete_activity = context
-            .object_scope(target)
-            .and_then(|object| {
-                object
-                    .pending_update
-                    .change_def
-                    .as_deref()
-                    .or(object.definition_id.as_deref())
-            })
-            .and_then(|definition| context.world.definition_metadata(definition))
-            .is_some_and(|metadata| metadata.fire.incomplete_activity);
-        let Some(object) = context.object_scope_mut(target) else {
-            return Ok(None);
-        };
-        // ActIdle is the built-in action slot before ActMap and is always a
-        // valid SetAction target even when no action named "Idle" exists.
-        if name != "Idle" && !object.action_library.contains(name) {
-            return Ok(None);
-        }
-        let current = object.effective_action_name().to_string();
-        let current_index = object.effective_action_index();
-        let requested_index = object.action_library.named_action_index(name);
-        let previous_phase = object.action_phase();
-        let definition = object
-            .pending_update
-            .change_def
-            .clone()
-            .or_else(|| object.definition_id.clone());
-        if object.effective_blocks_other_actions()
-            && (current != name || current_index != requested_index)
-        {
-            return Ok(None);
-        }
-        // C4Object::SetAction accepts the requested ActMap entry but coerces
-        // the resulting action to ActIdle for incomplete objects whose
-        // definition does not allow incomplete activity (:4127-4130).
-        let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
-            "Idle"
-        } else {
-            name
-        };
-        let actual_index = object.action_library.named_action_index(actual_name);
-
-        let changed = current != actual_name || current_index != actual_index;
-        let update = object
-            .pending_update
-            .action
-            .get_or_insert_with(ActionUpdate::default);
-        update.set_name(actual_name.to_string());
-        update.set_force(false);
-        update.callbacks_dispatched = true;
-        if changed {
-            object.reset_action_ticks();
-        } else {
-            object.reset_action_phase_delay();
-        }
-        object.set_action_phase(0);
-        if object.update_effective_action(actual_name) {
-            object.reset_action_data();
-        }
-        if !builtin_idle {
-            if let Some(action_target) = action_target {
-                object.set_action_target(0, Some(action_target));
+    let callbacks = try_with_host_context_mut(
+        "native action requires an active engine context",
+        |context| {
+            if !context.ensure_object_scope(target) {
+                return Ok(None);
             }
-        }
-        let position = object.effective_position();
-        object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
-        object.refresh_cached_ocf();
-
-        let callbacks = (
-            (actual_name != "Idle")
-                .then(|| {
+            let incomplete_activity = context
+                .object_scope(target)
+                .and_then(|object| {
                     object
-                        .action_library
-                        .start_callback_for_entry(actual_name, actual_index)
+                        .pending_update
+                        .change_def
+                        .as_deref()
+                        .or(object.definition_id.as_deref())
                 })
-                .flatten(),
-            object
-                .action_library
-                .abort_callback_for_entry(&current, current_index),
-            previous_phase,
-            definition,
-        );
-        let _ = refresh_live_object_ocf(context, target);
-        Ok(Some(callbacks))
-    })?;
+                .and_then(|definition| context.world.definition_metadata(definition))
+                .is_some_and(|metadata| metadata.fire.incomplete_activity);
+            let Some(object) = context.object_scope_mut(target) else {
+                return Ok(None);
+            };
+            // ActIdle is the built-in action slot before ActMap and is always a
+            // valid SetAction target even when no action named "Idle" exists.
+            if name != "Idle" && !object.action_library.contains(name) {
+                return Ok(None);
+            }
+            let current = object.effective_action_name().to_string();
+            let current_index = object.effective_action_index();
+            let requested_index = object.action_library.named_action_index(name);
+            let previous_phase = object.action_phase();
+            let definition = object
+                .pending_update
+                .change_def
+                .clone()
+                .or_else(|| object.definition_id.clone());
+            if object.effective_blocks_other_actions()
+                && (current != name || current_index != requested_index)
+            {
+                return Ok(None);
+            }
+            // C4Object::SetAction accepts the requested ActMap entry but coerces
+            // the resulting action to ActIdle for incomplete objects whose
+            // definition does not allow incomplete activity (:4127-4130).
+            let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
+                "Idle"
+            } else {
+                name
+            };
+            let actual_index = object.action_library.named_action_index(actual_name);
+
+            let changed = current != actual_name || current_index != actual_index;
+            let update = object
+                .pending_update
+                .action
+                .get_or_insert_with(ActionUpdate::default);
+            update.set_name(actual_name.to_string());
+            update.set_force(false);
+            update.callbacks_dispatched = true;
+            if changed {
+                object.reset_action_ticks();
+            } else {
+                object.reset_action_phase_delay();
+            }
+            object.set_action_phase(0);
+            if object.update_effective_action(actual_name) {
+                object.reset_action_data();
+            }
+            if !builtin_idle {
+                if let Some(action_target) = action_target {
+                    object.set_action_target(0, Some(action_target));
+                }
+            }
+            let position = object.effective_position();
+            object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
+            object.refresh_cached_ocf();
+
+            let callbacks = (
+                (actual_name != "Idle")
+                    .then(|| {
+                        object
+                            .action_library
+                            .start_callback_for_entry(actual_name, actual_index)
+                    })
+                    .flatten(),
+                object
+                    .action_library
+                    .abort_callback_for_entry(&current, current_index),
+                previous_phase,
+                definition,
+            );
+            let _ = refresh_live_object_ocf(context, target);
+            Ok(Some(callbacks))
+        },
+    )?;
     let Some((start_call, abort_call, previous_phase, definition)) = callbacks else {
         return Ok(false);
     };
@@ -4030,36 +4053,37 @@ pub(crate) fn native_set_action_by_name_with_target(
 
 /// Target-aware `C4Object::SetDir` used by native action helpers.
 pub(crate) fn native_set_dir(target: ObjectId, direction: Direction) -> Result<(), RuntimeError> {
-    let turn_action = try_with_host_context_mut("SetDir requires an active engine context", |context| {
-        if !context.ensure_object_scope(target) {
-            return Ok(None);
-        }
-        let Some(object) = context.object_scope(target) else {
-            return Ok(None);
-        };
-        let action = object.effective_action_name();
-        let action_index = object.effective_action_index();
-        let directions = object
-            .action_library
-            .directions_for_entry(action, action_index);
-        let raw_direction = direction.to_script_value();
-        if object.action_library.is_idle_entry(action, action_index)
-            || raw_direction < 0
-            || raw_direction >= directions
-        {
-            return Ok(None);
-        }
-        Ok(Some(
-            (object.direction() != direction)
-                .then(|| {
-                    object
-                        .action_library
-                        .turn_action_for_entry(action, action_index)
-                        .map(str::to_string)
-                })
-                .flatten(),
-        ))
-    })?;
+    let turn_action =
+        try_with_host_context_mut("SetDir requires an active engine context", |context| {
+            if !context.ensure_object_scope(target) {
+                return Ok(None);
+            }
+            let Some(object) = context.object_scope(target) else {
+                return Ok(None);
+            };
+            let action = object.effective_action_name();
+            let action_index = object.effective_action_index();
+            let directions = object
+                .action_library
+                .directions_for_entry(action, action_index);
+            let raw_direction = direction.to_script_value();
+            if object.action_library.is_idle_entry(action, action_index)
+                || raw_direction < 0
+                || raw_direction >= directions
+            {
+                return Ok(None);
+            }
+            Ok(Some(
+                (object.direction() != direction)
+                    .then(|| {
+                        object
+                            .action_library
+                            .turn_action_for_entry(action, action_index)
+                            .map(str::to_string)
+                    })
+                    .flatten(),
+            ))
+        })?;
     let Some(turn_action) = turn_action else {
         return Ok(());
     };
@@ -4085,37 +4109,44 @@ pub(crate) fn native_fling(
     add_speed: bool,
     caused_by: i32,
 ) -> Result<(), RuntimeError> {
-    let available = try_with_host_context_mut("Fling requires an active engine context", |context| {
-        let Some(snapshot) = context.get_world_object(target) else {
-            return Ok(false);
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(false);
-        }
-        let staged_ocf = context
-            .object_scope(target)
-            .map(|object| object.staged_ocf(snapshot.ocf()))
-            .unwrap_or_else(|| snapshot.ocf());
-        if staged_ocf & ocf::ALIVE != 0 {
-            stage_energy_loss_cause(context, target, -1, crate::C4FX_CALL_ENG_SCRIPT, caused_by);
-        } else if context
-            .object_scope(target)
-            .and_then(ObjectScopeContext::container)
-            .is_none()
-        {
-            if let Some(object) = context.object_scope_mut(target) {
-                object.set_controller(caused_by);
+    let available =
+        try_with_host_context_mut("Fling requires an active engine context", |context| {
+            let Some(snapshot) = context.get_world_object(target) else {
+                return Ok(false);
+            };
+            if !context.ensure_object_scope(target) {
+                return Ok(false);
             }
-        }
-        if add_speed {
-            if let Some(object) = context.object_scope(target) {
-                let current = object.fixed_velocity();
-                velocity.x += current.x / 2;
-                velocity.y += current.y / 2;
+            let staged_ocf = context
+                .object_scope(target)
+                .map(|object| object.staged_ocf(snapshot.ocf()))
+                .unwrap_or_else(|| snapshot.ocf());
+            if staged_ocf & ocf::ALIVE != 0 {
+                stage_energy_loss_cause(
+                    context,
+                    target,
+                    -1,
+                    crate::C4FX_CALL_ENG_SCRIPT,
+                    caused_by,
+                );
+            } else if context
+                .object_scope(target)
+                .and_then(ObjectScopeContext::container)
+                .is_none()
+            {
+                if let Some(object) = context.object_scope_mut(target) {
+                    object.set_controller(caused_by);
+                }
             }
-        }
-        Ok(true)
-    })?;
+            if add_speed {
+                if let Some(object) = context.object_scope(target) {
+                    let current = object.fixed_velocity();
+                    velocity.x += current.x / 2;
+                    velocity.y += current.y / 2;
+                }
+            }
+            Ok(true)
+        })?;
     if !available {
         return Ok(());
     }
@@ -4197,15 +4228,18 @@ pub(crate) fn shake_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ShakeObjects", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ShakeObjects", "y")?;
     let radius = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "ShakeObjects", "radius")?;
-    let (ids, caused_by) = try_with_host_context("ShakeObjects requires an active engine context", |context| {
-        Ok::<_, RuntimeError>((
-            context.master_object_ids(),
-            context
-                .object_context()
-                .map(ObjectScopeContext::controller)
-                .unwrap_or(OWNER_NONE),
-        ))
-    })?;
+    let (ids, caused_by) = try_with_host_context(
+        "ShakeObjects requires an active engine context",
+        |context| {
+            Ok::<_, RuntimeError>((
+                context.master_object_ids(),
+                context
+                    .object_context()
+                    .map(ObjectScopeContext::controller)
+                    .unwrap_or(OWNER_NONE),
+            ))
+        },
+    )?;
 
     for id in ids {
         let candidate = HOST_CONTEXT.with(|cell| {
@@ -4492,7 +4526,6 @@ pub(crate) fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetR", "target")?;
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_scope(target) {
                 return Ok(Value::Int(script_rotation(object.rotation())));
@@ -4630,7 +4663,6 @@ fn get_position_component(
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
@@ -4674,7 +4706,6 @@ pub(crate) fn object_distance(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let locate_position = |id: ObjectId| -> Option<Vector2> {
             if let Some(object) = context.object_context() {
                 if object.id() == id {
@@ -4785,7 +4816,6 @@ fn get_velocity_component(
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let effective_precision = normalise_precision(precision);
         let fetch_velocity = |fixed_velocity: FixedVec2| {
             // C++ GetXDir/GetYDir return fixtoi(xdir/ydir, prec). `C4Script.cpp:1167`.
@@ -5078,7 +5108,6 @@ pub(crate) fn get_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let effective_precision = normalise_precision(precision);
         if let Some(target) = target_id {
             if let Some(object) = context.object_scope(target) {
@@ -5270,7 +5299,6 @@ pub(crate) fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     try_with_host_context_mut("SetPosition requires an active engine context", |context| {
-
         let landscape_snapshot = if check_bounds {
             context.landscape_ref().cloned()
         } else {
@@ -5463,7 +5491,6 @@ pub(crate) fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     try_with_host_context_mut("SetGraphics requires an active engine context", |context| {
-
         let object_id = if let Some(target) = target_id {
             target
         } else {
@@ -5815,7 +5842,6 @@ pub(crate) fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
     let action = action.unwrap_or_default();
 
     with_host_context(Ok(Value::Nil), |context| {
-
         // `idDef` defaults to the executing definition (cthr->Def).
         let (library, graphics) = match definition {
             Some(id) => match context.definition_metadata(&id) {
@@ -6329,7 +6355,6 @@ pub(crate) fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
         consume_optional_object_reference_argument(args, &mut index, "ActIdle", "target")?;
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let idle = if let Some(target) = target_id {
             match context.object_context() {
                 Some(object) if target == object.id() => {
@@ -6557,21 +6582,23 @@ pub(crate) fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let updated = try_with_host_context_mut("SetAlive requires an active engine context", |context| {
-        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
-        else {
-            return Ok(Value::Bool(false));
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
-        let Some(object) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
-        };
+    let updated =
+        try_with_host_context_mut("SetAlive requires an active engine context", |context| {
+            let Some(target) =
+                target_id.or_else(|| context.object_context().map(|object| object.id()))
+            else {
+                return Ok(Value::Bool(false));
+            };
+            if !context.ensure_object_scope(target) {
+                return Ok(Value::Bool(false));
+            }
+            let Some(object) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
 
-        object.set_alive(alive);
-        Ok(Value::Bool(true))
-    })?;
+            object.set_alive(alive);
+            Ok(Value::Bool(true))
+        })?;
     if updated == Value::Bool(true) {
         let target = HOST_CONTEXT.with(|cell| {
             cell.borrow().as_ref().and_then(|context| {
@@ -6602,7 +6629,6 @@ pub(crate) fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Int(OWNER_NONE)), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
@@ -6640,7 +6666,6 @@ pub(crate) fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
         .flatten();
 
     with_host_context(Ok(Value::Int(OWNER_NONE)), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
@@ -6748,7 +6773,6 @@ pub(crate) fn get_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
         .flatten();
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
         let layer = target.and_then(|target| context.object_layer(target));
         Ok(layer.map(object_reference_value).unwrap_or(Value::Nil))
@@ -6960,7 +6984,6 @@ pub(crate) fn get_alive(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             // C++ reads the live object. A foreign target may already have
             // a nested scope because Kill/SetAlive touched it earlier in

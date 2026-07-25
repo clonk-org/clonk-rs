@@ -5,8 +5,8 @@ fn scripted_music_level_roundtrips_engine_state_and_restore_event() {
     let mut engine = Engine::new();
     engine
         .load_scenario_script_with_convention(
-                "MusicLevel.c",
-                r#"#strict 3
+            "MusicLevel.c",
+            r#"#strict 3
 func Probe() {
     var low = MusicLevel(-1);
     var high = MusicLevel(130);
@@ -123,16 +123,16 @@ fn resume_reconciliation_folds_music_commands_without_mutating_saved_fields() {
 fn set_playlist_roundtrips_engine_state_and_initial_game_data() {
     let mut engine = Engine::new();
     engine.configure_music_tracks([
-            "Pack/Theme.mid",
-            "theme-extra.ogg",
-            "Other.mid",
-            "Duplicate/Theme.mid",
-            "Credits.ogg",
+        "Pack/Theme.mid",
+        "theme-extra.ogg",
+        "Other.mid",
+        "Duplicate/Theme.mid",
+        "Credits.ogg",
     ]);
     engine
         .load_scenario_script_with_convention(
-                "SetPlayList.c",
-                "#strict 3\nfunc Probe() { return SetPlayList(\"*.mid;THEME*\", true); }\n",
+            "SetPlayList.c",
+            "#strict 3\nfunc Probe() { return SetPlayList(\"*.mid;THEME*\", true); }\n",
             true,
         )
         .expect("SetPlayList probe compiles");
@@ -158,14 +158,13 @@ fn set_playlist_roundtrips_engine_state_and_initial_game_data() {
         InitialNetworkGameData::from_engine(&engine)
             .expect("playlist-only engine is representable in JoinData")
             .play_list,
-            "*.mid;THEME*"
+        "*.mid;THEME*"
     );
 
     let encoded = state
         .to_json_string()
         .expect("music playlist state serializes");
-    let decoded =
-        EngineState::from_json_str(&encoded).expect("music playlist state deserializes");
+    let decoded = EngineState::from_json_str(&encoded).expect("music playlist state deserializes");
     let mut restored = Engine::new();
     restored.configure_music_tracks(["Theme.mid", "Other.ogg"]);
     restored
@@ -188,7 +187,7 @@ fn set_playlist_roundtrips_engine_state_and_initial_game_data() {
         InitialNetworkGameData::from_engine(&restored)
             .expect("restored playlist is representable in JoinData")
             .play_list,
-            "*.mid;THEME*"
+        "*.mid;THEME*"
     );
 }
 
@@ -198,8 +197,8 @@ fn explicit_empty_playlist_remains_distinct_from_default_after_restore() {
     engine.configure_music_tracks(["Theme.mid"]);
     engine
         .load_scenario_script_with_convention(
-                "EmptySetPlayList.c",
-                "#strict 3\nfunc Probe() { return SetPlayList(nil, false); }\n",
+            "EmptySetPlayList.c",
+            "#strict 3\nfunc Probe() { return SetPlayList(nil, false); }\n",
             true,
         )
         .expect("empty SetPlayList probe compiles");

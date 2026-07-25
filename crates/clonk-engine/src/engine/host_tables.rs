@@ -6,7 +6,9 @@
 use super::*;
 
 impl Engine {
-    pub(crate) fn definition_metadata_table(&self) -> Rc<HashMap<DefinitionId, DefinitionMetadata>> {
+    pub(crate) fn definition_metadata_table(
+        &self,
+    ) -> Rc<HashMap<DefinitionId, DefinitionMetadata>> {
         let mut cache = self.definition_metadata_cache.borrow_mut();
         if let Some(table) = cache.as_ref() {
             return Rc::clone(table);
@@ -367,7 +369,10 @@ impl Engine {
         .with_last_energy_loss_cause(object.last_energy_loss_cause)
     }
 
-    pub(crate) fn host_retained_contents_count(world: &HostWorldContext, contents: &[ObjectId]) -> usize {
+    pub(crate) fn host_retained_contents_count(
+        world: &HostWorldContext,
+        contents: &[ObjectId],
+    ) -> usize {
         contents
             .iter()
             .filter(|content_id| {
@@ -605,8 +610,13 @@ impl Engine {
         .with_network_control_mode(self.network_control_mode)
         .with_control_sync_mode(self.control_sync_mode())
         .with_edit_cursor_target(self.edit_cursor_target)
-        .with_pause_game_requests(self.replay_control, Rc::clone(&self.host_requests.pause_game_requests))
-        .with_network_target_fps_requests(Rc::clone(&self.host_requests.network_target_fps_requests))
+        .with_pause_game_requests(
+            self.replay_control,
+            Rc::clone(&self.host_requests.pause_game_requests),
+        )
+        .with_network_target_fps_requests(Rc::clone(
+            &self.host_requests.network_target_fps_requests,
+        ))
         .with_viewport_presentation_requests(
             self.replay_control,
             Rc::clone(&self.host_requests.viewport_presentation_requests),
@@ -616,7 +626,10 @@ impl Engine {
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
         .with_fair_crew_physical_cache(Rc::clone(&self.fair_crew_physical_cache))
-        .with_control_host(self.control_host, Rc::clone(&self.host_requests.player_info_updates))
+        .with_control_host(
+            self.control_host,
+            Rc::clone(&self.host_requests.player_info_updates),
+        )
         .with_player_order(self.player_order.iter().copied())
         .with_local_players(local_players)
         .with_active_message_board_input(self.active_message_board_input.clone())
@@ -1173,5 +1186,4 @@ impl Engine {
             .and_then(crate::landscape::LandscapeRasterState::map_creator)
             .map(map_creator_s2::MapCreatorS2State::callbacks)
     }
-
 }

@@ -3592,7 +3592,10 @@ impl CommandStack {
     /// C4Command::Fail's exact BaseMode/GetBaseCommand gate. The failed
     /// entry must already have `Finished=true`, just as C++ Finish does
     /// before calling Fail (C4Command.cpp:1575-1582,2139-2174).
-    pub(in crate::command) fn record_failure_at(&mut self, index: usize) -> Option<CommandFailureFeedback> {
+    pub(in crate::command) fn record_failure_at(
+        &mut self,
+        index: usize,
+    ) -> Option<CommandFailureFeedback> {
         let mode = self.entries.get(index)?.mode;
         let base_index = self
             .entries

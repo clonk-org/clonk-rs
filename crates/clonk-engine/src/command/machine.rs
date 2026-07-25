@@ -161,7 +161,10 @@ impl MoveToState {
         None
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         self.step_with_waypoint(ctx, false)
     }
 
@@ -345,7 +348,10 @@ impl MoveToState {
         self.step_after_procedure(ctx, position, target, target_range, next_is_move_to, false)
     }
 
-    pub(in crate::command) fn resume_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn resume_after_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         let Some(continuation) = self.stop_continuation.take() else {
             return CommandStepResult::running(None);
         };
@@ -873,7 +879,10 @@ impl EnterState {
         })
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         let Some(target) = self.target else {
             return CommandStepResult::failed(None);
         };
@@ -1012,7 +1021,10 @@ impl ExitState {
         })
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         // InitEvaluation consumes this Execute even when there is no attach
         // action to cancel (C4Command.cpp:1554-1555,1654-1657).
         if !self.evaluated {
@@ -1045,7 +1057,10 @@ impl ExitState {
         self.step_after_stop(ctx)
     }
 
-    pub(in crate::command) fn resume_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn resume_after_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         self.stop_continuation = false;
         self.step_after_stop(ctx)
     }
@@ -1236,7 +1251,10 @@ impl BuildState {
         }])
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if ctx.resolve(self.target).is_none() {
             return CommandStepResult::failed(None);
         }
@@ -1326,7 +1344,10 @@ impl BuildState {
         self.step_after_dig(ctx)
     }
 
-    pub(in crate::command) fn resume_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn resume_after_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if !std::mem::take(&mut self.stop_continuation) {
             return CommandStepResult::running(None);
         }
@@ -1510,7 +1531,10 @@ impl ConstructState {
         }
     }
 
-    pub(in crate::command) fn builder_has_conkit(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+    pub(in crate::command) fn builder_has_conkit(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<ObjectId> {
         ctx.object.contents.iter().copied().find(|id| {
             ctx.resolve(*id)
                 .map(|snapshot| {
@@ -1650,7 +1674,10 @@ impl ConstructState {
             .map(|snapshot| snapshot.id)
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if ctx.object.physical_deferred {
             self.physical_pending = true;
             return resolve_command_physical(ctx.object.id, 2, None);
@@ -1775,7 +1802,10 @@ impl ConstructState {
         self.step_after_stop(ctx)
     }
 
-    pub(in crate::command) fn resume_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn resume_after_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if !std::mem::take(&mut self.stop_continuation) {
             return CommandStepResult::running(None);
         }
@@ -2125,7 +2155,10 @@ impl TransferState {
         frame.is_multiple_of(5)
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         let target_id = self.target;
         if ctx.resolve(target_id).is_none() {
             return CommandStepResult::failed(None);
@@ -2192,7 +2225,10 @@ impl ChopState {
             .and_then(|definition| definition.chop_action.clone())
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if ctx.resolve(self.target).is_none() {
             return CommandStepResult::failed(None);
         }
@@ -2441,7 +2477,10 @@ impl DigState {
         direction
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         // C++ snapshots the adjusted bottom-center target before any helper
         // call in this evaluation, but recomputes it from live Shape.y on
         // every later execution.
@@ -2569,7 +2608,10 @@ impl GrabState {
         })
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         let target = (!self.target_cleared).then_some(self.target);
         if ctx.object.action_procedure == ActionProcedure::Push
             && ctx.object.action_target == target
@@ -2808,7 +2850,10 @@ impl ActivateState {
         }
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.target.is_none() && self.definition_id.is_none() {
             let Some(container) = self.container else {
                 return CommandStepResult::failed(None);
@@ -2999,7 +3044,10 @@ impl PushToState {
         )
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         let Some(target) = self.target else {
             return CommandStepResult::failed(None);
         };
@@ -3103,7 +3151,10 @@ impl UnGrabState {
         }
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         self.completion_pending = true;
         CommandStepResult::running(None).with_events(vec![CommandEvent::ObjectComUnGrabCommand {
             actor_id: ctx.object.id,
@@ -3149,7 +3200,10 @@ impl JumpState {
         }
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.evaluated {
             return CommandStepResult::completed(None);
         }
@@ -3208,7 +3262,10 @@ impl WaitState {
         Some(update.with_action_update(action_update))
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         let update = self.prepare_update(ctx);
         CommandStepResult::running(update)
     }
@@ -3303,7 +3360,10 @@ impl PutState {
         Ok(None)
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         self.step_with_gravity(ctx, crate::PhysicsSettings::default().gravity_as_c4fixed())
     }
 
@@ -3648,7 +3708,10 @@ impl DropState {
         })
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if ctx.object.action_procedure == ActionProcedure::Dig {
             self.continuations
                 .push(DropContinuation::AfterObjectComStop);
@@ -3663,14 +3726,20 @@ impl DropState {
         self.step_after_object_com_stop(ctx)
     }
 
-    pub(in crate::command) fn resume_after_prelude(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn resume_after_prelude(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         match self.continuations.pop() {
             Some(DropContinuation::AfterObjectComStop) => self.step_after_object_com_stop(ctx),
             None => CommandStepResult::running(None),
         }
     }
 
-    pub(in crate::command) fn step_after_object_com_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step_after_object_com_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         // Plain outside Drop preserves Action.ComDir. Only ObjectComStop's
         // ObjectActionStand and the targeted at-position branch stop it
         // (C4Command.cpp:988-1049).
@@ -3875,7 +3944,10 @@ impl GetState {
         Some(update)
     }
 
-    pub(in crate::command) fn resolve_target(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+    pub(in crate::command) fn resolve_target(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<ObjectId> {
         if let Some(target_id) = self.target {
             if ctx.resolve(target_id).is_some() {
                 return Some(target_id);
@@ -3997,7 +4069,10 @@ impl GetState {
         CommandStepResult::failed(update)
     }
 
-    pub(in crate::command) fn dig_out_position(landscape: &crate::Landscape, target_position: Vector2) -> Option<Vector2> {
+    pub(in crate::command) fn dig_out_position(
+        landscape: &crate::Landscape,
+        target_position: Vector2,
+    ) -> Option<Vector2> {
         let mut staging_position =
             landscape.find_closest_free(target_position, -120, 120, -1, -1)?;
         if let Some(good_angle_position) =
@@ -4066,7 +4141,10 @@ impl GetState {
         result
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if let (Some(identification), Some(container)) = (self.menu_identification, self.target) {
             let kind = if identification == 18 {
                 MenuRequestKind::Contents { container }
@@ -4248,7 +4326,10 @@ impl RetryState {
         }
     }
 
-    pub(in crate::command) fn step(&mut self, _ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        _ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         CommandStepResult::running(None)
     }
 }
@@ -4267,7 +4348,10 @@ impl FollowState {
         })
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         let follower = ctx.object;
 
         if follower.crew_member && follower.owner != OWNER_NONE && !follower.selected {
@@ -4379,7 +4463,10 @@ impl ThrowState {
         (position != Vector2::ZERO).then_some(position)
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         self.step_with_gravity(ctx, crate::PhysicsSettings::default().gravity_as_c4fixed())
     }
 
@@ -4651,7 +4738,10 @@ impl AttackState {
         })
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         let Some(target) = ctx.resolve(self.target) else {
             return CommandStepResult::failed(None);
         };
@@ -4746,7 +4836,10 @@ impl CallState {
             .unwrap_or(clonk_script::Value::Nil)
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.executed {
             return CommandStepResult::completed(None);
         }
@@ -4798,7 +4891,10 @@ impl ContextState {
         })
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.executed {
             return CommandStepResult::completed(None);
         }
@@ -4835,11 +4931,16 @@ pub(in crate::command) struct TakeState {
 }
 
 impl TakeState {
-    pub(in crate::command) fn from_request(_request: &CommandRequest) -> Result<Self, CommandError> {
+    pub(in crate::command) fn from_request(
+        _request: &CommandRequest,
+    ) -> Result<Self, CommandError> {
         Ok(Self { executed: false })
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.executed {
             return CommandStepResult::completed(None);
         }
@@ -4860,7 +4961,9 @@ pub(in crate::command) struct Take2State {
 }
 
 impl Take2State {
-    pub(in crate::command) fn from_request(_request: &CommandRequest) -> Result<Self, CommandError> {
+    pub(in crate::command) fn from_request(
+        _request: &CommandRequest,
+    ) -> Result<Self, CommandError> {
         Ok(Self { executed: false })
     }
 
@@ -4872,7 +4975,10 @@ impl Take2State {
         }
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.executed {
             return CommandStepResult::completed(None);
         }
@@ -5066,7 +5172,10 @@ impl AcquireState {
         true
     }
 
-    pub(in crate::command) fn find_candidate(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+    pub(in crate::command) fn find_candidate(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<ObjectId> {
         let mut best: Option<(ObjectId, i64, usize)> = None;
         for snapshot in ctx.objects.values() {
             if !self.candidate_is_valid(snapshot, ctx) {
@@ -5088,7 +5197,10 @@ impl AcquireState {
         best.map(|(id, _, _)| id)
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.definition_id.is_empty() {
             return CommandStepResult::failed(None);
         }
@@ -5208,7 +5320,10 @@ impl SellState {
         }
     }
 
-    pub(in crate::command) fn resolve_base(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+    pub(in crate::command) fn resolve_base(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<ObjectId> {
         if let Some(target) = self.target {
             // An explicit C4Command target bypasses FindBase. Data==0 opens
             // the menu before Base/hostility validation.
@@ -5237,7 +5352,10 @@ impl SellState {
         target
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.evaluation_pending {
             return CommandStepResult::running(None);
         }
@@ -5321,7 +5439,10 @@ impl BuyState {
         })
     }
 
-    pub(in crate::command) fn resolve_base(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+    pub(in crate::command) fn resolve_base(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<ObjectId> {
         if let Some(target) = self.target {
             // Explicit C4Command targets bypass FindFriendlyBase. Data==0
             // opens the menu before Base/hostility validation.
@@ -5354,7 +5475,10 @@ impl BuyState {
         target
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.evaluation_pending {
             return CommandStepResult::running(None);
         }
@@ -5447,7 +5571,10 @@ impl HomeState {
         }
     }
 
-    pub(in crate::command) fn resolve_base(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+    pub(in crate::command) fn resolve_base(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<ObjectId> {
         let owner = ctx.object.owner;
         if let Some(target_id) = self.target {
             // Explicit C4Command targets bypass FindBase entirely.
@@ -5472,7 +5599,10 @@ impl HomeState {
             .map(|snapshot| snapshot.id)
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         if self.is_home(ctx) {
             return CommandStepResult::completed(None);
         }
@@ -5629,7 +5759,10 @@ impl EnergyState {
             .map(|snapshot| snapshot.id)
     }
 
-    pub(in crate::command) fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    pub(in crate::command) fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
         let target_id = self.target;
         let Some(target_snapshot) = ctx.resolve(target_id) else {
             return CommandStepResult::failed(None);
@@ -6205,13 +6338,19 @@ impl CommandState {
     }
 }
 
-pub(crate) fn denumerate_object_reference(reference: &mut Option<ObjectId>, object_numbers: &HashSet<u64>) {
+pub(crate) fn denumerate_object_reference(
+    reference: &mut Option<ObjectId>,
+    object_numbers: &HashSet<u64>,
+) {
     if reference.is_some_and(|id| !object_numbers.contains(&id.as_u64())) {
         *reference = None;
     }
 }
 
-pub(in crate::command) fn clear_matching_object_reference(reference: &mut Option<ObjectId>, removed: ObjectId) -> bool {
+pub(in crate::command) fn clear_matching_object_reference(
+    reference: &mut Option<ObjectId>,
+    removed: ObjectId,
+) -> bool {
     if *reference == Some(removed) {
         *reference = None;
         true
@@ -6233,7 +6372,10 @@ fn clear_required_object_reference(reference: &mut ObjectId, removed: ObjectId) 
     }
 }
 
-pub(in crate::command) fn clear_value_object_reference(value: &mut clonk_script::Value, removed: ObjectId) -> bool {
+pub(in crate::command) fn clear_value_object_reference(
+    value: &mut clonk_script::Value,
+    removed: ObjectId,
+) -> bool {
     match value {
         clonk_script::Value::Object(id) if ObjectId::new(*id) == removed => {
             *value = clonk_script::Value::Nil;

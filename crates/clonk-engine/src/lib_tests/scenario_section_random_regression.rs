@@ -3,11 +3,7 @@ use crate::landscape::{
     LandscapeRasterState, RuntimeTexMapLookup, RuntimeTexMapMaterial, RuntimeTexMapState,
 };
 
-fn section(
-    name: &str,
-    width: u32,
-    base_extinguish_enabled: bool,
-) -> scenario::ScenarioSectionSpec {
+fn section(name: &str, width: u32, base_extinguish_enabled: bool) -> scenario::ScenarioSectionSpec {
     scenario::ScenarioSectionSpec {
         name: name.to_string(),
         source_group: None,
@@ -69,8 +65,8 @@ fn vehicle_section(name: &str, landscape: Landscape) -> scenario::ScenarioSectio
 }
 
 fn two_pixel_solid_mask_definition(id: &str, second_alpha: u8) -> Definition {
-    let mut definition = Definition::from_script(id, "Capture mask", "")
-        .expect("solid-mask definition compiles");
+    let mut definition =
+        Definition::from_script(id, "Capture mask", "").expect("solid-mask definition compiles");
     definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 1)));
     definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 2, 1, 0, 0)));
     definition.set_sprite_image(Some(DefinitionSpriteImage {
@@ -84,8 +80,7 @@ fn two_pixel_solid_mask_definition(id: &str, second_alpha: u8) -> Definition {
 
 fn resumed_non_main_root_engine() -> Engine {
     let mut engine = Engine::with_seed(5);
-    engine
-        .configure_scenario_sections(&[section("Cave", 80, true), section("Main", 120, true)]);
+    engine.configure_scenario_sections(&[section("Cave", 80, true), section("Main", 120, true)]);
     engine.set_landscape(vehicle_section_landscape(80, 40));
     engine
         .apply_initial_network_game_data(&InitialNetworkGameData {
@@ -137,7 +132,7 @@ fn synthetic_section_without_a_group_uses_its_explicit_object_fallback() {
         .expect("synthetic landscape-only section reopens"));
     assert!(
         engine.object_snapshot(ObjectId::new(900)).is_some(),
-            "a groupless landscape-only freeze retains explicit object templates"
+        "a groupless landscape-only freeze retains explicit object templates"
     );
 }
 
@@ -153,7 +148,7 @@ fn resumed_non_main_implicit_root_cannot_reopen_after_unsaved_departure() {
         !engine
             .load_scenario_section("Cave", 0, Vec::new())
             .expect("missing native group is an ordinary false result"),
-            "an implicit non-main root has no Filename for GetGroupfile"
+        "an implicit non-main root has no Filename for GetGroupfile"
     );
     assert_eq!(engine.debug_current_scenario_section(), "Main");
     assert_eq!(engine.landscape().map(Landscape::width), Some(120));
@@ -171,7 +166,7 @@ fn resumed_non_main_implicit_root_reopens_after_saved_departure() {
             .scenario_sections
             .get("cave")
             .is_some_and(|section| section.frozen_group.is_some()),
-            "C4S_SAVE_LANDSCAPE | C4S_SAVE_OBJECTS creates the temp group"
+        "C4S_SAVE_LANDSCAPE | C4S_SAVE_OBJECTS creates the temp group"
     );
     assert!(engine
         .load_scenario_section("Cave", 0, Vec::new())
@@ -182,17 +177,14 @@ fn resumed_non_main_implicit_root_reopens_after_saved_departure() {
 
 #[test]
 fn section_object_save_enumerates_active_and_inactive_compiler_caches() {
-        // Objects.Save(false, false) writes active objects only, but native
-        // Enumerate/Denumerate still visits the inactive list on both sides
-        // of decompilation (C4GameObjects.cpp:691-713).
+    // Objects.Save(false, false) writes active objects only, but native
+    // Enumerate/Denumerate still visits the inactive list on both sides
+    // of decompilation (C4GameObjects.cpp:691-713).
     let mut engine = Engine::with_seed(11);
     engine
-        .register_definition(
-            Definition::from_script("ITEM", "Item", "").expect("item compiles"),
-        )
+        .register_definition(Definition::from_script("ITEM", "Item", "").expect("item compiles"))
         .expect("item registers");
-    engine
-        .configure_scenario_sections(&[section("main", 80, true), section("next", 100, true)]);
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 100, true)]);
     engine.set_landscape(vehicle_section_landscape(80, 40));
 
     let active = engine
@@ -231,18 +223,16 @@ fn section_object_save_enumerates_active_and_inactive_compiler_caches() {
         .get("main")
         .and_then(|section| section.frozen_group.clone())
         .expect("departing main section freezes");
-    let group = clonk_resources::Group::from_raw_memory(
-        std::path::PathBuf::from("Sectmain.c4g"),
-        frozen,
-    )
-    .expect("frozen section group opens");
+    let group =
+        clonk_resources::Group::from_raw_memory(std::path::PathBuf::from("Sectmain.c4g"), frozen)
+            .expect("frozen section group opens");
     let objects_txt = group
         .read_entry_bytes("Objects.txt")
         .expect("frozen Objects.txt reads");
     assert!(
         String::from_utf8_lossy(&objects_txt)
             .contains(&format!("ActionTarget1={inactive_number}\r\n")),
-            "active rows decompile the enumerated cache word",
+        "active rows decompile the enumerated cache word",
     );
 
     let inactive_index = engine
@@ -250,12 +240,12 @@ fn section_object_save_enumerates_active_and_inactive_compiler_caches() {
         .expect("inactive object survives section switch");
     assert_eq!(
         engine.objects[inactive_index].compiler_cache.action_target1, inactive_number,
-            "inactive wrappers receive the same enumeration side effect",
+        "inactive wrappers receive the same enumeration side effect",
     );
     assert_eq!(
         engine.objects[inactive_index].state.action.target,
         Some(inactive),
-            "inactive wrapper denumerates through the shared number table",
+        "inactive wrapper denumerates through the shared number table",
     );
     let preserved_index = engine
         .find_object_index(preserved)
@@ -275,10 +265,7 @@ fn section_object_save_enumerates_active_and_inactive_compiler_caches() {
 fn section_landscape_init_refixes_the_exact_synced_rng_ledger() {
     let seed = 7;
     let mut engine = Engine::with_seed(seed);
-    engine.configure_scenario_sections(&[
-        section("main", 100, true),
-        section("next", 240, false),
-    ]);
+    engine.configure_scenario_sections(&[section("main", 100, true), section("next", 240, false)]);
     engine.set_landscape(vehicle_section_landscape(100, 40));
 
     engine.rng.random(31);
@@ -289,7 +276,7 @@ fn section_landscape_init_refixes_the_exact_synced_rng_ledger() {
         .expect("unknown section is not an engine error"));
     assert_eq!(
         engine.rng, unknown_before,
-            "the known-section gate precedes FixRandom"
+        "the known-section gate precedes FixRandom"
     );
 
     engine.rng.random(17);
@@ -300,7 +287,7 @@ fn section_landscape_init_refixes_the_exact_synced_rng_ledger() {
     assert_eq!(engine.landscape().expect("section landscape").width(), 240);
     assert!(
         !engine.base_extinguish_enabled,
-            "the target section projects its BaseFunctionality mask"
+        "the target section projects its BaseFunctionality mask"
     );
 
     let mut expected = LcgRng::seed_from_u64(seed);
@@ -310,7 +297,7 @@ fn section_landscape_init_refixes_the_exact_synced_rng_ledger() {
     assert_eq!(engine.rng.rnd3_ptr(), 0);
     assert_eq!(
         engine.rng, expected,
-            "section ScenarioInit consumes gravity immediately after the second FixRandom"
+        "section ScenarioInit consumes gravity immediately after the second FixRandom"
     );
 }
 
@@ -417,7 +404,7 @@ fn section_load_preserves_runtime_landscape_state_and_matches_mode_quirk() {
     assert_eq!(
         landscape.raster_state().unwrap().map_zoom(),
         7,
-            "exact section overloads retain the live MapZoom"
+        "exact section overloads retain the live MapZoom"
     );
     assert_eq!(engine.physics().gravity, 100);
 
@@ -427,7 +414,7 @@ fn section_load_preserves_runtime_landscape_state_and_matches_mode_quirk() {
     assert_eq!(
         engine.landscape().unwrap().mode(),
         LANDSCAPE_MODE_EXACT,
-            "an undefined pre-load mode permits the post-Clear exact assignment"
+        "an undefined pre-load mode permits the post-Clear exact assignment"
     );
 
     assert!(engine
@@ -447,7 +434,7 @@ fn section_load_preserves_runtime_landscape_state_and_matches_mode_quirk() {
         InitialNetworkGameData::from_engine(&engine)
             .expect("section runtime state captures")
             .current_scenario_section,
-            "next"
+        "next"
     );
 
     assert!(engine
@@ -458,7 +445,7 @@ fn section_load_preserves_runtime_landscape_state_and_matches_mode_quirk() {
     assert_eq!(
         landscape.raster_state().unwrap().texmap().material_names[1].as_deref(),
         Some("Earth"),
-            "raw Map.bmp bytes are interpreted against the live global slot"
+        "raw Map.bmp bytes are interpreted against the live global slot"
     );
 }
 
@@ -489,7 +476,7 @@ fn saved_section_exact_reload_reseeds_the_diff_baseline() {
             .save_diff(false)
             .expect("saved exact landscape has pInitial"),
         None,
-            "the just-saved full surface is the new diff baseline"
+        "the just-saved full surface is the new diff baseline"
     );
 }
 
@@ -524,14 +511,12 @@ fn saved_section_freezes_changed_map_before_exact_reload_discards_it() {
         .get("main")
         .and_then(|section| section.frozen_group.clone())
         .expect("departing main section freezes");
-    let group = clonk_resources::Group::from_raw_memory(
-        std::path::PathBuf::from("Sectmain.c4g"),
-        frozen,
-    )
-    .expect("frozen section group opens");
+    let group =
+        clonk_resources::Group::from_raw_memory(std::path::PathBuf::from("Sectmain.c4g"), frozen)
+            .expect("frozen section group opens");
     assert!(
         group.exists("Map.bmp"),
-            "C4Landscape::Save persists the changed retained map"
+        "C4Landscape::Save persists the changed retained map"
     );
 
     assert!(engine
@@ -580,18 +565,18 @@ fn empty_section_overload_retains_landscape_and_skips_second_init() {
 
 #[test]
 fn section_save_landscape_removes_and_restore_reputs_solid_masks_like_cpp() {
-        // C4S_SAVE_LANDSCAPE serializes the plane only while every solid
-        // mask is temporarily removed (C4Game.cpp:4137-4147). Returning to
-        // the section loads that clean plane and re-puts the saved gate, so
-        // opening it later restores Earth rather than a permanent MCVehic.
+    // C4S_SAVE_LANDSCAPE serializes the plane only while every solid
+    // mask is temporarily removed (C4Game.cpp:4137-4147). Returning to
+    // the section loads that clean plane and re-puts the saved gate, so
+    // opening it later restores Earth rather than a permanent MCVehic.
     let mut main_landscape = vehicle_section_landscape(20, 20);
     main_landscape.grid_write_byte(10, 10, 1);
     let next_landscape = vehicle_section_landscape(20, 20);
 
     let mut gate = Definition::from_script(
-            "SCGT",
-            "Section gate",
-            r#"
+        "SCGT",
+        "Section gate",
+        r#"
                 #strict 2
                 public func OpenMask() { return SetSolidMask(0, 0, 0, 0); }
             "#,
@@ -644,7 +629,7 @@ fn section_save_landscape_removes_and_restore_reputs_solid_masks_like_cpp() {
             .expect("restored main landscape")
             .grid_byte_at(10, 10),
         Some(2),
-            "restored gate must be put over the clean section plane"
+        "restored gate must be put over the clean section plane"
     );
 
     let gate_index = engine.find_object_index(gate).expect("saved gate restores");
@@ -657,17 +642,17 @@ fn section_save_landscape_removes_and_restore_reputs_solid_masks_like_cpp() {
             .expect("opened main landscape")
             .grid_byte_at(10, 10),
         Some(1),
-            "opening the restored gate must reveal its original Earth byte"
+        "opening the restored gate must reveal its original Earth byte"
     );
 }
 
 #[test]
 fn section_save_preserves_overlapping_inactive_solid_mask_like_cpp() {
-        // RemoveSolidMasks walks only active objects, but each Remove repairs
-        // every overlapping linked C4SolidMask newest-first. Runtime
-        // deactivation retains that link; an Objects.txt-loaded inactive row
-        // never acquired one (C4Object.cpp:5987-5995;
-        // C4SolidMask.cpp:231-274).
+    // RemoveSolidMasks walks only active objects, but each Remove repairs
+    // every overlapping linked C4SolidMask newest-first. Runtime
+    // deactivation retains that link; an Objects.txt-loaded inactive row
+    // never acquired one (C4Object.cpp:5987-5995;
+    // C4SolidMask.cpp:231-274).
     const OVERLAP_X: i32 = 2;
     const ACTIVE_X: i32 = 6;
     const ALL_ACTIVE_X: i32 = 10;
@@ -776,7 +761,7 @@ fn section_save_preserves_overlapping_inactive_solid_mask_like_cpp() {
             .expect("runtime-inactive object remains");
         assert!(
             engine.objects[index].solid_mask_bake.is_some(),
-                "runtime deactivation retains the existing C4SolidMask"
+            "runtime deactivation retains the existing C4SolidMask"
         );
     }
     let loaded_index = engine
@@ -784,7 +769,7 @@ fn section_save_preserves_overlapping_inactive_solid_mask_like_cpp() {
         .expect("loaded inactive object remains");
     assert!(
         engine.objects[loaded_index].solid_mask_bake.is_none(),
-            "loaded inactive objects must not be synthesized into survivors"
+        "loaded inactive objects must not be synthesized into survivors"
     );
 
     let capture = engine.capture_state();
@@ -814,12 +799,12 @@ fn section_save_preserves_overlapping_inactive_solid_mask_like_cpp() {
             Some(2),
             Some(1),
         ],
-            "only the two runtime-inactive half masks survive the active-list bracket"
+        "only the two runtime-inactive half masks survive the active-list bracket"
     );
 
     assert!(engine
         .load_scenario_section(
-                "next",
+            "next",
             1,
             vec![overlap_survivor, loaded_inactive, standalone_inactive],
         )
@@ -841,7 +826,7 @@ fn section_save_preserves_overlapping_inactive_solid_mask_like_cpp() {
 #[test]
 fn section_save_landscape_restores_c4b_pxs_and_consolidated_movers() {
     let library = clonk_resources::MaterialLibrary::parse(
-            r#"
+        r#"
             [Material Earth]
             Name=Earth
             Density=100
@@ -974,7 +959,7 @@ fn section_without_landscape_or_components_retains_pxs_and_movers() {
     assert_eq!(
         engine.landscape().map(|landscape| landscape.width()),
         Some(20),
-            "a section without a map keeps the departing landscape"
+        "a section without a map keeps the departing landscape"
     );
     assert!(engine.pxs_system.peek_slot(0, 6).is_some());
     assert_eq!(

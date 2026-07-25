@@ -810,7 +810,11 @@ const REDUNDANT_DATA_PACKET_LIMIT: u32 = 256;
 /// `C4NetIOUDP::Packet::AddFragment` (oracle-src-pinned src/C4NetIO.cpp:2615).
 /// A C++ peer therefore needs no knowledge of it.
 pub fn reliable_udp_redundant_copies(wire: &[u8]) -> usize {
-    if wire.first().map(|status| status & INTERNAL_PACKET_TYPE_MASK) != Some(IPID_DATA) {
+    if wire
+        .first()
+        .map(|status| status & INTERNAL_PACKET_TYPE_MASK)
+        != Some(IPID_DATA)
+    {
         return 0;
     }
     wire.get(9..13)

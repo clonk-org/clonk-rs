@@ -72,7 +72,11 @@ impl Engine {
     /// `C4Object::SetOwner` removes the old membership, but its NO_OWNER arm
     /// does not call `PlrFoWActualize` and therefore does not immediately add
     /// the object to every player.
-    pub(crate) fn actualize_object_fow_after_owner_change(&mut self, object_id: ObjectId, new_owner: i32) {
+    pub(crate) fn actualize_object_fow_after_owner_change(
+        &mut self,
+        object_id: ObjectId,
+        new_owner: i32,
+    ) {
         self.remove_object_from_fow_view_lists(object_id);
         if new_owner != OWNER_NONE {
             self.actualize_object_fow_view_range(object_id);
@@ -178,7 +182,12 @@ impl Engine {
         if self.frame.is_multiple_of(35) && normal_status {
             let team = self.players.get(&id).and_then(Player::team);
             let valid_team_home_base = team.filter(|team| {
-                self.team_home_base_rule && self.team_state.teams.iter().any(|candidate| candidate.id == *team)
+                self.team_home_base_rule
+                    && self
+                        .team_state
+                        .teams
+                        .iter()
+                        .any(|candidate| candidate.id == *team)
             });
             let should_produce = match valid_team_home_base {
                 Some(team) => self.runtime_team_members_in_order(team).first().copied() == Some(id),
@@ -806,7 +815,10 @@ impl Engine {
     /// that issue and immediately execute an order (notably contained
     /// Throw). It shares the retained-front callback/clear tail with the
     /// ordinary object tick.
-    pub(crate) fn execute_object_command_now(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+    pub(crate) fn execute_object_command_now(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<(), EngineError> {
         self.execute_object_command_now_inner(object_id, ImmediateCommandResume::Front)
             .map(|_| ())
     }
@@ -815,7 +827,10 @@ impl Engine {
     /// second UpdateInterval decrement. This is still the same native
     /// C4Command::Execute invocation; only the live callback boundary made
     /// the engine rebuild its command snapshot.
-    pub(crate) fn resume_move_to_after_stop(&mut self, object_id: ObjectId) -> Result<bool, EngineError> {
+    pub(crate) fn resume_move_to_after_stop(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
         self.execute_object_command_now_inner(object_id, ImmediateCommandResume::MoveToAfterStop)
     }
 
@@ -1134,5 +1149,4 @@ impl Engine {
         self.tick_with_presentation()?;
         Ok(())
     }
-
 }

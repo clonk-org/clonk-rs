@@ -4,8 +4,7 @@ fn sound_source_engine() -> (Engine, ObjectId, Vector2) {
     let mut engine = Engine::with_seed(0x4c_30_30_31);
     engine
         .register_definition(
-            Definition::from_script("SND1", "Sound source", "")
-                .expect("sound definition compiles"),
+            Definition::from_script("SND1", "Sound source", "").expect("sound definition compiles"),
         )
         .expect("sound definition registers");
     let position = Vector2::new(321, 654);

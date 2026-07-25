@@ -5,7 +5,7 @@ use crate::landscape::{
 
 fn blast_engine(copy_to_lower_slot: bool, blast_shift_to: &str) -> (Engine, MaterialId) {
     let source = format!(
-            r#"
+        r#"
             [Material Rock]
             Name=Rock
             Density=80

@@ -41,31 +41,23 @@ use crate::{
     LANDSCAPE_MODE_STATIC,
 };
 
-
+mod c4value;
 mod core;
-mod legacy_types;
-mod values;
+mod definitions;
 mod legacy_parse;
+mod legacy_types;
 mod map;
 mod sections;
-mod c4value;
-mod definitions;
+mod values;
 
+pub(crate) use c4value::*;
 pub use core::*;
-pub use legacy_types::*;
-pub use values::*;
+pub(crate) use definitions::*;
 pub use legacy_parse::*;
+pub use legacy_types::*;
 pub use map::*;
 pub(crate) use sections::*;
-pub(crate) use c4value::*;
-pub(crate) use definitions::*;
-
-
-
-
-
-
-
+pub use values::*;
 
 #[cfg(test)]
 fn write_test_definition_graphics(path: &Path) {

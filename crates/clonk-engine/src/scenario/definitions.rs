@@ -373,7 +373,10 @@ pub(crate) fn convert_action_facet(facet: &ResourceActionFacet) -> DefinitionAct
     }
 }
 
-pub(in crate::scenario) fn read_group_file_bytes(group: &Group, path: &Path) -> Result<Vec<u8>, ScenarioError> {
+pub(in crate::scenario) fn read_group_file_bytes(
+    group: &Group,
+    path: &Path,
+) -> Result<Vec<u8>, ScenarioError> {
     match group.read_file(path) {
         Ok(bytes) => Ok(bytes),
         Err(GroupError::EntryNotFound(_)) => read_file_from_fs(group, path),
@@ -498,7 +501,10 @@ struct DigMovementManifest {
 }
 
 impl MovementManifest {
-    pub(in crate::scenario) fn into_profile(self, id: &str) -> Result<MovementProfile, ScenarioError> {
+    pub(in crate::scenario) fn into_profile(
+        self,
+        id: &str,
+    ) -> Result<MovementProfile, ScenarioError> {
         let mut profile = MovementProfile::default();
         if let Some(float) = self.float {
             if let Some(speed) = float.speed {
@@ -1070,7 +1076,10 @@ impl EnvironmentManifest {
 }
 
 impl SkyManifest {
-    pub(in crate::scenario) fn into_config(self, group: &Group) -> Result<SkyConfig, ScenarioError> {
+    pub(in crate::scenario) fn into_config(
+        self,
+        group: &Group,
+    ) -> Result<SkyConfig, ScenarioError> {
         let mut settings = SkySettings::default();
         let mut surface_image = None;
 

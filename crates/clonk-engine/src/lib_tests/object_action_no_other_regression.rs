@@ -9,11 +9,11 @@ fn object_action_fight_respects_no_other_action() {
         Some("Fight".to_string()),
         HashMap::from([
             (
-                    "Fight".to_string(),
+                "Fight".to_string(),
                 ActionSpec::default().with_procedure("FIGHT"),
             ),
             (
-                    "Dead".to_string(),
+                "Dead".to_string(),
                 ActionSpec::default().with_no_other_action(true),
             ),
         ]),

@@ -25,20 +25,20 @@ fn initial_link_preparses_every_host_constant_before_function_literal_holds() {
     let mut engine = Engine::new();
     assert_eq!(
         engine.install_global_scripts(&[(
-                "System/A.c".into(),
-                "func Literal() { return \"a\"; }".into(),
+            "System/A.c".into(),
+            "func Literal() { return \"a\"; }".into(),
         )]),
         1
     );
     assert!(
         engine.script_string_registration_order().is_empty(),
-            "preparse must discard the earlier host's function body"
+        "preparse must discard the earlier host's function body"
     );
 
     register(
         &mut engine,
-            "LATE",
-            "static const Later = \"b\";\nfunc Constant() { return Later; }",
+        "LATE",
+        "static const Later = \"b\";\nfunc Constant() { return Later; }",
     );
     assert_eq!(engine.script_string_registration_order(), ["b"]);
 
@@ -46,7 +46,7 @@ fn initial_link_preparses_every_host_constant_before_function_literal_holds() {
     assert_eq!(
         engine.script_string_registration_order(),
         ["b", "a"],
-            "the global Parse pass runs only after every host was preparsed"
+        "the global Parse pass runs only after every host was preparsed"
     );
 }
 
@@ -55,8 +55,8 @@ fn initial_literal_hold_reuses_later_static_constant_identity() {
     let mut engine = Engine::new();
     assert_eq!(
         engine.install_global_scripts(&[(
-                "System/A.c".into(),
-                "func Literal() { return \"shared\"; }".into(),
+            "System/A.c".into(),
+            "func Literal() { return \"shared\"; }".into(),
         )]),
         1
     );
@@ -64,8 +64,8 @@ fn initial_literal_hold_reuses_later_static_constant_identity() {
 
     register(
         &mut engine,
-            "LATE",
-            "static const Shared = \"shared\";\nfunc Constant() { return Shared; }",
+        "LATE",
+        "static const Shared = \"shared\";\nfunc Constant() { return Shared; }",
     );
     let constant = engine
         .script_global_consts
@@ -89,13 +89,12 @@ fn initial_literal_hold_reuses_later_static_constant_identity() {
             _ => None,
         })
         .expect("system host remains installed");
-    let Value::String(initial_literal) = source.call("Literal", &[]).expect("literal runs")
-    else {
+    let Value::String(initial_literal) = source.call("Literal", &[]).expect("literal runs") else {
         panic!("Literal returns a string");
     };
     assert!(
         constant.ptr_eq(&initial_literal),
-            "Parse must set Hold on the constant's preparsed identity"
+        "Parse must set Hold on the constant's preparsed identity"
     );
 
     engine
@@ -111,13 +110,12 @@ fn initial_literal_hold_reuses_later_static_constant_identity() {
             _ => None,
         })
         .expect("system host remains installed");
-    let Value::String(relinked_literal) = source.call("Literal", &[]).expect("literal runs")
-    else {
+    let Value::String(relinked_literal) = source.call("Literal", &[]).expect("literal runs") else {
         panic!("Literal returns a string");
     };
     assert!(
         !constant.ptr_eq(&relinked_literal),
-            "Clear unregisters a held identity even while the constant still references it"
+        "Clear unregisters a held identity even while the constant still references it"
     );
 }
 
@@ -127,13 +125,13 @@ fn reload_rebuilds_append_include_copies_once_and_keeps_globals() {
     register(&mut engine, "INCA", "func Layer() { return 1; }");
     register(
         &mut engine,
-            "INCB",
-            "#strict\nfunc Layer() { return 10 + inherited(); }",
+        "INCB",
+        "#strict\nfunc Layer() { return 10 + inherited(); }",
     );
     register(
         &mut engine,
-            "BASE",
-            "#strict 2\n\
+        "BASE",
+        "#strict 2\n\
              #include INCA\n\
              #include INCB\n\
              static Kept;\n\
@@ -144,13 +142,13 @@ fn reload_rebuilds_append_include_copies_once_and_keeps_globals() {
     );
     register(
         &mut engine,
-            "APNX",
-            "#strict\n#appendto BASE\nfunc Layer() { return 1000 + inherited(); }",
+        "APNX",
+        "#strict\n#appendto BASE\nfunc Layer() { return 1000 + inherited(); }",
     );
     register(
         &mut engine,
-            "APNY",
-            "#strict\n#appendto BASE\nfunc Layer() { return 10000 + inherited(); }",
+        "APNY",
+        "#strict\n#appendto BASE\nfunc Layer() { return 10000 + inherited(); }",
     );
     register(&mut engine, "CHLD", "#include BASE");
 
@@ -167,8 +165,8 @@ fn reload_rebuilds_append_include_copies_once_and_keeps_globals() {
 
     assert!(engine
         .reload_definition_script(
-                "APNY",
-                "#strict\n#appendto BASE\nfunc Layer() { return 20000 + inherited(); }",
+            "APNY",
+            "#strict\n#appendto BASE\nfunc Layer() { return 20000 + inherited(); }",
         )
         .expect("append source reloads"));
     assert_eq!(call(&mut engine, base, "Layer"), Value::Int(21_111));
@@ -176,8 +174,8 @@ fn reload_rebuilds_append_include_copies_once_and_keeps_globals() {
 
     assert!(engine
         .reload_definition_script(
-                "BASE",
-                "#strict 2\n\
+            "BASE",
+            "#strict 2\n\
                      #include INCA\n\
                      #include INCB\n\
                      static Kept;\n\
@@ -220,27 +218,27 @@ fn relink_replays_interleaved_global_hosts_and_declaring_links() {
     let mut engine = Engine::new();
     assert_eq!(
         engine.install_global_scripts(&[(
-                "System/Base.c".into(),
-                "global func GlobalLayer() { return 1; }".into(),
+            "System/Base.c".into(),
+            "global func GlobalLayer() { return 1; }".into(),
         )]),
         1
     );
     register(
         &mut engine,
-            "OWNR",
-            "#strict\n\
+        "OWNR",
+        "#strict\n\
              global func GlobalLayer() { return inherited() * 10 + 2; }\n\
              func Probe() { return GlobalLayer(); }",
     );
     register(
         &mut engine,
-            "CALL",
-            "func Probe() { return GlobalLayer(); }",
+        "CALL",
+        "func Probe() { return GlobalLayer(); }",
     );
     engine
         .load_scenario_script_with_convention(
-                "Scenario/Script.c",
-                "#strict\n\
+            "Scenario/Script.c",
+            "#strict\n\
                  global func GlobalLayer() { return inherited() * 10 + 3; }\n\
                  func Probe() { return GlobalLayer(); }",
             true,
@@ -248,8 +246,8 @@ fn relink_replays_interleaved_global_hosts_and_declaring_links() {
         .expect("scenario script loads");
     assert_eq!(
         engine.install_scenario_global_scripts(&[(
-                "Scenario/System/Last.c".into(),
-                "#strict\nglobal func GlobalLayer() { return inherited() * 10 + 4; }".into(),
+            "Scenario/System/Last.c".into(),
+            "#strict\nglobal func GlobalLayer() { return inherited() * 10 + 4; }".into(),
         )]),
         1
     );
@@ -303,8 +301,8 @@ fn declaring_definition_calls_use_the_latest_engine_global_chain() {
         let mut engine = Engine::new();
         register(
             &mut engine,
-                "GFA1",
-                "#strict 2\n\
+            "GFA1",
+            "#strict 2\n\
                  global func F() { return 1; }\n\
                  func CallF() { return F(); }",
         );
@@ -316,7 +314,7 @@ fn declaring_definition_calls_use_the_latest_engine_global_chain() {
         assert_eq!(
             call(&mut engine, declaring, "CallF"),
             Value::Int(expected),
-                "later declaration: {later_source}",
+            "later declaration: {later_source}",
         );
     }
 }
@@ -326,8 +324,8 @@ fn scenario_script_calls_use_the_later_scenario_system_global() {
     let mut engine = Engine::new();
     engine
         .load_scenario_script_with_convention(
-                "Scenario/Script.c",
-                "#strict 2\n\
+            "Scenario/Script.c",
+            "#strict 2\n\
                  global func F() { return 1; }\n\
                  func CallF() { return F(); }",
             true,
@@ -335,8 +333,8 @@ fn scenario_script_calls_use_the_later_scenario_system_global() {
         .expect("scenario script loads first");
     assert_eq!(
         engine.install_scenario_global_scripts(&[(
-                "Scenario/System/Override.c".into(),
-                "global func F() { return 2; }".into(),
+            "Scenario/System/Override.c".into(),
+            "global func F() { return 2; }".into(),
         )]),
         1,
     );
@@ -359,14 +357,14 @@ fn relink_keeps_global_resort_lookup_bound_to_the_declaring_definition() {
     let mut engine = Engine::new();
     register(
         &mut engine,
-            "ADEF",
-            "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
+        "ADEF",
+        "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
              func Cmp(object first, object second) { return -11; }",
     );
     register(
         &mut engine,
-            "BDEF",
-            "func Cmp(object first, object second) { return 22; }\n\
+        "BDEF",
+        "func Cmp(object first, object second) { return 22; }\n\
              func Trigger() { return Queue(); }",
     );
     engine.relink_scripts().expect("scripts relink");
@@ -389,7 +387,7 @@ fn relink_keeps_global_resort_lookup_bound_to_the_declaring_definition() {
         engine.pending_object_order_commands.as_slice()
     else {
         panic!(
-                "unexpected relinked order queue: {:?}",
+            "unexpected relinked order queue: {:?}",
             engine.pending_object_order_commands
         );
     };
@@ -406,8 +404,8 @@ fn retained_system_host_owns_and_executes_its_local_resort_comparator() {
     let mut engine = Engine::new();
     assert_eq!(
         engine.install_global_scripts(&[(
-                "System/Order.c".into(),
-                "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
+            "System/Order.c".into(),
+            "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
                  func Cmp(object first, object second) { return -1; }"
                 .into(),
         )]),
@@ -415,8 +413,8 @@ fn retained_system_host_owns_and_executes_its_local_resort_comparator() {
     );
     register(
         &mut engine,
-            "BDEF",
-            "func Cmp(object first, object second) { return 1; }\n\
+        "BDEF",
+        "func Cmp(object first, object second) { return 1; }\n\
              func Trigger() { return Queue(); }",
     );
     engine.relink_scripts().expect("system scripts relink");
@@ -452,7 +450,7 @@ fn retained_system_host_owns_and_executes_its_local_resort_comparator() {
     assert_eq!(
         engine.debug_exec_order(),
         [second, first],
-            "the System-local -1 comparator wins over BDEF's +1 comparator"
+        "the System-local -1 comparator wins over BDEF's +1 comparator"
     );
 }
 
@@ -461,14 +459,14 @@ fn global_resort_comparator_executes_without_a_definition_context() {
     let mut engine = Engine::new();
     register(
         &mut engine,
-            "ADEF",
-            "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
+        "ADEF",
+        "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
              func Helper() { return 1; }",
     );
     register(
         &mut engine,
-            "BDEF",
-            "global func Cmp(object first, object second) {\n\
+        "BDEF",
+        "global func Cmp(object first, object second) {\n\
                  return Helper();\n\
              }\n\
              func Helper() {\n\
@@ -506,7 +504,7 @@ fn global_resort_comparator_executes_without_a_definition_context() {
     assert_eq!(
         engine.debug_exec_order(),
         [second, first],
-            "BDEF's global Cmp resolves BDEF's local Helper, not ADEF's conflicting helper"
+        "BDEF's global Cmp resolves BDEF's local Helper, not ADEF's conflicting helper"
     );
 }
 
@@ -515,13 +513,13 @@ fn queued_global_resort_pins_its_body_across_relink() {
     let mut engine = Engine::new();
     register(
         &mut engine,
-            "ADEF",
-            "global func Queue() { return ResortObjects(\"Cmp\"); }",
+        "ADEF",
+        "global func Queue() { return ResortObjects(\"Cmp\"); }",
     );
     register(
         &mut engine,
-            "BDEF",
-            "global func Cmp(object first, object second) { return -1; }\n\
+        "BDEF",
+        "global func Cmp(object first, object second) { return -1; }\n\
              func Trigger() { return Queue(); }",
     );
     engine.relink_scripts().expect("global comparator relinks");
@@ -535,8 +533,8 @@ fn queued_global_resort_pins_its_body_across_relink() {
 
     assert!(engine
         .reload_definition_script(
-                "BDEF",
-                "global func Cmp(object first, object second) { return 1; }\n\
+            "BDEF",
+            "global func Cmp(object first, object second) { return 1; }\n\
                      func Trigger() { return Queue(); }",
         )
         .expect("comparator definition reloads"));
@@ -544,7 +542,7 @@ fn queued_global_resort_pins_its_body_across_relink() {
     assert_eq!(
         engine.debug_exec_order(),
         [second, first],
-            "the queued -1 body wins over the reloaded +1 function"
+        "the queued -1 body wins over the reloaded +1 function"
     );
 }
 
@@ -553,22 +551,22 @@ fn reloaded_definition_globals_move_to_the_engine_function_tail() {
     let mut engine = Engine::new();
     assert_eq!(
         engine.install_global_scripts(&[(
-                "System/Base.c".into(),
-                "global func Layer() { return 1; }".into(),
+            "System/Base.c".into(),
+            "global func Layer() { return 1; }".into(),
         )]),
         1
     );
     register(
         &mut engine,
-            "EARL",
-            "#strict\n\
+        "EARL",
+        "#strict\n\
              global func Layer() { return inherited() * 10 + 2; }\n\
              func Own() { return Layer(); }",
     );
     register(
         &mut engine,
-            "LATE",
-            "#strict\n\
+        "LATE",
+        "#strict\n\
              global func Layer() { return inherited() * 10 + 3; }\n\
              func Own() { return Layer(); }",
     );
@@ -589,8 +587,8 @@ fn reloaded_definition_globals_move_to_the_engine_function_tail() {
 
     assert!(engine
         .reload_definition_script(
-                "EARL",
-                "#strict\n\
+            "EARL",
+            "#strict\n\
                      global func Layer() { return inherited() * 10 + 4; }\n\
                      func Own() { return Layer(); }",
         )

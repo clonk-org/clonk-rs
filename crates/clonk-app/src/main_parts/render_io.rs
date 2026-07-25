@@ -95,7 +95,9 @@ pub(crate) fn startup_scensel_game_option_bounds(
     clonk_frontend::startup_scensel::scen_sel_layout(width, height, fonts).game_option_bounds()
 }
 
-pub(crate) fn scensel_selection_info(menu: &MenuState) -> clonk_frontend::startup_scensel::SelectionInfo<'_> {
+pub(crate) fn scensel_selection_info(
+    menu: &MenuState,
+) -> clonk_frontend::startup_scensel::SelectionInfo<'_> {
     scensel_selection(menu)
         .map(|entry| clonk_frontend::startup_scensel::SelectionInfo {
             picture: entry.title_picture.as_ref(),
@@ -1130,8 +1132,7 @@ pub(crate) fn render_startup_frame(
                     // lives in `clonk_core::version::ENGINE_VERSION` and is what
                     // content gating and protocol identification use.
                     if !defer_native_main_text {
-                        let version_text =
-                            format!("Version {}", clonk_core::version::PORT_VERSION);
+                        let version_text = format!("Version {}", clonk_core::version::PORT_VERSION);
                         let version_text = version_text.as_str();
                         let version_x = width * 39 / 40;
                         let version_y = height / 18 + logo_h;
@@ -1210,7 +1211,10 @@ pub(crate) fn startup_fade_packed_modulation(opacity: u8) -> u32 {
     (u32::from(255_u8.saturating_sub(opacity)) << 24) | 0x00ff_ffff
 }
 
-pub(crate) fn apply_startup_fade_to_batch(batch: &mut NativePresentationBatch, opacity: u8) -> Result<()> {
+pub(crate) fn apply_startup_fade_to_batch(
+    batch: &mut NativePresentationBatch,
+    opacity: u8,
+) -> Result<()> {
     // `C4GUI::Dialog::Draw` switches to eFadeNone at the fully visible
     // endpoint and therefore does not activate even a white modulation.
     if opacity == u8::MAX {
@@ -1322,7 +1326,11 @@ pub(crate) struct PhysicalViewportState {
 }
 
 impl PhysicalViewportState {
-    pub(crate) const fn owned(player: i32, expand_player_slots: bool, physical_identity: u64) -> Self {
+    pub(crate) const fn owned(
+        player: i32,
+        expand_player_slots: bool,
+        physical_identity: u64,
+    ) -> Self {
         Self {
             displayed_player: player,
             camera_identity_owner: player,
@@ -2246,7 +2254,9 @@ pub(crate) fn object_menu_buying_player_color(
         .unwrap_or(0)
 }
 
-pub(crate) fn default_owner_definition_sprite(image: clonk_engine::DefinitionSpriteImage) -> ImageData {
+pub(crate) fn default_owner_definition_sprite(
+    image: clonk_engine::DefinitionSpriteImage,
+) -> ImageData {
     let width = image.width();
     let height = image.height();
     let mask = image.color_mask();
@@ -2638,7 +2648,11 @@ fn fow_object_is_closed(snapshot: &SimulationSnapshot, object: &ObjectSnapshot) 
 
 /// Exact interaction predicate from `C4Player::FoWIsVisible`. This is
 /// deliberately independent from the renderer's faded modulation map.
-pub(crate) fn fow_point_is_visible(snapshot: &SimulationSnapshot, owner: i32, point: Vector2) -> bool {
+pub(crate) fn fow_point_is_visible(
+    snapshot: &SimulationSnapshot,
+    owner: i32,
+    point: Vector2,
+) -> bool {
     let Some(player) = snapshot.players.iter().find(|player| player.id == owner) else {
         return false;
     };
@@ -2733,7 +2747,10 @@ pub(crate) fn ingame_pointer_viewport_pixel(
     )
 }
 
-pub(crate) fn build_menu_entries(entries: &[FrontendScenario], include_back: bool) -> Vec<ScenarioEntry> {
+pub(crate) fn build_menu_entries(
+    entries: &[FrontendScenario],
+    include_back: bool,
+) -> Vec<ScenarioEntry> {
     let mut result = Vec::new();
     if include_back {
         result.push(ScenarioEntry {
@@ -2751,7 +2768,9 @@ pub(crate) fn build_menu_entries(entries: &[FrontendScenario], include_back: boo
     result
 }
 
-pub(crate) fn build_scenario_catalog(entries: &[FrontendScenario]) -> HashMap<String, FrontendScenario> {
+pub(crate) fn build_scenario_catalog(
+    entries: &[FrontendScenario],
+) -> HashMap<String, FrontendScenario> {
     let mut catalog = HashMap::new();
     for entry in entries {
         insert_scenario_recursive(entry, &mut catalog);
@@ -3514,7 +3533,11 @@ fn mutable_group_descend<'a>(
     }
 }
 
-pub(crate) fn scenario_filename_from_title(title: &str, kind: ScenarioKind, old_path: &Path) -> String {
+pub(crate) fn scenario_filename_from_title(
+    title: &str,
+    kind: ScenarioKind,
+    old_path: &Path,
+) -> String {
     const STRIP: &[char] = &[
         '!', '"', '§', '%', '&', '/', '=', '?', '+', '*', '#', ':', ';', '<', '>', '\\', '.',
     ];
@@ -5611,4 +5634,3 @@ pub(crate) fn compute_mix_values_for(
         pan,
     )
 }
-

@@ -103,7 +103,10 @@ impl Engine {
 
     /// The force-close/RejectContents lifecycle shared by the internal
     /// Activate/Get/Contents menus (C4Object.cpp:1884-1959).
-    pub(crate) fn apply_container_menu_request(&mut self, request: MenuRequest) -> Result<(), EngineError> {
+    pub(crate) fn apply_container_menu_request(
+        &mut self,
+        request: MenuRequest,
+    ) -> Result<(), EngineError> {
         let reused_menu_identity = self
             .find_object_index(request.crew_id)
             .and_then(|index| self.objects[index].state.menu.as_ref())
@@ -1519,5 +1522,4 @@ impl Engine {
             None => None,
         }
     }
-
 }

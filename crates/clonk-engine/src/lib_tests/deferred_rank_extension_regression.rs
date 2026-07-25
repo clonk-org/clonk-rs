@@ -33,6 +33,6 @@ fn resource_rank_extension_errors_remain_deferred_through_engine_definition() {
     assert_eq!(names.get(0).as_deref(), Some("Recruit"));
     assert!(
         std::panic::catch_unwind(|| names.get(1)).is_err(),
-            "requesting the malformed extended rank preserves native's uncaught boundary"
+        "requesting the malformed extended rank preserves native's uncaught boundary"
     );
 }

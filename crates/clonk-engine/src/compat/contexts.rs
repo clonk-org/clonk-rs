@@ -2650,13 +2650,14 @@ fn call_world_object_reference_with(
             ),
         }
     });
-    let (previous_script_object, previous_script_definition) = with_host_context_mut((None, None), |context| {
-        let definition = context.object_effective_definition_id(target);
-        (
-            context.script_object_context.replace(target),
-            context.script_definition_context.replace(definition),
-        )
-    });
+    let (previous_script_object, previous_script_definition) =
+        with_host_context_mut((None, None), |context| {
+            let definition = context.object_effective_definition_id(target);
+            (
+                context.script_object_context.replace(target),
+                context.script_definition_context.replace(definition),
+            )
+        });
     let this = object_reference_value(target);
     let call = if preserve_caller {
         script.call_reference_with_cells_and_this_preserving_caller(function, args, &cells, this)
@@ -2902,13 +2903,14 @@ fn call_world_object_function_with_options(
     });
     // The HOST_CONTEXT borrow is released here: the nested VM's host
     // functions re-borrow it against the swapped-in scope.
-    let (previous_script_object, previous_script_definition) = with_host_context_mut((None, None), |context| {
-        let definition = context.object_effective_definition_id(target);
-        (
-            context.script_object_context.replace(target),
-            context.script_definition_context.replace(definition),
-        )
-    });
+    let (previous_script_object, previous_script_definition) =
+        with_host_context_mut((None, None), |context| {
+            let definition = context.object_effective_definition_id(target);
+            (
+                context.script_object_context.replace(target),
+                context.script_definition_context.replace(definition),
+            )
+        });
     let this = object_reference_value(target);
     let unchanged_finals = || args.to_vec();
     let call = if ref_args {

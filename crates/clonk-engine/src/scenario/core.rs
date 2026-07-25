@@ -2637,7 +2637,10 @@ impl Scenario {
         )
     }
 
-    pub(in crate::scenario) fn load_from_group_with_languages_and_seed_and_definition_modules<R, S>(
+    pub(in crate::scenario) fn load_from_group_with_languages_and_seed_and_definition_modules<
+        R,
+        S,
+    >(
         group: &Group,
         resolver: &R,
         languages: &[S],
@@ -3756,7 +3759,10 @@ impl Scenario {
     /// Live environment staged before the native Weather.Init boundary.
     /// Fresh legacy games still expose C4Weather::Default here; savegames
     /// and synthetic scenarios need their configured metadata immediately.
-    pub(in crate::scenario) fn environment_before_weather_init(&self, runtime_savegame: bool) -> EnvironmentSettings {
+    pub(in crate::scenario) fn environment_before_weather_init(
+        &self,
+        runtime_savegame: bool,
+    ) -> EnvironmentSettings {
         if self.weather_init.is_some() && !runtime_savegame {
             EnvironmentSettings::default()
         } else {

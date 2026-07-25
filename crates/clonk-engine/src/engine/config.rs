@@ -305,7 +305,8 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_teams(&mut self, teams: Vec<TeamInfo>) {
         self.team_state.team_last_team_id = self
-            .team_state.team_last_team_id
+            .team_state
+            .team_last_team_id
             .max(teams.iter().map(|team| team.id).max().unwrap_or(0));
         self.team_state.teams = Rc::new(teams);
         self.recheck_runtime_team_memberships();
@@ -388,13 +389,21 @@ impl Engine {
             .player(number)
             .and_then(Player::team)
             .filter(|team_id| self.team_state.teams.iter().any(|team| team.id == *team_id));
-        for team in self.team_state.teams.iter().filter(|team| !self.team_is_full(team)) {
+        for team in self
+            .team_state
+            .teams
+            .iter()
+            .filter(|team| !self.team_is_full(team))
+        {
             if possible.is_some_and(|team_id| team_id != team.id) {
                 return None;
             }
             possible = Some(team.id);
         }
-        match (possible, self.team_state.team_configuration.auto_generate_teams) {
+        match (
+            possible,
+            self.team_state.team_configuration.auto_generate_teams,
+        ) {
             (Some(_), true) => None,
             (Some(team), false) => Some(team),
             (None, true) => Some(-1),
@@ -795,5 +804,4 @@ impl Engine {
             Some(player_info_core),
         )
     }
-
 }

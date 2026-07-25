@@ -77,7 +77,8 @@ fn load(relative_path: &Path, seed: u64) -> Engine {
 
     let material_group = Group::open(content.join("Material.c4g")).expect("Material.c4g opens");
     let materials = MaterialLibrary::from_group(&material_group).expect("Material.c4g loads");
-    let system_group = Group::open(content_install.join("planet/System.c4g")).expect("System opens");
+    let system_group =
+        Group::open(content_install.join("planet/System.c4g")).expect("System opens");
     let system_scripts = load_system_scripts(&system_group).expect("System scripts load");
     let standard_names = system_group
         .read_file("Names.txt")
@@ -150,7 +151,8 @@ fn main() {
         .iter()
         .enumerate()
         .filter_map(|(index, name)| {
-            join(&mut engine, name, None).or_else(|| join(&mut engine, name, Some(index as i32 + 1)))
+            join(&mut engine, name, None)
+                .or_else(|| join(&mut engine, name, Some(index as i32 + 1)))
         })
         .collect();
 
@@ -200,6 +202,12 @@ fn main() {
     println!("p50              {:?}", percentile(&sorted, 0.50));
     println!("p95              {:?}", percentile(&sorted, 0.95));
     println!("p99              {:?}", percentile(&sorted, 0.99));
-    println!("max              {:?}", sorted.last().copied().unwrap_or_default());
-    println!("frames > 27.7ms  {over_budget} ({:.1}%)", over_budget as f64 / frames as f64 * 100.0);
+    println!(
+        "max              {:?}",
+        sorted.last().copied().unwrap_or_default()
+    );
+    println!(
+        "frames > 27.7ms  {over_budget} ({:.1}%)",
+        over_budget as f64 / frames as f64 * 100.0
+    );
 }

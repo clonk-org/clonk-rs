@@ -81,7 +81,7 @@ public func Lone() { return MissingFromLone(); }
     let (recovered, warnings) = capture_warnings(|| {
         tolerate_script_error(engine.call_object_function(
             index,
-                "Outer",
+            "Outer",
             vec![Value::Int(7), Value::Nil, Value::from("tail")],
         ))
     });
@@ -132,9 +132,9 @@ public func Lone() { return MissingFromLone(); }
     let game_over = engine.game_over_triggered;
     let (raw_result, warnings) = capture_warnings(|| {
         ScenarioScript::execute_value_for_script(
-                "STAK",
+            "STAK",
             Some("STAK".to_owned()),
-                "Outer",
+            "Outer",
             &raw_args,
             world,
             rng,
@@ -169,9 +169,9 @@ public func Lone() { return MissingFromLone(); }
     );
     let (scenario_result, warnings) = capture_warnings(|| {
         ScenarioScript::execute_value_for_script(
-                "Scenario",
+            "Scenario",
             None,
-                "SceneOuter",
+            "SceneOuter",
             &[],
             engine.host_world_context(),
             engine.rng.clone(),
@@ -211,7 +211,7 @@ public func Lone() { return MissingFromLone(); }
     assert_eq!(
         frames.len(),
         1,
-            "recovered frames must not leak into later calls"
+        "recovered frames must not leak into later calls"
     );
     assert!(frames[0].contains("Lone()"));
     assert!(!frames[0].contains("Inner") && !frames[0].contains("Outer"));

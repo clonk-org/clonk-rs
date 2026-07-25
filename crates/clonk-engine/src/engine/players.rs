@@ -158,8 +158,12 @@ impl Engine {
             0 => None,
             id => Some(id),
         };
-        let selected_team =
-            selected_team_id.and_then(|id| self.team_state.teams.iter().find(|candidate| candidate.id == id));
+        let selected_team = selected_team_id.and_then(|id| {
+            self.team_state
+                .teams
+                .iter()
+                .find(|candidate| candidate.id == id)
+        });
         let previous_team = self.player(number).and_then(Player::team);
         let team_is_full = selected_team.is_some_and(|selected| {
             previous_team != Some(selected.id) && self.team_is_full(selected)
@@ -177,7 +181,9 @@ impl Engine {
 
         config.team = selected_team.map(|selected| selected.id);
         let selected_team_color = selected_team
-            .filter(|selected| self.team_state.team_configuration.team_colors && selected.color != 0)
+            .filter(|selected| {
+                self.team_state.team_configuration.team_colors && selected.color != 0
+            })
             .map(|selected| selected.color);
         self.player_mut(number)?.set_team(config.team);
         if let Some(color) = selected_team_color {
@@ -201,7 +207,11 @@ impl Engine {
         // the lockstep RNG or inventing a color; callers do not apply zero
         // to the player while host-color transport remains open.
         let color = default_generated_team_color(id).unwrap_or(0);
-        Rc::make_mut(&mut self.team_state.teams).push(TeamInfo::new(id, format!("Team {id}"), color));
+        Rc::make_mut(&mut self.team_state.teams).push(TeamInfo::new(
+            id,
+            format!("Team {id}"),
+            color,
+        ));
         self.team_state.team_last_team_id = id;
         Some(id)
     }
@@ -1935,7 +1945,11 @@ impl Engine {
     /// Native `C4Object::SetOwner`: owner color, owner/controller write,
     /// FLAG base propagation, and the synchronous ordinary
     /// `OnOwnerChanged(new, old)` callback.
-    pub(crate) fn set_object_owner(&mut self, object_id: ObjectId, new_owner: i32) -> Result<(), EngineError> {
+    pub(crate) fn set_object_owner(
+        &mut self,
+        object_id: ObjectId,
+        new_owner: i32,
+    ) -> Result<(), EngineError> {
         if new_owner != OWNER_NONE && !self.players.contains_key(&new_owner) {
             return Ok(());
         }
@@ -2837,5 +2851,4 @@ impl Engine {
         let player = self.player_mut(id)?;
         Ok(player.adjust_home_base_production(definition_id, delta))
     }
-
 }

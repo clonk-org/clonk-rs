@@ -211,7 +211,9 @@ impl MapPixelClassifier {
         }
     }
 
-    pub(in crate::scenario) fn material_library(&self) -> Option<&clonk_resources::MaterialLibrary> {
+    pub(in crate::scenario) fn material_library(
+        &self,
+    ) -> Option<&clonk_resources::MaterialLibrary> {
         self.material_library.as_ref()
     }
 
@@ -1498,7 +1500,10 @@ fn decode_legacy_sky_surface(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 /// Load a named surface from one scenario group. The first existing extension
 /// is decoded once; a broken higher-priority file does not fall through to a
 /// lower-priority extension (C4Surface.cpp:846-865).
-pub(in crate::scenario) fn load_legacy_sky_surface(group: &Group, name: &str) -> Option<(u32, u32, Vec<u8>)> {
+pub(in crate::scenario) fn load_legacy_sky_surface(
+    group: &Group,
+    name: &str,
+) -> Option<(u32, u32, Vec<u8>)> {
     for pattern in legacy_sky_filename_patterns(name) {
         match read_legacy_group_wildcard(group, &pattern) {
             LegacySkyEntryMatch::Missing => {}
@@ -1701,7 +1706,9 @@ pub(in crate::scenario) fn derive_legacy_environment(
     Ok(environment)
 }
 
-pub(in crate::scenario) fn legacy_scenario_section_name(path: &Path) -> Result<Option<String>, ScenarioError> {
+pub(in crate::scenario) fn legacy_scenario_section_name(
+    path: &Path,
+) -> Result<Option<String>, ScenarioError> {
     if path.components().count() != 1 {
         return Ok(None);
     }
@@ -1721,7 +1728,9 @@ pub(in crate::scenario) fn legacy_scenario_section_name(path: &Path) -> Result<O
     Ok(Some(name.to_owned()))
 }
 
-pub(in crate::scenario) fn load_legacy_landscape_systems(group: &Group) -> Result<ScenarioLandscapeSystems, ScenarioError> {
+pub(in crate::scenario) fn load_legacy_landscape_systems(
+    group: &Group,
+) -> Result<ScenarioLandscapeSystems, ScenarioError> {
     let mut ignore_progress = |_: i32, _: &'static str| {};
     load_legacy_landscape_systems_with_progress(group, &mut ignore_progress)
 }

@@ -874,7 +874,10 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
     }
 }
 
-pub(crate) fn open_child_flexible(group: &Group, relative: &Path) -> Result<Option<Group>, GroupError> {
+pub(crate) fn open_child_flexible(
+    group: &Group,
+    relative: &Path,
+) -> Result<Option<Group>, GroupError> {
     match group.open_child(relative) {
         Ok(child) => Ok(Some(child)),
         Err(err) => match err {
@@ -951,7 +954,11 @@ pub(crate) struct SavedScenarioInfo {
 }
 
 impl SavedScenarioInfo {
-    pub(crate) fn from_frontend(frontend: &FrontendScenario, label: &str, fallback_ground: i32) -> Self {
+    pub(crate) fn from_frontend(
+        frontend: &FrontendScenario,
+        label: &str,
+        fallback_ground: i32,
+    ) -> Self {
         Self {
             identifier: frontend.identifier.clone(),
             title: frontend.title.clone(),
@@ -2166,7 +2173,6 @@ pub(crate) fn current_offline_round_random_seed(parameter_seed: Option<i32>) -> 
     resolve_offline_round_random_seed(parameter_seed, current_unix_timestamp(), pin.as_deref())
 }
 
-
 pub(crate) fn format_startup_crew_birthday(seconds: i32) -> String {
     if seconds == 0 {
         return String::new();
@@ -2270,7 +2276,11 @@ pub(crate) fn encode_surface_to_png(surface: &Surface) -> Result<Vec<u8>> {
     encode_rgba_png(surface.width(), surface.height(), surface.pixels())
 }
 
-pub(crate) fn encode_presented_save_thumbnail(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn encode_presented_save_thumbnail(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<Vec<u8>> {
     anyhow::ensure!(width != 0 && height != 0, "save thumbnail source is empty");
     let expected = (width as usize)
         .checked_mul(height as usize)
@@ -2460,7 +2470,6 @@ pub(crate) fn load_save_entry(path: &Path) -> Result<SaveEntry> {
     })
 }
 
-
 pub(crate) fn parse_config_bool(raw: &str) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
@@ -2635,7 +2644,9 @@ pub(crate) fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
     flags
 }
 
-pub(crate) fn frontend_upper_board_mode(mode: UpperBoardMode) -> clonk_frontend::hud::UpperBoardMode {
+pub(crate) fn frontend_upper_board_mode(
+    mode: UpperBoardMode,
+) -> clonk_frontend::hud::UpperBoardMode {
     match mode {
         UpperBoardMode::Hide => clonk_frontend::hud::UpperBoardMode::Hide,
         UpperBoardMode::Full => clonk_frontend::hud::UpperBoardMode::Full,
@@ -3451,7 +3462,10 @@ pub(crate) fn arm_graphical_engine_debug_mode(engine: &mut Engine, config: &[u8]
     arm_engine_debug_mode(engine, config, false);
 }
 
-pub(crate) fn arm_configured_graphical_engine_debug_mode(engine: &mut Engine, paths: Option<&AppPaths>) {
+pub(crate) fn arm_configured_graphical_engine_debug_mode(
+    engine: &mut Engine,
+    paths: Option<&AppPaths>,
+) {
     arm_graphical_engine_debug_mode(engine, &load_native_config_bytes(paths));
 }
 
@@ -3486,7 +3500,9 @@ pub(crate) fn frozen_auto_frame_skip(
         .unwrap_or(configured)
 }
 
-pub(crate) fn configured_console_script_strictness(config: &[u8]) -> clonk_engine::ScriptStrictness {
+pub(crate) fn configured_console_script_strictness(
+    config: &[u8],
+) -> clonk_engine::ScriptStrictness {
     let Some(value) =
         clonk_app_netplay::configured_native_scalar(config, "Developer", "ConsoleScriptStrictness")
     else {
@@ -3630,7 +3646,10 @@ pub(crate) fn native_config_text(config: &[u8], section: &str, key: &str) -> Opt
 /// The two path strings passed by C4GameSave::SaveCore to
 /// C4SDefinitions::SetModules. AppPaths maps an installed ExePath layout to
 /// `content/` in a source checkout; packaged layouts use the install root.
-pub(crate) fn game_save_definition_paths(paths: Option<&AppPaths>, native_config: &[u8]) -> (String, String) {
+pub(crate) fn game_save_definition_paths(
+    paths: Option<&AppPaths>,
+    native_config: &[u8],
+) -> (String, String) {
     let executable_path = paths
         .map(|paths| paths.content_dir().unwrap_or(paths.install_root()))
         .map(|path| {
@@ -3743,7 +3762,9 @@ pub(crate) fn load_prepared_league_host_config(
     }
 }
 
-pub(crate) fn lobby_ready_check_cooldown_from_config(config: Option<&Config>) -> LobbyReadyCheckCooldown {
+pub(crate) fn lobby_ready_check_cooldown_from_config(
+    config: Option<&Config>,
+) -> LobbyReadyCheckCooldown {
     let seconds = config
         .and_then(|config| config.get_in(Some("Cooldowns"), "ReadyCheck"))
         .and_then(|value| value.trim().parse::<i64>().ok())
@@ -4060,7 +4081,9 @@ pub(crate) fn load_network_search_settings(
     }
 }
 
-pub(crate) fn load_reference_query_settings(paths: Option<&AppPaths>) -> clonk_network::ReferenceQueryConfig {
+pub(crate) fn load_reference_query_settings(
+    paths: Option<&AppPaths>,
+) -> clonk_network::ReferenceQueryConfig {
     let config = load_native_config_bytes(paths);
     let value = |key| native_config_text(&config, "General", key);
     let language_charset = value("LanguageCharset").unwrap_or_default();
@@ -4076,7 +4099,9 @@ pub(crate) fn load_reference_query_settings(paths: Option<&AppPaths>) -> clonk_n
     }
 }
 
-pub(crate) fn load_league_auth_settings(paths: Option<&AppPaths>) -> clonk_network::LeagueAuthRequestHead {
+pub(crate) fn load_league_auth_settings(
+    paths: Option<&AppPaths>,
+) -> clonk_network::LeagueAuthRequestHead {
     let config = load_native_config_bytes(paths);
     let value = |key| {
         clonk_app_netplay::configured_native_value(&config, "Network", key).unwrap_or_default()
@@ -4176,7 +4201,11 @@ pub(crate) fn load_network_advertiser_settings(
     }
 }
 
-pub(crate) fn sanitize_classic_lobby_name(value: &str, field: &str, allow_empty: bool) -> Result<String> {
+pub(crate) fn sanitize_classic_lobby_name(
+    value: &str,
+    field: &str,
+    allow_empty: bool,
+) -> Result<String> {
     let native = clonk_resources::encode_legacy_script_text(value)
         .ok_or_else(|| anyhow!("{field} is not representable as Windows-1252"))?;
     let native = LegacyCString::from_bytes(native)
@@ -4331,7 +4360,9 @@ pub(crate) fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> Game
     }
 }
 
-pub(crate) fn scenario_fair_crew_constraint(scenario: Option<&FrontendScenario>) -> FairCrewConstraint {
+pub(crate) fn scenario_fair_crew_constraint(
+    scenario: Option<&FrontendScenario>,
+) -> FairCrewConstraint {
     let Some(path) = scenario.and_then(|scenario| scenario.path.as_deref()) else {
         return FairCrewConstraint::Free;
     };
@@ -4452,7 +4483,10 @@ pub(crate) fn persist_native_config_values(
     fs::write(path, updated)
 }
 
-pub(crate) fn persist_league_account_preference(paths: &AppPaths, account: &LegacyCString) -> io::Result<()> {
+pub(crate) fn persist_league_account_preference(
+    paths: &AppPaths,
+    account: &LegacyCString,
+) -> io::Result<()> {
     persist_native_config_values(
         paths,
         "Network",
@@ -5135,7 +5169,9 @@ pub(crate) struct CursorPortraitImages {
 /// Prepares the two surfaces consumed by `C4DefGraphics::DrawClr`. Keeping
 /// them separate lets the HUD scale/filter the base and owner overlay in the
 /// same two passes as C++.
-pub(crate) fn cursor_portrait_images(image: clonk_engine::DefinitionPictureImage) -> CursorPortraitImages {
+pub(crate) fn cursor_portrait_images(
+    image: clonk_engine::DefinitionPictureImage,
+) -> CursorPortraitImages {
     let width = image.width();
     let height = image.height();
     let mask = image.color_mask();
@@ -5742,7 +5778,9 @@ pub(crate) fn is_team_message_syntax(text: &str) -> bool {
         || legacy_prefix_no_case(&raw, b"/team ")
 }
 
-pub(crate) fn control_player_effective_name(player: &clonk_engine::ControlPlayerInfoEntry) -> &[u8] {
+pub(crate) fn control_player_effective_name(
+    player: &clonk_engine::ControlPlayerInfoEntry,
+) -> &[u8] {
     if !player.league_account.is_empty() {
         player.league_account.as_bytes()
     } else if !player.forced_name.is_empty() {
@@ -6033,7 +6071,9 @@ pub(crate) fn build_game_over_dialog(
     dialog
 }
 
-pub(crate) fn configured_control_key_names(bindings: &KeyboardBindings) -> HashMap<i32, Vec<ControlKeyName>> {
+pub(crate) fn configured_control_key_names(
+    bindings: &KeyboardBindings,
+) -> HashMap<i32, Vec<ControlKeyName>> {
     (0..4_usize)
         .map(|control_set| {
             let names = ControlBindingId::ALL
@@ -6192,4 +6232,3 @@ pub(crate) fn synchronized_player_file_policy(
     }
     SynchronizedPlayerFilePolicy::Persist { local_control }
 }
-

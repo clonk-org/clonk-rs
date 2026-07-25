@@ -40,7 +40,6 @@ fn flip_dir_and_projective_row_round_trip() {
     );
     assert!(!transform.is_identity());
     let encoded = serde_json::to_string(&transform).expect("transform serializes");
-    let decoded: DrawTransform =
-        serde_json::from_str(&encoded).expect("transform deserializes");
+    let decoded: DrawTransform = serde_json::from_str(&encoded).expect("transform deserializes");
     assert_eq!(decoded, transform);
 }

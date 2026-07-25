@@ -393,7 +393,10 @@ impl LegacyGame {
 }
 
 impl LegacyPlayer {
-    pub(in crate::scenario) fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+    pub(in crate::scenario) fn apply_entries(
+        &mut self,
+        entries: &[(String, String)],
+    ) -> Result<(), ScenarioError> {
         for (key, value) in entries {
             let key_lower = key.to_ascii_lowercase();
             let raw = value.trim();
@@ -914,7 +917,11 @@ impl LegacyScenarioCore {
         saved
     }
 
-    pub(in crate::scenario) fn serialize_section(&self, force_exact: bool, head_defaults: Option<[i32; 2]>) -> Vec<u8> {
+    pub(in crate::scenario) fn serialize_section(
+        &self,
+        force_exact: bool,
+        head_defaults: Option<[i32; 2]>,
+    ) -> Vec<u8> {
         let mut writer = LegacyScenarioIniWriter::default();
         let [context_menu_default, control_style_default] = head_defaults.unwrap_or([
             self.head.forced_auto_context_menu,
@@ -1038,7 +1045,12 @@ where
     }
 }
 
-pub(crate) fn push_raw_string(fields: &mut LegacyIniFields, key: &'static str, value: &str, default: &str) {
+pub(crate) fn push_raw_string(
+    fields: &mut LegacyIniFields,
+    key: &'static str,
+    value: &str,
+    default: &str,
+) {
     if value != default {
         fields.push((key, value.to_owned()));
     }
@@ -1777,7 +1789,9 @@ impl LegacyScenarioCore {
     }
 }
 
-pub(in crate::scenario) fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifest, ScenarioError> {
+pub(in crate::scenario) fn parse_legacy_scenario_manifest(
+    group: &Group,
+) -> Result<LegacyScenarioManifest, ScenarioError> {
     let bytes = match read_group_file_case_insensitive(group, "Scenario.txt") {
         Ok(bytes) => bytes,
         Err(GroupError::EntryNotFound(_)) => return Err(ScenarioError::LegacyCoreMissing),
@@ -1839,12 +1853,18 @@ pub(in crate::scenario) fn overlay_legacy_scenario_manifest(
     })
 }
 
-pub(in crate::scenario) fn read_group_file_case_insensitive(group: &Group, name: &str) -> Result<Vec<u8>, GroupError> {
+pub(in crate::scenario) fn read_group_file_case_insensitive(
+    group: &Group,
+    name: &str,
+) -> Result<Vec<u8>, GroupError> {
     try_read_group_file_case_insensitive(group, name)?
         .ok_or_else(|| GroupError::EntryNotFound(PathBuf::from(name)))
 }
 
-pub(in crate::scenario) fn read_optional_legacy_entry(group: &Group, name: &str) -> Result<Option<Vec<u8>>, ScenarioError> {
+pub(in crate::scenario) fn read_optional_legacy_entry(
+    group: &Group,
+    name: &str,
+) -> Result<Option<Vec<u8>>, ScenarioError> {
     match group.read_file(name) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(GroupError::EntryNotFound(_)) => Ok(None),
@@ -1951,7 +1971,9 @@ fn cpp_ssearch_end(source: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
-pub(in crate::scenario) fn validate_name_ex_no_empty(mut value: String) -> Result<String, ScenarioError> {
+pub(in crate::scenario) fn validate_name_ex_no_empty(
+    mut value: String,
+) -> Result<String, ScenarioError> {
     value = value
         .trim_matches(|character: char| character.is_ascii_whitespace())
         .to_string();
@@ -2074,7 +2096,9 @@ fn parse_legacy_parameters_i32(
     Ok(scenario_default)
 }
 
-pub(in crate::scenario) fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, ScenarioError> {
+pub(in crate::scenario) fn parse_legacy_scenario_text(
+    text: &str,
+) -> Result<LegacyScenarioManifest, ScenarioError> {
     const HEAD_KEYS: &[&str] = &[
         "Icon",
         "Title",
@@ -2453,7 +2477,10 @@ pub(in crate::scenario) fn find_entry(entries: &[(String, String)], key: &str) -
         .map(str::to_string)
 }
 
-pub(in crate::scenario) fn find_entry_including_empty<'a>(entries: &'a [(String, String)], key: &str) -> Option<&'a str> {
+pub(in crate::scenario) fn find_entry_including_empty<'a>(
+    entries: &'a [(String, String)],
+    key: &str,
+) -> Option<&'a str> {
     entries
         .iter()
         .find(|(entry_key, _)| entry_key.eq_ignore_ascii_case(key))
@@ -3158,7 +3185,11 @@ impl LegacyIniTree {
             .find(|index| self.nodes[*index].section && self.nodes[*index].name == name)
     }
 
-    pub(in crate::scenario) fn sections(&self, parent: usize, name: &str) -> impl Iterator<Item = usize> + '_ {
+    pub(in crate::scenario) fn sections(
+        &self,
+        parent: usize,
+        name: &str,
+    ) -> impl Iterator<Item = usize> + '_ {
         let name = name.to_string();
         self.nodes[parent]
             .children
@@ -3248,7 +3279,9 @@ pub(in crate::scenario) fn parse_legacy_teams_source(source: &str) -> ScenarioLo
     metadata
 }
 
-pub(in crate::scenario) fn derive_legacy_teams_default(core: &LegacyScenarioCore) -> ScenarioLobbyTeams {
+pub(in crate::scenario) fn derive_legacy_teams_default(
+    core: &LegacyScenarioCore,
+) -> ScenarioLobbyTeams {
     let melee = matches!(core.game.mode, 1 | 2)
         || core.game.goals.iter().any(|entry| {
             entry.id.eq_ignore_ascii_case("MELE") || entry.id.eq_ignore_ascii_case("MEL2")
@@ -3347,7 +3380,9 @@ pub(in crate::scenario) fn load_runtime_landscape_data(
     )
 }
 
-pub(in crate::scenario) fn load_runtime_current_scenario_section(group: &Group) -> Result<String, ScenarioError> {
+pub(in crate::scenario) fn load_runtime_current_scenario_section(
+    group: &Group,
+) -> Result<String, ScenarioError> {
     let current = try_read_group_file_case_insensitive(group, "Game.txt")?
         .map(|bytes| crate::parse_initial_network_game_data(&bytes).current_scenario_section)
         .unwrap_or_default();
@@ -3446,7 +3481,9 @@ pub(in crate::scenario) fn parse_legacy_game_parameter_overrides(
     overrides
 }
 
-pub(in crate::scenario) fn game_parameter_defaults(core: &LegacyScenarioCore) -> ScenarioGameParameterValues {
+pub(in crate::scenario) fn game_parameter_defaults(
+    core: &LegacyScenarioCore,
+) -> ScenarioGameParameterValues {
     let (rules, goals) = converted_legacy_rules_and_goals(&core.game);
     ScenarioGameParameterValues {
         random_seed: core.head.random_seed,
@@ -3533,7 +3570,12 @@ fn lobby_id_entries(list: &LegacyIdList) -> Vec<ScenarioLobbyIdEntry> {
         .collect()
 }
 
-pub(in crate::scenario) fn ini_i32(tree: &LegacyIniTree, parent: usize, name: &str, default: i32) -> i32 {
+pub(in crate::scenario) fn ini_i32(
+    tree: &LegacyIniTree,
+    parent: usize,
+    name: &str,
+    default: i32,
+) -> i32 {
     tree.value(parent, name)
         .and_then(parse_std_i32)
         .unwrap_or(default)
@@ -3544,14 +3586,24 @@ fn ini_optional_i32(tree: &LegacyIniTree, parent: usize, name: &str, default: i3
         .then(|| ini_i32(tree, parent, name, default))
 }
 
-pub(in crate::scenario) fn ini_u32(tree: &LegacyIniTree, parent: usize, name: &str, default: u32) -> u32 {
+pub(in crate::scenario) fn ini_u32(
+    tree: &LegacyIniTree,
+    parent: usize,
+    name: &str,
+    default: u32,
+) -> u32 {
     tree.value(parent, name)
         .and_then(parse_std_i64)
         .map(|value| value as u32)
         .unwrap_or(default)
 }
 
-pub(in crate::scenario) fn ini_bool(tree: &LegacyIniTree, parent: usize, name: &str, default: bool) -> bool {
+pub(in crate::scenario) fn ini_bool(
+    tree: &LegacyIniTree,
+    parent: usize,
+    name: &str,
+    default: bool,
+) -> bool {
     tree.value(parent, name)
         .and_then(parse_std_bool)
         .unwrap_or(default)
@@ -3758,7 +3810,11 @@ pub(in crate::scenario) fn skip_std_whitespace(raw: &str, position: &mut usize) 
     }
 }
 
-pub(in crate::scenario) fn consume_std_separator(raw: &str, position: &mut usize, separator: u8) -> bool {
+pub(in crate::scenario) fn consume_std_separator(
+    raw: &str,
+    position: &mut usize,
+    separator: u8,
+) -> bool {
     skip_std_whitespace(raw, position);
     if raw.as_bytes().get(*position) != Some(&separator) {
         return false;
@@ -3856,7 +3912,9 @@ fn parse_team_i32(key: &str, value: &str, line: usize) -> Result<i32, ScenarioEr
         .map_err(|error| team_parse_error(line, format!("invalid {key} `{value}`: {error}")))
 }
 
-pub(in crate::scenario) fn parse_team_distribution(value: &str) -> (Option<InitialNetworkTeamDistribution>, Option<u8>) {
+pub(in crate::scenario) fn parse_team_distribution(
+    value: &str,
+) -> (Option<InitialNetworkTeamDistribution>, Option<u8>) {
     let value = value.trim_start_matches([' ', '\t']);
     let identifier_end = value
         .bytes()
@@ -4110,11 +4168,16 @@ pub(in crate::scenario) fn load_scenario_system_scripts<S: AsRef<str>>(
 /// Evaluate `[Landscape] MapZoom` with the C4S default
 /// `C4SVal(10, 0, 5, 15)` (C4Scenario.cpp:307,353) against the local
 /// FixRandom map-creation ledger.
-pub(in crate::scenario) fn legacy_map_zoom(section: Option<&Vec<(String, String)>>, rng: &mut crate::rng::LcgRng) -> u32 {
+pub(in crate::scenario) fn legacy_map_zoom(
+    section: Option<&Vec<(String, String)>>,
+    rng: &mut crate::rng::LcgRng,
+) -> u32 {
     legacy_map_zoom_value(section).evaluate(rng) as u32
 }
 
-pub(in crate::scenario) fn legacy_map_zoom_value(section: Option<&Vec<(String, String)>>) -> LegacyC4SVal {
+pub(in crate::scenario) fn legacy_map_zoom_value(
+    section: Option<&Vec<(String, String)>>,
+) -> LegacyC4SVal {
     let default = LegacyC4SVal::new(10, 0, 5, 15);
     section
         .and_then(|entries| find_entry_including_empty(entries, "mapzoom"))

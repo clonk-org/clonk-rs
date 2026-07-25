@@ -169,7 +169,10 @@ pub(in crate::command) fn adjust_solid_offset(
 /// the launch velocity (the fixed-velocity delta apply arms mobility,
 /// matching Mobile=1 in ObjectActionJump). Any pending ComDir steer from
 /// the same Execute rides along.
-pub(in crate::command) fn let_go_update(steer: Option<CommandDirection>, xdirf: i32) -> ObjectUpdate {
+pub(in crate::command) fn let_go_update(
+    steer: Option<CommandDirection>,
+    xdirf: i32,
+) -> ObjectUpdate {
     let mut update = ObjectUpdate::new();
     if let Some(direction) = steer {
         update = update.with_command_direction(direction);

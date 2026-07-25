@@ -73,11 +73,11 @@ fn restore_reputs_overlapping_masks_in_master_object_order() {
     assert_eq!(
         second_bake.buffer,
         vec![1],
-            "master First->Next starts with the reverse of Rust exec order"
+        "master First->Next starts with the reverse of Rust exec order"
     );
     assert_eq!(
         first_bake.buffer,
         vec![2],
-            "the later overlapping mask records MCVehic as an unused slot"
+        "the later overlapping mask records MCVehic as an unused slot"
     );
 }

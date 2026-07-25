@@ -80,22 +80,22 @@ mod game_app_sound;
 #[path = "game_app/startup.rs"]
 mod game_app_startup;
 
+#[path = "main_parts/app_state.rs"]
+mod main_app_state;
 #[path = "main_parts/assets.rs"]
 mod main_assets;
 #[path = "main_parts/audio.rs"]
 mod main_audio;
-#[path = "main_parts/app_state.rs"]
-mod main_app_state;
-#[path = "main_parts/resources.rs"]
-mod main_resources;
 #[path = "main_parts/render_io.rs"]
 mod main_render_io;
+#[path = "main_parts/resources.rs"]
+mod main_resources;
 
+pub(crate) use main_app_state::*;
 pub(crate) use main_assets::*;
 pub(crate) use main_audio::*;
-pub(crate) use main_app_state::*;
-pub(crate) use main_resources::*;
 pub(crate) use main_render_io::*;
+pub(crate) use main_resources::*;
 
 use std::cmp::Ordering;
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};

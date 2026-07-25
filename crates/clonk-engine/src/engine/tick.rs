@@ -1864,11 +1864,14 @@ impl Engine {
             }
         }
         if let Some(sequence) = solid_mask_instance_sequence {
-            self.solid_mask_staging.next_solid_mask_instance_sequence = self.solid_mask_staging.next_solid_mask_instance_sequence.max(
-                sequence
-                    .checked_add(1)
-                    .expect("C4SolidMask instance sequence overflow"),
-            );
+            self.solid_mask_staging.next_solid_mask_instance_sequence = self
+                .solid_mask_staging
+                .next_solid_mask_instance_sequence
+                .max(
+                    sequence
+                        .checked_add(1)
+                        .expect("C4SolidMask instance sequence overflow"),
+                );
         }
         let fow_range_changed = plr_view_range.is_some();
 
@@ -3618,5 +3621,4 @@ impl Engine {
         object.enqueue_commands(commands);
         Ok(())
     }
-
 }

@@ -36,8 +36,7 @@ pub const LEAGUE_MIN_UPDATE_INTERVAL_SECONDS: i64 = 10;
 pub const LEAGUE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Release `C4ENGINENAME/C4VERSION` sent by the pinned C++ oracle.
-pub const LEAGUE_HTTP_USER_AGENT: &str =
-    concat!("LegacyClonk/", clonk_core::engine_version_str!());
+pub const LEAGUE_HTTP_USER_AGENT: &str = concat!("LegacyClonk/", clonk_core::engine_version_str!());
 
 /// Language settings copied from `Config.General` for a league query.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

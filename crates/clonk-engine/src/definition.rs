@@ -1375,7 +1375,11 @@ impl Definition {
     /// Live SetOCF variant. `C4ObjectList::ObjectCount` ignores removed list
     /// holes but retains C4OS_INACTIVE entries, so Engine callers supply the
     /// count resolved against the authoritative object table.
-    pub(crate) fn compute_ocf_with_contents_count(&self, state: &ObjectState, contents_count: usize) -> u32 {
+    pub(crate) fn compute_ocf_with_contents_count(
+        &self,
+        state: &ObjectState,
+        contents_count: usize,
+    ) -> u32 {
         // OCF_Normal: the OCF is never zero (SetOCF, C4Object.cpp:547-548)
         let mut ocf = self.ocf_base | OCF_NORMAL;
         // OCF_NotContained (SetOCF, C4Object.cpp:627-629); OCF_Available
@@ -1688,7 +1692,11 @@ impl Definition {
         self.set_rank_name_table(names.map(RankNameTable::from_resolved_names), rank_base);
     }
 
-    pub(crate) fn set_rank_name_table(&mut self, names: Option<RankNameTable>, rank_base: Option<i32>) {
+    pub(crate) fn set_rank_name_table(
+        &mut self,
+        names: Option<RankNameTable>,
+        rank_base: Option<i32>,
+    ) {
         self.rank_names_owned = names.is_some();
         self.rank_names = names;
         self.rank_base = self.rank_names.as_ref().map(|_| match rank_base {
@@ -4995,4 +5003,3 @@ impl Definition {
         Ok((commands, audio_state, rng, callback_result))
     }
 }
-

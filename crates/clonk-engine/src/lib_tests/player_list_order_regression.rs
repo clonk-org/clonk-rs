@@ -24,7 +24,7 @@ fn register_joining_player(engine: &mut Engine, name: &str) -> i32 {
     engine.register_joining_player(
         &joining_player(name),
         PlayerAtClient::HOST,
-            "Local",
+        "Local",
         PlayerRuntimeControl::NONE,
         false,
         None,
@@ -83,7 +83,7 @@ fn loaded_crew_info_list_prepends_group_entries_like_cpp() {
     let player = engine.register_joining_player(
         &config,
         PlayerAtClient::HOST,
-            "Local",
+        "Local",
         PlayerRuntimeControl::NONE,
         false,
         None,
@@ -107,7 +107,7 @@ fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
     assert_eq!(
         two_players.players().map(Player::id).collect::<Vec<_>>(),
         vec![1, 0],
-            "public iteration follows C4PlayerList links"
+        "public iteration follows C4PlayerList links"
     );
     let snapshot = two_players.snapshot();
     assert_eq!(
@@ -117,7 +117,7 @@ fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
             .map(|player| player.id)
             .collect::<Vec<_>>(),
         vec![1, 0],
-            "simulation players follow C4PlayerList links"
+        "simulation players follow C4PlayerList links"
     );
     assert_eq!(
         snapshot
@@ -127,18 +127,18 @@ fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
             .map(|player| player.owner)
             .collect::<Vec<_>>(),
         vec![1, 0],
-            "HUD live-player prefix follows C4PlayerList links"
+        "HUD live-player prefix follows C4PlayerList links"
     );
     assert_eq!(snapshot.hud.local_players, vec![1, 0]);
     assert_eq!(
         two_players.host_world_context().player_ids(),
         &[1, 0],
-            "live indexed script natives follow C4PlayerList links"
+        "live indexed script natives follow C4PlayerList links"
     );
     assert_eq!(
         host_world_context_from_snapshot(&snapshot).player_ids(),
         &[1, 0],
-            "snapshot indexed script natives follow serialized list order"
+        "snapshot indexed script natives follow serialized list order"
     );
     assert_eq!(
         two_players
@@ -148,7 +148,7 @@ fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
             .map(|player| player.id)
             .collect::<Vec<_>>(),
         vec![1, 0],
-            "native's two-node scan reaches the appended player and returns"
+        "native's two-node scan reaches the appended player and returns"
     );
 
     let state = two_players.capture_state();
@@ -181,7 +181,7 @@ fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
             .map(|player| player.id)
             .collect::<Vec<_>>(),
         vec![0, 1, 2],
-            "the intervening higher number makes native move zero to the head"
+        "the intervening higher number makes native move zero to the head"
     );
 
     let mut legacy_fixture = Engine::new();
@@ -200,7 +200,7 @@ fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
             .map(|player| player.id)
             .collect::<Vec<_>>(),
         vec![2, 4],
-            "legacy direct-map fixtures append untracked players deterministically"
+        "legacy direct-map fixtures append untracked players deterministically"
     );
 
     let mut partial_ledger_fixture = Engine::new();
@@ -219,7 +219,7 @@ fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
             .map(Player::id)
             .collect::<Vec<_>>(),
         vec![1, 2, 4],
-            "public iteration must not hide an untracked direct-map addition"
+        "public iteration must not hide an untracked direct-map addition"
     );
     partial_ledger_fixture.players.remove(&4);
     partial_ledger_fixture.players.remove(&1);
@@ -229,7 +229,7 @@ fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
             .map(Player::id)
             .collect::<Vec<_>>(),
         vec![2],
-            "a stale same-length ledger must still expose every live map player"
+        "a stale same-length ledger must still expose every live map player"
     );
 }
 
@@ -248,9 +248,9 @@ fn l052_clear_pointer_callbacks_follow_native_player_list_order() {
     );
 
     let mut definition = Definition::from_script(
-            "PORD",
-            "Player-order callback probe",
-            r#"#strict 2
+        "PORD",
+        "Player-order callback probe",
+        r#"#strict 2
 static callback_log;
 
 func CrewSelection(bool unselect, bool cursor)
@@ -330,7 +330,7 @@ func ReadCallbackLog() { return callback_log; }
             .call_object_function(replacement_index, "ReadCallbackLog", Vec::new())
             .expect("read callback order"),
         Value::Int(21),
-            "player 1 callback must precede player 0 after the native reuse edge"
+        "player 1 callback must precede player 0 after the native reuse edge"
     );
 }
 
@@ -392,15 +392,15 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
         .expect("unknown-client player remains")
         .set_script_player(true);
 
-        // A direct legacy fixture supplies the GetInfo()==nullptr case. It
-        // is remote in the second pass and must not create a result row.
+    // A direct legacy fixture supplies the GetInfo()==nullptr case. It
+    // is remote in the second pass and must not create a result row.
     let mut no_info = PlayerConfig::new(5, "No info").build();
     no_info.set_at_client(PlayerAtClient::new(8));
     engine.players.insert(5, no_info);
     engine.player_order = vec![3, 1, 4, 2, 0, 5];
-        // Explicit LocalControl is authoritative over the InitControl
-        // derivation: player 1 is local despite AtClient=7, while player 2
-        // is non-local despite being a user at the replay client id.
+    // Explicit LocalControl is authoritative over the InitControl
+    // derivation: player 1 is local despite AtClient=7, while player 2
+    // is non-local despite being a user at the replay client id.
     engine.set_local_players([3, 1]);
 
     let mut crew_definition =
@@ -416,8 +416,8 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
         .expect("owned definition registers");
     engine
         .load_scenario_script_with_convention(
-                "AbortCallbacks",
-                "#strict 3\n\
+            "AbortCallbacks",
+            "#strict 3\n\
                  static RemoveCalls, GameOverCalls;\n\
                  func Initialize() { RemoveCalls = 0; GameOverCalls = 0; }\n\
                  func RemovePlayer() { RemoveCalls = RemoveCalls + 1; }\n\
@@ -454,7 +454,7 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
     assert_eq!(
         removed.iter().map(Player::id).collect::<Vec<_>>(),
         vec![3, 1, 0, 5],
-            "RemoveLocal completes before RemoveAtRemoteClient"
+        "RemoveLocal completes before RemoveAtRemoteClient"
     );
     assert!(removed.iter().all(|player| !player.to_state().evaluated));
     assert_eq!(
@@ -483,7 +483,7 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
     assert_eq!(engine.objects[owned_index].state.owner, OWNER_NONE);
     assert_ne!(
         engine.objects[owned_index].state.owner, 4,
-            "NotifyOwnedObjects must not transfer to the preserved teammate"
+        "NotifyOwnedObjects must not transfer to the preserved teammate"
     );
 
     assert_eq!(
@@ -549,8 +549,8 @@ fn initialized_join_player_can_repeat_scenario_and_team_init() {
     engine.set_teams(vec![TeamInfo::new(1, "One", 0), TeamInfo::new(2, "Two", 0)]);
     engine
         .load_scenario_script_with_convention(
-                "RepeatedScenarioInit",
-                "#strict 3\n\
+            "RepeatedScenarioInit",
+            "#strict 3\n\
                  static InitCalls;\n\
                  func Initialize() { InitCalls = 0; }\n\
                  func InitializePlayer() { InitCalls = InitCalls + 1; }\n\
@@ -614,8 +614,8 @@ fn control_game_over_request_does_not_remove_a_player() {
         .expect("player registers");
     engine
         .load_scenario_script_with_convention(
-                "ControlGameOver",
-                "#strict 3\n\
+            "ControlGameOver",
+            "#strict 3\n\
                  static Calls;\n\
                  func Initialize() { Calls = 0; }\n\
                  func OnGameOver() { Calls = Calls + 1; }\n\

@@ -3,7 +3,7 @@ use crate::landscape::PixelGrid;
 
 fn border_engine(bottom_open: bool) -> (Engine, MaterialId) {
     let library = clonk_resources::MaterialLibrary::parse(
-            r#"
+        r#"
             [Material Vehicle]
             Name=Vehicle
             Density=100
@@ -38,7 +38,7 @@ fn spawn_digger(engine: &mut Engine) -> ObjectId {
 
 fn shifting_border_engine() -> (Engine, MaterialId) {
     let library = clonk_resources::MaterialLibrary::parse(
-            r#"
+        r#"
             [Material Vehicle]
             Name=Vehicle
             Density=100
@@ -73,7 +73,7 @@ fn shifting_border_engine() -> (Engine, MaterialId) {
 
 fn shake_border_engine() -> (Engine, MaterialId) {
     let library = clonk_resources::MaterialLibrary::parse(
-            r#"
+        r#"
             [Material Vehicle]
             Name=Vehicle
             Density=100
@@ -114,8 +114,8 @@ fn blast_circle_counts_closed_bottom_vehicle_without_rng_draws() {
         .blast_circle(Vector2::new(3, 2), 2, None)
         .expect("nonnegative blast runs");
 
-        // C4Landscape::BlastFree includes ycnt=radius. At y=3 the circle
-        // probes two closed-bottom pixels; at y=4 it probes one more.
+    // C4Landscape::BlastFree includes ycnt=radius. At y=3 the circle
+    // probes two closed-bottom pixels; at y=4 it probes one more.
     assert_eq!(result.pixel_count_by_material.get(&vehicle), Some(&3));
     assert_eq!(result.removed_by_material.get(&vehicle), None);
     assert_eq!(engine.rng.count, before_rng, "Vehicle has no BlastShiftTo");
@@ -168,7 +168,7 @@ fn dig_rect_credits_vehicle_only_at_closed_bottom() {
         assert_eq!(
             engine.objects[digger_index].material_content(vehicle),
             expected_vehicle,
-                "bottom_open={bottom_open}"
+            "bottom_open={bottom_open}"
         );
     }
 }
@@ -199,7 +199,7 @@ fn closed_bottom_vehicle_runs_shift_rng_but_records_no_oob_removal() {
             .bytes()
             .iter()
             .all(|byte| *byte == 0),
-            "out-of-bounds shifts and clears cannot alter Surface8"
+        "out-of-bounds shifts and clears cannot alter Surface8"
     );
 }
 
@@ -213,7 +213,7 @@ fn shake_circle_closed_bottom_creates_no_vehicle_pxs() {
     assert_eq!(
         engine.pxs_system.count(),
         7,
-            "only the seven in-bounds Earth pixels create PXS"
+        "only the seven in-bounds Earth pixels create PXS"
     );
     assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
     assert_eq!(engine.rng.count, before_rng);

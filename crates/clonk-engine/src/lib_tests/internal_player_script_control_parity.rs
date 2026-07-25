@@ -107,8 +107,7 @@ fn admitted_joined_player_team_update_applies_add_player_side_effects_only() {
         .expect("joined player registers");
     engine
         .register_definition(
-            Definition::from_script("OWND", "Owned", "")
-                .expect("owned-object definition compiles"),
+            Definition::from_script("OWND", "Owned", "").expect("owned-object definition compiles"),
         )
         .expect("owned-object definition registers");
     let owned = engine
@@ -235,8 +234,8 @@ fn activate_game_goal_menu_builtin_rejects_missing_player_and_queues_valid_local
     assert_eq!(
         engine
             .direct_exec_script_control_global(
-                    "ActivateGameGoalMenu(99)",
-                    "L004 missing player",
+                "ActivateGameGoalMenu(99)",
+                "L004 missing player",
                 Some(3),
             )
             .expect("missing player call executes"),
@@ -249,8 +248,8 @@ fn activate_game_goal_menu_builtin_rejects_missing_player_and_queues_valid_local
     assert_eq!(
         engine
             .direct_exec_script_control_global(
-                    "ActivateGameGoalMenu(3)",
-                    "L004 valid player",
+                "ActivateGameGoalMenu(3)",
+                "L004 valid player",
                 Some(3),
             )
             .expect("valid player call executes"),
@@ -267,9 +266,9 @@ fn goal_menu_control_evaluates_every_peer_but_marks_only_local_ui() {
     let mut engine = Engine::new();
     register_player(&mut engine, 3, 7);
     let mut goal = Definition::from_script(
-            "GOAL",
-            "Goal",
-            "#strict 3\nfunc IsFulfilled() { return true; }",
+        "GOAL",
+        "Goal",
+        "#strict 3\nfunc IsFulfilled() { return true; }",
     )
     .expect("goal definition compiles");
     goal.set_category(CATEGORY_GOAL);

@@ -751,7 +751,9 @@ impl Engine {
             delete_sky_entry: landscape.delete_sky_entry,
             teams_txt: serialize_teams(
                 &state.teams,
-                state.team_configuration.unwrap_or(self.team_state.team_configuration),
+                state
+                    .team_configuration
+                    .unwrap_or(self.team_state.team_configuration),
                 state.team_last_team_id,
                 state.team_max_script_players,
                 &state.team_script_player_names,

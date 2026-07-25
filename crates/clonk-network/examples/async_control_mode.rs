@@ -33,12 +33,19 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         (self.0 >> 33) as u32
     }
 
     fn below(&mut self, bound: u32) -> u32 {
-        if bound == 0 { 0 } else { self.next_u32() % bound }
+        if bound == 0 {
+            0
+        } else {
+            self.next_u32() % bound
+        }
     }
 }
 
@@ -110,7 +117,10 @@ impl Client {
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn percentile(sorted: &[Duration], fraction: f64) -> Duration {
@@ -144,9 +154,21 @@ fn run(
             let slow = index == 0;
             Client {
                 id: index as ClientId,
-                rtt_ms: if slow { bad.0 } else { env_u64("LC_GOOD_RTT_MS", 60) },
-                jitter_ms: if slow { bad.1 } else { env_u64("LC_GOOD_JITTER_MS", 10) },
-                loss_permille: if slow { bad.2 } else { env_u64("LC_GOOD_LOSS_PERMILLE", 5) as u32 },
+                rtt_ms: if slow {
+                    bad.0
+                } else {
+                    env_u64("LC_GOOD_RTT_MS", 60)
+                },
+                jitter_ms: if slow {
+                    bad.1
+                } else {
+                    env_u64("LC_GOOD_JITTER_MS", 10)
+                },
+                loss_permille: if slow {
+                    bad.2
+                } else {
+                    env_u64("LC_GOOD_LOSS_PERMILLE", 5) as u32
+                },
                 in_flight: Vec::new(),
                 estimator: ControlLatencyEstimator::new(),
                 presend,
@@ -159,7 +181,9 @@ fn run(
 
     let mut coordinator = ControlCoordinator::new(256);
     for peer in &peers {
-        coordinator.register_client(peer.id).expect("client registers");
+        coordinator
+            .register_client(peer.id)
+            .expect("client registers");
     }
 
     let mut now = Duration::ZERO;
@@ -208,7 +232,10 @@ fn run(
             peer.in_flight.retain(|(at, _, _)| *at > now);
             for (t, sent_at) in arrived {
                 // The client learns what its link cost and re-sizes PreSend.
-                let sample = now.saturating_sub(sent_at).as_millis().min(i32::MAX as u128) as i32;
+                let sample = now
+                    .saturating_sub(sent_at)
+                    .as_millis()
+                    .min(i32::MAX as u128) as i32;
                 peer.estimator.observe(sample);
                 let packet = ControlPacket::builder(peer.id, t).payload(vec![0u8; 8]);
                 if let Ok(outcome_of) = coordinator.ingest(packet) {
@@ -257,7 +284,10 @@ fn run(
             .unwrap_or_default()
     };
     outcome.slow_presend = mean_of(&peers[0].presend_samples);
-    let good: Vec<Duration> = peers[1..].iter().flat_map(|p| p.presend_samples.clone()).collect();
+    let good: Vec<Duration> = peers[1..]
+        .iter()
+        .flat_map(|p| p.presend_samples.clone())
+        .collect();
     outcome.good_presend = mean_of(&good);
     outcome
 }
@@ -282,7 +312,10 @@ fn main() {
         env_u64("LC_GOOD_JITTER_MS", 10),
         env_u64("LC_GOOD_LOSS_PERMILLE", 5),
     );
-    println!("async budget {:?}\n", async_budget(2, env_u64("LC_ASYNC_MAX_WAIT", 2) as i32, 38));
+    println!(
+        "async budget {:?}\n",
+        async_budget(2, env_u64("LC_ASYNC_MAX_WAIT", 2) as i32, 38)
+    );
     println!(
         "{:<24} {:>9} {:>9} {:>9} {:>9} {:>10} {:>11}",
         "mode", "mean", "p95", "p99", "max", "pkts lost", "presend"
@@ -305,7 +338,9 @@ fn main() {
         }
         all.sort_unstable();
         let total: Duration = all.iter().sum();
-        let mean = total.checked_div(all.len().max(1) as u32).unwrap_or_default();
+        let mean = total
+            .checked_div(all.len().max(1) as u32)
+            .unwrap_or_default();
         let slow_mean = slow_presend
             .iter()
             .sum::<Duration>()

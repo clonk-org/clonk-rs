@@ -121,22 +121,21 @@ protected func Departure(pTarget)
 }
 "#;
 
-    let mut actor =
-        Definition::from_script("ACTR", "Actor", actor_script).expect("actor compiles");
+    let mut actor = Definition::from_script("ACTR", "Actor", actor_script).expect("actor compiles");
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         None,
         HashMap::from([
             (
-                    "Push".to_string(),
+                "Push".to_string(),
                 ActionSpec::default().with_procedure("PUSH"),
             ),
             (
-                    "Walk".to_string(),
+                "Walk".to_string(),
                 ActionSpec::default().with_procedure("WALK"),
             ),
             (
-                    "Throw".to_string(),
+                "Throw".to_string(),
                 ActionSpec::default()
                     .with_procedure("THROW")
                     .with_start_call("StartThrow"),
@@ -167,7 +166,7 @@ fn spawn_push_put_triplet(engine: &mut Engine, reject: bool) -> (ObjectId, Objec
                 .with_position(Vector2::new(80, 40))
                 .with_velocity(Vector2::new(3, -2))
                 .with_local_vars(HashMap::from([(
-                        "reject".to_string(),
+                    "reject".to_string(),
                     Value::Int(i32::from(reject)),
                 )])),
         )
@@ -208,7 +207,7 @@ fn spawn_contained_put_take_triplet(
 ) -> (ObjectId, ObjectId, ObjectId) {
     let target = engine
         .spawn_object(SpawnConfig::new("TARG").with_local_vars(HashMap::from([(
-                "reject".to_string(),
+            "reject".to_string(),
             Value::Int(i32::from(reject)),
         )])))
         .expect("target spawns");
@@ -251,8 +250,7 @@ fn object_com_put_accepts_an_explicit_non_content_object() {
     assert!(engine
         .try_object_com_put(actor, target, item)
         .expect("ObjectComPut executes"));
-    let item_state =
-        &engine.objects[engine.find_object_index(item).expect("item remains")].state;
+    let item_state = &engine.objects[engine.find_object_index(item).expect("item remains")].state;
     assert_eq!(item_state.container, Some(target));
     assert_eq!(
         item_state.local_vars.get("callback_order"),
@@ -354,7 +352,7 @@ protected func Departure(pTarget)
         .find_object_index(first_link)
         .expect("first linked child exists");
     engine.objects[first_link_index].state.local_vars.insert(
-            "reenter_target".to_string(),
+        "reenter_target".to_string(),
         object_reference_value(destination),
     );
 
@@ -376,7 +374,7 @@ protected func Departure(pTarget)
         .state
         .container,
         None,
-            "the loop re-reads Contents.First even when the prior Exit returned false"
+        "the loop re-reads Contents.First even when the prior Exit returned false"
     );
 }
 
@@ -398,7 +396,7 @@ fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
             .local_vars
             .get("callback_order"),
         Some(&Value::Int(123_456)),
-            "RejectEntrance -> RejectCollect -> Collection2 -> Entrance -> Put -> Collection"
+        "RejectEntrance -> RejectCollect -> Collection2 -> Entrance -> Put -> Collection"
     );
     assert_eq!(
         engine.objects[item_index].state.position,
@@ -415,7 +413,7 @@ fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
             .snapshot()
             .command_names(),
         ["UnGrab", "Put"],
-            "Ty queues interval-zero UnGrab above the still-running Put"
+        "Ty queues interval-zero UnGrab above the still-running Put"
     );
     assert_eq!(
         engine.objects[actor_index]
@@ -452,7 +450,7 @@ fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
             .commands
             .snapshot()
             .is_empty(),
-            "helper failure finishes Put and must not queue Ty-UnGrab"
+        "helper failure finishes Put and must not queue Ty-UnGrab"
     );
 }
 
@@ -460,8 +458,7 @@ fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
 fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
     for command in [CommandId::Throw, CommandId::Drop] {
         let mut accepted = put_fixture_engine();
-        let (actor, item, target) =
-            spawn_contained_put_take_triplet(&mut accepted, false, command);
+        let (actor, item, target) = spawn_contained_put_take_triplet(&mut accepted, false, command);
         accepted
             .execute_object_command_now(actor)
             .expect("accepted ObjectComPutTake executes");
@@ -483,7 +480,7 @@ fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
             .commands
             .snapshot()
             .is_empty(),
-                "{command:?} finishes after the callback tail"
+            "{command:?} finishes after the callback tail"
         );
 
         let mut rejected = put_fixture_engine();
@@ -498,12 +495,12 @@ fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
         assert_eq!(
             item_state.container,
             Some(actor),
-                "{command:?} honors RejectCollect"
+            "{command:?} honors RejectCollect"
         );
         assert_eq!(
             item_state.local_vars.get("callback_order"),
             Some(&Value::Int(12)),
-                "Put/Collection must not run after RejectCollect"
+            "Put/Collection must not run after RejectCollect"
         );
         assert!(
             rejected.objects[rejected
@@ -512,7 +509,7 @@ fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
             .commands
             .snapshot()
             .is_empty(),
-                "{command:?} ignores the helper result and still finishes"
+            "{command:?} ignores the helper result and still finishes"
         );
     }
 }
@@ -557,7 +554,7 @@ fn command_references_accept_inactive_live_put_take_helpers_like_cpp() {
                 .expect("inactive item remains")
                 .container,
             Some(target),
-                "{command:?} skips Status==0 and retains C4OS_INACTIVE"
+            "{command:?} skips Status==0 and retains C4OS_INACTIVE"
         );
         assert_eq!(
             engine
@@ -565,7 +562,7 @@ fn command_references_accept_inactive_live_put_take_helpers_like_cpp() {
                 .expect("tombstone remains until end-of-tick cleanup")
                 .container,
             Some(actor),
-                "the deleted contents hole is never selected"
+            "the deleted contents hole is never selected"
         );
     }
 }
@@ -602,12 +599,12 @@ fn command_references_accept_inactive_sell_candidates_like_cpp() {
     assert_eq!(
         engine.command_sell_candidate(actor, base, "ITEM", Some(inactive)),
         Some((1, inactive)),
-            "an explicit inactive Target2 remains preferred"
+        "an explicit inactive Target2 remains preferred"
     );
     assert_eq!(
         engine.command_sell_candidate(actor, base, "ITEM", Some(deleted)),
         Some((1, inactive)),
-            "a deleted Target2 falls back to Contents.Find's inactive entry"
+        "a deleted Target2 falls back to Contents.Find's inactive entry"
     );
 }
 
@@ -639,7 +636,7 @@ fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
             .expect("first item remains")
             .container,
         Some(target),
-            "the outer Put succeeds before its Put callback"
+        "the outer Put succeeds before its Put callback"
     );
     assert_eq!(
         engine
@@ -647,7 +644,7 @@ fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
             .expect("second item remains")
             .container,
         Some(actor),
-            "the nested Throw's put is rejected by the now-full target"
+        "the nested Throw's put is rejected by the now-full target"
     );
     let actor_index = engine.find_object_index(actor).expect("actor remains");
     assert_eq!(
@@ -656,7 +653,7 @@ fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
             .snapshot()
             .command_names(),
         ["UnGrab", "Put"],
-            "the nested false PutTake result must not fail the outer successful Put"
+        "the nested false PutTake result must not fail the outer successful Put"
     );
 
     engine
@@ -670,7 +667,7 @@ fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
             .commands
             .snapshot()
             .is_empty(),
-            "the outer Put retained and consumed its own success result"
+        "the outer Put retained and consumed its own success result"
     );
 }
 
@@ -692,17 +689,17 @@ fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
     let target_index = engine.find_object_index(target).expect("target exists");
     engine.objects[target_index].state.local_vars.extend([
         (
-                "nested_put_actor".to_string(),
+            "nested_put_actor".to_string(),
             object_reference_value(actor),
         ),
         (
-                "nested_put_item".to_string(),
+            "nested_put_item".to_string(),
             object_reference_value(replacement_item),
         ),
     ]);
     let actor_index = engine.find_object_index(actor).expect("actor exists");
     engine.objects[actor_index].state.local_vars.insert(
-            "tracked".to_string(),
+        "tracked".to_string(),
         object_reference_value(replacement_item),
     );
     engine.objects[actor_index]
@@ -724,7 +721,7 @@ fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
             .expect("outer item remains")
             .container,
         Some(actor),
-            "the outer RejectCollect result stays with the detached outer Put"
+        "the outer RejectCollect result stays with the detached outer Put"
     );
     assert_eq!(
         engine
@@ -732,7 +729,7 @@ fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
             .expect("replacement item remains")
             .container,
         Some(target),
-            "recursive ExecuteCommand completes the replacement helper synchronously"
+        "recursive ExecuteCommand completes the replacement helper synchronously"
     );
     let actor_index = engine.find_object_index(actor).expect("actor remains");
     let commands = engine.objects[actor_index].commands.command_views();
@@ -744,7 +741,7 @@ fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
     assert_eq!(replacement.target2, Some(replacement_item));
     assert!(
         !replacement.finished,
-            "the outer failure must not consume the successful replacement Put"
+        "the outer failure must not consume the successful replacement Put"
     );
 }
 
@@ -785,11 +782,11 @@ fn removed_nested_throw_does_not_finish_the_outer_throw_instance() {
             .local_vars
             .get("command_after_nested"),
         Some(&Value::String("Throw".to_string().into())),
-            "removing the inner Throw while its helper returns leaves the outer instance live"
+        "removing the inner Throw while its helper returns leaves the outer instance live"
     );
     assert!(
         engine.objects[actor_index].commands.snapshot().is_empty(),
-            "the outer Throw finishes only when its own helper returns"
+        "the outer Throw finishes only when its own helper returns"
     );
     for item in [first_item, second_item] {
         assert_eq!(
@@ -835,7 +832,7 @@ fn callback_execute_command_reenters_the_same_in_flight_throw() {
             .local_vars
             .get("command_after_same_reentry"),
         Some(&Value::String("Get".to_string().into())),
-            "the in-flight Throw reexecutes and queues Get after its requested item moved"
+        "the in-flight Throw reexecutes and queues Get after its requested item moved"
     );
     assert_eq!(
         engine.objects[actor_index]
@@ -843,7 +840,7 @@ fn callback_execute_command_reenters_the_same_in_flight_throw() {
             .snapshot()
             .command_names(),
         ["Get", "Throw"],
-            "the reentrant child remains above the exact finished outer Throw"
+        "the reentrant child remains above the exact finished outer Throw"
     );
 }
 
@@ -871,12 +868,12 @@ fn script_execute_command_runs_outside_throw_callbacks_before_returning() {
     assert_eq!(
         actor_state.local_vars.get("command_during_throw_start"),
         Some(&Value::String("Throw".to_string().into())),
-            "StartCall sees the exact executing Throw before Finish(true)"
+        "StartCall sees the exact executing Throw before Finish(true)"
     );
     assert_eq!(
         actor_state.local_vars.get("departure_seen"),
         Some(&Value::Int(1)),
-            "Departure runs before script ExecuteCommand returns"
+        "Departure runs before script ExecuteCommand returns"
     );
     assert!(engine.objects[actor_index].commands.snapshot().is_empty());
     assert_eq!(
@@ -897,30 +894,30 @@ public func RunExecute()
   return(1);
 }
 "#;
-    let mut actor = Definition::from_script("NDIG", "NoOtherAction digger", script)
-        .expect("actor compiles");
+    let mut actor =
+        Definition::from_script("NDIG", "NoOtherAction digger", script).expect("actor compiles");
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         None,
         HashMap::from([
             (
-                    "Dig".to_string(),
+                "Dig".to_string(),
                 ActionSpec::default()
                     .with_procedure("DIG")
                     .with_no_other_action(true),
             ),
             (
-                    "Walk".to_string(),
+                "Walk".to_string(),
                 ActionSpec::default().with_procedure("WALK"),
             ),
             (
-                    "Throw".to_string(),
+                "Throw".to_string(),
                 ActionSpec::default().with_procedure("THROW"),
             ),
         ]),
     );
-    let mut item = Definition::from_script("NDIT", "NoOtherAction item", "#strict")
-        .expect("item compiles");
+    let mut item =
+        Definition::from_script("NDIT", "NoOtherAction item", "#strict").expect("item compiles");
     item.set_collectible(true);
 
     let mut engine = Engine::with_seed(119);
@@ -951,12 +948,12 @@ public func RunExecute()
     assert_eq!(
         engine.objects[actor_index].fixed_velocity,
         FixedVec2::from_ints(7, -3),
-            "failed Idle/Walk transitions do not zero the digging velocity"
+        "failed Idle/Walk transitions do not zero the digging velocity"
     );
     assert_eq!(
         engine.objects[actor_index].state.command_direction,
         CommandDirection::Stop,
-            "ObjectActionStand writes ComDir before its rejected Walk"
+        "ObjectActionStand writes ComDir before its rejected Walk"
     );
     assert_eq!(
         engine
@@ -964,7 +961,7 @@ public func RunExecute()
             .expect("item remains")
             .container,
         Some(actor),
-            "ObjectComThrow rejects the still-Dig procedure"
+        "ObjectComThrow rejects the still-Dig procedure"
     );
     assert!(engine.objects[actor_index].commands.snapshot().is_empty());
 }
@@ -996,13 +993,13 @@ protected func StartWalk()
         None,
         HashMap::from([
             (
-                    "Dig".to_string(),
+                "Dig".to_string(),
                 ActionSpec::default()
                     .with_procedure("DIG")
                     .with_abort_call("AbortDig"),
             ),
             (
-                    "Walk".to_string(),
+                "Walk".to_string(),
                 ActionSpec::default()
                     .with_procedure("WALK")
                     .with_start_call("StartWalk"),
@@ -1045,7 +1042,7 @@ protected func StartWalk()
             .local_vars
             .get("callback_order"),
         Some(&Value::Int(12)),
-            "Dig Abort and Walk Start finish before ObjectComDrop"
+        "Dig Abort and Walk Start finish before ObjectComDrop"
     );
     assert_eq!(
         engine
@@ -1082,13 +1079,13 @@ protected func Grabbed(object actor, bool grab)
         None,
         HashMap::from([
             (
-                    "Push".to_string(),
+                "Push".to_string(),
                 ActionSpec::default()
                     .with_procedure("PUSH")
                     .with_no_other_action(true),
             ),
             (
-                    "Walk".to_string(),
+                "Walk".to_string(),
                 ActionSpec::default().with_procedure("WALK"),
             ),
         ]),
@@ -1138,7 +1135,7 @@ protected func Grabbed(object actor, bool grab)
     assert_eq!(
         engine.objects[actor_index].state.command_direction,
         CommandDirection::Stop,
-            "C4Command::UnGrab writes Stop even when ObjectComUnGrab fails"
+        "C4Command::UnGrab writes Stop even when ObjectComUnGrab fails"
     );
     assert_eq!(
         engine.objects[actor_index]
@@ -1193,11 +1190,11 @@ protected func Grabbed(object actor, bool grab)
         None,
         HashMap::from([
             (
-                    "Push".to_string(),
+                "Push".to_string(),
                 ActionSpec::default().with_procedure("PUSH"),
             ),
             (
-                    "Walk".to_string(),
+                "Walk".to_string(),
                 ActionSpec::default().with_procedure("WALK"),
             ),
         ]),
@@ -1266,7 +1263,7 @@ protected func Grabbed(object actor, bool grab)
             .local_vars
             .get("grab_calls"),
         Some(&Value::Nil),
-            "a denied close stops before Grab(false)"
+        "a denied close stops before Grab(false)"
     );
     let target_index = engine.find_object_index(target).expect("target remains");
     assert_eq!(
@@ -1275,7 +1272,7 @@ protected func Grabbed(object actor, bool grab)
             .local_vars
             .get("grabbed_calls"),
         None,
-            "a denied close stops before Grabbed(false)"
+        "a denied close stops before Grabbed(false)"
     );
 
     assert_eq!(
@@ -1313,7 +1310,7 @@ protected func Grabbed(object actor, bool grab)
             .local_vars
             .get("menu_during_grab"),
         Some(&Value::Int(0)),
-            "Grab(false) observes the menu already closed"
+        "Grab(false) observes the menu already closed"
     );
     let target_index = engine.find_object_index(target).expect("target remains");
     assert_eq!(
@@ -1329,7 +1326,7 @@ protected func Grabbed(object actor, bool grab)
             .local_vars
             .get("menu_during_grabbed"),
         Some(&Value::Int(0)),
-            "Grabbed(false) observes the menu already closed"
+        "Grabbed(false) observes the menu already closed"
     );
 }
 
@@ -1359,11 +1356,11 @@ protected func Grabbed(object actor, bool grab)
         None,
         HashMap::from([
             (
-                    "Push".to_string(),
+                "Push".to_string(),
                 ActionSpec::default().with_procedure("PUSH"),
             ),
             (
-                    "Walk".to_string(),
+                "Walk".to_string(),
                 ActionSpec::default().with_procedure("WALK"),
             ),
         ]),
@@ -1411,7 +1408,7 @@ protected func Grabbed(object actor, bool grab)
             .local_vars
             .get("grabbed_calls"),
         Some(&Value::Int(1)),
-            "inactive Status is nonzero and still receives Grabbed(false)"
+        "inactive Status is nonzero and still receives Grabbed(false)"
     );
 
     let live_target = engine
@@ -1448,7 +1445,7 @@ protected func Grabbed(object actor, bool grab)
             .local_vars
             .get("grabbed_calls"),
         None,
-            "actor Status=0 after Grab(false) suppresses target Grabbed(false)"
+        "actor Status=0 after Grab(false) suppresses target Grabbed(false)"
     );
 }
 
@@ -1484,29 +1481,29 @@ protected func StartThrow()
         None,
         HashMap::from([
             (
-                    "Walk".to_string(),
+                "Walk".to_string(),
                 ActionSpec::default()
                     .with_procedure("WALK")
                     .with_directions(2)
                     .with_turn_action("Turn"),
             ),
             (
-                    "Turn".to_string(),
+                "Turn".to_string(),
                 ActionSpec::default()
                     .with_procedure("WALK")
                     .with_directions(2)
                     .with_start_call("StartTurn"),
             ),
             (
-                    "Throw".to_string(),
+                "Throw".to_string(),
                 ActionSpec::default()
                     .with_procedure("THROW")
                     .with_start_call("StartThrow"),
             ),
         ]),
     );
-    let mut item = Definition::from_script("TIT2", "Turning throw item", "#strict")
-        .expect("item compiles");
+    let mut item =
+        Definition::from_script("TIT2", "Turning throw item", "#strict").expect("item compiles");
     item.set_collectible(true);
 
     let mut engine = Engine::with_seed(120);
@@ -1559,7 +1556,7 @@ protected func StartThrow()
             .local_vars
             .get("throw_saw_turn"),
         Some(&Value::Int(1)),
-            "SetDir's TurnAction completes before Throw's StartCall"
+        "SetDir's TurnAction completes before Throw's StartCall"
     );
     assert_eq!(
         engine
@@ -1607,11 +1604,11 @@ protected func Departure(pContainer)
         Some("Walk".to_string()),
         HashMap::from([
             (
-                    "Walk".to_string(),
+                "Walk".to_string(),
                 ActionSpec::default().with_procedure("WALK"),
             ),
             (
-                    "Throw".to_string(),
+                "Throw".to_string(),
                 ActionSpec::default().with_procedure("THROW"),
             ),
         ]),
@@ -1661,7 +1658,7 @@ protected func Departure(pContainer)
     assert_eq!(
         item.state.local_vars.get("throw_order"),
         Some(&Value::Int(123)),
-            "BoundsCheck ContactTop runs before Ejection and Departure"
+        "BoundsCheck ContactTop runs before Ejection and Departure"
     );
 }
 
@@ -1696,7 +1693,7 @@ fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
     ]);
     let target_index = engine.find_object_index(target).expect("target exists");
     engine.objects[target_index].state.local_vars.insert(
-            "reject_contents_actor".to_string(),
+        "reject_contents_actor".to_string(),
         object_reference_value(actor),
     );
     engine.objects[actor_index]
@@ -1717,27 +1714,27 @@ fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
     assert_eq!(
         actor_state.local_vars.get("reject_contents_seen"),
         Some(&Value::Int(1)),
-            "RejectContents runs inside nested ExecuteCommand"
+        "RejectContents runs inside nested ExecuteCommand"
     );
     assert_eq!(
         actor_state.local_vars.get("menu_after_nested"),
         Some(&Value::Int(6)),
-            "GetMenu observes C4MN_Activate before ExecuteCommand returns"
+        "GetMenu observes C4MN_Activate before ExecuteCommand returns"
     );
     assert_eq!(
         actor_state.local_vars.get("menu_selection_after_nested"),
         Some(&Value::Int(0)),
-            "the activate menu has already refilled and selected its first row"
+        "the activate menu has already refilled and selected its first row"
     );
     assert_eq!(
         actor_state.local_vars.get("menu_during_value"),
         Some(&Value::Int(6)),
-            "CalcValue sees the already-installed Activate menu during refill"
+        "CalcValue sees the already-installed Activate menu during refill"
     );
     assert_eq!(
         actor_state.local_vars.get("menu_selection_during_value"),
         Some(&Value::Int(-1)),
-            "selection adjustment stays frozen until the full refill completes"
+        "selection adjustment stays frozen until the full refill completes"
     );
     let menu = actor_state
         .menu
@@ -1755,7 +1752,7 @@ fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
     );
     assert!(
         menu.items.iter().any(|entry| entry.item_id == "NITM"),
-            "an item entered after the iterator's current row is included in the same refill"
+        "an item entered after the iterator's current row is included in the same refill"
     );
     assert_eq!(
         engine.objects[actor_index]
@@ -1763,7 +1760,7 @@ fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
             .snapshot()
             .command_names(),
         ["Put"],
-            "the nested Throw finished without disturbing the outer Put"
+        "the nested Throw finished without disturbing the outer Put"
     );
 }
 
@@ -1822,7 +1819,7 @@ fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double
                 .try_object_com_put(actor, target, item)
                 .expect("ObjectComPut attempt executes"),
             should_drop,
-                "LastComDownDouble={down_double}"
+            "LastComDownDouble={down_double}"
         );
 
         let actor_index = engine.find_object_index(actor).expect("actor remains");
@@ -1836,12 +1833,12 @@ fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double
                     engine.objects[actor_index].state.position.x + 8,
                     engine.objects[actor_index].state.position.y + 6,
                 ),
-                    "drop uses the live actor/item shapes for its exit position"
+                "drop uses the live actor/item shapes for its exit position"
             );
             assert_eq!(
                 engine.objects[item_index].fixed_velocity,
                 FixedVec2::new(force, C4Fixed::ZERO),
-                    "rightward drop applies the physical throw force"
+                "rightward drop applies the physical throw force"
             );
             assert_eq!(engine.objects[actor_index].state.no_collect_delay, 2);
             assert_eq!(engine.objects[actor_index].state.action.name, "Walk");
@@ -1851,7 +1848,7 @@ fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double
                     .local_vars
                     .get("departure_seen"),
                 Some(&Value::Int(1)),
-                    "the drop runs the item's Departure callback"
+                "the drop runs the item's Departure callback"
             );
         } else {
             assert_eq!(engine.objects[item_index].state.container, Some(actor));
@@ -1863,7 +1860,7 @@ fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double
                     .local_vars
                     .get("departure_seen"),
                 None,
-                    "a disarmed failed put must not begin the drop callback sequence"
+                "a disarmed failed put must not begin the drop callback sequence"
             );
         }
     }
@@ -1896,7 +1893,7 @@ fn empty_contained_throw_and_drop_open_the_activate_menu_before_finishing() {
         assert_eq!(menu.refill_object, Some(target));
         assert!(
             engine.objects[actor_index].commands.snapshot().is_empty(),
-                "{command:?} finishes after opening the menu"
+            "{command:?} finishes after opening the menu"
         );
     }
 }
@@ -1905,8 +1902,8 @@ fn empty_contained_throw_and_drop_open_the_activate_menu_before_finishing() {
 fn empty_pushing_throw_and_drop_open_get_only_for_grab_get_targets() {
     for command in [CommandId::Throw, CommandId::Drop] {
         let mut engine = put_fixture_engine();
-        let mut target_definition = Definition::from_script("GETT", "Get target", "#strict")
-            .expect("get target compiles");
+        let mut target_definition =
+            Definition::from_script("GETT", "Get target", "#strict").expect("get target compiles");
         target_definition.set_grab_put_get(GRAB_PUT_GET_GET);
         engine
             .register_definition(target_definition)

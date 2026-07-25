@@ -67,9 +67,9 @@ fn editor_engine(seed: u64) -> Engine {
             },
         ],
         texture_inventory: vec![
-                "Rough".to_string(),
-                "Smooth".to_string(),
-                "Liquid".to_string(),
+            "Rough".to_string(),
+            "Smooth".to_string(),
+            "Liquid".to_string(),
         ],
         default_material_entries: vec![("Earth".to_string(), 1), ("Water".to_string(), 3)],
         material_crossmap_entries: Vec::new(),
@@ -188,7 +188,7 @@ fn fill_uses_y_then_x_draws_and_exactly_two_draws_per_grade() {
         .collect::<Vec<_>>();
     assert_eq!(
         actual, expected,
-            "each PXS keeps the y-first coordinate pair"
+        "each PXS keeps the y-first coordinate pair"
     );
 }
 
@@ -245,8 +245,8 @@ fn static_rect_updates_the_retained_map_and_exact_to_static_restores_it() {
         .unwrap()
         .set_mode(LANDSCAPE_MODE_STATIC);
 
-        // A static radius-one brush uses Map::SetPix, not the asymmetric
-        // two-pixel CSurface8 circle used in Exact mode.
+    // A static radius-one brush uses Map::SetPix, not the asymmetric
+    // two-pixel CSurface8 circle used in Exact mode.
     let mut brush = control(EMDT_BRUSH);
     brush.mode = LANDSCAPE_MODE_STATIC;
     brush.x = 8;
@@ -262,8 +262,8 @@ fn static_rect_updates_the_retained_map_and_exact_to_static_restores_it() {
     assert_eq!(retained.index_at(8, 8), Some(1));
     assert_eq!(retained.index_at(7, 8), Some(0));
 
-        // MapToLandscape redraws only the primitive's affected rectangle;
-        // unrelated runtime Surface8 changes outside it must survive.
+    // MapToLandscape redraws only the primitive's affected rectangle;
+    // unrelated runtime Surface8 changes outside it must survive.
     engine
         .landscape
         .as_mut()
@@ -360,7 +360,7 @@ fn static_draw_marks_and_saves_map_bmp_with_store_map_palette_colors() {
         .expect("changed map saves"));
     assert!(
         engine.landscape().unwrap().map_changed(),
-            "save does not clear the gate"
+        "save does not clear the gate"
     );
 
     let root = clonk_resources::Group::from_memory(
@@ -495,7 +495,7 @@ fn runtime_texmap_save_gates_creates_and_mutates_material_child() {
     assert_eq!(material.read_file("TexMap.txt").unwrap(), expected);
     assert!(
         engine.landscape().unwrap().texture_map_entries_added(),
-            "save does not clear the gate"
+        "save does not clear the gate"
     );
 
     let mut file_root = clonk_resources::MutableGroup::new("Scenario.c4s");

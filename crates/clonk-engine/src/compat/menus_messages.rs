@@ -338,7 +338,9 @@ pub(crate) fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     // Object menu: validate the command object (C4Script.cpp:1433-1436);
     // no command object is the scenario-script-callback form.
     if let Some(command_object) = command_object {
-        let command_present = with_host_context(false, |context| context.object_status_present(command_object));
+        let command_present = with_host_context(false, |context| {
+            context.object_status_present(command_object)
+        });
         if !command_present {
             return Ok(Value::Bool(false));
         }
@@ -639,52 +641,55 @@ pub(crate) fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         def_description,
         static_components,
         component_script,
-    ) = with_host_context((None, None, String::new(), String::new(), Vec::new(), None), |context| {
-        // pDef = C4Id2Def(idItem), falling back to the menu object's own
-        // def (C4Script.cpp:1488-1489).
-        let item_definition_id = (item_id_raw != 0).then(|| stored_item_id.clone());
-        let item_metadata = item_definition_id
-            .as_deref()
-            .and_then(|id| context.definition_metadata(id));
-        let presentation_definition_id = item_metadata
-            .and(item_definition_id.clone())
-            .or_else(|| context.object_effective_definition_id(target));
-        let def_name = presentation_definition_id
-            .as_deref()
-            .and_then(|id| context.definition_metadata(id))
-            .map(|metadata| metadata.name.clone())
-            .unwrap_or_default();
-        let def_description = presentation_definition_id
-            .as_deref()
-            .and_then(|id| context.world.definition_description(id))
-            .unwrap_or_default()
-            .to_string();
-        let static_components = item_metadata
-            .map(|metadata| {
-                metadata
-                    .components
-                    .iter()
-                    .map(|(definition_id, count)| crate::ObjectMenuComponent {
-                        definition_id: definition_id.clone(),
-                        count: *count,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let component_script = item_definition_id
-            .as_deref()
-            .filter(|_| item_metadata.is_some())
-            .and_then(|id| context.world.definition_script(id))
-            .cloned();
-        (
-            context.object_menu(target),
-            presentation_definition_id,
-            def_name,
-            def_description,
-            static_components,
-            component_script,
-        )
-    });
+    ) = with_host_context(
+        (None, None, String::new(), String::new(), Vec::new(), None),
+        |context| {
+            // pDef = C4Id2Def(idItem), falling back to the menu object's own
+            // def (C4Script.cpp:1488-1489).
+            let item_definition_id = (item_id_raw != 0).then(|| stored_item_id.clone());
+            let item_metadata = item_definition_id
+                .as_deref()
+                .and_then(|id| context.definition_metadata(id));
+            let presentation_definition_id = item_metadata
+                .and(item_definition_id.clone())
+                .or_else(|| context.object_effective_definition_id(target));
+            let def_name = presentation_definition_id
+                .as_deref()
+                .and_then(|id| context.definition_metadata(id))
+                .map(|metadata| metadata.name.clone())
+                .unwrap_or_default();
+            let def_description = presentation_definition_id
+                .as_deref()
+                .and_then(|id| context.world.definition_description(id))
+                .unwrap_or_default()
+                .to_string();
+            let static_components = item_metadata
+                .map(|metadata| {
+                    metadata
+                        .components
+                        .iter()
+                        .map(|(definition_id, count)| crate::ObjectMenuComponent {
+                            definition_id: definition_id.clone(),
+                            count: *count,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let component_script = item_definition_id
+                .as_deref()
+                .filter(|_| item_metadata.is_some())
+                .and_then(|id| context.world.definition_script(id))
+                .cloned();
+            (
+                context.object_menu(target),
+                presentation_definition_id,
+                def_name,
+                def_description,
+                static_components,
+                component_script,
+            )
+        },
+    );
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1475)
     };
@@ -1086,9 +1091,7 @@ pub(crate) fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError>
     let Some(target) = target else {
         return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1739)
     };
-    let menu = with_host_context(None, |context| {
-        context.object_menu(target)
-    });
+    let menu = with_host_context(None, |context| context.object_menu(target));
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1739)
     };
@@ -1327,10 +1330,13 @@ pub(crate) fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         portrait,
     };
 
-    try_with_host_context_mut("CustomMessage requires an active engine context", |context| {
-        context.register_message(MessageCommand::Add(spec));
-        Ok(Value::Bool(true))
-    })
+    try_with_host_context_mut(
+        "CustomMessage requires an active engine context",
+        |context| {
+            context.register_message(MessageCommand::Add(spec));
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 enum LogLevel {
@@ -1478,7 +1484,6 @@ pub(crate) fn message(args: &[Value]) -> Result<Value, RuntimeError> {
     let format_args = if args.len() > 2 { &args[2..] } else { &[] };
 
     try_with_host_context_mut("Message requires an active engine context", |context| {
-
         let fallback = message_fallback_spec(
             context,
             "Message",
@@ -1544,45 +1549,47 @@ pub(crate) fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let format_args = if args.len() > 3 { &args[3..] } else { &[] };
 
-    try_with_host_context_mut("PlayerMessage requires an active engine context", |context| {
-
-        let kind = if target_raw.is_some() {
-            MessageKind::TargetPlayer
-        } else {
-            MessageKind::GlobalPlayer
-        };
-        let fallback = message_fallback_spec(
-            context,
-            "PlayerMessage",
-            &raw_message,
-            format_args,
-            kind,
-            target_raw.map(ObjectId::new),
-            Some(player_id),
-        );
-        if let Some(sound) = extract_speech_segment(&raw_message) {
-            let speech_target = target_raw
-                .map(ObjectId::new)
-                .or(context.script_object_context);
-            let (queued, pending_fallback) = context.audio_mut().try_play_speech(
-                &sound,
-                speech_target,
-                fallback.as_ref().ok().cloned(),
+    try_with_host_context_mut(
+        "PlayerMessage requires an active engine context",
+        |context| {
+            let kind = if target_raw.is_some() {
+                MessageKind::TargetPlayer
+            } else {
+                MessageKind::GlobalPlayer
+            };
+            let fallback = message_fallback_spec(
+                context,
+                "PlayerMessage",
+                &raw_message,
+                format_args,
+                kind,
+                target_raw.map(ObjectId::new),
+                Some(player_id),
             );
-            if queued {
-                if let Some(pending_fallback) = pending_fallback {
-                    context.register_message(MessageCommand::PendingSpeech(pending_fallback));
+            if let Some(sound) = extract_speech_segment(&raw_message) {
+                let speech_target = target_raw
+                    .map(ObjectId::new)
+                    .or(context.script_object_context);
+                let (queued, pending_fallback) = context.audio_mut().try_play_speech(
+                    &sound,
+                    speech_target,
+                    fallback.as_ref().ok().cloned(),
+                );
+                if queued {
+                    if let Some(pending_fallback) = pending_fallback {
+                        context.register_message(MessageCommand::PendingSpeech(pending_fallback));
+                    }
+                    return Ok(Value::Bool(true));
                 }
-                return Ok(Value::Bool(true));
             }
-        }
 
-        // FnPlayerMessage carries iPlayer into C4GM_*Player verbatim;
-        // unlike FnPlrMessage, it never gates through ValidPlr.
-        context.register_message(MessageCommand::Add(fallback?));
+            // FnPlayerMessage carries iPlayer into C4GM_*Player verbatim;
+            // unlike FnPlrMessage, it never gates through ValidPlr.
+            context.register_message(MessageCommand::Add(fallback?));
 
-        Ok(Value::Bool(true))
-    })
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 pub(crate) fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -1607,7 +1614,6 @@ pub(crate) fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
     let formatted = format_script_string("AddMessage", &raw_message, format_args)?;
 
     try_with_host_context_mut("AddMessage requires an active engine context", |context| {
-
         let text = formatted.clone();
         if !text.trim().is_empty() {
             let spec = MessageSpec {
@@ -1650,7 +1656,6 @@ pub(crate) fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
     let format_args = if args.len() > 2 { &args[2..] } else { &[] };
 
     try_with_host_context_mut("PlrMessage requires an active engine context", |context| {
-
         let resolved_player = resolve_target_player(context, player_id);
 
         let fallback = message_fallback_spec(

@@ -701,10 +701,18 @@ impl Engine {
         self.clear_fair_crew_physicals();
         self.active_message_board_input = None;
         self.host_requests.pending_game_goal_menu_requests.clear();
-        self.host_requests.network_target_fps_requests.borrow_mut().clear();
-        self.host_requests.viewport_presentation_requests.borrow_mut().clear();
+        self.host_requests
+            .network_target_fps_requests
+            .borrow_mut()
+            .clear();
+        self.host_requests
+            .viewport_presentation_requests
+            .borrow_mut()
+            .clear();
         self.film_viewport_available = false;
-        self.host_requests.player_info_league_progress_updates.clear();
+        self.host_requests
+            .player_info_league_progress_updates
+            .clear();
         for object in &state.objects {
             if !self
                 .definitions
@@ -3336,9 +3344,11 @@ impl Engine {
         synchronize_hostility: bool,
     ) -> Result<(), EngineError> {
         if let Some(generated_team) = generated_team {
-            self.team_state.team_last_team_id = self.team_state.team_last_team_id.max(generated_team.id);
+            self.team_state.team_last_team_id =
+                self.team_state.team_last_team_id.max(generated_team.id);
             if !self
-                .team_state.teams
+                .team_state
+                .teams
                 .iter()
                 .any(|existing| existing.id == generated_team.id)
             {
@@ -3554,7 +3564,11 @@ impl Engine {
         });
     }
 
-    pub(crate) fn set_linked_crew_info_physical(&mut self, link: CrewInfoLink, physical: PhysicalInfo) {
+    pub(crate) fn set_linked_crew_info_physical(
+        &mut self,
+        link: CrewInfoLink,
+        physical: PhysicalInfo,
+    ) {
         if let Some(entry) = self
             .crew_rosters
             .get_mut(&link.player_id)
@@ -3682,7 +3696,8 @@ impl Engine {
                     let data = data.map(legacy_c_string_bytes);
                     Rc::make_mut(&mut self.player_info_league_progress_data)
                         .insert(player_info_id, data.clone());
-                    self.host_requests.player_info_league_progress_updates
+                    self.host_requests
+                        .player_info_league_progress_updates
                         .push((player_info_id, data));
                 }
                 PlayerCommand::SetRestoreInfos { what } => {
@@ -3721,7 +3736,8 @@ impl Engine {
                     open_menu,
                 } => {
                     let (goals, fulfilled_goals) = self.evaluate_goals_for_player(player_id)?;
-                    self.host_requests.pending_game_goal_menu_requests
+                    self.host_requests
+                        .pending_game_goal_menu_requests
                         .push(GameGoalMenuRequest {
                             player: player_id,
                             goals,
@@ -4081,12 +4097,13 @@ impl Engine {
                     }
                 }
                 PlayerCommand::Remove { player_id } => {
-                    self.host_requests.pending_remove_player_controls
-                        .push(RemovePlayerControlData {
+                    self.host_requests.pending_remove_player_controls.push(
+                        RemovePlayerControlData {
                             player: player_id,
                             disconnected: false,
                             by_client: 0,
-                        });
+                        },
+                    );
                 }
                 PlayerCommand::SetFogOfWar { player_id, enabled } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
@@ -4152,7 +4169,8 @@ impl Engine {
             None => return,
         };
         let captain_id = self
-            .team_state.teams
+            .team_state
+            .teams
             .iter()
             .find(|candidate| candidate.id == team)
             .and_then(|team| team.player_ids.first().copied())
@@ -4167,7 +4185,8 @@ impl Engine {
             })
             .or_else(|| {
                 let has_player_info_order = self
-                    .team_state.teams
+                    .team_state
+                    .teams
                     .iter()
                     .find(|candidate| candidate.id == team)
                     .is_some_and(|team| !team.player_ids.is_empty());
@@ -4381,7 +4400,11 @@ impl Engine {
         });
     }
 
-    pub(crate) fn resolve_command_targets(&self, owner: i32, target: &CrewCommandTarget) -> Vec<ObjectId> {
+    pub(crate) fn resolve_command_targets(
+        &self,
+        owner: i32,
+        target: &CrewCommandTarget,
+    ) -> Vec<ObjectId> {
         match target {
             CrewCommandTarget::Cursor => self.crew_cursor(owner).into_iter().collect(),
             CrewCommandTarget::Selection => self.selected_crew(owner),
@@ -4686,5 +4709,4 @@ impl Engine {
             self.update_sector_for_index(idx);
         }
     }
-
 }

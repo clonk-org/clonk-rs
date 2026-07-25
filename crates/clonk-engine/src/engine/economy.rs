@@ -2001,7 +2001,10 @@ impl Engine {
     }
 
     /// Engine-owned `C4Object::AssignRemoval(false)`.
-    pub(crate) fn assign_object_removal(&mut self, object_id: ObjectId) -> Result<bool, EngineError> {
+    pub(crate) fn assign_object_removal(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
         self.assign_object_removal_with_contents(object_id, false)
     }
 
@@ -2243,7 +2246,10 @@ impl Engine {
         Ok((definition_id, action_library))
     }
 
-    pub(crate) fn shared_action_library_for(&self, definition_id: &str) -> Option<SharedActionLibrary> {
+    pub(crate) fn shared_action_library_for(
+        &self,
+        definition_id: &str,
+    ) -> Option<SharedActionLibrary> {
         self.definition_metadata_table()
             .get(definition_id)
             .map(|metadata| metadata.action_library.clone())
@@ -2339,7 +2345,11 @@ impl Engine {
     /// Full engine-owned C4Object::ChangeDef lifecycle. This is required by
     /// native BurnTurnTo; script-host changes have already executed the same
     /// callbacks synchronously and use `apply_change_object_def` at fold.
-    pub(crate) fn change_object_def_live(&mut self, idx: usize, new_def: &str) -> Result<bool, EngineError> {
+    pub(crate) fn change_object_def_live(
+        &mut self,
+        idx: usize,
+        new_def: &str,
+    ) -> Result<bool, EngineError> {
         if !self.definitions.contains_key(new_def) {
             return Ok(false);
         }
@@ -2437,7 +2447,13 @@ impl Engine {
     /// `C4Object::Fling` (C4Object.cpp:1639-1652) without fAddSpeed: trace the
     /// causing player, try the Tumble action, then Jump (ObjectActionTumble/Jump,
     /// C4ObjectCom.cpp:48-80), else set the velocity directly.
-    pub(crate) fn fling_object(&mut self, idx: usize, txdir: C4Fixed, tydir: C4Fixed, caused_by: i32) {
+    pub(crate) fn fling_object(
+        &mut self,
+        idx: usize,
+        txdir: C4Fixed,
+        tydir: C4Fixed,
+        caused_by: i32,
+    ) {
         // C4Object::Fling attributes indirect kills before changing the
         // action: living objects update their kill trace; an uncontained
         // non-living object takes the causing player as Controller
@@ -3430,5 +3446,4 @@ impl Engine {
             .and_then(|id| self.materials.get_by_id(id))
             .map(|material| material.name().to_string())
     }
-
 }

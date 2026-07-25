@@ -4,8 +4,8 @@ fn speed_engine() -> Engine {
     let mut engine = Engine::new();
     engine
         .load_scenario_script_with_convention(
-                "SetGameSpeed.c",
-                r#"
+            "SetGameSpeed.c",
+            r#"
 #strict
 func SetSpeed(int speed) { return SetGameSpeed(speed); }
 func ResetSpeed() { return SetGameSpeed(); }

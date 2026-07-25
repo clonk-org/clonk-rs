@@ -39,7 +39,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         (self.0 >> 33) as u32
     }
 
@@ -413,7 +416,10 @@ fn main() {
     println!("p50              {:?}", percentile(&sorted, 0.50));
     println!("p95              {:?}", percentile(&sorted, 0.95));
     println!("p99              {:?}", percentile(&sorted, 0.99));
-    println!("max              {:?}", sorted.last().copied().unwrap_or_default());
+    println!(
+        "max              {:?}",
+        sorted.last().copied().unwrap_or_default()
+    );
     println!(
         "over one period  {stalls} ({:.1}%)",
         stalls as f64 / latencies.len().max(1) as f64 * 100.0

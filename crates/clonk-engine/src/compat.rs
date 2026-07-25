@@ -134,7 +134,12 @@ fn try_with_host_context<T>(
     missing: &str,
     f: impl FnOnce(&EffectHostContext) -> Result<T, RuntimeError>,
 ) -> Result<T, RuntimeError> {
-    HOST_CONTEXT.with(|cell| f(cell.borrow().as_ref().ok_or_else(|| RuntimeError::new(missing))?))
+    HOST_CONTEXT.with(|cell| {
+        f(cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new(missing))?)
+    })
 }
 
 /// `try_with_host_context` for the wrappers that mutate engine state.
@@ -142,8 +147,12 @@ fn try_with_host_context_mut<T>(
     missing: &str,
     f: impl FnOnce(&mut EffectHostContext) -> Result<T, RuntimeError>,
 ) -> Result<T, RuntimeError> {
-    HOST_CONTEXT
-        .with(|cell| f(cell.borrow_mut().as_mut().ok_or_else(|| RuntimeError::new(missing))?))
+    HOST_CONTEXT.with(|cell| {
+        f(cell
+            .borrow_mut()
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new(missing))?)
+    })
 }
 
 #[cfg(test)]

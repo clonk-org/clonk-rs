@@ -18,8 +18,7 @@ fn install_physical_actions(definition: &mut Definition, actions: Vec<(&str, Act
 }
 
 #[test]
-fn phase_call_keeps_stale_function_owner_but_uses_changed_def_act_map(
-) -> Result<(), EngineError> {
+fn phase_call_keeps_stale_function_owner_but_uses_changed_def_act_map() -> Result<(), EngineError> {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut old_hooks = DebuggerHooks::new();
     {
@@ -41,9 +40,9 @@ fn phase_call_keeps_stale_function_owner_but_uses_changed_def_act_map(
     }
 
     let mut old = Definition::from_script(
-            "POLD",
-            "Old phase owner",
-            r#"#strict
+        "POLD",
+        "Old phase owner",
+        r#"#strict
 local marker;
 protected func OnPhase()
 {
@@ -56,9 +55,9 @@ protected func OnPhase()
     old.set_c4_callback_convention(true);
     old.set_debugger_hooks(old_hooks);
     let source = ActionSpec::default()
-            // ChangeDef's mandatory SetAction(ActIdle) resets the live
-            // phase to zero. A zero stale Length proves ExecAction still
-            // performs the old comparison and numeric NextAction afterward.
+        // ChangeDef's mandatory SetAction(ActIdle) resets the live
+        // phase to zero. A zero stale Length proves ExecAction still
+        // performs the old comparison and numeric NextAction afterward.
         .with_length(0)
         .with_delay(1)
         .with_phase_call("OnPhase")
@@ -69,9 +68,9 @@ protected func OnPhase()
     );
 
     let mut new = Definition::from_script(
-            "PNW1",
-            "New phase target",
-            r#"#strict
+        "PNW1",
+        "New phase target",
+        r#"#strict
 local marker;
 protected func OnPhase() { marker = 2; return 1; }
 protected func NewZeroStart() { marker = marker * 10 + 4; return 1; }
@@ -84,11 +83,11 @@ protected func NewOneStart() { marker = marker * 10 + 3; return 1; }
         &mut new,
         vec![
             (
-                    "NewZero",
+                "NewZero",
                 ActionSpec::default().with_start_call("NewZeroStart"),
             ),
             (
-                    "NewOne",
+                "NewOne",
                 ActionSpec::default().with_start_call("NewOneStart"),
             ),
         ],
@@ -115,7 +114,7 @@ protected func NewOneStart() { marker = marker * 10 + 3; return 1; }
             engine.objects[index].state.action.act_map_index,
         ),
         ("NewOne", Some(1)),
-            "stale numeric NextAction resolves in the changed definition",
+        "stale numeric NextAction resolves in the changed definition",
     );
     assert_eq!(
         engine.objects[index].state.local_vars.get("marker"),
@@ -130,8 +129,7 @@ protected func NewOneStart() { marker = marker * 10 + 3; return 1; }
 }
 
 #[test]
-fn removed_phase_receiver_still_runs_phase_end_start_before_stopping() -> Result<(), EngineError>
-{
+fn removed_phase_receiver_still_runs_phase_end_start_before_stopping() -> Result<(), EngineError> {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut hooks = DebuggerHooks::new();
     {
@@ -143,9 +141,9 @@ fn removed_phase_receiver_still_runs_phase_end_start_before_stopping() -> Result
         });
     }
     let mut definition = Definition::from_script(
-            "PDEL",
-            "Deleted phase receiver",
-            r#"#strict
+        "PDEL",
+        "Deleted phase receiver",
+        r#"#strict
 protected func OnPhase() { RemoveObject(); return 1; }
 protected func OnStart() { return 1; }
 protected func OnEnd() { return 1; }
@@ -182,7 +180,7 @@ protected func OnEnd() { return 1; }
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         ["OnPhase", "OnStart"],
-            "SetAction starts the target even with Status=0, then suppresses old EndCall",
+        "SetAction starts the target even with Status=0, then suppresses old EndCall",
     );
     Ok(())
 }
@@ -191,9 +189,9 @@ protected func OnEnd() { return 1; }
 fn script_set_action_coerces_incomplete_objects_to_act_idle_and_skips_start_call(
 ) -> Result<(), EngineError> {
     let mut definition = Definition::from_script(
-            "PINC",
-            "Partial action gate",
-            r#"#strict
+        "PINC",
+        "Partial action gate",
+        r#"#strict
 local walk_started, old_aborted, aborted_phase, abort_saw_action;
 public func Probe()
 {
@@ -233,14 +231,14 @@ protected func OldAborted(phase)
             .with_loaded(true),
     )?;
     let index = engine.find_object_index(object).expect("object exists");
-        // Establish a state that can only arise after an already-active
-        // object loses construction. The call below is the seam under test.
+    // Establish a state that can only arise after an already-active
+    // object loses construction. The call below is the seam under test.
     engine.objects[index].state.construction = FULL_CON / 2;
 
     assert_eq!(
         engine.call_object_function(index, "Probe", Vec::new())?,
         Value::Bool(true),
-            "the requested slot is valid, so SetAction succeeds despite coercion",
+        "the requested slot is valid, so SetAction succeeds despite coercion",
     );
 
     let object = &engine.objects[index].state;
@@ -254,7 +252,7 @@ protected func OldAborted(phase)
     assert_eq!(
         object.local_vars.get("abort_saw_action"),
         Some(&Value::String("Idle".into())),
-            "AbortCall runs after Action.Act has become ActIdle",
+        "AbortCall runs after Action.Act has become ActIdle",
     );
     Ok(())
 }
@@ -262,9 +260,9 @@ protected func OldAborted(phase)
 #[test]
 fn natural_phase_end_refreshes_ocf_before_start_and_end_callbacks() -> Result<(), EngineError> {
     let mut definition = Definition::from_script(
-            "POCF",
-            "Natural action OCF refresh",
-            r#"#strict
+        "POCF",
+        "Natural action OCF refresh",
+        r#"#strict
 local callback_order, start_saw_fight_ready, end_saw_fight_ready;
 protected func TargetStarted()
 {
@@ -286,7 +284,7 @@ protected func SourceEnded()
         &mut definition,
         vec![
             (
-                    "Source",
+                "Source",
                 ActionSpec::default()
                     .with_length(1)
                     .with_delay(1)
@@ -295,7 +293,7 @@ protected func SourceEnded()
                     .with_next_index(1),
             ),
             (
-                    "Target",
+                "Target",
                 ActionSpec::default().with_start_call("TargetStarted"),
             ),
         ],
@@ -331,7 +329,7 @@ protected func SourceEnded()
     assert_eq!(
         state.local_vars.get("end_saw_fight_ready"),
         Some(&Value::Int(1)),
-            "SetOCF runs after action selection and before both callbacks",
+        "SetOCF runs after action selection and before both callbacks",
     );
     Ok(())
 }
