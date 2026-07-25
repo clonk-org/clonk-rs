@@ -385,3 +385,19 @@ state extraction remains queued behind wave 2.
     method is shadowed by a trait method in scope, rustc reports the *arity*
     mismatch instead of E0624, so the loop must consume every error class, not
     just E0616/E0624/E0603/E0451.
+- lib.rs domain-type split landed: the `Object` cluster (ObjectState,
+  ObjectUpdate, Object + its 1,743-line impl, SpawnConfig, ObjectSnapshot;
+  5,022 lines) and the `Definition` cluster (DefinitionSpriteImage through the
+  4,556-line `impl Definition`; 4,989 lines) left the crate root for
+  `object.rs` and `definition.rs`. lib.rs 22,690 → 12,682 lines.
+
+  Visibility note: items private at the *crate root* are already visible
+  crate-wide (every module is a descendant of the root), so `pub(crate)` on the
+  274 promoted declarations preserves their scope exactly — the same
+  scope-preservation argument as `pub(in crate::<mod>)` for a non-root split.
+
+  Trap worth remembering: a `#[cfg(test)] #[path = "lib_tests/..."] mod X;`
+  declaration sat inside the moved line range, so X became `object::X` and one
+  test id changed — count unchanged, so only the byte-identical id-list check
+  caught it. Always re-check `nextest list` output, not just its line count,
+  and keep test-module declarations in the parent when slicing by line range.
