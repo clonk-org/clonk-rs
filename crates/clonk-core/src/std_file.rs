@@ -211,7 +211,9 @@ pub fn make_temp_filename(prefix: &str) -> io::Result<PathBuf> {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos(),
-        SmallRng::from_entropy().next_u64()
+        SmallRng::try_from_os_rng()
+            .map_err(io::Error::other)?
+            .next_u64()
     );
     temp.push(unique);
     Ok(temp)

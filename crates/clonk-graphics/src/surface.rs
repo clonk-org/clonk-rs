@@ -2583,7 +2583,7 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(0x5EED);
         for y in 0..4u32 {
             for x in 0..4u32 {
-                let color = Color::new(rng.gen(), rng.gen(), rng.gen(), 255);
+                let color = Color::new(rng.random(), rng.random(), rng.random(), 255);
                 src.set_pixel(x, y, color).unwrap();
             }
         }
