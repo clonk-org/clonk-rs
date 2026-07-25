@@ -1,5 +1,0 @@
-NotEnoughResources=!
-IsBuilding=!
-RocketIsStillThere=!
-ocketBuildingInProcess=!
-NoRocketAvailable=!

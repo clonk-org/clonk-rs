@@ -23,4 +23,6 @@ tracing = "0.1"
 [dev-dependencies]
 tempfile = "3"
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading"] }
+# `CreateEventW` takes a `*const SECURITY_ATTRIBUTES`, so windows-sys only emits
+# it when `Win32_Security` is enabled alongside the threading module.
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }

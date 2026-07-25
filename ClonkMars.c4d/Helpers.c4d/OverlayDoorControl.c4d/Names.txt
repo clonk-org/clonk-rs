@@ -1,2 +1,0 @@
-DE:Eingangssteuerung
-US:Door control

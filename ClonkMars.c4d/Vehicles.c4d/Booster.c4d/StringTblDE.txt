@@ -1,3 +1,0 @@
-rocketStarts=Eine Rakete vom Spieler
-rocketStarts2=Startet in
-seconds=Sekunden

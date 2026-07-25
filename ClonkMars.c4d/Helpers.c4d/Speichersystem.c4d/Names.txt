@@ -1,2 +1,0 @@
-DE:Speichersystem
-US:Storage System

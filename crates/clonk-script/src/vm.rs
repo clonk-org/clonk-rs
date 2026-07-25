@@ -7544,9 +7544,9 @@ impl<'a> Vm<'a> {
             let script_wants_reference = function
                 .and_then(|function| function.params.get(index))
                 .is_some_and(|param| param.is_reference)
-                || name.zip(self.reference_parameter_probe).is_some_and(
-                    |(name, probe)| probe(name, index),
-                );
+                || name
+                    .zip(self.reference_parameter_probe)
+                    .is_some_and(|(name, probe)| probe(name, index));
             let host_wants_reference = function.is_none()
                 && name
                     .and_then(|name| self.host_reference_function(name))

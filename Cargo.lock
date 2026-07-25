@@ -1079,6 +1079,7 @@ dependencies = [
  "clonk-core",
  "tempfile",
  "thiserror 1.0.69",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5615,6 +5616,7 @@ dependencies = [
  "clonk-engine",
  "clonk-logging",
  "clonk-resources",
+ "image",
  "tempfile",
  "tracing",
  "walkdir",

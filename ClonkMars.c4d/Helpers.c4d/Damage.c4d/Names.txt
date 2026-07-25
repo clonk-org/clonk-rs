@@ -1,2 +1,0 @@
-DE:Explosionssteuerung
-US:Explosion control

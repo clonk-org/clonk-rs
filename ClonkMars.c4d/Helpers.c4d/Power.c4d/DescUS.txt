@@ -1,7 +1,0 @@
-New implementation of energy.
-
-Contents:
--Energy rule
--Power line
--Include for buildings
--Wire roll

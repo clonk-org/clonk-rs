@@ -1,9 +1,0 @@
-[DefCore]
-id=DE5B
-Name=Desk
-Category=C4D_Structure
-Width=27
-Height=23
-Offset=-13,-11
-Vertices=1
-VertexY=11

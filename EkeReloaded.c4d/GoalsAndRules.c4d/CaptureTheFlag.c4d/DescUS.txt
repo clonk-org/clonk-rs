@@ -1,1 +1,0 @@
-All bunkers in the map must be conquered by swapping the flags next to the bunkers.

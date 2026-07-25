@@ -39,9 +39,9 @@ cargo xtask package
 By default, the command writes
 `target/dist/clonk-rust-<version>-<target-triple>.zip` (or the equivalent path
 beneath `CARGO_TARGET_DIR`). The archive contains the `clonk-game` launcher,
-the `clonk-app` runtime, the pinned base content, the authorized Eke Reloaded
-and ClonkMars packs, credits, and project, content, trademark, and Rust
-dependency notices. The legacy
+the `clonk-app` runtime, the pinned content submodule — base packs plus the
+authorized Eke Reloaded and ClonkMars packs — credits, and project, content,
+trademark, and Rust dependency notices. The legacy
 `c4group` update utility is optional: packaged builds run without it, while a
 copy installed alongside the game is still probed and a broken executable is
 reported before startup.
@@ -79,8 +79,8 @@ the terms collected in [`licenses/`](licenses/), including the Clonk content
 license. The trademark terms in [`TRADEMARK`](TRADEMARK) also continue to
 apply.
 
-The root-level Eke Reloaded and ClonkMars packs are redistributed under the
-specific permission and attribution terms recorded in
+The Eke Reloaded and ClonkMars packs inside the content submodule are
+redistributed under the specific permission and attribution terms recorded in
 [`THIRD_PARTY_GAME_CONTENT.md`](THIRD_PARTY_GAME_CONTENT.md), not under the
 source or general content licenses.
 

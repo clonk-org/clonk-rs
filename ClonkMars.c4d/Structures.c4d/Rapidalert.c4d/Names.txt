@@ -1,2 +1,0 @@
-DE:Frühwarnsystem
-US:Rapid Alert System

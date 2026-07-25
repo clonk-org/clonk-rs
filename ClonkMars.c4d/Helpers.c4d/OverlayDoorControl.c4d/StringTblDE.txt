@@ -1,2 +1,0 @@
-TxtFull=%s hat bereits %d Clonks!
-TxtNoPushEnter=%s passt nicht|in %s hinein.

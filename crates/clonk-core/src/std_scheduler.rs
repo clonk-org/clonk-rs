@@ -559,7 +559,10 @@ impl StdScheduler {
 #[cfg(windows)]
 fn decode_wait_index(result: u32, handle_count: usize) -> Option<usize> {
     let count = handle_count as u32;
-    if result >= WAIT_OBJECT_0 && result < WAIT_OBJECT_0 + count {
+    // `WAIT_OBJECT_0` is 0, so the lower bound of the documented
+    // `WAIT_OBJECT_0 <= result < WAIT_OBJECT_0 + count` range holds for every
+    // `u32` and is left implicit rather than written as a vacuous comparison.
+    if result < WAIT_OBJECT_0 + count {
         Some((result - WAIT_OBJECT_0) as usize)
     } else if result >= WAIT_ABANDONED_0 && result < WAIT_ABANDONED_0 + count {
         Some((result - WAIT_ABANDONED_0) as usize)

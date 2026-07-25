@@ -1,1 +1,0 @@
-RestInfo=Dein Team muss noch %d Bunker erobern.

@@ -1,2 +1,0 @@
-[Teams]
-Active=0

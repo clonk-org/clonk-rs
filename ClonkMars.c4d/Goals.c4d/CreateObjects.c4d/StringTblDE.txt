@@ -1,2 +1,0 @@
-MsgGoalFulfilled=Alle zu erschaffenden Gebäude sind gebaut!
-MsgGoalTodo=Es müssen noch %dx %s gebaut werden.

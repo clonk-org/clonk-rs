@@ -1,1 +1,0 @@
-Kann mit einem Schalter geöffnet oder geschlossen werden.

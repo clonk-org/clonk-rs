@@ -15,11 +15,30 @@ use xtask::dev_check;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-const ROOT_GAME_PACKS: [&str; 4] = [
+// The authorized classic packs ship inside the content submodule, which is the
+// engine's data root (`General.ExePath`). Packing them beside it instead would
+// leave them outside every definition and scenario search path.
+const CONTENT_GAME_PACKS: [&str; 4] = [
     "EkeReloaded.c4d",
     "EkeReloaded.c4f",
     "ClonkMars.c4d",
     "ClonkMars.c4f",
+];
+
+const MACOS_APP_NAME: &str = "Clonk Rust.app";
+const MACOS_ICON_STEM: &str = "ClonkRust";
+const MACOS_ICON_SOURCE: &str = "planet/Graphics.c4g/Logo.png";
+/// Everything the staged payload keeps outside `bin/`, relocated into
+/// `Contents/Resources` so the bundle stays self-contained.
+const MACOS_BUNDLED_RESOURCES: [&str; 8] = [
+    "planet",
+    "content",
+    "licenses",
+    "COPYING",
+    "TRADEMARK",
+    "README.md",
+    "credits.txt",
+    "THIRD_PARTY_GAME_CONTENT.md",
 ];
 
 fn main() -> Result<()> {
@@ -933,6 +952,12 @@ fn package() -> Result<()> {
             .join("licenses/RUST_THIRD_PARTY_LICENSES.txt"),
     )?;
     let package_dir = assemble_package_layout(&paths)?;
+    if paths.target_triple.contains("apple-darwin") {
+        let app_dir = assemble_macos_app_bundle(&paths, &package_dir)?;
+        let image = create_dmg(&paths, &app_dir)?;
+        tracing::info!(path = %image.display(), "packaged Rust port");
+        return Ok(());
+    }
     let archive = create_archive(&paths, &package_dir)?;
     tracing::info!(path = %archive.display(), "packaged Rust port");
     Ok(())
@@ -986,7 +1011,7 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
 
     for binary_name in ["clonk-game", "clonk-app"] {
-        let exe_name = executable_name(binary_name);
+        let exe_name = executable_name(binary_name, &paths.target_triple);
         let built_binary = paths.release_dir.join(&exe_name);
         if !built_binary.exists() {
             bail!(
@@ -1026,26 +1051,20 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
         &package_dir.join("THIRD_PARTY_GAME_CONTENT.md"),
     )?;
 
-    for pack in ROOT_GAME_PACKS {
-        let source = paths.repo_root.join(pack);
-        if !source.is_dir() {
-            bail!(
-                "required authorized game pack was not found at {}",
-                source.display()
-            );
-        }
-        let destination = package_dir.join(pack);
-        copy_tracked_directory(&paths.repo_root, Path::new(pack), &destination)?;
-        if !directory_contains_file(&destination)? {
-            bail!("required authorized game pack {pack} did not contain any tracked files");
-        }
-    }
-
     let planet_dst = package_dir.join("planet");
     copy_tracked_directory(&paths.repo_root, Path::new("planet"), &planet_dst)?;
 
     let content_dst = package_dir.join("content");
     copy_tracked_directory(&content_src, Path::new(""), &content_dst)?;
+
+    for pack in CONTENT_GAME_PACKS {
+        let destination = content_dst.join(pack);
+        if !directory_contains_file(&destination)? {
+            bail!(
+                "required authorized game pack {pack} did not reach the package; it must be tracked in the content submodule"
+            );
+        }
+    }
 
     let licenses_dst = package_dir.join("licenses");
     copy_tracked_directory(&paths.repo_root, Path::new("licenses"), &licenses_dst)?;
@@ -1066,8 +1085,259 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     Ok(package_dir)
 }
 
-fn executable_name(binary_name: &str) -> String {
-    format!("{binary_name}{}", env::consts::EXE_SUFFIX)
+/// Restructure the staged payload into a macOS application bundle.
+///
+/// `clonk-app` is the bundle executable rather than the `clonk-game` launcher:
+/// the launcher stages `System.c4g`/`Graphics.c4g` next to the bundle, which
+/// fails when the app runs from a read-only disk image. It still ships inside
+/// `Contents/MacOS` for terminal use.
+fn assemble_macos_app_bundle(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf> {
+    let app_dir = package_dir.join(MACOS_APP_NAME);
+    let contents = app_dir.join("Contents");
+    let macos_dir = contents.join("MacOS");
+    let resources = contents.join("Resources");
+    for directory in [&macos_dir, &resources] {
+        fs::create_dir_all(directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+    }
+
+    let bin_dir = package_dir.join("bin");
+    for binary_name in ["clonk-game", "clonk-app"] {
+        let staged = bin_dir.join(binary_name);
+        let bundled = macos_dir.join(binary_name);
+        fs::rename(&staged, &bundled).with_context(|| {
+            format!(
+                "failed to move {} into {}",
+                staged.display(),
+                bundled.display()
+            )
+        })?;
+        set_executable(&bundled)?;
+    }
+    fs::remove_dir_all(&bin_dir)
+        .with_context(|| format!("failed to remove {}", bin_dir.display()))?;
+
+    for entry in MACOS_BUNDLED_RESOURCES {
+        let staged = package_dir.join(entry);
+        let bundled = resources.join(entry);
+        fs::rename(&staged, &bundled).with_context(|| {
+            format!(
+                "failed to move {} into {}",
+                staged.display(),
+                bundled.display()
+            )
+        })?;
+    }
+
+    write_macos_icon(paths, &resources.join(format!("{MACOS_ICON_STEM}.icns")))?;
+    fs::write(contents.join("Info.plist"), macos_info_plist())
+        .with_context(|| format!("failed to write {}", contents.join("Info.plist").display()))?;
+    fs::write(contents.join("PkgInfo"), b"APPL????")
+        .with_context(|| format!("failed to write {}", contents.join("PkgInfo").display()))?;
+
+    sign_macos_bundle(&app_dir, &macos_dir)?;
+
+    Ok(app_dir)
+}
+
+/// Ad-hoc sign the finished bundle and prove the signature validates.
+///
+/// The linker already ad-hoc signs each executable, but a `.app` whose
+/// `Contents/_CodeSignature` is absent fails validation as a bundle, and macOS
+/// reports a quarantined copy of it as "damaged and can't be opened" rather
+/// than as merely unsigned. Signing seals `Info.plist` and `Resources`.
+///
+/// This is not a substitute for Developer ID signing and notarization: the
+/// download still needs the quarantine flag cleared before it will launch.
+fn sign_macos_bundle(app_dir: &Path, macos_dir: &Path) -> Result<()> {
+    // The launcher is nested code and must be signed before the bundle that
+    // seals it; `clonk-app` is the bundle executable and is covered below.
+    codesign(&["--force", "--sign", "-"], &macos_dir.join("clonk-game"))?;
+    codesign(&["--force", "--sign", "-"], app_dir)?;
+    // Packaging must fail loudly rather than ship an unopenable bundle.
+    codesign(&["--verify", "--deep", "--strict"], app_dir)
+        .context("the packaged application bundle does not carry a valid signature")?;
+    Ok(())
+}
+
+fn codesign(arguments: &[&str], target: &Path) -> Result<()> {
+    let status = Command::new("codesign")
+        .args(arguments)
+        .arg(target)
+        .status()
+        .with_context(|| format!("failed to invoke codesign for {}", target.display()))?;
+    if !status.success() {
+        bail!(
+            "codesign {} failed for {} with status {:?}",
+            arguments.join(" "),
+            target.display(),
+            status.code()
+        );
+    }
+    Ok(())
+}
+
+fn macos_info_plist() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Clonk Rust</string>
+	<key>CFBundleExecutable</key>
+	<string>clonk-app</string>
+	<key>CFBundleIconFile</key>
+	<string>{MACOS_ICON_STEM}</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.syb0rg.clonk-rust</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Clonk Rust</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>{version}</string>
+	<key>CFBundleVersion</key>
+	<string>{version}</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.games</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>
+"#,
+        version = env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Render the project logo into an `.icns` via a temporary iconset.
+///
+/// The logo is wider than it is tall, so it is composited onto a transparent
+/// square first; padding with `sips` would force an opaque background.
+fn write_macos_icon(paths: &WorkspacePaths, destination: &Path) -> Result<()> {
+    let logo_path = paths.repo_root.join(MACOS_ICON_SOURCE);
+    let logo = image::open(&logo_path)
+        .with_context(|| format!("failed to read icon source {}", logo_path.display()))?
+        .to_rgba8();
+    let side = logo.width().max(logo.height());
+    let mut square = image::RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 0, 0]));
+    image::imageops::overlay(
+        &mut square,
+        &logo,
+        i64::from((side - logo.width()) / 2),
+        i64::from((side - logo.height()) / 2),
+    );
+
+    let iconset_dir = destination.with_extension("iconset");
+    if iconset_dir.exists() {
+        fs::remove_dir_all(&iconset_dir)
+            .with_context(|| format!("failed to remove {}", iconset_dir.display()))?;
+    }
+    fs::create_dir_all(&iconset_dir)
+        .with_context(|| format!("failed to create {}", iconset_dir.display()))?;
+
+    // `iconutil` requires exactly these names, and rejects an incomplete set.
+    for (size, name) in [
+        (16, "icon_16x16.png"),
+        (32, "icon_16x16@2x.png"),
+        (32, "icon_32x32.png"),
+        (64, "icon_32x32@2x.png"),
+        (128, "icon_128x128.png"),
+        (256, "icon_128x128@2x.png"),
+        (256, "icon_256x256.png"),
+        (512, "icon_256x256@2x.png"),
+        (512, "icon_512x512.png"),
+        (1024, "icon_512x512@2x.png"),
+    ] {
+        let scaled =
+            image::imageops::resize(&square, size, size, image::imageops::FilterType::Lanczos3);
+        let path = iconset_dir.join(name);
+        scaled
+            .save(&path)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+
+    let status = Command::new("iconutil")
+        .args(["--convert", "icns", "--output"])
+        .arg(destination)
+        .arg(&iconset_dir)
+        .status()
+        .context("failed to invoke iconutil")?;
+    if !status.success() {
+        bail!("iconutil failed with status {:?}", status.code());
+    }
+    fs::remove_dir_all(&iconset_dir)
+        .with_context(|| format!("failed to remove {}", iconset_dir.display()))?;
+    Ok(())
+}
+
+/// Wrap the bundle in a compressed disk image with the conventional
+/// drag-to-Applications layout.
+fn create_dmg(paths: &WorkspacePaths, app_dir: &Path) -> Result<PathBuf> {
+    let dist_dir = paths.target_dir.join("dist");
+    let staging = dist_dir.join("dmg-staging");
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("failed to remove {}", staging.display()))?;
+    }
+    fs::create_dir_all(&staging)
+        .with_context(|| format!("failed to create {}", staging.display()))?;
+    let staged_app = staging.join(MACOS_APP_NAME);
+    fs::rename(app_dir, &staged_app).with_context(|| {
+        format!(
+            "failed to move {} into {}",
+            app_dir.display(),
+            staged_app.display()
+        )
+    })?;
+    std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
+        .context("failed to create the /Applications shortcut")?;
+
+    let image_path = dist_dir.join(format!(
+        "clonk-rust-{}-{}.dmg",
+        env!("CARGO_PKG_VERSION"),
+        paths.target_triple
+    ));
+    if image_path.exists() {
+        fs::remove_file(&image_path)
+            .with_context(|| format!("failed to remove {}", image_path.display()))?;
+    }
+    let status = Command::new("hdiutil")
+        .args(["create", "-volname", "Clonk Rust", "-srcfolder"])
+        .arg(&staging)
+        // APFS preserves filenames byte-for-byte. HFS+ normalizes Unicode, so
+        // content paths such as `Überladungen.c4d` would arrive under a
+        // different encoding than the code signature sealed, and every such
+        // resource would read back as missing.
+        .args(["-fs", "APFS", "-format", "UDZO", "-quiet"])
+        .arg(&image_path)
+        .status()
+        .context("failed to invoke hdiutil")?;
+    if !status.success() {
+        bail!("hdiutil failed with status {:?}", status.code());
+    }
+    fs::remove_dir_all(&staging)
+        .with_context(|| format!("failed to remove {}", staging.display()))?;
+    Ok(image_path)
+}
+
+fn executable_name(binary_name: &str, target_triple: &str) -> String {
+    // The host suffix is wrong whenever `CARGO_BUILD_TARGET` cross-compiles the
+    // release binaries, so the extension follows the target triple instead.
+    let suffix = if target_triple.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    format!("{binary_name}{suffix}")
 }
 
 fn directory_contains_file(path: &Path) -> Result<bool> {
@@ -1367,7 +1637,9 @@ fn rustc_host_target(workspace_dir: &Path) -> Result<String> {
 
 fn audit_release_dependencies(paths: &WorkspacePaths) -> Result<()> {
     for binary_name in ["clonk-game", "clonk-app"] {
-        let binary = paths.release_dir.join(executable_name(binary_name));
+        let binary = paths
+            .release_dir
+            .join(executable_name(binary_name, &paths.target_triple));
         if paths.target_triple.contains("apple-darwin") {
             audit_macos_release_binary(&binary)?;
         } else if paths.target_triple.contains("linux") {
@@ -1580,6 +1852,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    const FIXTURE_TARGET: &str = "test-target";
+
     fn write_fixture(path: &Path, contents: &[u8]) {
         fs::create_dir_all(path.parent().expect("fixture path has a parent"))
             .expect("create fixture parent");
@@ -1632,28 +1906,31 @@ mod tests {
             b"scenario",
         );
         write_fixture(
-            &root.join("EkeReloaded.c4d/DefCore.txt"),
+            &root.join("content/EkeReloaded.c4d/DefCore.txt"),
             b"eke definitions",
         );
         write_fixture(
-            &root.join("EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
+            &root.join("content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
             b"harpoon race",
         );
-        write_fixture(&root.join("ClonkMars.c4d/DefCore.txt"), b"mars definitions");
         write_fixture(
-            &root.join("ClonkMars.c4f/Test.c4s/Scenario.txt"),
+            &root.join("content/ClonkMars.c4d/DefCore.txt"),
+            b"mars definitions",
+        );
+        write_fixture(
+            &root.join("content/ClonkMars.c4f/Test.c4s/Scenario.txt"),
             b"mars scenario",
         );
         write_fixture(
             &root
                 .join("workspace-target/release")
-                .join(executable_name("clonk-game")),
+                .join(executable_name("clonk-game", FIXTURE_TARGET)),
             b"launcher",
         );
         write_fixture(
             &root
                 .join("workspace-target/release")
-                .join(executable_name("clonk-app")),
+                .join(executable_name("clonk-app", FIXTURE_TARGET)),
             b"runtime",
         );
 
@@ -1662,10 +1939,30 @@ mod tests {
             repo_root: root.to_path_buf(),
             target_dir: root.join("workspace-target"),
             release_dir: root.join("workspace-target/release"),
-            host_triple: "test-target".to_string(),
-            target_triple: "test-target".to_string(),
+            host_triple: FIXTURE_TARGET.to_string(),
+            target_triple: FIXTURE_TARGET.to_string(),
         };
         (temp, paths)
+    }
+
+    #[test]
+    fn executable_name_follows_the_target_triple_not_the_host() {
+        assert_eq!(
+            executable_name("clonk-app", "x86_64-pc-windows-gnu"),
+            "clonk-app.exe"
+        );
+        assert_eq!(
+            executable_name("clonk-app", "x86_64-pc-windows-msvc"),
+            "clonk-app.exe"
+        );
+        assert_eq!(
+            executable_name("clonk-app", "x86_64-unknown-linux-gnu"),
+            "clonk-app"
+        );
+        assert_eq!(
+            executable_name("clonk-game", "aarch64-apple-darwin"),
+            "clonk-game"
+        );
     }
 
     #[test]
@@ -1675,8 +1972,8 @@ mod tests {
         let package_dir = assemble_package_layout(&paths).expect("assemble package");
 
         for relative in [
-            PathBuf::from("bin").join(executable_name("clonk-game")),
-            PathBuf::from("bin").join(executable_name("clonk-app")),
+            PathBuf::from("bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
+            PathBuf::from("bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
             PathBuf::from("COPYING"),
             PathBuf::from("TRADEMARK"),
             PathBuf::from("README.md"),
@@ -1692,10 +1989,10 @@ mod tests {
             PathBuf::from("planet/Graphics.c4g/Logo.png"),
             PathBuf::from("content/Objects.c4d/DefCore.txt"),
             PathBuf::from("content/Worlds.c4f/Test.c4s/Scenario.txt"),
-            PathBuf::from("EkeReloaded.c4d/DefCore.txt"),
-            PathBuf::from("EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
-            PathBuf::from("ClonkMars.c4d/DefCore.txt"),
-            PathBuf::from("ClonkMars.c4f/Test.c4s/Scenario.txt"),
+            PathBuf::from("content/EkeReloaded.c4d/DefCore.txt"),
+            PathBuf::from("content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
+            PathBuf::from("content/ClonkMars.c4d/DefCore.txt"),
+            PathBuf::from("content/ClonkMars.c4f/Test.c4s/Scenario.txt"),
         ] {
             assert!(
                 package_dir.join(&relative).is_file(),
@@ -1738,9 +2035,9 @@ mod tests {
         zip.extract(extracted.path())
             .expect("extract package archive");
         for relative in [
-            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-game")),
-            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-app")),
-            PathBuf::from("clonk-rust/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
+            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
+            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
+            PathBuf::from("clonk-rust/content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
             PathBuf::from("clonk-rust/licenses/RUST_THIRD_PARTY_LICENSES.txt"),
         ] {
             assert!(
@@ -1875,7 +2172,15 @@ mod tests {
             .expect("run git init");
         assert!(init.success(), "git init failed");
         let add = Command::new("git")
-            .args(["add", "Objects.c4d", "Worlds.c4f"])
+            .args([
+                "add",
+                "Objects.c4d",
+                "Worlds.c4f",
+                "EkeReloaded.c4d",
+                "EkeReloaded.c4f",
+                "ClonkMars.c4d",
+                "ClonkMars.c4f",
+            ])
             .current_dir(&content)
             .status()
             .expect("run git add");
@@ -1888,8 +2193,16 @@ mod tests {
         let package_dir = assemble_package_layout(&paths).expect("assemble package");
 
         assert!(
-            !package_dir.join("content/EkeReloaded.c4f").exists(),
-            "untracked duplicate Eke Reloaded content leaked into the package"
+            package_dir
+                .join("content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt")
+                .is_file(),
+            "tracked Eke Reloaded content must reach the package"
+        );
+        assert!(
+            !package_dir
+                .join("content/EkeReloaded.c4f/Secret.txt")
+                .exists(),
+            "untracked Eke Reloaded content leaked into the package"
         );
     }
 
@@ -1903,15 +2216,7 @@ mod tests {
             .expect("run git init");
         assert!(init.success(), "git init failed");
         let add = Command::new("git")
-            .args([
-                "add",
-                "planet",
-                "licenses",
-                "EkeReloaded.c4d",
-                "EkeReloaded.c4f",
-                "ClonkMars.c4d",
-                "ClonkMars.c4f",
-            ])
+            .args(["add", "planet", "licenses", "content"])
             .current_dir(&paths.repo_root)
             .status()
             .expect("run git add");
@@ -1944,10 +2249,7 @@ mod tests {
                 "planet",
                 "licenses/dependency.txt",
                 "licenses/third_party",
-                "EkeReloaded.c4d",
-                "EkeReloaded.c4f",
-                "ClonkMars.c4d",
-                "ClonkMars.c4f",
+                "content",
             ])
             .current_dir(&paths.repo_root)
             .status()
@@ -1977,15 +2279,7 @@ mod tests {
             .expect("run git init");
         assert!(init.success(), "git init failed");
         let add = Command::new("git")
-            .args([
-                "add",
-                "planet",
-                "licenses",
-                "EkeReloaded.c4d",
-                "EkeReloaded.c4f",
-                "ClonkMars.c4d",
-                "ClonkMars.c4f",
-            ])
+            .args(["add", "planet", "licenses", "content"])
             .current_dir(&paths.repo_root)
             .status()
             .expect("run git add");

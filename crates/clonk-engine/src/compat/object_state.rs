@@ -6277,11 +6277,13 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
             .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
             .unwrap_or_default();
         let scope = match foreign {
-            Some(target) => &mut context
-                .nested_objects
-                .get_mut(&target)
-                .expect("scope just ensured")
-                .scope,
+            Some(target) => {
+                &mut context
+                    .nested_objects
+                    .get_mut(&target)
+                    .expect("scope just ensured")
+                    .scope
+            }
             None => match context.object_context_mut() {
                 Some(object) => object,
                 None => return Ok(Value::Bool(false)),

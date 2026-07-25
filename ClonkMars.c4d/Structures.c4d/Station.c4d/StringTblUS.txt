@@ -1,3 +1,0 @@
-TxtNoTarget=Missing transmitt targets
-TxtBeamstation=Transmitt to selectected Station
-TxtNeededEnergy=Needed Energy:

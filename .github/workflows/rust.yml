@@ -1,10 +1,24 @@
 name: Clonk Rust CI
 
+# Automatic triggers are disabled while the `content/` submodule lives in a
+# separate private repository: the built-in GITHUB_TOKEN is scoped to the
+# repository running the workflow, so `actions/checkout` cannot clone
+# syb0rg/clonk-rs-content and every job fails at checkout with
+# "Repository not found". Runs were also billing private-repo Actions minutes
+# on every push and on each open dependabot pull request.
+#
+# To re-enable, first give checkout access to the content repository — make it
+# public, or add a fine-grained PAT with Contents:read on both repositories as
+# a secret and pass it to `actions/checkout` via `token:` — then restore:
+#
+#   push:
+#     branches: [main]
+#   pull_request:
+#     branches: [main]
+#
+# The gates below are otherwise current; they run locally via the commands in
+# CLAUDE.md, and `workflow_dispatch` still allows a manual run.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -22,7 +36,8 @@ jobs:
   focused-feedback:
     name: Focused developer feedback
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Was 15, which a cold-cache run of the full command set can exceed.
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -80,10 +95,14 @@ jobs:
           fi
           echo "base=$base" >> "$GITHUB_OUTPUT"
 
+      # No `--budget-seconds`: dev-check treats an exhausted budget as a
+      # failure, and the local fast-feedback budget cannot be met from a cold
+      # runner cache. CI wants every selected command to run; the job timeout
+      # is the real bound.
       - name: Run change-aware checks
         env:
           COMPARISON_BASE: ${{ steps.comparison.outputs.base }}
-        run: cargo dev-check --base "$COMPARISON_BASE" --budget-seconds 60
+        run: cargo dev-check --base "$COMPARISON_BASE"
 
       - name: Upload developer-feedback artifacts
         if: always()

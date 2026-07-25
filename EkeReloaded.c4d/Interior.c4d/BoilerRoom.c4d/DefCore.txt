@@ -1,7 +1,0 @@
-[DefCore]
-id=BL5B
-Name=BoilerRoom
-Category=C4D_StaticBack
-Width=220
-Height=70
-TopFace=0,0,30,70

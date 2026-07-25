@@ -279,7 +279,9 @@
         );
         assert_eq!(app.startup_scenario_back_dialog, None);
         assert!(app.loading_state.is_none());
-        assert!(app.loader_screen.is_none());
+        // The return through PreInit re-initializes the loader screen for the
+        // next game (src/C4Application.cpp:242-247,373-389).
+        assert!(app.loader_screen.is_some());
         assert!(app.loader_error.is_none());
         assert!(app.active_scenario.is_none());
         assert!(app.active_definition_load.is_none());

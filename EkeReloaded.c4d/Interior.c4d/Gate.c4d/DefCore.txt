@@ -1,8 +1,0 @@
-[DefCore]
-id=GT5B
-Name=Gate
-Category=C4D_StaticBack
-Width=49
-Height=11
-Offset=-24,-5
-SolidMask=0,0,49,5

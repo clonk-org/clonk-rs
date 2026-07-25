@@ -1,7 +1,0 @@
-[Action]
-Name=Exist
-Facet=0,0,27,23
-Length=15
-FlipDir=1
-Directions=2
-NextAction=Exist

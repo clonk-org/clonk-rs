@@ -26,8 +26,7 @@ fn prepare_harpoonrace_host(
     let repository = repository_root();
     let content = repository.join("content");
     let planet = repository.join("planet");
-    let scenario_path =
-        repository.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
+    let scenario_path = content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
     let install_roots = vec![repository, content.clone(), planet];
     prepare_harpoonrace_host_from_paths(
         random_seed_unix_seconds,
@@ -48,10 +47,8 @@ fn prepare_harpoonrace_host_from_paths(
     prepared_host_bootstrap::PreparedHostBootstrap,
     tempfile::TempDir,
 ) {
-    let definition_resource_paths = vec![
-        content.join("Objects.c4d"),
-        repository_root().join("EkeReloaded.c4d"),
-    ];
+    let definition_resource_paths =
+        vec![content.join("Objects.c4d"), content.join("EkeReloaded.c4d")];
     let effective_definition_modules = vec!["Objects.c4d".to_owned(), "EkeReloaded.c4d".to_owned()];
     let definition_resources = freeze_host_definition_resource_sources(
         &definition_resource_paths,
@@ -232,7 +229,7 @@ fn harpoonrace_league_seed_reload_uses_the_published_scenario_bytes() {
     let content = repository.join("content");
     let planet = repository.join("planet");
     let source_scenario =
-        repository.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
+        content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
     let isolated = tempfile::tempdir().expect("isolated scenario source");
     let isolated_content = isolated.path().join("content");
     let isolated_scenario = isolated_content.join("HarpoonRace.c4s");

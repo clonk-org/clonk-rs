@@ -6826,7 +6826,8 @@ mod tests {
         // min(160/64, 120/64) = 1.875 (src/C4DefGraphics.cpp:820-825), so C++
         // actually renders 64 * 0.234 * 1.875 = 28.08px. That is the oracle;
         // do not "correct" it toward the content's stated intent.
-        let hud = crate::test_support::repo_root().join("ClonkMars.c4d/Helpers.c4d/HUD.c4d");
+        let hud =
+            crate::test_support::repo_root().join("content/ClonkMars.c4d/Helpers.c4d/HUD.c4d");
         assert!(
             hud.is_dir(),
             "the bundled ClonkMars pack must provide {}",

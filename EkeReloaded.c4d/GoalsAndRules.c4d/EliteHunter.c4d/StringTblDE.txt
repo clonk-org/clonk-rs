@@ -1,2 +1,0 @@
-RestInfo=Du musst noch %d Stippel, Mutationen oder Kokons eliminieren um zu gewinnen.
-GameOver=%s ist der beste Jäger im Universum!

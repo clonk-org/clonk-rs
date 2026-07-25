@@ -1,5 +1,0 @@
-Kann Clonks über große Distanzen beamen. Benötigt dafür die Splitter.
-
-Funktionsweise: Anfassen und
-- Graben für schnellsten Weg
-- Springen für den energieeffizientesten Weg

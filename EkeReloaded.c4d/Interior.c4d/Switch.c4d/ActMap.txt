@@ -1,8 +1,0 @@
-[Action]
-Name=Red
-FacetBase=1
-
-[Action]
-Name=Green
-Facet=15,0,15,18
-NextAction=Green

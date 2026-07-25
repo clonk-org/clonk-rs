@@ -459,9 +459,11 @@ impl GameApp {
             // the remembered startup dialog and only then presents its log.
             self.startup_restart_diagnostics.mark_quit_with_error();
             self.startup_restart_diagnostics.add_fatal_error(message);
-            self.loader_screen = None;
-            self.loader_error = None;
+            // PreInit re-initializes the loader screen after Game.Clear has
+            // released the partial game, so it takes the restored startup
+            // GraphicsResource fonts rather than the failed scenario's.
             self.return_to_menu();
+            self.reinitialize_startup_loader_screen();
             return self.present_startup_restart_diagnostics();
         }
 

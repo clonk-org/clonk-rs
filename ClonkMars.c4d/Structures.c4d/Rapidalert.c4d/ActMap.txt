@@ -1,6 +1,0 @@
-[Action]
-Name=Active
-Length=30
-Delay=1
-Facet=0,0,40,80,0,0
-NextAction=Active

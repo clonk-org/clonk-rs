@@ -1,9 +1,0 @@
-Die Terraforming Einheit erzeugt Wärme und lässt es regen. Dadurch werden extreme Temperaturen effektiv normalisiert.
-
-Aufgrund dessen wachsen dann Pflanzen, die wiederum Sauerstoff auf der Oberfläche des Planeten in einem gewissen Radius erzeugen.
-
-Mithilfe von LEDs wächst sogar unterirdisch Vegetation ("Graben" zeigt, wo).
-
-"Werfen" (de)aktiviert das Terraforming.
-"Nach Oben" zeigt den Radius an, in dem Vegetation wachsen kann.
-"Graben" zeigt, wo der Terraformer Erd- oder Ascheregen wegräumt. Mit dem Kontextmenü kann das zurückgesetzt werden.

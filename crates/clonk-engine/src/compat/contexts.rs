@@ -696,8 +696,10 @@ pub(crate) fn call_scoped_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, false, false, false, None, None, false)
-        .map(|outcome| outcome.map(|(value, _)| value))
+    call_scoped_script_function_impl(
+        script, function, args, false, false, false, None, None, false,
+    )
+    .map(|outcome| outcome.map(|(value, _)| value))
 }
 
 /// Game.Script::Call resolves a named function owned by the scenario host.

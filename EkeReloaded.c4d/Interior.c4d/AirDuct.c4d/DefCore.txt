@@ -1,8 +1,0 @@
-[DefCore]
-id=AD5B
-Name=AirDuct
-Category=C4D_StaticBack
-Width=32
-Height=22
-TopFace=0,0,32,22
- 

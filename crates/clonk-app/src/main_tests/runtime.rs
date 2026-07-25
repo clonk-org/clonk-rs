@@ -1099,7 +1099,9 @@
         assert!(matches!(app.mode, AppMode::Menu));
         assert_eq!(app.startup_view, StartupView::MainMenu);
         assert!(app.loading_state.is_none());
-        assert!(app.loader_screen.is_none());
+        // The return through PreInit re-initializes the loader screen for the
+        // next game (src/C4Application.cpp:242-247,373-389).
+        assert!(app.loader_screen.is_some());
         assert_startup_error_log(
             &app,
             "Failed to start Two players: Fullscreen mode requires at least one participating player.",

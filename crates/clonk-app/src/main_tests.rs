@@ -1494,12 +1494,9 @@ fn prepare_harpoonrace_host_with_seed(
         .expect("repository root");
     let content = repository.join("content");
     let planet = repository.join("planet");
-    let scenario_path =
-        repository.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
-    let definition_resource_paths = vec![
-        content.join("Objects.c4d"),
-        repository.join("EkeReloaded.c4d"),
-    ];
+    let scenario_path = content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
+    let definition_resource_paths =
+        vec![content.join("Objects.c4d"), content.join("EkeReloaded.c4d")];
     let effective_definition_modules = vec!["Objects.c4d".to_owned(), "EkeReloaded.c4d".to_owned()];
     let definition_resources = host_game_resource_sources::freeze_host_definition_resource_sources(
         &definition_resource_paths,

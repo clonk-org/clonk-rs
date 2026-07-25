@@ -1,2 +1,0 @@
-DE:Laboratorium
-US:Laboratory

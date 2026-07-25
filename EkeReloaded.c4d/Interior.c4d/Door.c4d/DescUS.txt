@@ -1,1 +1,0 @@
-With SetCode(newCode) you can make a security door. The code is also the color.
