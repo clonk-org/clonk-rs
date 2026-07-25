@@ -161,6 +161,12 @@ pub type MethodRefArgsDispatch =
 /// `&` there`.
 pub type ReferenceParameterProbe = std::rc::Rc<dyn Fn(&str, usize) -> bool>;
 
+/// `C4AulScriptEngine::GetFirstFunc` lookup used while compiling direct object
+/// calls (C4AulParse.cpp:3194-3229). An unresolved `->~Name(...)` emits no
+/// AB_CALLFS at all, so the embedding engine supplies its whole linked function
+/// namespace rather than a target-specific method lookup.
+pub type DirectCallFunctionProbe = std::rc::Rc<dyn Fn(&str) -> bool>;
+
 /// Enters/leaves the native no-object scope required by strict-3
 /// `global->Fn(...)`. The script VM owns unwinding; the embedding engine owns
 /// its object/definition context and therefore supplies this small hook.
@@ -1048,6 +1054,9 @@ pub struct Engine {
     /// Engine-wide `&`-parameter lookup used when an arrow call's callee is
     /// not resolvable in this host (see [`ReferenceParameterProbe`]).
     reference_parameter_probe: Option<ReferenceParameterProbe>,
+    /// Engine-wide name lookup deciding whether a failsafe arrow call emitted
+    /// AB_CALLFS at link time (see [`DirectCallFunctionProbe`]).
+    direct_call_function_probe: Option<DirectCallFunctionProbe>,
     /// Embedding-engine context switch for AB_CALLGLOBAL's null Obj/Def.
     global_call_context_hook: Option<GlobalCallContextHook>,
     /// The shared `static` table; `None` keeps the legacy per-host
@@ -1119,6 +1128,7 @@ impl Engine {
             method_reference_dispatch: None,
             method_ref_args_dispatch: None,
             reference_parameter_probe: None,
+            direct_call_function_probe: None,
             global_call_context_hook: None,
             globals_named: None,
             globals_numbered: Some(new_global_slots()),
@@ -1898,6 +1908,10 @@ impl Engine {
         self.reference_parameter_probe = Some(probe);
     }
 
+    pub fn register_direct_call_function_probe(&mut self, probe: DirectCallFunctionProbe) {
+        self.direct_call_function_probe = Some(probe);
+    }
+
     pub fn register_global_call_context_hook(&mut self, hook: GlobalCallContextHook) {
         self.global_call_context_hook = Some(hook);
     }
@@ -1923,6 +1937,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -1963,6 +1978,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2010,6 +2026,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2060,6 +2077,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2118,6 +2136,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2162,6 +2181,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2205,6 +2225,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2249,6 +2270,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2292,6 +2314,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2342,6 +2365,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2383,6 +2407,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2421,6 +2446,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2529,6 +2555,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2663,6 +2690,7 @@ impl Engine {
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
         .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())

@@ -42,6 +42,7 @@ mod harpoonrace_reload;
 mod harpoonrace_worldgen;
 mod hazard_crosshair;
 mod hazard_death_relaunch;
+mod hazard_inventory;
 mod hazard_squat_aim;
 mod is_newgfx;
 mod legacy_scenario_loading;

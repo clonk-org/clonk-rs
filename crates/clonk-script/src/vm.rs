@@ -2984,6 +2984,9 @@ pub struct Vm<'a> {
     /// Engine-wide `&`-parameter lookup for callees this host cannot resolve
     /// (crate::engine::ReferenceParameterProbe).
     reference_parameter_probe: Option<&'a crate::engine::ReferenceParameterProbe>,
+    /// Whole-engine name lookup used by C4AulParse before emitting a direct
+    /// AB_CALL/AB_CALLFS (crate::engine::DirectCallFunctionProbe).
+    direct_call_function_probe: Option<&'a crate::engine::DirectCallFunctionProbe>,
     /// Embedding-engine context switch for AB_CALLGLOBAL's null Obj/Def.
     global_call_context_hook: Option<&'a GlobalCallContextHook>,
     /// References returned from a global callee may outlive its temporary
@@ -3038,6 +3041,7 @@ impl<'a> Vm<'a> {
             method_reference_dispatch: None,
             method_ref_args_dispatch: None,
             reference_parameter_probe: None,
+            direct_call_function_probe: None,
             global_call_context_hook: None,
             retain_global_call_context_for_host_paths: false,
             globals_named: None,
@@ -3153,6 +3157,14 @@ impl<'a> Vm<'a> {
         probe: Option<&'a crate::engine::ReferenceParameterProbe>,
     ) -> Self {
         self.reference_parameter_probe = probe;
+        self
+    }
+
+    pub fn with_direct_call_function_probe(
+        mut self,
+        probe: Option<&'a crate::engine::DirectCallFunctionProbe>,
+    ) -> Self {
+        self.direct_call_function_probe = probe;
         self
     }
 
@@ -3946,6 +3958,7 @@ impl<'a> Vm<'a> {
             method_reference_dispatch: self.method_reference_dispatch,
             method_ref_args_dispatch: self.method_ref_args_dispatch,
             reference_parameter_probe: self.reference_parameter_probe,
+            direct_call_function_probe: self.direct_call_function_probe,
             global_call_context_hook: self.global_call_context_hook,
             retain_global_call_context_for_host_paths: true,
             globals_named: self.globals_named,
@@ -6912,6 +6925,18 @@ impl<'a> Vm<'a> {
         )
     }
 
+    fn direct_call_function_known(&self, name: &str) -> bool {
+        self.functions.contains_key(name)
+            || self
+                .global_functions
+                .is_some_and(|functions| functions.contains_key(name))
+            || self.has_host_function(name)
+            || Self::is_global_vm_builtin(name)
+            || self
+                .direct_call_function_probe
+                .map_or_else(|| self.method_dispatch.is_some(), |probe| probe(name))
+    }
+
     fn global_call_may_return_reference(&self, name: &str) -> bool {
         self.engine_global_script_function(name)
             .map(|function| function.returns_reference)
@@ -7316,6 +7341,16 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<Value, RuntimeError> {
+        if failsafe && !self.direct_call_function_known(name) {
+            // GetFirstFunc failed during C++ parsing, so no AB_CALLFS exists:
+            // Parse_Params(0) still evaluates every explicit argument after
+            // the already-evaluated target, then the target slot becomes nil
+            // (C4AulParse.cpp:3215-3231). A forwarded `...` supplies no slots
+            // to this zero-parameter pseudo-call.
+            self.evaluate_discarded_call_args(args, env, depth + 1)?;
+            return Ok(Value::Nil);
+        }
+
         // Effect-callback state maps carry the object id ("id" key): an
         // arrow call on one targets THAT object, matching the host-fn
         // object-reference convention (C++ pTarget is C4VObj —
@@ -7608,6 +7643,30 @@ impl<'a> Vm<'a> {
         #[cfg(test)]
         record_call_arg_heap_spill(evaluated_args.spilled());
         Ok(evaluated_args)
+    }
+
+    /// `Parse_Params(0, nullptr)` for a globally unresolved fail-safe call.
+    /// With no candidate function, C++ deliberately leaves each operand's
+    /// reference bytecode intact, holds every slot until all expressions have
+    /// run, and then drops the complete zero-parameter frame
+    /// (C4AulParse.cpp:2311-2344).
+    fn evaluate_discarded_call_args(
+        &self,
+        args: &[Expr],
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        let mut evaluated = Vec::with_capacity(args.len());
+        let mut value_stack = ValueStackReservation::empty();
+        for arg in args {
+            let value = {
+                let _pin_creation = LegacyPathPinCreationGuard::enter();
+                self.evaluate_reference_or_value(arg, env, depth)?
+            };
+            evaluated.push(value);
+            value_stack.grow(1)?;
+        }
+        Ok(())
     }
 
     /// `Callee(args, ...)`: after the explicit arguments, forward every

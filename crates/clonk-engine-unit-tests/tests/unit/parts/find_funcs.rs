@@ -2806,9 +2806,9 @@ func Trigger() {
         // `obj->Method(args)` is AB_CALL (C4AulExec.cpp:1216-1305): the
         // function resolves on the TARGET's def via FindSameNameFunc
         // (C4Aul.cpp:130-148 — own script functions, then global/engine
-        // functions running with the TARGET's context). `->~` forgives only
-        // a MISSING FUNCTION (:1262-1267); a falsy target throws even for
-        // `->~` (:1224-1226).
+        // functions running with the TARGET's context). For a name known
+        // engine-wide, `->~` forgives only a target-specific MISSING FUNCTION
+        // (:1262-1267); a falsy target still throws (:1224-1226).
         let caller_script = r#"
         global func Poke(target) { return target->Secret(21); }
         global func PokeMissing(target) { return target->NoSuch(); }
@@ -2833,6 +2833,10 @@ func Trigger() {
         public func Secret(v) { return v + 1000; }
         public func NamedOnly() { return 77; }
         public func GlobalOnly() { return 99; }
+        // Keep these names engine-wide known so C4AulParse emits AB_CALL/FS;
+        // PROB still has neither function, exercising the runtime miss.
+        public func NoSuch() {}
+        public func Anything() {}
         public func &Slot() { return named_slot; }
         "#;
 
@@ -2950,7 +2954,8 @@ func Trigger() {
             .expect("same-definition namespaced call stays valid");
         assert_eq!(result, Value::Int(1022));
 
-        // Missing function: error for `->`, nil for `->~`.
+        // The names exist only on unrelated OTHR, so lookup on PROB misses:
+        // error for `->`, nil for `->~`.
         // (The engine wraps the VM error; the distinction that matters is
         // error-vs-nil between -> and ->~ below.)
         engine
@@ -2961,8 +2966,9 @@ func Trigger() {
             .expect("->~ forgives the missing function");
         assert_eq!(result, Value::Nil);
 
-        // Falsy target: error even for `->~` (the exact "target is zero"
-        // message is pinned by the clonk-script unit test).
+        // The unrelated OTHR::Anything makes the name engine-wide known, so
+        // AB_CALLFS is emitted and a falsy target remains an error (the exact
+        // "target is zero" message is pinned by the clonk-script unit test).
         engine
             .call_object_function(caller_idx, "PokeNil", Vec::new())
             .expect_err("falsy target throws even for ->~");
@@ -4515,4 +4521,3 @@ func Trigger() {
             Some(77)
         );
     }
-

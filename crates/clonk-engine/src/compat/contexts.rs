@@ -519,6 +519,17 @@ pub(crate) fn arrow_reference_parameter_probe(name: &str, slot: usize) -> bool {
     })
 }
 
+/// C4AulParse resolves a direct-call name through the whole engine function
+/// map before deciding whether to emit AB_CALLFS. The target object is
+/// deliberately irrelevant to this lookup (C4AulParse.cpp:3215-3231).
+pub(crate) fn arrow_direct_call_function_probe(name: &str) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_none_or(|context| context.world.script_function_known(name))
+    })
+}
+
 /// AB_CALL twin for an arrow call carrying reference arguments. C4AulParse
 /// pushes an lvalue argument as `C4V_pC4Value` whenever any same-named engine
 /// function declares `&` at that slot (C4AulParse.cpp:2318-2331), and
