@@ -771,6 +771,40 @@ pub fn reliable_udp_packet_kind(wire: &[u8]) -> Option<ReliableUdpPacketKind> {
     })
 }
 
+/// Inner-packet size at or below which a data packet is sent twice.
+///
+/// Control packets are tens of bytes; a resource chunk is orders of magnitude
+/// larger and fragments into full 499-byte datagrams. Keying on the inner
+/// packet's total size therefore separates the latency-critical stream from the
+/// bulk one without needing the traffic class down here, and a control packet
+/// that somehow exceeded this simply falls back to today's repair behavior.
+const REDUNDANT_DATA_PACKET_LIMIT: u32 = 256;
+
+/// Whether an outgoing datagram should be put on the wire a second time.
+///
+/// **Deliberate divergence from the oracle.** C++ sends each data datagram
+/// once and recovers a loss with a repair round trip
+/// (oracle-src-pinned src/C4NetIO.cpp:3128). Reliable-UDP delivery is strictly
+/// ordered, so a single lost control datagram withholds *every* later control
+/// tick from the game loop until that repair completes — the whole session
+/// freezes, not just the peer that dropped it. Re-sending a control-sized
+/// packet immediately costs a few hundred bytes per second and removes the
+/// round trip for any loss that does not take both copies.
+///
+/// This is invisible on the wire: the copy is byte-identical, so it carries the
+/// same packet number, and both engines discard a duplicate fragment they have
+/// already stored — Rust at `ReliableUdpPartialPacket::add_fragment` and C++ at
+/// `C4NetIOUDP::Packet::AddFragment` (oracle-src-pinned src/C4NetIO.cpp:2615).
+/// A C++ peer therefore needs no knowledge of it.
+pub fn reliable_udp_sends_redundant_copy(wire: &[u8]) -> bool {
+    if wire.first().map(|status| status & INTERNAL_PACKET_TYPE_MASK) != Some(IPID_DATA) {
+        return false;
+    }
+    wire.get(9..13)
+        .and_then(|size| size.try_into().ok())
+        .is_some_and(|size| u32::from_ne_bytes(size) <= REDUNDANT_DATA_PACKET_LIMIT)
+}
+
 /// Splits one inner packet into packed C++ reliable-UDP data datagrams.
 pub fn encode_reliable_udp_data_fragments(
     first_packet_number: u32,
@@ -1489,6 +1523,54 @@ mod tests {
                 missing_packet_numbers: Vec::new(),
                 missing_multicast_packet_numbers: Vec::new(),
             }
+        );
+    }
+
+    /// The redundancy discriminator must catch real control traffic and must
+    /// not double the cost of a resource transfer.
+    #[test]
+    fn redundant_copy_covers_control_packets_but_not_bulk_transfer() {
+        // A player-control sized inner packet: one small datagram, re-sent.
+        let control = encode_reliable_udp_data_fragments(7, &[0_u8; 40]).expect("encode control");
+        assert_eq!(control.len(), 1);
+        assert!(reliable_udp_sends_redundant_copy(&control[0]));
+
+        // A resource chunk: many full fragments, none of them re-sent.
+        let bulk = encode_reliable_udp_data_fragments(7, &[0_u8; 8_192]).expect("encode bulk");
+        assert!(bulk.len() > 1);
+        for fragment in &bulk {
+            assert!(
+                !reliable_udp_sends_redundant_copy(fragment),
+                "bulk transfer must not pay for redundancy"
+            );
+        }
+
+        // Only data packets qualify; a Check carries its own retry damping.
+        assert!(!reliable_udp_sends_redundant_copy(&[IPID_CHECK, 0, 0, 0, 0]));
+        assert!(!reliable_udp_sends_redundant_copy(&[]));
+    }
+
+    /// The copy has to be byte-identical, or it would occupy a fresh packet
+    /// number and the receiver would deliver the control twice.
+    #[test]
+    fn redundant_copy_is_the_same_bytes_and_is_discarded_on_arrival() {
+        let fragments = encode_reliable_udp_data_fragments(3, b"tick").expect("encode");
+        let wire = &fragments[0];
+        let first = decode_reliable_udp_data_fragment(wire).expect("decode original");
+        let copy = decode_reliable_udp_data_fragment(wire).expect("decode duplicate");
+        assert_eq!(first.packet_number, copy.packet_number);
+
+        let mut window = ReliableUdpReceiveWindow::new(3, 0);
+        let delivered = window
+            .receive_direct_data_fragment(first)
+            .expect("original delivers");
+        assert_eq!(delivered.len(), 1);
+        let repeated = window
+            .receive_direct_data_fragment(copy)
+            .expect("a duplicate is accepted, not an error");
+        assert!(
+            repeated.is_empty(),
+            "the duplicate must not deliver the control a second time"
         );
     }
 }

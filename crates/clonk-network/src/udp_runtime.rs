@@ -32,6 +32,17 @@ pub const RELIABLE_UDP_CONNECT_RETRIES: u8 = 5;
 pub const RELIABLE_UDP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 pub const RELIABLE_UDP_OUTGOING_PACKET_CAPACITY: usize = 10_000;
 
+/// How long one datagram may hold the shared reliable-UDP hub before it is
+/// dropped and left to the reliable layer, the way C++ drops on EWOULDBLOCK
+/// (oracle-src-pinned src/C4NetIO.cpp:1772-1790). See `send_planned_datagram`.
+///
+/// A writable socket never reaches this: `send_to` completes on its first poll
+/// and the timer is dropped unfired. It only bounds the pathological case, so
+/// it is sized to be invisible against the 28 ms simulation tick while still
+/// tolerating a brief kernel-buffer spike rather than dropping on the first
+/// sign of pressure.
+pub const RELIABLE_UDP_SEND_BUDGET: Duration = Duration::from_millis(2);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReliableUdpPeerStatus {
     Connecting,
@@ -1397,10 +1408,33 @@ impl ReliableUdpSocketDriver {
                     .record_broadcast_datagram(crate::NetworkProtocol::Udp, datagram.payload.len());
             }
         }
-        let result = self
-            .socket
-            .send_to(&datagram.payload, datagram.destination)
-            .await;
+        // C++ `C4NetIOSimpleUDP::Send` issues one non-blocking `sendto` and on
+        // EWOULDBLOCK resets the error and reports success — it drops the
+        // datagram and lets the reliable layer repair it for that one peer
+        // (oracle-src-pinned src/C4NetIO.cpp:1772-1790, :211-214).
+        //
+        // Awaiting writability unconditionally is not equivalent, and the
+        // difference is not academic: one hub task owns this socket for every
+        // peer, so suspending here holds up control delivery to all of them
+        // behind whichever peer is congested, turning one bad uplink into a
+        // stall for the whole session.
+        //
+        // `try_send_to` is NOT the way to express this — tokio's `try_*` does
+        // not register interest, so it answers WouldBlock until readiness has
+        // been established and would silently drop every early datagram.
+        // Bounding the real `send_to` keeps its readiness handling and still
+        // refuses to let one peer own the hub: a writable socket completes on
+        // the first poll without the timer ever arming, and a congested one is
+        // dropped like C++ once the budget expires.
+        let result = match tokio::time::timeout(
+            RELIABLE_UDP_SEND_BUDGET,
+            self.socket.send_to(&datagram.payload, datagram.destination),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Ok(datagram.payload.len()),
+        };
         (peer, peer_backed, result)
     }
 
@@ -1409,7 +1443,14 @@ impl ReliableUdpSocketDriver {
         for datagram in step.datagrams {
             let (peer, peer_backed, result) = self.send_planned_datagram(&datagram).await;
             match result {
-                Ok(_) => {}
+                Ok(_) => {
+                    // Control-sized packets go out twice. See
+                    // `reliable_udp_sends_redundant_copy` for why this is worth
+                    // its bandwidth and why a C++ peer cannot tell.
+                    if crate::udp::reliable_udp_sends_redundant_copy(&datagram.payload) {
+                        let _ = self.send_planned_datagram(&datagram).await;
+                    }
+                }
                 Err(error) => {
                     if peer_backed {
                         first_send_error.get_or_insert((error, peer));
@@ -2762,8 +2803,11 @@ mod tests {
         let (second_length, _) =
             recv_spy_kind(&second, &mut second_wire, ReliableUdpPacketKind::Data).await;
         assert!(statistics.generate_statistics(2_002));
-        let first_output = normalize(udp_accounted_bytes(first_length));
-        let second_output = normalize(udp_accounted_bytes(second_length));
+        // Both payloads are control-sized, so each went out twice. The second
+        // copy is real bandwidth and is accounted as such -- see
+        // `reliable_udp_sends_redundant_copy`.
+        let first_output = normalize(udp_accounted_bytes(first_length) * 2);
+        let second_output = normalize(udp_accounted_bytes(second_length) * 2);
         assert_eq!(
             statistics
                 .connection_statistics(first_key)
