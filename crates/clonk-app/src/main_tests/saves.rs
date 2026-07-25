@@ -4843,6 +4843,113 @@
     }
 
     #[test]
+    fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
+        // C4StartupScenSelDlg::OnShown loads ExePath and exposes the configured
+        // Savegames.c4f as a SubFolder whose activation loads its saved .c4s
+        // children (C4StartupScenSelDlg.cpp:948-958, 1431-1439, 1669-1678).
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let fixture = tempdir().expect("savegame browser fixture");
+        let user_data = fixture.path().join("user-data");
+        let save_root = fixture.path().join("External Savegames.c4f");
+        let scenario_saves = save_root.join("Missions.c4f");
+        let saved_scenario = scenario_saves.join("Missions1.c4s");
+        let (_guard, paths) = exact_loader_test_paths(&user_data, None);
+        persist_config_value(
+            &paths,
+            "General",
+            "SaveGameFolder",
+            save_root.to_string_lossy().into_owned(),
+        )
+        .expect("configure external native savegame folder");
+
+        fs::create_dir_all(&scenario_saves).expect("create native savegame folders");
+        fs::write(save_root.join("Title.txt"), b"US:Savegames")
+            .expect("write localized savegame-folder title");
+        fs::write(scenario_saves.join("Title.txt"), b"US:Cave mission saves")
+            .expect("write localized scenario-save folder title");
+        let mut saved = MutableGroup::new("Missions1.c4s");
+        saved
+            .add_file(
+                "Scenario.txt",
+                b"[Head]\nTitle=Resume cave mission\nSaveGame=1\nNoInitialize=1\nMinPlayer=0\nMaxPlayer=0\n"
+                    .to_vec(),
+            )
+            .expect("add saved Scenario.txt");
+        saved
+            .add_file("Game.txt", b"[Game]\nFrame=37\n".to_vec())
+            .expect("add saved Game.txt");
+        fs::write(&saved_scenario, saved.pack().expect("pack native savegame"))
+            .expect("write native savegame");
+
+        let entries = load_frontend_scenarios_from_paths(&paths);
+        let savegames = entries
+            .iter()
+            .find(|entry| entry.path.as_deref() == Some(save_root.as_path()))
+            .expect("configured native savegame folder is a root playlist");
+        assert_eq!(savegames.title, "Savegames");
+        assert_eq!(savegames.kind, ScenarioKind::Folder);
+        assert_eq!(
+            scensel_entry_icon(savegames),
+            0,
+            "a .c4f save playlist uses the classic yellow folder phase"
+        );
+        let mission = savegames
+            .children
+            .iter()
+            .find(|entry| entry.path.as_deref() == Some(scenario_saves.as_path()))
+            .expect("savegame playlist contains its scenario folder");
+        let resume = mission
+            .children
+            .iter()
+            .find(|entry| entry.path.as_deref() == Some(saved_scenario.as_path()))
+            .expect("scenario save folder contains the individual resume");
+        assert_eq!(resume.title, "Resume cave mission");
+        assert_eq!(resume.kind, ScenarioKind::Scenario);
+
+        let player_root = fixture.path().join("Players");
+        fs::create_dir(&player_root).expect("create resume participant folder");
+        configure_test_startup_participant(&paths, &player_root);
+        let menu = StartupMenu::new(build_menu_entries(&entries, false), test_font(), None)
+            .expect("savegame browser menu");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        app.menu_state = MenuState::new(menu, entries.clone());
+        app.scenario_catalog = build_scenario_catalog(&entries);
+        app.open_scenario_browser();
+        let summary = |entry: &FrontendScenario| clonk_frontend::ScenarioSummary {
+            identifier: entry.identifier.clone(),
+            title: entry.title.clone(),
+            kind: entry.kind,
+        };
+        app.process_menu_actions(vec![StartupMenuAction::OpenEntry(summary(savegames))])
+            .expect("open Savegames playlist");
+        app.process_menu_actions(vec![StartupMenuAction::OpenEntry(summary(mission))])
+            .expect("open scenario save folder");
+        let (selected, _) = app
+            .process_menu_actions(vec![StartupMenuAction::StartScenario(summary(resume))])
+            .expect("select individual native savegame");
+        let selected = selected.expect("savegame selection requests a scenario start");
+        assert_eq!(
+            app.scenario_catalog
+                .get(&selected)
+                .and_then(|entry| entry.path.as_deref()),
+            Some(saved_scenario.as_path()),
+            "the selected row resumes from the stored native C4Group"
+        );
+
+        app.handle_menu_actions(vec![StartupMenuAction::StartScenario(summary(resume))])
+            .expect("clicking the individual savegame enters the native loader");
+        assert_eq!(app.mode, AppMode::Loading);
+        assert_eq!(
+            app.loading_state
+                .as_ref()
+                .and_then(|loading| loading.scenario.path.as_deref()),
+            Some(saved_scenario.as_path())
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
     fn savegame_slot_probe_uses_c4group_validity() {
         let fixture = tempdir().expect("slot validity fixture");
         let user_data = fixture.path().join("user-data");
