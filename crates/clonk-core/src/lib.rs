@@ -5,3 +5,4 @@ pub mod std_file;
 pub mod std_markup;
 pub mod std_scheduler;
 pub mod std_sync;
+pub mod version;

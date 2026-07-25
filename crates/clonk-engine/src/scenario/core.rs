@@ -344,7 +344,7 @@ pub(in crate::scenario) enum CollectedDefinition {
 
 // C4Game::InitDefs checks every loaded definition against the running engine
 // tuple before script linking (C4Game.cpp:108-115; C4Version.h:28-32).
-const DEFINITION_ENGINE_VERSION: [i32; 5] = [4, 9, 11, 0, 362];
+use clonk_core::version::ENGINE_VERSION as DEFINITION_ENGINE_VERSION;
 
 fn definition_requires_newer_engine(definition: &ScenarioDefinition) -> bool {
     let Some(core) = definition.core.as_ref() else {

@@ -13,6 +13,7 @@ autotests = false
 [dependencies]
 flate2 = "1"
 iconv-native = "0.1"
+clonk-core = { path = "../clonk-core" }
 clonk-engine = { path = "../clonk-engine" }
 clonk-resources = { path = "../clonk-resources" }
 serde = { version = "1", features = ["derive"] }

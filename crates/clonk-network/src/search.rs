@@ -1638,7 +1638,7 @@ pub async fn fetch_reference_query_endpoint_with_config(
     let plan = ReferenceRequestPlan::for_endpoint(endpoint);
     let client = plan
         .client_builder()
-        .user_agent("LegacyClonk/4.9.11.0 [362]")
+        .user_agent(crate::league::LEAGUE_HTTP_USER_AGENT)
         .gzip(true)
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::limited(10))

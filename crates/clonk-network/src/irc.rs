@@ -23,7 +23,7 @@ pub const IRC_MAX_READ_LOG_LENGTH: usize = 1_000;
 const IRC_READ_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const IRC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IRC_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const IRC_CTCP_ENGINE_VERSION: &str = "4.9.11.0 [362] ";
+const IRC_CTCP_ENGINE_VERSION: &str = clonk_core::version::ENGINE_VERSION_TEXT;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrcMessageType {

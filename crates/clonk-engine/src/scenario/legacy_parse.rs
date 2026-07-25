@@ -705,7 +705,10 @@ impl LegacyEnvironment {
     }
 }
 
-const CURRENT_SCENARIO_VERSION: [i32; 4] = [4, 9, 11, 0];
+const CURRENT_SCENARIO_VERSION: [i32; 4] = {
+    let [major, minor, patch, revision, _build] = clonk_core::version::ENGINE_VERSION;
+    [major, minor, patch, revision]
+};
 pub(crate) const C4_MAX_TITLE: usize = 512;
 
 impl LegacyScenarioCore {

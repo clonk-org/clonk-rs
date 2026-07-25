@@ -5,8 +5,8 @@ Generated with cargo-about 0.9.1 from the locked, all-target release
 dependency graphs of clonk-app and clonk-game. Development dependencies are
 excluded. Duplicate entries between the two binary graphs are intentional.
 
-Cargo.lock FNV-1a 64: 1e3bda86066f0a70
-Release dependency inputs FNV-1a 64: df61bd739cf0db60
+Cargo.lock FNV-1a 64: 45de6fc70b38e0f3
+Release dependency inputs FNV-1a 64: 1775275d8bfb9997
 Project source: ISC (see ../COPYING).
 Game content: separate CC BY-NC terms (see clonk_content_license.txt).
 Third-party Rust crates: their respective licenses below.

@@ -44,7 +44,7 @@ const CRASH_ARTIFACT_MARKER: &str = "-crash-";
 const OFFICIAL_LEAGUE_SERVER: &str = "https://league.clonkspot.org";
 const OFFICIAL_UPDATE_SERVER: &str = "https://update.clonkspot.org/lc/update";
 const OFFICIAL_PUNCHER_SERVER: &str = "netpuncher.openclonk.org:11115";
-const CLASSIC_CONFIG_VERSION: u32 = 362;
+const CLASSIC_CONFIG_VERSION: u32 = clonk_core::version::ENGINE_VERSION[4] as u32;
 const CLASSIC_CONFIG_VERSION_VALUE: &str = "362";
 const CLASSIC_UNVERSIONED_CONFIG_VERSION: u32 = 347;
 
