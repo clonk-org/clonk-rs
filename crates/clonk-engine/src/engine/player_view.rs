@@ -178,7 +178,7 @@ impl Engine {
         if self.frame.is_multiple_of(35) && normal_status {
             let team = self.players.get(&id).and_then(Player::team);
             let valid_team_home_base = team.filter(|team| {
-                self.team_home_base_rule && self.teams.iter().any(|candidate| candidate.id == *team)
+                self.team_home_base_rule && self.team_state.teams.iter().any(|candidate| candidate.id == *team)
             });
             let should_produce = match valid_team_home_base {
                 Some(team) => self.runtime_team_members_in_order(team).first().copied() == Some(id),

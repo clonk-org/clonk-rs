@@ -17,8 +17,8 @@ impl Engine {
     ) -> Result<JoinPlayerOutcome, EngineError> {
         let has_valid_team = config
             .team
-            .is_some_and(|team_id| self.teams.iter().any(|team| team.id == team_id));
-        if self.runtime_join_team_choice && !has_valid_team && !semantics.script_player {
+            .is_some_and(|team_id| self.team_state.teams.iter().any(|team| team.id == team_id));
+        if self.team_state.runtime_join_team_choice && !has_valid_team && !semantics.script_player {
             let number = self.join_player_for_team_selection_at_client_with_name(
                 config,
                 at_client,
@@ -159,7 +159,7 @@ impl Engine {
             id => Some(id),
         };
         let selected_team =
-            selected_team_id.and_then(|id| self.teams.iter().find(|candidate| candidate.id == id));
+            selected_team_id.and_then(|id| self.team_state.teams.iter().find(|candidate| candidate.id == id));
         let previous_team = self.player(number).and_then(Player::team);
         let team_is_full = selected_team.is_some_and(|selected| {
             previous_team != Some(selected.id) && self.team_is_full(selected)
@@ -177,7 +177,7 @@ impl Engine {
 
         config.team = selected_team.map(|selected| selected.id);
         let selected_team_color = selected_team
-            .filter(|selected| self.team_configuration.team_colors && selected.color != 0)
+            .filter(|selected| self.team_state.team_configuration.team_colors && selected.color != 0)
             .map(|selected| selected.color);
         self.player_mut(number)?.set_team(config.team);
         if let Some(color) = selected_team_color {
@@ -192,17 +192,17 @@ impl Engine {
     }
 
     pub(crate) fn generate_runtime_team(&mut self) -> Option<i32> {
-        if !self.team_configuration.auto_generate_teams {
+        if !self.team_state.team_configuration.auto_generate_teams {
             return None;
         }
-        let id = self.team_last_team_id.checked_add(1)?;
+        let id = self.team_state.team_last_team_id.checked_add(1)?;
         // Higher IDs require C++'s process-global SafeRandom color search.
         // Keep zero as an explicit unresolved marker rather than consuming
         // the lockstep RNG or inventing a color; callers do not apply zero
         // to the player while host-color transport remains open.
         let color = default_generated_team_color(id).unwrap_or(0);
-        Rc::make_mut(&mut self.teams).push(TeamInfo::new(id, format!("Team {id}"), color));
-        self.team_last_team_id = id;
+        Rc::make_mut(&mut self.team_state.teams).push(TeamInfo::new(id, format!("Team {id}"), color));
+        self.team_state.team_last_team_id = id;
         Some(id)
     }
 
@@ -696,7 +696,7 @@ impl Engine {
         // PlrStartIndex when configured (C4Player.cpp:670-677).
         let start_index = config
             .team
-            .and_then(|team_id| self.teams.iter().find(|team| team.id == team_id))
+            .and_then(|team_id| self.team_state.teams.iter().find(|team| team.id == team_id))
             .map(|team| team.player_start_index)
             .filter(|index| *index != 0)
             .and_then(|index| usize::try_from(index - 1).ok())

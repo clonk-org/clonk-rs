@@ -1432,7 +1432,7 @@ impl Engine {
         config: SpawnConfig,
         initial_info_physical: Option<PhysicalInfo>,
     ) -> Result<ObjectId, EngineError> {
-        let was_deferred = self.defer_solid_mask_updates;
+        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
         let result = (|| {
             let (id, additional, nested_outcomes) =
                 self.spawn_single_inner(config, initial_info_physical)?;
@@ -1441,7 +1441,7 @@ impl Engine {
             self.check_game_over()?;
             Ok(id)
         })();
-        let outermost = !was_deferred && self.defer_solid_mask_updates;
+        let outermost = !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
         self.finish_host_solid_mask_operations(outermost, result)
     }
 

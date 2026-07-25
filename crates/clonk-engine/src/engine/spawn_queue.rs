@@ -96,7 +96,7 @@ impl Engine {
             initialized,
         } = config;
         if let Some(sequence) = solid_mask_instance_sequence {
-            self.next_solid_mask_instance_sequence = self.next_solid_mask_instance_sequence.max(
+            self.solid_mask_staging.next_solid_mask_instance_sequence = self.solid_mask_staging.next_solid_mask_instance_sequence.max(
                 sequence
                     .checked_add(1)
                     .expect("C4SolidMask instance sequence overflow"),
@@ -1369,9 +1369,9 @@ impl Engine {
         queue: Vec<SpawnConfig>,
         nested_outcomes: Vec<compat::NestedObjectOutcome>,
     ) -> Result<Vec<ObjectId>, EngineError> {
-        let was_deferred = self.defer_solid_mask_updates;
+        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
         let result = self.process_spawn_queue_with_outcomes_inner(queue, nested_outcomes);
-        let outermost = !was_deferred && self.defer_solid_mask_updates;
+        let outermost = !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
         self.finish_host_solid_mask_operations(outermost, result)
     }
 

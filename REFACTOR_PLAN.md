@@ -316,14 +316,12 @@ state extraction remains queued behind wave 2.
 
 ## Deferred, with reasons (2026-07-24)
 
-- **Engine field sub-structs** (`struct Engine`, 156 fields): every candidate
-  group — base rules (12 fields), teams (8), crew info (7), pathfinder (3),
-  scenario sections (5) — is read *and written* directly by test code
-  (41/178/62/5/10 references across 7-17 test files). Regrouping them into
-  sub-structs is a field-path rename that necessarily edits those test bodies,
-  which the current landing rule forbids for rename commits. Doing it needs
-  either an explicit exception, or a preparatory commit that migrates the tests
-  onto accessors first — itself a test-touching change. Not attempted.
+- **Engine field sub-structs** — partially UNBLOCKED, see the landing below.
+  The original blocker measurement was wrong: it counted `.field` textually, so
+  `context.world.base_buy_enabled` (a different struct) and method calls like
+  `engine.teams()` were scored as test coupling. Per field, only *some* are
+  actually read from a test body; 61 of the 156 are read from none. Sub-structs
+  built from those fields touch no test file at all.
 - **Dead-code deletion**: the workspace is `dead_code`-clean under
   `clippy -D warnings`, so nothing is compiler-detectably dead. A cross-crate
   scan finds 147 `pub` items never named outside their own definition, but
@@ -416,3 +414,22 @@ state extraction remains queued behind wave 2.
   so a bare-identifier parse missed it. Struct *literals* also attract
   private-field spans, so the declaration guard must require the exact 4-space
   field indent — an early run spliced `pub(crate)` into literal initializers.
+- Engine sub-structs, first landing (goal item 2): `struct Engine` 156 → 141
+  fields via three groups whose members no test body reads —
+  `TeamRuntime` (7: the runtime roster and lobby-team configuration),
+  `SolidMaskStaging` (4: deferred solid-mask work between host updates) and
+  `HostRequestQueues` (7: the queues the host drains each frame). Field
+  declarations moved verbatim, so their visibility text is unchanged — a
+  private field of a root-level struct is crate-visible either way. All 131
+  access sites were rewritten from rustc E0609/E0615 spans, never textually,
+  because other structs in the crate carry identically named fields (a second
+  struct has its own `team_configuration`, `team_last_team_id`, ...).
+
+  Method: extract, compile, then check `git status` on every test path — if a
+  test file moved, the field is coupled and comes back out. `team_home_base_rule`
+  did exactly that (two `engine.team_home_base_rule` asserts in
+  `scenario/tests/part_05.rs`), so it stayed on Engine. Remaining test-free
+  candidates for later landings: the definition/order caches, the exec-list
+  cursor group, and the scenario-section bookkeeping — each is a partial group
+  (one or two of its natural members *are* read by tests), so they trade
+  cohesion against the no-test-body rule and want a judgement call first.

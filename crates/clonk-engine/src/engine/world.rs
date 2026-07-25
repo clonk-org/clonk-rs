@@ -779,7 +779,7 @@ impl Engine {
     pub fn set_league_game(&mut self, league_game: bool) {
         self.league_game = league_game;
         if league_game {
-            self.team_configuration.allow_team_switch = false;
+            self.team_state.team_configuration.allow_team_switch = false;
         }
     }
 

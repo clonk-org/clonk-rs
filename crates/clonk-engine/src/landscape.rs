@@ -8755,7 +8755,7 @@ protected func Construction()
             assert!(engine.objects[index].solid_mask_bake.is_some());
         }
         assert!(
-            !engine.defer_solid_mask_updates,
+            !engine.solid_mask_staging.defer_solid_mask_updates,
             "direct spawn must close and replay its deferred construction scope"
         );
     }

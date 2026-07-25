@@ -73,7 +73,7 @@ impl Engine {
             return;
         }
         for operation in operations {
-            if self.defer_solid_mask_updates {
+            if self.solid_mask_staging.defer_solid_mask_updates {
                 // Host landscape calls share the chronological mask stream
                 // and replay there after copy-out channels materialize.
                 continue;
@@ -2253,7 +2253,7 @@ impl Engine {
                 audio_state,
                 rng,
             } = outcome?;
-            let was_deferred = self.defer_solid_mask_updates;
+            let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
             let mut outermost =
                 self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
             let fold_result = (|| -> Result<(), EngineError> {
@@ -2299,7 +2299,7 @@ impl Engine {
                 self.apply_particle_commands(particles);
                 Ok(())
             })();
-            outermost |= !was_deferred && self.defer_solid_mask_updates;
+            outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
             self.finish_host_solid_mask_operations(outermost, fold_result)?;
         }
         Ok(())

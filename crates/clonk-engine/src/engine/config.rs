@@ -304,10 +304,10 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn set_teams(&mut self, teams: Vec<TeamInfo>) {
-        self.team_last_team_id = self
-            .team_last_team_id
+        self.team_state.team_last_team_id = self
+            .team_state.team_last_team_id
             .max(teams.iter().map(|team| team.id).max().unwrap_or(0));
-        self.teams = Rc::new(teams);
+        self.team_state.teams = Rc::new(teams);
         self.recheck_runtime_team_memberships();
     }
 
@@ -316,12 +316,12 @@ impl Engine {
     /// registry and TeamConfiguration before the first synchronized save.
     #[doc(hidden)]
     pub fn set_initial_network_team_metadata(&mut self, metadata: &InitialNetworkTeamMetadata) {
-        self.team_last_team_id = metadata
+        self.team_state.team_last_team_id = metadata
             .last_team_id
             .max(metadata.teams.iter().map(|team| team.id).max().unwrap_or(0));
-        self.team_max_script_players = metadata.max_script_players;
-        self.team_script_player_names = metadata.script_player_names.as_bytes().to_vec();
-        self.team_random_team_count = metadata.random_team_count;
+        self.team_state.team_max_script_players = metadata.max_script_players;
+        self.team_state.team_script_player_names = metadata.script_player_names.as_bytes().to_vec();
+        self.team_state.team_random_team_count = metadata.random_team_count;
     }
 
     /// Reconciles the live C4Team player-info ID lists after a PlayerInfo
@@ -329,7 +329,7 @@ impl Engine {
     /// appended in the caller-supplied (C4PlayerInfo ID) order.
     #[doc(hidden)]
     pub fn recheck_team_player_info_memberships(&mut self, memberships: &[(i32, i32)]) {
-        for team in Rc::make_mut(&mut self.teams) {
+        for team in Rc::make_mut(&mut self.team_state.teams) {
             team.player_ids.retain(|player_info_id| {
                 memberships
                     .iter()
@@ -373,11 +373,11 @@ impl Engine {
     }
 
     pub fn teams(&self) -> &[TeamInfo] {
-        &self.teams
+        &self.team_state.teams
     }
 
     pub fn auto_generate_teams(&self) -> bool {
-        self.team_configuration.auto_generate_teams
+        self.team_state.team_configuration.auto_generate_teams
     }
 
     /// Returns the sole team this runtime player can join, or `None` when
@@ -387,14 +387,14 @@ impl Engine {
         let mut possible = self
             .player(number)
             .and_then(Player::team)
-            .filter(|team_id| self.teams.iter().any(|team| team.id == *team_id));
-        for team in self.teams.iter().filter(|team| !self.team_is_full(team)) {
+            .filter(|team_id| self.team_state.teams.iter().any(|team| team.id == *team_id));
+        for team in self.team_state.teams.iter().filter(|team| !self.team_is_full(team)) {
             if possible.is_some_and(|team_id| team_id != team.id) {
                 return None;
             }
             possible = Some(team.id);
         }
-        match (possible, self.team_configuration.auto_generate_teams) {
+        match (possible, self.team_state.team_configuration.auto_generate_teams) {
             (Some(_), true) => None,
             (Some(team), false) => Some(team),
             (None, true) => Some(-1),
@@ -404,11 +404,11 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn set_team_colors(&mut self, enabled: bool) {
-        self.team_configuration.team_colors = enabled;
+        self.team_state.team_configuration.team_colors = enabled;
     }
 
     pub fn team_colors(&self) -> bool {
-        self.team_configuration.team_colors
+        self.team_state.team_configuration.team_colors
     }
 
     /// Assign C4TeamList::eTeamDist from a CID_Set packet. Native debug
@@ -418,22 +418,22 @@ impl Engine {
         if !(0..=4).contains(&distribution) {
             return false;
         }
-        self.team_configuration.distribution = distribution;
+        self.team_state.team_configuration.distribution = distribution;
         true
     }
 
     pub fn team_distribution(&self) -> i32 {
-        self.team_configuration.distribution
+        self.team_state.team_configuration.distribution
     }
 
     #[doc(hidden)]
     pub fn team_configuration(&self) -> TeamConfiguration {
-        self.team_configuration
+        self.team_state.team_configuration
     }
 
     #[doc(hidden)]
     pub fn set_auto_generate_teams(&mut self, enabled: bool) {
-        self.team_configuration.auto_generate_teams = enabled;
+        self.team_state.team_configuration.auto_generate_teams = enabled;
     }
 
     #[doc(hidden)]
@@ -441,15 +441,15 @@ impl Engine {
         if self.league_game {
             config.allow_team_switch = false;
         }
-        self.runtime_join_team_choice = config.custom && config.active;
-        self.team_configuration = config;
+        self.team_state.runtime_join_team_choice = config.custom && config.active;
+        self.team_state.team_configuration = config;
     }
 
     #[doc(hidden)]
     pub fn set_runtime_join_team_choice(&mut self, enabled: bool) {
-        self.team_configuration.custom = enabled;
-        self.team_configuration.active = enabled;
-        self.runtime_join_team_choice = enabled;
+        self.team_state.team_configuration.custom = enabled;
+        self.team_state.team_configuration.active = enabled;
+        self.team_state.runtime_join_team_choice = enabled;
     }
 
     /// One C4SPlrStart slot; `None` past `C4S_MaxPlayer` (4). Joining

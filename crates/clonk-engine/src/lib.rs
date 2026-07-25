@@ -7371,6 +7371,36 @@ fn mission_access_store_updates_semicolon_modules_case_insensitively() {
     assert_eq!(store.update_modules("alpha;GAMMA", true), "Beta");
 }
 
+/// Runtime team roster and lobby-team configuration, grouped out of Engine.
+struct TeamRuntime {
+    teams: Rc<Vec<TeamInfo>>,
+    team_configuration: TeamConfiguration,
+    team_last_team_id: i32,
+    team_max_script_players: i32,
+    team_script_player_names: Vec<u8>,
+    team_random_team_count: i32,
+    runtime_join_team_choice: bool,
+}
+
+/// Deferred solid-mask work staged between host updates, grouped out of Engine.
+struct SolidMaskStaging {
+    next_solid_mask_instance_sequence: u64,
+    defer_solid_mask_updates: bool,
+    deferred_solid_mask_operations: Vec<HostSolidMaskOperation>,
+    deferred_host_raster_preview: Option<compat::HostRasterPreview>,
+}
+
+/// Queues the engine fills for the host to drain each frame, grouped out of Engine.
+struct HostRequestQueues {
+    player_info_updates: Rc<RefCell<Vec<PlayerInfoUpdateRequest>>>,
+    player_info_league_progress_updates: Vec<(i32, Option<Vec<u8>>)>,
+    pending_remove_player_controls: Vec<RemovePlayerControlData>,
+    pending_game_goal_menu_requests: Vec<GameGoalMenuRequest>,
+    pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
+    network_target_fps_requests: Rc<RefCell<Vec<NetworkTargetFpsRequest>>>,
+    viewport_presentation_requests: Rc<RefCell<Vec<ViewportPresentationRequest>>>,
+}
+
 pub struct Engine {
     #[doc(hidden)]
     pub(crate) definitions: HashMap<DefinitionId, Definition>,
@@ -7453,16 +7483,12 @@ pub struct Engine {
     pub next_object_id: u64,
     /// Next C4SolidMask construction-order token. Runtime-only: native
     /// pSolidMaskData is NoSave and is rebuilt after a load.
-    next_solid_mask_instance_sequence: u64,
     /// Channel folds are suppressed while chronological host mask
     /// operations are staged for replay.
-    defer_solid_mask_updates: bool,
     /// Operations accumulated by the outermost deferred fold. Nested spawn,
     /// effect, and callback folds append to this same chronological stream.
-    deferred_solid_mask_operations: Vec<HostSolidMaskOperation>,
     /// Exact callback-final raster exposed to synchronous callbacks that run
     /// before the outermost chronological stream reaches authoritative replay.
-    deferred_host_raster_preview: Option<compat::HostRasterPreview>,
     #[doc(hidden)]
     pub rng: LcgRng,
     /// Game.Script.Go — the scenario Script%d counter gate (FnScriptGo,
@@ -7532,27 +7558,20 @@ pub struct Engine {
     /// Deferred CreateScriptPlayer updates. PlayerInfo must enter the same
     /// app/control path as every other join instead of mutating players from
     /// inside the script callback.
-    player_info_updates: Rc<RefCell<Vec<PlayerInfoUpdateRequest>>>,
     /// Script writes already folded into the engine that the embedding
     /// PlayerInfo registry must mirror before its next full projection.
-    player_info_league_progress_updates: Vec<(i32, Option<Vec<u8>>)>,
     /// Host-side `Game.Input` requests produced by
     /// `EliminatePlayer(plr, true)`. The app moves these into a later
     /// synchronized control tick; applying the script callback must not
     /// remove the player inline.
-    pending_remove_player_controls: Vec<RemovePlayerControlData>,
     /// Runtime presentation requests produced after synchronized goal
     /// evaluation. This is deliberately excluded from EngineState.
-    pending_game_goal_menu_requests: Vec<GameGoalMenuRequest>,
     /// Process-local console pause requests emitted by `PauseGame`. Shared
     /// into copied host contexts so nested calls preserve script call order.
-    pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
     /// Process-local pacing writes emitted by `SetPreSend`, in script-call
     /// order. The app owns client-name matching, the network clock and flash.
-    network_target_fps_requests: Rc<RefCell<Vec<NetworkTargetFpsRequest>>>,
     /// Process-local physical viewport requests emitted by `SetFilmView` and
     /// `SetViewOffset`. Physical viewport ownership remains in the app.
-    viewport_presentation_requests: Rc<RefCell<Vec<ViewportPresentationRequest>>>,
     /// Process-local `Console.EditCursor.Target`. The developer console owns
     /// this pointer; synchronized state and snapshots deliberately do not.
     edit_cursor_target: Option<ObjectId>,
@@ -7691,19 +7710,12 @@ pub struct Engine {
     /// effective `PlayerControlState::auto_context_menu` preference.
     forced_auto_context_menu: Option<bool>,
     /// Ordered `Game.Teams` entries loaded from the scenario's Teams.txt.
-    teams: Rc<Vec<TeamInfo>>,
     /// Complete live `Game.Teams` configuration. The team vector alone is
     /// insufficient to reconstruct Custom/Active/AutoGenerateTeams.
-    team_configuration: TeamConfiguration,
     /// Savegame-only C4TeamList compiler fields. These remain independent
     /// from the live team vector and its seven script-queryable flags.
-    team_last_team_id: i32,
-    team_max_script_players: i32,
-    team_script_player_names: Vec<u8>,
-    team_random_team_count: i32,
     /// `C4TeamList::IsRuntimeJoinTeamChoice`: custom, active team lists
     /// postpone teamless user ScenarioInit until a team control executes.
-    runtime_join_team_choice: bool,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     /// The four C4SPlrStart slots retained from the scenario: consumed at
@@ -7806,6 +7818,9 @@ pub struct Engine {
     show_commands_requests: ShowCommandsRequestStore,
     scoreboard: Rc<RefCell<ScoreboardState>>,
     scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
+    team_state: TeamRuntime,
+    solid_mask_staging: SolidMaskStaging,
+    host_requests: HostRequestQueues,
 }
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -9889,10 +9904,12 @@ impl Engine {
             materials_shared: std::cell::RefCell::new(None),
             objects: Vec::new(),
             next_object_id: 1,
-            next_solid_mask_instance_sequence: 1,
-            defer_solid_mask_updates: false,
-            deferred_solid_mask_operations: Vec::new(),
-            deferred_host_raster_preview: None,
+            solid_mask_staging: SolidMaskStaging {
+                next_solid_mask_instance_sequence: 1,
+                defer_solid_mask_updates: false,
+                deferred_solid_mask_operations: Vec::new(),
+                deferred_host_raster_preview: None,
+            },
             rng: {
                 let mut rng = LcgRng::seed_from_u64(seed);
                 rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
@@ -9918,13 +9935,15 @@ impl Engine {
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
             player_info_league_scores: Rc::new(BTreeMap::new()),
             control_host: true,
-            player_info_updates: Rc::new(RefCell::new(Vec::new())),
-            player_info_league_progress_updates: Vec::new(),
-            pending_remove_player_controls: Vec::new(),
-            pending_game_goal_menu_requests: Vec::new(),
-            pause_game_requests: Rc::new(RefCell::new(Vec::new())),
-            network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
-            viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
+            host_requests: HostRequestQueues {
+                player_info_updates: Rc::new(RefCell::new(Vec::new())),
+                player_info_league_progress_updates: Vec::new(),
+                pending_remove_player_controls: Vec::new(),
+                pending_game_goal_menu_requests: Vec::new(),
+                pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+                network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
+                viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
+            },
             edit_cursor_target: None,
             local_players: None,
             control_key_names: Rc::new(HashMap::new()),
@@ -9977,13 +9996,15 @@ impl Engine {
             last_player_info_id: 0,
             forced_control_style: None,
             forced_auto_context_menu: None,
-            teams: Rc::new(Vec::new()),
-            team_configuration: TeamConfiguration::default(),
-            team_last_team_id: 0,
-            team_max_script_players: 0,
-            team_script_player_names: Vec::new(),
-            team_random_team_count: 0,
-            runtime_join_team_choice: false,
+            team_state: TeamRuntime {
+                teams: Rc::new(Vec::new()),
+                team_configuration: TeamConfiguration::default(),
+                team_last_team_id: 0,
+                team_max_script_players: 0,
+                team_script_player_names: Vec::new(),
+                team_random_team_count: 0,
+                runtime_join_team_choice: false,
+            },
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             player_starts: vec![scenario::PlayerStart::default(); scenario::MAX_PLAYER_STARTS],

@@ -663,12 +663,12 @@ impl Engine {
             last_player_info_id: self.last_player_info_id,
             forced_control_style: self.forced_control_style,
             forced_auto_context_menu: self.forced_auto_context_menu,
-            teams: self.teams.as_ref().clone(),
-            team_configuration: Some(self.team_configuration),
-            team_last_team_id: self.team_last_team_id,
-            team_max_script_players: self.team_max_script_players,
-            team_script_player_names: self.team_script_player_names.clone(),
-            team_random_team_count: self.team_random_team_count,
+            teams: self.team_state.teams.as_ref().clone(),
+            team_configuration: Some(self.team_state.team_configuration),
+            team_last_team_id: self.team_state.team_last_team_id,
+            team_max_script_players: self.team_state.team_max_script_players,
+            team_script_player_names: self.team_state.team_script_player_names.clone(),
+            team_random_team_count: self.team_state.team_random_team_count,
             crew_selection,
             crew_roles,
             crew_info_rosters: self.crew_rosters.clone(),
@@ -700,11 +700,11 @@ impl Engine {
         // must lazily rebuild it from the restored parameters and RNG epoch.
         self.clear_fair_crew_physicals();
         self.active_message_board_input = None;
-        self.pending_game_goal_menu_requests.clear();
-        self.network_target_fps_requests.borrow_mut().clear();
-        self.viewport_presentation_requests.borrow_mut().clear();
+        self.host_requests.pending_game_goal_menu_requests.clear();
+        self.host_requests.network_target_fps_requests.borrow_mut().clear();
+        self.host_requests.viewport_presentation_requests.borrow_mut().clear();
         self.film_viewport_available = false;
-        self.player_info_league_progress_updates.clear();
+        self.host_requests.player_info_league_progress_updates.clear();
         for object in &state.objects {
             if !self
                 .definitions
@@ -717,7 +717,7 @@ impl Engine {
         }
         // Game.Input is not part of EngineState. A pre-load direct-removal
         // request must not fire against players from the restored game.
-        self.pending_remove_player_controls.clear();
+        self.host_requests.pending_remove_player_controls.clear();
         // Sound instances are presentation state and are not serialized by
         // C4SoundSystem. Loading a game starts without channels or object
         // bindings from the discarded world.
@@ -1379,16 +1379,16 @@ impl Engine {
             .max(0);
         self.forced_control_style = state.forced_control_style;
         self.forced_auto_context_menu = state.forced_auto_context_menu;
-        self.teams = Rc::new(state.teams.clone());
+        self.team_state.teams = Rc::new(state.teams.clone());
         if let Some(configuration) = state.team_configuration {
             self.set_team_configuration(configuration);
         }
-        self.team_last_team_id = state
+        self.team_state.team_last_team_id = state
             .team_last_team_id
             .max(state.teams.iter().map(|team| team.id).max().unwrap_or(0));
-        self.team_max_script_players = state.team_max_script_players;
-        self.team_script_player_names = state.team_script_player_names.clone();
-        self.team_random_team_count = state.team_random_team_count;
+        self.team_state.team_max_script_players = state.team_max_script_players;
+        self.team_state.team_script_player_names = state.team_script_player_names.clone();
+        self.team_state.team_random_team_count = state.team_random_team_count;
         self.recheck_runtime_team_memberships();
         self.players_registered = !self.players.is_empty();
         self.next_mission = state.next_mission.clone();
@@ -3336,13 +3336,13 @@ impl Engine {
         synchronize_hostility: bool,
     ) -> Result<(), EngineError> {
         if let Some(generated_team) = generated_team {
-            self.team_last_team_id = self.team_last_team_id.max(generated_team.id);
+            self.team_state.team_last_team_id = self.team_state.team_last_team_id.max(generated_team.id);
             if !self
-                .teams
+                .team_state.teams
                 .iter()
                 .any(|existing| existing.id == generated_team.id)
             {
-                Rc::make_mut(&mut self.teams).push(generated_team);
+                Rc::make_mut(&mut self.team_state.teams).push(generated_team);
             }
         }
         if !self.players.contains_key(&player_id) {
@@ -3682,7 +3682,7 @@ impl Engine {
                     let data = data.map(legacy_c_string_bytes);
                     Rc::make_mut(&mut self.player_info_league_progress_data)
                         .insert(player_info_id, data.clone());
-                    self.player_info_league_progress_updates
+                    self.host_requests.player_info_league_progress_updates
                         .push((player_info_id, data));
                 }
                 PlayerCommand::SetRestoreInfos { what } => {
@@ -3721,7 +3721,7 @@ impl Engine {
                     open_menu,
                 } => {
                     let (goals, fulfilled_goals) = self.evaluate_goals_for_player(player_id)?;
-                    self.pending_game_goal_menu_requests
+                    self.host_requests.pending_game_goal_menu_requests
                         .push(GameGoalMenuRequest {
                             player: player_id,
                             goals,
@@ -4081,7 +4081,7 @@ impl Engine {
                     }
                 }
                 PlayerCommand::Remove { player_id } => {
-                    self.pending_remove_player_controls
+                    self.host_requests.pending_remove_player_controls
                         .push(RemovePlayerControlData {
                             player: player_id,
                             disconnected: false,
@@ -4152,7 +4152,7 @@ impl Engine {
             None => return,
         };
         let captain_id = self
-            .teams
+            .team_state.teams
             .iter()
             .find(|candidate| candidate.id == team)
             .and_then(|team| team.player_ids.first().copied())
@@ -4167,7 +4167,7 @@ impl Engine {
             })
             .or_else(|| {
                 let has_player_info_order = self
-                    .teams
+                    .team_state.teams
                     .iter()
                     .find(|candidate| candidate.id == team)
                     .is_some_and(|team| !team.player_ids.is_empty());
@@ -4234,7 +4234,7 @@ impl Engine {
             .collect::<Vec<_>>();
         live.sort_unstable_by_key(|(info_id, _)| *info_id);
         let live_teams = live.iter().copied().collect::<HashMap<_, _>>();
-        for team in Rc::make_mut(&mut self.teams) {
+        for team in Rc::make_mut(&mut self.team_state.teams) {
             let team_id = team.id;
             team.player_ids.retain(|info_id| {
                 live_teams
@@ -4265,7 +4265,7 @@ impl Engine {
         live.sort_unstable();
 
         let mut ordered = Vec::with_capacity(live.len());
-        if let Some(team) = self.teams.iter().find(|team| team.id == team_id) {
+        if let Some(team) = self.team_state.teams.iter().find(|team| team.id == team_id) {
             for info_id in &team.player_ids {
                 if let Some(index) = live.iter().position(|(id, _)| id == info_id) {
                     ordered.push(live.remove(index).1);

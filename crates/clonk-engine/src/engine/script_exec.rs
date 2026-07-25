@@ -1097,44 +1097,44 @@ impl Engine {
     /// app feeds them through PlayerInfo admission before any JoinPlayer is
     /// issued, matching C4PlayerInfoList::DoPlayerInfoUpdate.
     pub fn take_script_player_info_updates(&mut self) -> Vec<PlayerInfoUpdateRequest> {
-        self.player_info_updates.borrow_mut().drain(..).collect()
+        self.host_requests.player_info_updates.borrow_mut().drain(..).collect()
     }
 
     /// Drain `SetLeagueProgressData` writes in script execution order so the
     /// app's retained C4PlayerInfo registry remains the same object graph as
     /// the engine-side script projection.
     pub fn take_player_info_league_progress_updates(&mut self) -> Vec<(i32, Option<Vec<u8>>)> {
-        std::mem::take(&mut self.player_info_league_progress_updates)
+        std::mem::take(&mut self.host_requests.player_info_league_progress_updates)
     }
 
     /// Drain host-authored `CID_RemovePlr` requests in script call order.
     /// The embedding control layer assigns them to a not-yet-executed tick.
     pub fn take_pending_remove_player_controls(&mut self) -> Vec<RemovePlayerControlData> {
-        std::mem::take(&mut self.pending_remove_player_controls)
+        std::mem::take(&mut self.host_requests.pending_remove_player_controls)
     }
 
     /// Drain goal evaluations in synchronized control order. Remote/replay
     /// requests remain observable with `open_menu == false` so callers can
     /// discard only the presentation while retaining callback execution.
     pub fn take_game_goal_menu_requests(&mut self) -> Vec<GameGoalMenuRequest> {
-        std::mem::take(&mut self.pending_game_goal_menu_requests)
+        std::mem::take(&mut self.host_requests.pending_game_goal_menu_requests)
     }
 
     /// Drain process-local pause actions in script call order. Replay calls
     /// are suppressed before they reach this app-owned request channel.
     pub fn take_pause_game_requests(&mut self) -> Vec<PauseGameRequest> {
-        std::mem::take(&mut *self.pause_game_requests.borrow_mut())
+        std::mem::take(&mut *self.host_requests.pause_game_requests.borrow_mut())
     }
 
     /// Drain local `SetPreSend` requests in exact script-call order. This is
     /// runtime-only state and never enters synchronized snapshots or saves.
     pub fn take_network_target_fps_requests(&mut self) -> Vec<NetworkTargetFpsRequest> {
-        std::mem::take(&mut *self.network_target_fps_requests.borrow_mut())
+        std::mem::take(&mut *self.host_requests.network_target_fps_requests.borrow_mut())
     }
 
     /// Drain physical viewport mutations in exact script call order.
     pub fn take_viewport_presentation_requests(&mut self) -> Vec<ViewportPresentationRequest> {
-        std::mem::take(&mut *self.viewport_presentation_requests.borrow_mut())
+        std::mem::take(&mut *self.host_requests.viewport_presentation_requests.borrow_mut())
     }
 
     /// Update the process-local developer-console target queried by the

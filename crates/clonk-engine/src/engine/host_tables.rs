@@ -543,15 +543,15 @@ impl Engine {
                         .map(|sequence| (object.id, sequence))
                 })
                 .collect(),
-            self.next_solid_mask_instance_sequence,
+            self.solid_mask_staging.next_solid_mask_instance_sequence,
         )
         .with_scenario_sections(
             self.scenario_sections
                 .values()
                 .map(|section| section.name.as_str()),
         )
-        .with_teams(Rc::clone(&self.teams))
-        .with_team_runtime_options(self.team_configuration, self.league_game)
+        .with_teams(Rc::clone(&self.team_state.teams))
+        .with_team_runtime_options(self.team_state.team_configuration, self.league_game)
         .with_game_tick_delay(
             Rc::clone(&self.game_tick_delay_ms),
             Rc::clone(&self.game_tick_delay_revision),
@@ -591,18 +591,18 @@ impl Engine {
         .with_network_control_mode(self.network_control_mode)
         .with_control_sync_mode(self.control_sync_mode())
         .with_edit_cursor_target(self.edit_cursor_target)
-        .with_pause_game_requests(self.replay_control, Rc::clone(&self.pause_game_requests))
-        .with_network_target_fps_requests(Rc::clone(&self.network_target_fps_requests))
+        .with_pause_game_requests(self.replay_control, Rc::clone(&self.host_requests.pause_game_requests))
+        .with_network_target_fps_requests(Rc::clone(&self.host_requests.network_target_fps_requests))
         .with_viewport_presentation_requests(
             self.replay_control,
-            Rc::clone(&self.viewport_presentation_requests),
+            Rc::clone(&self.host_requests.viewport_presentation_requests),
         )
         .with_film_viewport_available(self.film_viewport_available)
         .with_smoke_level(self.bubble_smoke_level())
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
         .with_fair_crew_physical_cache(Rc::clone(&self.fair_crew_physical_cache))
-        .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
+        .with_control_host(self.control_host, Rc::clone(&self.host_requests.player_info_updates))
         .with_player_order(self.player_order.iter().copied())
         .with_local_players(local_players)
         .with_active_message_board_input(self.active_message_board_input.clone())
@@ -626,8 +626,8 @@ impl Engine {
         .with_flag_removeable(self.flag_removeable)
         .with_sky_adjustment(sky_adjustment)
         .with_sky_fade(sky_fade[0], sky_fade[1]);
-        if self.defer_solid_mask_updates {
-            if let Some(preview) = self.deferred_host_raster_preview.clone() {
+        if self.solid_mask_staging.defer_solid_mask_updates {
+            if let Some(preview) = self.solid_mask_staging.deferred_host_raster_preview.clone() {
                 world.apply_host_raster_preview(preview);
             }
         }

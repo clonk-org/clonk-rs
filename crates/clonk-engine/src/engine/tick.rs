@@ -582,7 +582,7 @@ impl Engine {
                         self.audio_registry.clone(),
                     )?
                 };
-                let was_deferred = self.defer_solid_mask_updates;
+                let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
                 let mut outermost = self.stage_host_solid_mask_operations(
                     effect_solid_mask_operations,
                     effect_host_raster_preview,
@@ -650,7 +650,7 @@ impl Engine {
                     }
                     Ok(())
                 })();
-                outermost |= !was_deferred && self.defer_solid_mask_updates;
+                outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
                 self.finish_host_solid_mask_operations(outermost, fold_result)?;
             }
 
@@ -1128,7 +1128,7 @@ impl Engine {
                 script_counter,
             } = command;
 
-            let was_deferred = self.defer_solid_mask_updates;
+            let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
             let mut outermost = self.stage_host_solid_mask_operations(
                 solid_mask_operations,
                 command_host_raster_preview,
@@ -1400,7 +1400,7 @@ impl Engine {
 
                 Ok(())
             })();
-            outermost |= !was_deferred && self.defer_solid_mask_updates;
+            outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
             self.finish_host_solid_mask_operations(outermost, command_fold_result)?;
 
             self.trigger_action_callbacks(idx, Some(previous_action_name))?;
@@ -1805,7 +1805,7 @@ impl Engine {
             }
         }
         if let Some(sequence) = solid_mask_instance_sequence {
-            self.next_solid_mask_instance_sequence = self.next_solid_mask_instance_sequence.max(
+            self.solid_mask_staging.next_solid_mask_instance_sequence = self.solid_mask_staging.next_solid_mask_instance_sequence.max(
                 sequence
                     .checked_add(1)
                     .expect("C4SolidMask instance sequence overflow"),
@@ -2540,7 +2540,7 @@ impl Engine {
         // calls. Apply every non-mask state change first while suppressing
         // their channel-local mask folds, then replay the captured C++ call
         // order against the now-materialized objects.
-        let was_deferred = self.defer_solid_mask_updates;
+        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
         let mut outermost =
             self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
         let result = self.apply_callback_outcome_inner(
@@ -2551,7 +2551,7 @@ impl Engine {
             definition_id,
             clamp_velocity,
         );
-        outermost |= !was_deferred && self.defer_solid_mask_updates;
+        outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
         self.finish_host_solid_mask_operations(outermost, result)
     }
 
@@ -3092,9 +3092,9 @@ impl Engine {
         &mut self,
         outcomes: Vec<compat::NestedObjectOutcome>,
     ) -> Result<Vec<compat::NestedObjectOutcome>, EngineError> {
-        let was_deferred = self.defer_solid_mask_updates;
+        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
         let result = self.apply_nested_object_outcomes_retaining_missing_inner(outcomes);
-        let outermost = !was_deferred && self.defer_solid_mask_updates;
+        let outermost = !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
         self.finish_host_solid_mask_operations(outermost, result)
     }
 

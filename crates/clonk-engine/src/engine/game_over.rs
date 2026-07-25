@@ -388,11 +388,11 @@ impl Engine {
     ) -> Result<Vec<ObjectId>, EngineError> {
         let solid_mask_operations = batch.solid_mask_operations.0.clone();
         let host_raster_preview = batch.host_raster_preview.0.clone();
-        let was_deferred = self.defer_solid_mask_updates;
+        let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
         let mut outermost =
             self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
         let result = self.apply_scenario_batch_inner(batch);
-        outermost |= !was_deferred && self.defer_solid_mask_updates;
+        outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
         self.finish_host_solid_mask_operations(outermost, result)
     }
 

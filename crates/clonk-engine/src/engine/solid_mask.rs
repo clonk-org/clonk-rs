@@ -70,7 +70,7 @@ impl Engine {
     /// clip the mask to the landscape, save the background bytes, write
     /// MCVehic. No-op when already put or ineligible.
     pub(crate) fn put_solid_mask(&mut self, index: usize) {
-        if self.defer_solid_mask_updates {
+        if self.solid_mask_staging.defer_solid_mask_updates {
             return;
         }
         if index >= self.objects.len()
@@ -87,8 +87,8 @@ impl Engine {
         };
         let instance_sequence = match self.objects[index].solid_mask_instance_sequence {
             Some(sequence) => {
-                self.next_solid_mask_instance_sequence =
-                    self.next_solid_mask_instance_sequence.max(
+                self.solid_mask_staging.next_solid_mask_instance_sequence =
+                    self.solid_mask_staging.next_solid_mask_instance_sequence.max(
                         sequence
                             .checked_add(1)
                             .expect("C4SolidMask instance sequence overflow"),
@@ -96,9 +96,9 @@ impl Engine {
                 sequence
             }
             None => {
-                let sequence = self.next_solid_mask_instance_sequence;
-                self.next_solid_mask_instance_sequence = self
-                    .next_solid_mask_instance_sequence
+                let sequence = self.solid_mask_staging.next_solid_mask_instance_sequence;
+                self.solid_mask_staging.next_solid_mask_instance_sequence = self
+                    .solid_mask_staging.next_solid_mask_instance_sequence
                     .checked_add(1)
                     .expect("C4SolidMask instance sequence overflow");
                 self.objects[index].solid_mask_instance_sequence = Some(sequence);
@@ -337,7 +337,7 @@ impl Engine {
     /// (SetRotation/DoCon/Enter/Exit/destruction all pass false in C++).
     #[doc(hidden)]
     pub fn remove_solid_mask(&mut self, index: usize) {
-        if self.defer_solid_mask_updates {
+        if self.solid_mask_staging.defer_solid_mask_updates {
             return;
         }
         self.remove_solid_mask_impl(index, true, false);
@@ -777,7 +777,7 @@ impl Engine {
     /// re-put when (still) eligible.
     #[doc(hidden)]
     pub fn update_solid_mask(&mut self, index: usize) {
-        if self.defer_solid_mask_updates {
+        if self.solid_mask_staging.defer_solid_mask_updates {
             return;
         }
         self.remove_solid_mask(index);
@@ -815,8 +815,8 @@ impl Engine {
                     ..
                 } => {
                     self.objects[index].solid_mask_instance_sequence = Some(instance_sequence);
-                    self.next_solid_mask_instance_sequence =
-                        self.next_solid_mask_instance_sequence.max(
+                    self.solid_mask_staging.next_solid_mask_instance_sequence =
+                        self.solid_mask_staging.next_solid_mask_instance_sequence.max(
                             instance_sequence
                                 .checked_add(1)
                                 .expect("C4SolidMask instance sequence overflow"),
@@ -839,14 +839,14 @@ impl Engine {
             debug_assert!(host_raster_preview.is_none());
             return false;
         }
-        let outermost = !self.defer_solid_mask_updates;
+        let outermost = !self.solid_mask_staging.defer_solid_mask_updates;
         if outermost {
-            debug_assert!(self.deferred_solid_mask_operations.is_empty());
-            self.defer_solid_mask_updates = true;
+            debug_assert!(self.solid_mask_staging.deferred_solid_mask_operations.is_empty());
+            self.solid_mask_staging.defer_solid_mask_updates = true;
         }
-        self.deferred_solid_mask_operations.extend(operations);
+        self.solid_mask_staging.deferred_solid_mask_operations.extend(operations);
         if host_raster_preview.is_some() {
-            self.deferred_host_raster_preview = host_raster_preview;
+            self.solid_mask_staging.deferred_host_raster_preview = host_raster_preview;
         }
         outermost
     }
@@ -856,10 +856,10 @@ impl Engine {
     /// chronological fold using only foreign-object operations, that normal
     /// put is suppressed and must join the stream explicitly.
     pub(crate) fn stage_materialized_spawn_solid_mask(&mut self, index: usize) {
-        if !self.defer_solid_mask_updates
+        if !self.solid_mask_staging.defer_solid_mask_updates
             || self.objects[index].solid_mask_bake.is_some()
             || self.objects[index].solid_mask_empty_put
-            || self.deferred_solid_mask_operations.iter().any(|operation| {
+            || self.solid_mask_staging.deferred_solid_mask_operations.iter().any(|operation| {
                 matches!(operation,
                     HostSolidMaskOperation::Put { object_id, .. }
                     | HostSolidMaskOperation::Remove { object_id }
@@ -871,8 +871,8 @@ impl Engine {
         let Some(spec) = self.solid_mask_spec(index) else {
             return;
         };
-        self.next_solid_mask_instance_sequence = self
-            .deferred_solid_mask_operations
+        self.solid_mask_staging.next_solid_mask_instance_sequence = self
+            .solid_mask_staging.deferred_solid_mask_operations
             .iter()
             .filter_map(|operation| match operation {
                 HostSolidMaskOperation::Put {
@@ -881,19 +881,19 @@ impl Engine {
                 HostSolidMaskOperation::Remove { .. }
                 | HostSolidMaskOperation::Landscape { .. } => None,
             })
-            .fold(self.next_solid_mask_instance_sequence, u64::max);
+            .fold(self.solid_mask_staging.next_solid_mask_instance_sequence, u64::max);
         let instance_sequence = self.objects[index]
             .solid_mask_instance_sequence
             .unwrap_or_else(|| {
-                let sequence = self.next_solid_mask_instance_sequence;
-                self.next_solid_mask_instance_sequence = self
-                    .next_solid_mask_instance_sequence
+                let sequence = self.solid_mask_staging.next_solid_mask_instance_sequence;
+                self.solid_mask_staging.next_solid_mask_instance_sequence = self
+                    .solid_mask_staging.next_solid_mask_instance_sequence
                     .checked_add(1)
                     .expect("C4SolidMask instance sequence overflow");
                 self.objects[index].solid_mask_instance_sequence = Some(sequence);
                 sequence
             });
-        self.next_solid_mask_instance_sequence = self.next_solid_mask_instance_sequence.max(
+        self.solid_mask_staging.next_solid_mask_instance_sequence = self.solid_mask_staging.next_solid_mask_instance_sequence.max(
             instance_sequence
                 .checked_add(1)
                 .expect("C4SolidMask instance sequence overflow"),
@@ -906,8 +906,8 @@ impl Engine {
         };
         let mut world = self.host_world_context();
         world.preview_solid_mask_operations(std::slice::from_ref(&operation));
-        self.deferred_host_raster_preview = Some(world.host_raster_preview());
-        self.deferred_solid_mask_operations.push(operation);
+        self.solid_mask_staging.deferred_host_raster_preview = Some(world.host_raster_preview());
+        self.solid_mask_staging.deferred_solid_mask_operations.push(operation);
     }
 
     /// Close a chronological fold and replay only when this caller opened
@@ -921,9 +921,9 @@ impl Engine {
         if !outermost {
             return result;
         }
-        self.defer_solid_mask_updates = false;
-        self.deferred_host_raster_preview = None;
-        let operations = std::mem::take(&mut self.deferred_solid_mask_operations);
+        self.solid_mask_staging.defer_solid_mask_updates = false;
+        self.solid_mask_staging.deferred_host_raster_preview = None;
+        let operations = std::mem::take(&mut self.solid_mask_staging.deferred_solid_mask_operations);
         self.replay_host_solid_mask_operations(operations);
         result
     }
