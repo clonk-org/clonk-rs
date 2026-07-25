@@ -308,6 +308,48 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **`Network.ControlMode` defaults to 2 (`CNM_Async`), not 0 (`CNM_Decentral`)**
+  (`crates/clonk-app/src/main_parts/resources.rs`,
+  `crates/clonk-app/src/advanced_config.rs`; C++ `C4Config.cpp` ships 0 and
+  labels async `"[!]Asynchroner Netzwerkmodus (experimentell!)"`,
+  `C4GameOptions.cpp:93`). Approved 2026-07-25. The async *mechanism* itself is
+  already a faithful port -- `force_expired_async_control` mirrors
+  `PackCompleteCtrl` (oracle-src-pinned src/C4GameControlNetwork.cpp:741-784)
+  and the deadline mirrors :754 exactly; only the default changes.
+  In lockstep the host cannot publish tick T until every client's control for T
+  arrives, so the slowest link paces the whole session and one bad peer stalls
+  everyone. Async bounds that wait at
+  `ControlRate * AsyncMaxWait * 1000 / TargetFPS` (106 ms at defaults), then
+  packs whichever clients arrived. The absent client's input is dropped, not
+  deferred.
+  Determinism is unaffected: only the host decides the timeout and broadcasts
+  one authoritative aggregate, so every client executes the identical control.
+  The straggler's late packet is rejected as stale rather than replayed on a
+  later tick (`ControlCoordinator::ingest`, `tick < current_tick`), which is now
+  pinned by
+  `control_arriving_after_its_tick_was_forced_is_stale_and_never_executes`.
+  Measured with `cargo run -p clonk-network --example async_control_mode`, 16
+  seeds x 400 ticks, 4 clients with one impaired, *with PreSend active* (that
+  pairing is the whole basis for this default -- see the numbers below).
+  p99/max shared-tick lateness, decentral -> async:
+  250 ms peer 232/281 ms -> 190/206 ms (32 packets dropped);
+  +-150 ms jitter peer 278/302 ms -> 233/262 ms (45);
+  8 clients with one at 400 ms 346/408 ms -> 311/337 ms (66);
+  60 ms/10% loss peer 93/106 ms -> 93/106 ms (0 -- the timeout never fires, so
+  enabling it is free where it is not needed).
+  The cost is what changed the decision. Without PreSend the same runs drop
+  1006-2162 packets; with the envelope estimator delivering most control on
+  time, async only fires on genuine outliers and drops 32-66, roughly 0.5-1% of
+  ticks -- and most ticks carry no keypress at all, so real input loss is well
+  below that. PreSend still does the bulk of the work (mean lateness
+  192 -> 63 ms, 216 -> 60 ms, 297 -> 98 ms); async is a tail/hitch fix layered
+  on top, not a replacement for it.
+  Known residuals: the drop is silent, with no client-side signal that a
+  player's input was discarded; and a peer whose latency *consistently* exceeds
+  the budget is dropped on nearly every tick (`AsyncMaxWait` 1 dropped on 6490
+  of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
+  above ordinary delivery time rather than being tuned down to chase the tail.
+
 - **PreSend is sized from the delivery-time envelope, not the mean**
   (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;
   C++ `C4GameControlNetwork::CalcPerformance`, oracle-src-pinned

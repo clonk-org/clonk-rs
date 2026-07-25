@@ -472,7 +472,8 @@ fn network(config: &Config) -> AdvancedConfigSection {
             i32_row(config, section, "PortUDP", 11_113),
             i32_row(config, section, "PortDiscovery", 11_114),
             i32_row(config, section, "PortRefServer", 11_111),
-            i32_row(config, section, "ControlMode", 0),
+            // 2 = CNM_Async; see the PORT_STATUS divergence entry.
+            i32_row(config, section, "ControlMode", 2),
             validated_text_row(config, section, "LocalName", "Unknown", |value| {
                 validate_network_name(value, false)
             }),

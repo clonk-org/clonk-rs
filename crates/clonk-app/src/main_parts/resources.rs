@@ -3995,7 +3995,9 @@ pub(crate) fn build_network_host_preparation(
         generated_team_name_template: app.generated_team_name_template.clone(),
         player_sources,
         config: prepared_host_bootstrap::PreparedHostBootstrapConfig {
-            control_mode: integer("Network", "ControlMode", 0),
+            // CNM_Async, diverging from C++'s CNM_Decentral default. See the
+            // PORT_STATUS divergence entry for the measurements.
+            control_mode: integer("Network", "ControlMode", 2),
             control_rate: integer("Network", "ControlRate", 2),
             async_max_wait: integer("Network", "AsyncMaxWait", 2),
             fair_crew: app.startup_view_flags.fair_crew,
