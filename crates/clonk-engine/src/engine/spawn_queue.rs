@@ -1378,7 +1378,7 @@ impl Engine {
     /// Apply every held same-call `Enter` whose container has materialized,
     /// repeating until no further link resolves so a chain of freshly created
     /// containers binds in one pass.
-    fn apply_materialized_deferred_enters(
+    pub(crate) fn apply_materialized_deferred_enters(
         &mut self,
         deferred_enters: &mut Vec<(ObjectId, ObjectId)>,
     ) -> Result<(), EngineError> {
