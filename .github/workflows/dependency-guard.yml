@@ -1,0 +1,98 @@
+name: Dependency guard
+
+# Compile-and-invariant guard for dependency changes. This is deliberately the
+# one workflow that runs today: it does **not** check out the `content/`
+# submodule, so it is unaffected by that repository being private and needs no
+# token beyond the built-in one. See `.github/workflows/rust.yml` for the full
+# gate, which does need content and stays disabled until checkout can reach it.
+#
+# It exists because two Renovate security pull requests were merged while CI
+# was off: `rand` 0.8 -> 0.9 removed `SmallRng::from_entropy()` and broke the
+# workspace build, and the dependency-graph change silently invalidated
+# `licenses/RUST_THIRD_PARTY_LICENSES.txt`, which `cargo xtask package`
+# validates. Both commands below were verified to catch those failures with
+# `content/` absent.
+
+on:
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'about.toml'
+      - '.github/workflows/dependency-guard.yml'
+  push:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'about.toml'
+      - '.github/workflows/dependency-guard.yml'
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repository. No job raises it.
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-guard-${{ github.ref }}
+  # Supersede duplicate pushes on a branch, but never cancel a run on main so
+  # every commit that lands keeps a verdict.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  guard:
+    name: Build and dependency invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Pinned to a full commit SHA, not a tag: a mutable ref is the vector the
+      # tj-actions/changed-files compromise used. v7 rather than the v4 pinned
+      # in rust.yml, because v4 runs on the deprecated Node 20 runtime.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No `submodules:` key. The default is false, and that is what lets
+          # this workflow run at all while `content/` is a private repository.
+          persist-credentials: false
+
+      # alsa-sys and libudev-sys run pkg-config in their build scripts, which
+      # `cargo check` executes, so these are needed even without codegen.
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: dependency-guard
+          cache-on-failure: true
+
+      # Type-checks every library and binary in the workspace without codegen.
+      # `--locked` additionally fails when a manifest moved without its
+      # lockfile, which is the shape a bad dependency update takes.
+      #
+      # Deliberately NOT `--all-targets`: test targets `include_bytes!` real
+      # game data (crates/clonk-resources/src/definition.rs,
+      # crates/clonk-engine/src/map_creator_s2.rs), so checking them would
+      # require the content submodule.
+      - name: Check workspace libraries and binaries
+        run: cargo check --workspace --locked
+
+      # Guards the committed third-party notice against the dependency graph
+      # (dependency_licenses::tests::committed_notice_matches_workspace_release_inputs)
+      # plus the release packaging layout. Needs no game content.
+      - name: Verify dependency notice and packaging invariants
+        run: cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
