@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 
 fn replay_fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../dev-replays")
+        .join("../../testdata/dev-replays")
         .join(name)
 }
 

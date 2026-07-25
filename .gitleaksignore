@@ -1,9 +1,0 @@
-# False positives inherited from the public LegacyClonk history.
-# KEY_JOY_AxisMax is a C++ enum constant, not a credential.
-26394748ab4edd0203a453ffdcb704addf28475f:src/C4KeyboardInput.h:generic-api-key:60
-ab044537536baedc76031a65509c0d5feb670ad9:src/C4KeyboardInput.h:generic-api-key:44
-66b40452c375ef43118d9eb23822672a63cc84d2:engine/inc/C4KeyboardInput.h:generic-api-key:45
-
-# These matches are adjacent English localization labels for password fields.
-66b40452c375ef43118d9eb23822672a63cc84d2:planet/System.c4g/LanguageUS.txt:generic-api-key:222
-66b40452c375ef43118d9eb23822672a63cc84d2:planet/System.c4g/LanguageUS.txt:generic-api-key:790

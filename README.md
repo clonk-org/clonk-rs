@@ -50,9 +50,9 @@ Tracker-music playback loads the optional libxmp 4 runtime at run time. Install
 libxmp through the platform package manager, or set `LC_LIBXMP_LIBRARY` to a
 compatible library; the game otherwise remains runnable without tracker music.
 
-See [`CLAUDE.md`](CLAUDE.md) for engineering constraints,
+See [`AGENTS.md`](AGENTS.md) for engineering constraints,
 [`PORT_STATUS.md`](PORT_STATUS.md) for parity status, and
-[`REFACTOR_PLAN.md`](REFACTOR_PLAN.md) for the ongoing
+[`docs/REFACTOR_PLAN.md`](docs/REFACTOR_PLAN.md) for the ongoing
 decomposition campaign.
 
 ## The C++ oracle

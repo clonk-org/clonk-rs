@@ -10,7 +10,7 @@ where
     F: Fn(usize) -> Result<Recording, EngineError>,
 {
     let baseline_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../snapshots/engine/v1")
+        .join("../../testdata/engine/v1")
         .join(baseline_name);
     let update = env::var_os("UPDATE_ENGINE_SNAPSHOTS").is_some();
 

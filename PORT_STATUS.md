@@ -146,7 +146,7 @@ aiming rides on both: its HCRH crosshair orbits the aiming Clonk at
 runs `ControlCommand`/`DoMouseAiming`/`FireAimWeapon` through to the launched
 projectile.
 
-Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
+Menu parity is tracked recursively in `docs/MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
 source and shipped content; top-level visual similarity is not treated as full
 menu parity. The classic scoreboard and F1 help now have C++ layout, input
@@ -184,7 +184,7 @@ live comparison.
   (`C4StartupMainDlg.cpp:72-74`, `C4StartupAboutDlg.cpp:274-275`); Rust now
   draws the `FANPROJECTTEXT` half alone. The About licenses list drops its
   `Clonk Trademark` page, leaving one entry (`COPYING`), which widens the
-  already-recorded gap in `MENU_PARITY.md` that Rust does not ingest the
+  already-recorded gap in `docs/MENU_PARITY.md` that Rust does not ingest the
   `deps/licenses.cmake` corpus — with one row, list navigation has no second
   row, so `license_list_pointer_and_keyboard_selection_follow_listbox_rules`
   no longer covers inter-row selection. `IDS_DEV_LICENSE` keeps its CC BY-NC

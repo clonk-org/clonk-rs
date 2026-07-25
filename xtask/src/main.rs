@@ -930,7 +930,7 @@ fn verify_engine_snapshots() -> Result<()> {
 fn engine_snapshot_dir(paths: &WorkspacePaths) -> PathBuf {
     paths
         .workspace_dir
-        .join("snapshots")
+        .join("testdata")
         .join("engine")
         .join("v1")
 }
