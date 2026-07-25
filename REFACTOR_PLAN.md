@@ -401,3 +401,18 @@ state extraction remains queued behind wave 2.
   test id changed — count unchanged, so only the byte-identical id-list check
   caught it. Always re-check `nextest list` output, not just its line count,
   and keep test-module declarations in the parent when slicing by line range.
+- main.rs split landed (completes the wave-2 file list): five contiguous slices
+  moved to `#[path]`-mounted files under `crates/clonk-app/src/main_parts/` —
+  assets 8,226 / app_state 6,615 / resources 6,267 / audio 6,076 /
+  render_io 5,606 lines. `fn main`, the module declarations and the root
+  `impl GameApp` stay behind; main.rs 40,421 → 7,682 lines.
+
+  Scope is preserved exactly: items private at a *binary* crate root are
+  already visible crate-wide, so the 2,391 `pub(crate)` promotions grant
+  nothing new — the spliced `mod tests` reaches them just as before. Three
+  promotion shapes the earlier engine splits had not hit: a foreign item inside
+  `extern "C" { .. }`, a tuple struct's positional fields, and rustc naming a
+  type with a module prefix and generic arguments (`main_audio::ResolvedSound<'a>`)
+  so a bare-identifier parse missed it. Struct *literals* also attract
+  private-field spans, so the declaration guard must require the exact 4-space
+  field indent — an early run spliced `pub(crate)` into literal initializers.

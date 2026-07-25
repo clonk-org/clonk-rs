@@ -1,0 +1,6615 @@
+//! `main.rs` — GameApp's state structs, lobby/menu/search state and boundary enums.
+//!
+//! A contiguous slice moved verbatim from the crate root; it stays part of
+//! the same binary crate, re-exported from `main.rs` so every path resolves.
+
+use super::*;
+
+pub(crate) struct GameApp {
+    pub(crate) engine: Engine,
+    pub(crate) graphics: GraphicsSystem,
+    pub(crate) sky: Option<SkyRenderState>,
+    /// Landscape texture surfaces + material render metadata (re-applied on
+    /// every GraphicsSystem rebuild, like the sky).
+    pub(crate) material_texture_images: Arc<HashMap<String, MaterialTextureSurface>>,
+    pub(crate) material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
+    /// System.c4g global script sources, loaded once at boot for every
+    /// fresh game engine (the C++ `Game.ScriptEngine` scripts).
+    pub(crate) system_scripts: Vec<(String, String)>,
+    /// System.c4g Names.txt, used when fresh crew files have no definition-
+    /// specific ClonkNames list (C4Game::InitScriptEngine).
+    pub(crate) standard_names: Option<String>,
+    /// Process-global Application.ResStrTable entries used by
+    /// GetNeededMatStr. Rebuilt after an Options language selection and
+    /// reinstalled on every fresh Engine.
+    pub(crate) needed_material_need: String,
+    pub(crate) needed_material_none: String,
+    /// Process-global localized `IDS_OBJ_NODIG`, reinstalled on every fresh
+    /// engine and refreshed immediately after an Options language change.
+    pub(crate) object_no_dig: String,
+    /// Localized ConstructionCheck feedback bundle, managed exactly like
+    /// `object_no_dig`.
+    pub(crate) construction_check_feedback: [String; 5],
+    /// Game.Rank names frozen by the latest C4Game::PreInit analogue. Startup
+    /// Options may reload the process language table afterward, but a game
+    /// started from that same startup session retains these names.
+    pub(crate) default_rank_names: Option<Vec<String>>,
+    /// IDS_GAME_DEFRANKS from the currently loaded process language table.
+    /// The next return-to-startup PreInit promotes this to Game.Rank.
+    pub(crate) loaded_default_rank_names: Option<Vec<String>>,
+    /// Process-global `Application.ResStrTable` projection shared by startup,
+    /// lobby, console, and runtime presentation. C++ replaces this table only
+    /// after an Options language selection; retaining it also prevents
+    /// per-frame network-browser/console lookup from reopening System.c4g.
+    pub(crate) startup_tooltip_resources: HashMap<String, String>,
+    /// Encoding of the process-global resource table. `LoadResStr` reads the
+    /// same already-loaded table as the UTF-8 presentation helpers; retain
+    /// its source charset so byte-returning call sites do not reopen it.
+    pub(crate) runtime_language_charset: RuntimeHelpCharset,
+    /// Process-local Config.General.MissionAccess shared across fresh games.
+    pub(crate) mission_access: MissionAccessStore,
+    /// Process-global C4Group maker captured from `Config.General.Name` once
+    /// during application initialization, like `C4Group_SetMaker`.
+    pub(crate) process_group_maker: LegacyCString,
+    /// Byte-exact process-global resource table used by LoadResStr. Unlike a
+    /// file reload at save time, this changes only when Options reloads the
+    /// application language.
+    pub(crate) save_description_language_table: Option<RuntimeLanguageBytesTable>,
+    /// First two bytes of the materialized Config.General.Language used for
+    /// C4GameSave's Desc??.rtf entry name.
+    pub(crate) save_description_language: Vec<u8>,
+    /// `Config.Graphics.ShowFolderMaps`, default-on like C4ConfigGraphics.
+    pub(crate) show_folder_maps: bool,
+    /// Process-local Config.Graphics.ShowCommands enable requests shared
+    /// across fresh engines.
+    pub(crate) show_commands_requests: ShowCommandsRequestStore,
+    /// Process-local `Config.General.AllowScriptingInReplays`; native reads
+    /// this from its already-loaded configuration while replay controls run.
+    pub(crate) allow_scripting_in_replays: bool,
+    pub(crate) input: InputDispatcher,
+    pub(crate) bindings: KeyboardBindings,
+    pub(crate) gamepad_bindings: GamepadBindings,
+    pub(crate) local_controls: LocalControlRegistry,
+    /// Engine-routed physical keys currently held by the window input
+    /// backend. Winit's repeated `Pressed` events must carry C++'s
+    /// `fRepeated` semantics into `LocalControlKey` rather than looking like
+    /// deliberate double presses.
+    pub(crate) pressed_engine_keys: HashSet<VirtualKeyCode>,
+    /// Raw Tab state is tracked before modifier/dialog scope lookup because a
+    /// held key can cross into or out of a PRIO_PlrControl binding.
+    pub(crate) scoreboard_tab_raw_pressed: bool,
+    pub(crate) keyboard_modifiers: ModifiersState,
+    pub(crate) pending_screenshots: VecDeque<ScreenshotRequest>,
+    pub(crate) retained_gpu_presentation_active: bool,
+    /// While scale-native text is captured, split the retained command stream
+    /// at the same painter-order boundaries as `NativePresentationPlan`.
+    pub(crate) retained_gpu_ordered_capture_active: bool,
+    /// Reused command-only target for scale-native physical text layers.
+    pub(crate) retained_native_capture_surface: Option<Surface>,
+    pub(crate) pending_gpu_thumbnail_paths: VecDeque<PathBuf>,
+    pub(crate) pending_native_save_thumbnails: VecDeque<PendingNativeSaveThumbnail>,
+    pub(crate) pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
+    /// Current `Config.General.GamepadEnabled` value used by each new
+    /// `C4Player::InitControl` analogue.
+    pub(crate) gamepads_enabled: bool,
+    /// Startup-time gamepad subsystem gate. Native does not create or later
+    /// poll `C4GamePadControl` when this was false during application init.
+    pub(crate) gamepad_input_enabled: bool,
+    pub(crate) gamepads: GamepadManager,
+    #[cfg(test)]
+    pub(crate) gamepad_poll_count: usize,
+    pub(crate) gamepad_gui_control: bool,
+    pub(crate) snapshot: SimulationSnapshot,
+    pub(crate) focus_id: Option<ObjectId>,
+    pub(crate) focus_snapshot: Option<clonk_engine::ObjectSnapshot>,
+    pub(crate) frame_text: String,
+    pub(crate) status_text: String,
+    pub(crate) startup_restart_diagnostics: StartupRestartDiagnostics,
+    pub(crate) energy_fraction: f32,
+    pub(crate) scenario_label: String,
+    pub(crate) fallback_ground: i32,
+    pub(crate) menu_state: MenuState,
+    pub(crate) main_menu_state: MainMenuState,
+    /// One process-level C4GUI::CMouse tooltip clock shared by every startup
+    /// dialog. Target lookup remains view-specific, but input ownership and
+    /// the 500ms stillness delay are global.
+    pub(crate) startup_tooltip: ClassicTooltipTracker,
+    pub(crate) startup_network_dialog: Option<clonk_frontend::startup_netdlg::NetDlgController>,
+    /// Process-global C4Network2IRC analogue. Native retains the IRC client
+    /// independently of the startup network dialog, so changing startup
+    /// screens must not tear down a live connection.
+    pub(crate) startup_irc_client: Option<clonk_network::IrcClientHandle>,
+    pub(crate) startup_irc_server: String,
+    /// Whether the singleton-style C4ChatDlg analogue is currently shown.
+    /// The controller and transport remain process-global when this UI closes.
+    pub(crate) external_irc_dialog_visible: bool,
+    /// Standalone C4ChatDlg owns a distinct C4ChatControl from the startup
+    /// NetworkGame sheet. Closing the window destroys this UI-local state
+    /// while the process-global IRC transport survives.
+    pub(crate) external_irc_dialog: Option<clonk_frontend::startup_netdlg::NetDlgController>,
+    /// Distinguishes a resolver/TCP failure before the first Connected event
+    /// (classic modal failure) from an established-session disconnect (status
+    /// transcript line only).
+    pub(crate) startup_irc_initial_connect_pending: bool,
+    /// Shared double-click latch for the embedded and standalone chat views.
+    pub(crate) irc_dialog_last_click: Option<(GuiPoint, Instant)>,
+    /// Left gesture retained by the standalone z=0 chat dialog.
+    pub(crate) external_irc_pointer_capture: bool,
+    pub(crate) startup_game_search: Option<clonk_network::StartupGameSearch>,
+    #[cfg(test)]
+    pub(crate) startup_game_search_test_events: VecDeque<clonk_network::StartupGameSearchEvent>,
+    /// C4StartupNetDlg::tLastRefresh. OnShown seeds the one-second guard,
+    /// and accepted Reload/F5 requests advance it before restarting search.
+    pub(crate) startup_network_last_refresh: Option<Instant>,
+    /// C4StartupNetListEntry::iTimeout for the masterserver row. Unlike
+    /// tLastRefresh, this response-relative deadline must not throttle F5.
+    pub(crate) startup_masterserver_next_query_at: Option<Instant>,
+    /// Reject pre-refresh events until the worker acknowledges the new
+    /// generation with Cleared, so deleted rows cannot flash back into view.
+    pub(crate) startup_network_refresh_waiting_for_clear: bool,
+    /// `C4StartupNetDlg::fIgnoreUpdate`: declining one league-server redirect
+    /// suppresses further prompts for the lifetime of this dialog instance.
+    pub(crate) startup_network_ignore_redirect: bool,
+    /// Complete references retained in the same order as the visible game
+    /// list. The frontend row projects only a display address.
+    pub(crate) startup_game_references: Vec<clonk_network::NetworkGameReference>,
+    /// Per-host reference requests created from LAN discovery datagrams.
+    pub(crate) startup_discovery_reference_queries: Vec<StartupDiscoveryReferenceQuery>,
+    /// User-entered reference requests remain visible until they resolve,
+    /// fail, or are replaced by their returned reference rows.
+    pub(crate) startup_direct_reference_queries: Vec<StartupDirectReferenceQuery>,
+    pub(crate) next_startup_direct_reference_query_id: u64,
+    pub(crate) network_game_advertiser: Option<clonk_network::NetworkGameAdvertiser>,
+    /// Last validated exact host reference. This state advances independently
+    /// of optional listener I/O and is retained as the next InitLocal rebuild
+    /// template when advertising could not bind.
+    pub(crate) advertised_game_reference: Option<clonk_network::HostGameReference>,
+    pub(crate) startup_player_dialog: Option<clonk_frontend::startup_plrsel::PlrSelController>,
+    pub(crate) startup_player_properties_dialog: Option<PendingStartupPlayerProperties>,
+    pub(crate) startup_player_files: Vec<StartupPlayerFile>,
+    pub(crate) startup_player_models: Vec<clonk_frontend::startup_plrsel::PlrSelPlayer>,
+    pub(crate) startup_crew_files: Vec<StartupCrewFile>,
+    pub(crate) startup_crew_models: Vec<clonk_frontend::startup_plrsel::PlrSelCrew>,
+    pub(crate) startup_crew_player_index: Option<usize>,
+    /// Inline `CallbackRenameEdit` projected over the active crew row.
+    pub(crate) startup_crew_rename: Option<StartupCrewRenameState>,
+    pub(crate) startup_options_dialog: Option<clonk_frontend::startup_options_dlg::OptionsDlgState>,
+    pub(crate) startup_options_advanced_dialog: Option<PendingOptionsAdvancedDialog>,
+    pub(crate) startup_about_dialog: Option<clonk_frontend::startup_about_dlg::AboutDlgState>,
+    pub(crate) startup_view: StartupView,
+    /// C4Startup::SwitchDialog's paired FadeOut/FadeIn. The outgoing pixels
+    /// are frozen because opening the replacement mutates or destroys several
+    /// startup controllers before the next presentation.
+    pub(crate) startup_dialog_fade: Option<StartupDialogFade>,
+    /// Process-local `C4Startup::eLastDlgID`. The network lobby and staged
+    /// loader are game states rather than startup dialogs, so they must not
+    /// displace the dialog reopened after the round ends.
+    pub(crate) last_startup_dialog: StartupDialog,
+    /// The one retained dialog that native `SDID_Back` may reuse. A dialog
+    /// rebuilt by `DoStartup` after a round has no such history, so Back from
+    /// that fresh selector goes to Main instead of inventing a NetDlg.
+    pub(crate) startup_scenario_back_dialog: Option<StartupDialog>,
+    pub(crate) startup_view_flags: StartupViewFlags,
+    pub(crate) scenario_selector_mode: ScenarioSelectorMode,
+    pub(crate) scenario_game_options: GameOptionButtons,
+    pub(crate) object_menu: Option<ObjectMenuState>,
+    pub(crate) ingame_menu: PlayerIngameMenus,
+    /// Cached Graphics.c4g sheets for the in-game menu renderer.
+    pub(crate) ingame_menu_gfx: Option<IngameMenuGraphics>,
+    /// `C4Player::BigIcon` equivalents keyed by stable C4PlayerInfo ID. The
+    /// renderer projects these onto the current runtime player numbers.
+    pub(crate) runtime_player_big_icons: HashMap<i32, ImageData>,
+    /// Player-info sources already checked without finding a usable BigIcon.
+    pub(crate) runtime_player_big_icon_misses: HashSet<i32>,
+    /// Per-viewport-owner async C4Menu::TimeOnSelection presentation state.
+    /// This is deliberately outside the deterministic engine menu state
+    /// (C4Menu.cpp:804-821).
+    pub(crate) script_menu_presentations: BTreeMap<i32, ScriptMenuPresentationState>,
+    /// Last output rectangle for each owning viewport. C4Viewport raises
+    /// `ResetMenuPositions` on split-screen relayouts as well as window
+    /// resizes, so menu placement cannot key only off the OS resize event.
+    pub(crate) menu_viewport_rects: BTreeMap<i32, Rect>,
+    /// `Config.Graphics` display toggles loaded at process startup and driven
+    /// by the Display submenu (C4MainMenu.cpp:855-884).
+    pub(crate) display_flags: DisplayFlags,
+    /// `Config.General.UseWhiteLobbyChat`, which is intentionally distinct
+    /// from the in-game white-chat display toggle.
+    pub(crate) white_lobby_chat: bool,
+    /// Prefix GUI log lines with C++'s markup-colored wall-clock timestamp.
+    pub(crate) show_log_timestamps: bool,
+    /// Process-local `Config.Graphics.SmokeLevel`; object bubbles consult it
+    /// only outside network/recording sync mode, while particles always do.
+    pub(crate) graphics_smoke_level: i32,
+    /// `C4Player::MouseControl` analogue: gates in-game mouse gameplay
+    /// input (C4MainMenu.cpp:847-849).
+    pub(crate) mouse_control: bool,
+    /// False when `[Head] DisableMouse=1`; C++ then neither assigns mouse
+    /// control nor offers its Options entry (C4Player.cpp:1907-1912;
+    /// C4MainMenu.cpp:563-571).
+    pub(crate) mouse_control_allowed: bool,
+    pub(crate) save_browser: Option<SaveBrowserState>,
+    pub(crate) save_browser_return_to_menu: bool,
+    pub(crate) mode: AppMode,
+    pub(crate) scenario_catalog: HashMap<String, FrontendScenario>,
+    /// Interactive scenario refreshes run outside the UI thread. The old
+    /// menu tree remains live but hidden until this worker supplies the
+    /// replacement vector, making completion one atomic book rebuild.
+    pub(crate) scenario_selector_discovery: Option<ScenarioSelectorDiscoveryState>,
+    /// Cached `C4ScenarioListLoader::Entry::CanOpen` result for the current
+    /// selector mode. Rows stay actionable; this controls label color only.
+    pub(crate) scenario_entry_enabled: HashMap<String, bool>,
+    pub(crate) active_scenario: Option<FrontendScenario>,
+    /// Effective definition vector from the active game. C++ backs this up
+    /// across Restart/Next Mission and restores it as FixedDefinitions.
+    pub(crate) active_definition_load: Option<ScenarioDefinitionLoad>,
+    /// Byte-exact `Game.DefinitionFilenames` projection used only by
+    /// C4GameSave::WriteDescDefinitions. The String-based load vector cannot
+    /// retain native Unix path bytes that are not valid UTF-8.
+    pub(crate) active_description_definition_modules: Vec<Vec<u8>>,
+    /// C4GraphicsResource's game-local HUD, cursor and palette selection.
+    /// `None` means the process-startup Graphics.c4g bundle is active.
+    pub(crate) active_game_graphics: Option<GameGraphicsResources>,
+    pub(crate) audio: Option<AudioContext>,
+    #[cfg(test)]
+    pub(crate) ui_sound_log: Vec<String>,
+    #[cfg(test)]
+    pub(crate) league_surrender_pre_abort_results: Option<(
+        clonk_engine::RoundResultsState,
+        clonk_engine::RoundResultsState,
+        bool,
+    )>,
+    /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
+    /// from persisted RXMusic while a game is running.
+    pub(crate) runtime_music_enabled: bool,
+    /// A frontend-to-scenario fade still owns the mixer. Scenario-load failure
+    /// may return to Menu and wait for it; game teardown instead clears this at
+    /// the following PreInit reconstruction before entering startup.
+    pub(crate) resume_frontend_music_after_fade: bool,
+    /// `C4Startup::DoStartup` calls PlayFrontendMusic exactly once per startup
+    /// entry. Dialog navigation must not restart a non-looping track after it
+    /// ends; returning from a game resets this guard.
+    pub(crate) frontend_music_attempted_for_entry: bool,
+    pub(crate) assets: Arc<FrontendAssets>,
+    /// Per-resource failures from resolving the active scenario's C4GUI
+    /// sheet/font set. Empty means the active (or startup) bundle resolved
+    /// exactly; any entry keeps the typed bootstrap boundary failing.
+    pub(crate) active_global_gui_failures: HashMap<&'static str, String>,
+    /// Scale-native CStdFont atlas used after the presenter's bilinear base
+    /// pass for startup screens and in-game messages. C++ rebuilds its
+    /// fonts with Application.GetScale()
+    /// (C4Fonts.cpp:158-173).
+    pub(crate) native_startup_fonts: Option<Arc<clonk_frontend::clonk_fonts::NativeClonkFontSet>>,
+    /// Ordered logical chrome/native-text batches prepared during the current
+    /// logical render and consumed immediately after FramePresenter upscales
+    /// the base. Keeping later chrome in separate batches preserves C4GUI
+    /// z-order instead of replaying every glyph over the finished frame.
+    pub(crate) pending_native_presentation: Option<NativePresentationPlan>,
+    /// Exact C4LoaderScreen selected for the currently active startup or
+    /// scenario load. A missing screen is paired with `loader_error` and is
+    /// always a logged typed boundary, never a generic pane.
+    pub(crate) loader_screen: Option<LoaderScreen>,
+    pub(crate) loader_error: Option<String>,
+    pub(crate) loader_render_config: Option<LoaderRenderConfig>,
+    pub(crate) loader_render_error: Option<String>,
+    pub(crate) loader_gamma: Option<clonk_graphics::GammaRamp>,
+    pub(crate) app_paths: Option<AppPaths>,
+    /// Process-local compatibility arguments applied after configuration is
+    /// loaded. They must never be written back to the selected config file.
+    pub(crate) classic_command_line: ClassicCommandLine,
+    /// A converted command-line stream still owns the initial OpenGame
+    /// attempt. Clear this after successful activation so later rounds do not
+    /// inherit the native no-startup failure policy.
+    pub(crate) classic_record_stream_activation_pending: bool,
+    /// ParseCommandLine snapshots the config/`.c4d` definition vector once
+    /// for the next game init. Later startup rounds begin from an empty Game
+    /// and the unchecked selector appends only Objects.c4d.
+    pub(crate) initial_definition_seed: Option<Vec<String>>,
+    /// Persistent developer-window policy selected by `/console`. Unlike
+    /// per-round classic arguments, `/open` must not reset this.
+    pub(crate) console_mode: bool,
+    pub(crate) developer_console: DeveloperConsole,
+    pub(crate) developer_console_edit_mode: ConsoleEditMode,
+    /// Native `C4Console::Editing` starts true and is irreversibly cleared
+    /// when `EnableControls` observes a no-input playback. Opening another
+    /// game defaults the edit cursor mode, but does not restore this latch.
+    pub(crate) developer_console_editing_enabled: bool,
+    pub(crate) developer_console_pointer: GuiPoint,
+    /// Thread-safe tracing mirror drained by the console window each app
+    /// iteration. It remains `None` for the fullscreen client.
+    pub(crate) console_log_capture: Option<clonk_logging::ConsoleLogCapture>,
+    /// C4Game::fScriptCreatedObjects: set only when Scenario Initialize
+    /// changed the live object count and cleared after the scenario-save
+    /// double-object warning.
+    pub(crate) script_created_objects: bool,
+    /// Optional targeted crew-definition source for pathless sandbox
+    /// fixtures. This is deliberately separate from `app_paths`: it must not
+    /// make unrelated app subsystems appear install-initialized, but it does
+    /// need to survive sandbox restart and saved-game restoration.
+    pub(crate) sandbox_crew_definition_paths: Option<AppPaths>,
+    pub(crate) configured_client_player_selection: Option<ConfiguredClientPlayerSelection>,
+    pub(crate) material_library: Option<Arc<MaterialSet>>,
+    // Fields drop in declaration order. Cancel an in-flight league request
+    // before NetworkManager joins its worker so shutdown cannot wait for the
+    // HTTP timeout.
+    pub(crate) pending_lobby_internet_signup: Option<network::PendingMasterserverSignup>,
+    pub(crate) pending_league_player_auth: Option<PendingLeaguePlayerAuth>,
+    pub(crate) network_event_waker: Option<NetworkEventWakeCallback>,
+    pub(crate) network: Option<NetworkManager>,
+    pub(crate) network_mode: Option<NetworkMode>,
+    /// Process-session credentials mutated by C4LeagueSignupDialog. Native
+    /// persists LeagueAccount but deliberately keeps LeaguePassword only in
+    /// memory, so never write this override through the INI helper.
+    pub(crate) league_auth_session: Option<clonk_network::LeagueAuthRequestHead>,
+    pub(crate) network_lobby: Option<NetworkLobbyState>,
+    pub(crate) classic_host_lobby: Option<ClassicHostLobbyState>,
+    pub(crate) lobby_preload_task: Option<LobbyPreloadTask>,
+    pub(crate) lobby_preload_artifact: Option<LobbyPreloadArtifact>,
+    pub(crate) network_start_wait: Option<NetworkStartWaitDialogState>,
+    /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
+    /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
+    pub(crate) host_lobby_countdown: Option<HostLobbyCountdown>,
+    /// The live host session surfaces its locally submitted countdown once
+    /// after broadcasting it. C++ instead applies that packet directly and
+    /// excludes the host from the broadcast, so suppress exactly those echoes.
+    pub(crate) pending_local_lobby_countdown_echoes: VecDeque<clonk_network::LobbyCountdownPacket>,
+    pub(crate) lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
+    pub(crate) ready_check_toasts_enabled: bool,
+    pub(crate) pending_desktop_notifications: VecDeque<DesktopNotification>,
+    pub(crate) control_messages: ControlMessageState,
+    pub(crate) league_votes: LeagueVoteState,
+    pub(crate) startup_network_connection: Option<StartupNetworkConnection>,
+    pub(crate) classic_direct_reference_query: Option<ClassicDirectReferenceQuery>,
+    /// Frozen C++-ordered address attempts retained across password prompts.
+    pub(crate) pending_network_join: Option<ClientSettings>,
+    pub(crate) staged_network_host_scenario: Option<StagedNetworkHostScenario>,
+    pub(crate) sync_checks: SyncCheckState,
+    pub(crate) network_ticks: NetworkTickGate,
+    pub(crate) waiting_network_control: Option<NetworkControlWait>,
+    pub(crate) network_control_retry_pending: bool,
+    pub(crate) network_sync: NetworkSyncGate,
+    /// `C4GameControl::Input` packets produced outside the simulation in a
+    /// local game. They execute together at the next control-rate frame.
+    pub(crate) offline_control_input: Vec<NetworkControl>,
+    /// Offline counterpart of C4Game::HaltCount. Pause/Unpause assign 1/0,
+    /// while native modal owners increment/decrement the same counted stack.
+    /// Any nonzero value stops simulation but leaves event/render loops alive.
+    pub(crate) offline_halt_count: i32,
+    pub(crate) network_control_running: bool,
+    /// App-owned counterpart of C4Network2's runtime fStatusReached state.
+    /// The session owns acknowledgement consensus; the app owns driving
+    /// simulation to this target and stopping exactly at the control boundary.
+    pub(crate) runtime_network_status_barrier: Option<RuntimeNetworkStatusBarrier>,
+    /// Live host `Game.Network.Status` projection for periodic references.
+    /// This is distinct from the control barrier, which may still be waiting
+    /// after ChangeGameStatus has already switched Paused/Running.
+    pub(crate) host_reference_paused: bool,
+    /// Last authoritative C4Network2Status control mode. Runtime chat can
+    /// replace it through the same status barrier as C4Network2::SetCtrlMode.
+    pub(crate) runtime_network_control_mode: Option<i32>,
+    /// Control mode applied after the status acknowledgement. The F4 option
+    /// keeps displaying this while a newer status is still pending.
+    pub(crate) runtime_network_committed_control_mode: Option<i32>,
+    /// Last acknowledged C4Network2Status. Native retains both status flags
+    /// until the next status request resets them.
+    pub(crate) runtime_network_committed_status: Option<clonk_network::NetworkStatus>,
+    pub(crate) runtime_network_join_allowed: Option<bool>,
+    pub(crate) network_control_clock: Option<NetworkControlClock>,
+    pub(crate) network_max_players: usize,
+    pub(crate) network_is_league: bool,
+    /// Exact synchronized `Game.Parameters.League` bytes. This is distinct
+    /// from `network_is_league`, which models `isLeague()`'s LeagueAddress
+    /// test; GetLeagueProgressData gates on this name instead.
+    pub(crate) network_league_name: Vec<u8>,
+    /// Process-local `Game.Parameters.StreamAddress`; this value is assigned
+    /// by league Start but is intentionally absent from JoinData.
+    pub(crate) network_stream_address: LegacyCString,
+    /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
+    pub(crate) frames_per_second: i32,
+    pub(crate) frames_since_second: i32,
+    /// C4Game::FullSpeed and FrameSkip are transient per-game scheduler
+    /// controls. They are deliberately excluded from save capture/restore.
+    pub(crate) full_speed: bool,
+    pub(crate) frame_skip: i32,
+    /// Frozen `C4GameParameters::AutoFrameSkip` for the active round. Unlike
+    /// the startup option, this must not change while a game is running.
+    pub(crate) auto_frame_skip: bool,
+    /// Process-local Config.Graphics.MaxRefreshDelay used by the application
+    /// timer divisor. It is read once, then refreshed only after Options saves.
+    pub(crate) max_refresh_delay_ms: u64,
+    /// C4Game::pNetworkStatistics exists for every running game. Only the
+    /// Pings presentation tab is conditional on an enabled network session.
+    pub(crate) network_stats: Option<NetworkStats>,
+    pub(crate) network_stats_clients: HashSet<ClientId>,
+    pub(crate) network_stats_players: HashSet<i32>,
+    pub(crate) control_clients: ControlClientRegistry,
+    /// `C4GameControlClient::iNextControl` for the activated-client copy.
+    /// Native resets every entry to the current ControlTick whenever
+    /// `CopyClientList` runs and never advances it afterwards.
+    pub(crate) network_client_next_control_ticks: HashMap<i32, i32>,
+    pub(crate) network_client_activity: NetworkClientActivity,
+    pub(crate) control_player_infos: ControlPlayerInfoRegistry,
+    /// Physical profile group retained for each locally admitted PlayerInfo.
+    /// C4Player keeps this as `Filename`; the Rust control packet carries only
+    /// a legacy presentation path, so retain the resolved path separately for
+    /// `C4PlayerList::SynchronizeLocalFiles`.
+    pub(crate) local_player_profile_paths: HashMap<i32, PathBuf>,
+    /// Native restart handoff captured at full game initialization and kept
+    /// across the next same-scenario lobby only.
+    pub(crate) restart_restore_infos: RestartRestoreInfos,
+    /// `Application.NextMission` set by C4AbortGameDialog's Restart button.
+    /// It deliberately survives a rejected/ignored league vote and is
+    /// consumed by the next hard `QuitGame` route.
+    pub(crate) abort_restart_pending: bool,
+    /// PlayerListItem runs its restore hook only on construction, not on each
+    /// later row update. Track the items already constructed in this lobby.
+    pub(crate) restart_restore_roster_items: HashSet<(i32, i32)>,
+    /// Process-local `C4PlayerInfo::dwAlternateColor` values for players
+    /// loaded by this host. The synchronized row intentionally omits this
+    /// field, so resource identity carries it across authoritative echoes and
+    /// later conflict-resolution passes.
+    pub(crate) host_local_alternate_colors_by_resource: HashMap<i32, u32>,
+    /// Assigned PlayerInfo identities that still belong to this host process.
+    /// Resource IDs are global and may also be referenced by a remote row, so
+    /// they cannot by themselves prove ownership of the local-only color.
+    pub(crate) host_local_player_info_ids: HashSet<i32>,
+    /// Joined infos selected by RestoreSavegameInfos for the distinct
+    /// RecreatePlayers phase. They must never fall back into normal network
+    /// JoinPlayer issuance while legacy runtime-player loading is deferred.
+    pub(crate) deferred_network_savegame_recreation: Vec<(i32, i32)>,
+    /// Frozen Application.ResStrTable template used by GenerateDefaultTeams.
+    pub(crate) generated_team_name_template: LegacyCString,
+    pub(crate) network_team_assignment: Option<NetworkTeamAssignmentState>,
+    pub(crate) admission_resources: AdmissionResourceStore,
+    pub(crate) blocking_resource_wait: Option<BlockingResourceWait>,
+    pub(crate) aborted_player_resource_joins: HashSet<(i32, i32)>,
+    /// Mutable host-owned JoinData used for lobby Set changes, GO
+    /// activation, and later client admission. PreparedHostBootstrap remains
+    /// the immutable resource proof from before the socket opened.
+    pub(crate) host_join_snapshot: Option<clonk_network::HostJoinSnapshot>,
+    /// C4Network2::fDynamicNeeded plus the clients waiting for the next
+    /// synchronized runtime dynamic. One queued CID_Synchronize serves every
+    /// request observed before that boundary.
+    pub(crate) pending_runtime_dynamic_request: Option<PendingRuntimeDynamicRequest>,
+    pub(crate) pending_network_join_data: Option<clonk_network::JoinDataEnvelope>,
+    pub(crate) initial_lobby_status_ack_pending: bool,
+    pub(crate) client_start_barrier: ClientStartBarrier,
+    pub(crate) pending_client_start_status: Option<clonk_network::NetworkStatus>,
+    pub(crate) client_combined_scenario_path: Option<PathBuf>,
+    pub(crate) client_combined_preload_file: ClientCombinedPreloadFile,
+    /// Exact host-ordered NRT_Material groups from final resource publication
+    /// or JoinData. `Some([])` is authoritative: neither side may fall back to
+    /// a process-local global Material.c4g.
+    pub(crate) network_material_resource_groups: Option<Vec<Group>>,
+    pub(crate) executing_ready_tick: Option<Tick>,
+    pub(crate) recording_enabled: bool,
+    pub(crate) recordings_dir: Option<PathBuf>,
+    /// Scenario and parameter inputs shared by developer saves and
+    /// non-initial records. This survives consuming `recording_template`.
+    pub(crate) live_save_seed: Option<RuntimeRecordingSeed>,
+    pub(crate) recording_template: Option<RecordingTemplate>,
+    pub(crate) recording: Option<RecordingSession>,
+    /// `C4GameControl::fRecordNeeded`: set as soon as the developer console
+    /// requests a runtime record and cleared only when its queued
+    /// `CID_Synchronize` starts the record (or submission fails).
+    pub(crate) runtime_record_requested: bool,
+    pub(crate) control_playback: Option<ControlRecordPlayback>,
+    pub(crate) local_owner: i32,
+    pub(crate) player_name: String,
+    pub(crate) selected_player_file: Option<PlayerFile>,
+    pub(crate) last_save_path: Option<PathBuf>,
+    pub(crate) object_sprites: HashMap<String, DefinitionSprite>,
+    pub(crate) sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
+    pub(crate) loading_state: Option<ScenarioLoadingState>,
+    pub(crate) boot_loading: Option<BootLoadingState>,
+    /// When set, boot straight into the sandbox scenario once boot loading
+    /// finishes (the `--sandbox` flag), instead of showing the menu. Cleared
+    /// after the first auto-start so returning to the menu behaves normally.
+    pub(crate) auto_start_sandbox: bool,
+    /// A direct scenario waits for process boot resources before it starts
+    /// either its local loader or prepared host, avoiding a race between the
+    /// independent workers.
+    pub(crate) auto_start_classic_command_line_scenario: bool,
+    /// One-shot launcher/package-manager hand-off for `/update`,
+    /// `clonk:update`, or an incoming `.c4u` package.
+    pub(crate) auto_open_update_dialog: bool,
+    /// Raw window position used by C4GUI-style viewport/menu hit-testing.
+    /// Gameplay keeps a separate pointer because C4MouseControl clamps raw
+    /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
+    pub(crate) ingame_gui_pointer: Option<GuiPoint>,
+    pub(crate) ingame_pointer: Option<ViewportPointer>,
+    /// `C4MouseControl::Help`, activated locally by the viewport Help button.
+    /// This is deliberately independent from the F1 `ShowHelp` overlay.
+    pub(crate) ingame_mouse_help: bool,
+    /// `C4MouseControl::InitCentered`: the first viewport move after `Init`
+    /// is evaluated at the viewport center, regardless of the platform point.
+    pub(crate) ingame_mouse_init_centered: bool,
+    /// C4MouseControl::VpX/VpY and its physical viewport identity. These are
+    /// retained even away from an edge so the native Tick5 synthetic Move
+    /// can reevaluate regions and layout changes without a new OS event.
+    pub(crate) ingame_viewport_mouse: Option<RetainedViewportMouse>,
+    /// Retained C4MouseControl::Scrolling direction. Move applies it once;
+    /// every subsequently executed game tick applies it again until the
+    /// pointer leaves the exact clamped viewport border.
+    pub(crate) ingame_edge_scroll: Option<ActiveViewportEdgeScroll>,
+    /// C4GraphicsSystem::FreeScroll's process-presentation velocity and
+    /// MostRecentScrolling clock. Repeated bare arrows carry the complete
+    /// prior vector for 100ms without mutating deterministic player state.
+    pub(crate) free_view_scroll_momentum: FreeViewScrollMomentum,
+    /// Presentation-only C4MouseControl caption timing and placement.
+    pub(crate) ingame_mouse_caption: IngameMouseCaptionState,
+    /// Last mouse-only logical position. Touch input intentionally does not
+    /// materialize C4GUI's themed mouse pointer.
+    pub(crate) window_mouse_position: Option<GuiPoint>,
+    /// Platform client-area membership is independent of focus: focus loss
+    /// restores the OS cursor without forgetting where a stationary pointer
+    /// will be when focus returns.
+    pub(crate) pointer_inside_window: bool,
+    /// Exact C4GUI::CMouse ownership for the most recent running mouse move.
+    pub(crate) running_gui_mouse_owned: bool,
+    /// Exact C4MouseControl::fMouseOwned state. This is deliberately separate
+    /// from GUI ownership: MouseControl::Init resets this bit to true without
+    /// clearing C4GUI's bit, so both cursors can transiently be active.
+    pub(crate) running_world_mouse_owned: bool,
+    pub(crate) running_pointer_position: Option<GuiPoint>,
+    /// Physical primary-button state (`CMouse::LDown`), independent of any
+    /// control that installed itself as `pDragElement`.
+    pub(crate) primary_pointer_left_down: bool,
+    /// SDL/X11 classify the second application-wide left press as LeftDouble
+    /// before GUI hit-testing, regardless of which control saw the first.
+    pub(crate) last_application_left_press: Option<Instant>,
+    /// Player menu whose title close button retained the current left-down.
+    /// C4GUI::Button invokes only when that same button receives left-up.
+    pub(crate) ingame_menu_close_pointer_capture: Option<i32>,
+    /// Script menu close button retaining the current left-down.
+    pub(crate) script_menu_close_pointer_capture: Option<(i32, ObjectId)>,
+    /// Wooden menu title currently moving its owning dialog.
+    pub(crate) menu_title_drag: Option<MenuTitleDrag>,
+    /// Tooltip-style caption installed by a Help-mode object click or region
+    /// hover, including C4MouseControl's move-count lifetime.
+    pub(crate) ingame_mouse_help_caption: Option<IngameMouseHelpCaption>,
+    pub(crate) mouse_state: Option<IngameButtonMouseState>,
+    pub(crate) ingame_right_mouse_state: Option<IngameButtonMouseState>,
+    /// C4Menu's retained drag element begins in GUI coordinates and becomes
+    /// a C4MouseControl construction drag only after the menu sensitivity is
+    /// crossed, so it cannot share the world-origin button state above.
+    pub(crate) construction_menu_drag: Option<ConstructionMenuDrag>,
+    /// C4MouseControl::Selection for object-only landscape frames. Unlike a
+    /// crew frame, C++ retains this local list after button-up so a later
+    /// object drag can issue Set + Append commands for the whole group.
+    pub(crate) ingame_dragged_objects: Vec<ObjectId>,
+    /// Platform-side C4MC_Button_LeftDouble synthesis for winit, whose
+    /// MouseInput event does not expose an OS click count.
+    pub(crate) ingame_last_left_down: Option<Instant>,
+    /// C4MouseControl::LeftDoubleIgnoreUp.
+    pub(crate) ingame_ignore_left_up: bool,
+    pub(crate) window_active: bool,
+    pub(crate) exit_requested: bool,
+    /// A confirmed `Config.Default()` reset owns shutdown persistence. Keep
+    /// this latched after `take_exit_request` so the event-loop tail cannot
+    /// merge stale display values back into the freshly reset config.
+    pub(crate) configuration_reset_requested: bool,
+    pub(crate) game_over_dialog: Option<GameOverState>,
+    pub(crate) game_over_handled: bool,
+    pub(crate) pending_league_end: Option<PendingLeagueEnd>,
+    /// `C4GraphicsSystem::ShowHelp`; reset by GraphicsSystem::Default for a
+    /// new game and toggled by each in-scope F1 down edge.
+    pub(crate) runtime_help_visible: bool,
+    /// C4's process-global resource string table is fixed at application
+    /// startup. Cache the resolved help columns likewise; errors are retained
+    /// so no later frame can silently switch languages.
+    pub(crate) runtime_help_text_cache: OnceLock<std::result::Result<RuntimeHelpColumns, String>>,
+    /// `C4Game::InitKeyboard` reloads Extra.c4g/KeyConfig.txt once per game.
+    /// Keep that ownership check separate from the process-global language
+    /// table so a new round cannot reuse a stale accept/refusal.
+    pub(crate) runtime_key_config_cache: OnceLock<std::result::Result<RuntimeKeyConfig, String>>,
+    /// Process-start localization/encoding metadata needed by live flash
+    /// producers. The active message itself is runtime-only, survives a
+    /// GraphicsSystem resize, and is reset by Game::Default/new-game.
+    pub(crate) runtime_flash_resources_cache: OnceLock<std::result::Result<RuntimeFlashResources, String>>,
+    pub(crate) runtime_flash_message: Option<RuntimeFlashMessage>,
+    /// Temporary player assigned to the existing primary viewport by replay
+    /// `SetFilmView` or viewport cycling. The physical identity is unchanged.
+    pub(crate) film_view_player: Option<i32>,
+    /// Ordered `C4GraphicsSystem::Viewports` membership. Unlike the local
+    /// control registry, this survives when `SetFilmView` retargets a
+    /// viewport and the player that originally caused its creation leaves.
+    pub(crate) physical_viewports: Vec<PhysicalViewportState>,
+    /// Monotonic identity of the next concrete native-style viewport object.
+    /// Player numbers may be reused while a film-retargeted older viewport
+    /// remains alive, so player ownership cannot identify camera smoothing.
+    pub(crate) next_physical_viewport_identity: u64,
+    /// Ordinary owned/ownerless layouts may still be reconciled from the app's
+    /// local-control registry. Once a film retarget makes physical lifetime
+    /// observable, never reconstruct the concrete list until the game resets.
+    pub(crate) physical_viewports_authoritative: bool,
+    /// Singleton runtime `C4Network2ClientListDlg`, toggled by bare F4.
+    pub(crate) runtime_client_list: Option<clonk_frontend::runtime_client_list::RuntimeClientListDialog>,
+    /// Keys owned by the modal lobby `C4Network2ClientDlg` until release,
+    /// including the Escape press that closes it.
+    pub(crate) runtime_client_list_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Both this dialog and game-over use C4GUI's default z=0. Preserve which
+    /// one was shown most recently so equal-z rendering and input stay in the
+    /// native insertion order.
+    pub(crate) runtime_client_list_above_game_over: bool,
+    /// Bottom-to-top order of the running Screen's default-z dialogs.
+    pub(crate) runtime_default_dialog_order: Vec<RuntimeDefaultDialog>,
+    /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
+    /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
+    /// the explicit game-over/Clear close sites.
+    pub(crate) scoreboard_dialog: Option<ScoreboardPresentationRequest>,
+    pub(crate) scoreboard_initial_reconcile_pending: bool,
+    pub(crate) scoreboard_close_pointer_capture: bool,
+    pub(crate) scoreboard_runtime: ScoreboardDialogRuntime,
+    /// Bottom-to-top native Screen child order for the running shared-dialog
+    /// layers whose z/activation interactions cross controller boundaries.
+    pub(crate) running_dialog_stack: Vec<RunningDialogStackEntry>,
+    pub(crate) running_active_dialog: Option<RunningDialogStackEntry>,
+    pub(crate) next_running_message_stack_id: u64,
+    /// App-owned classic dialogs, in C4GUI z-order. Pointer hit-testing starts
+    /// at the top; every entry is rendered bottom-to-top without a scrim.
+    pub(crate) message_dialogs: Vec<PendingMessageDialog>,
+    /// Native C4LeagueSignupDialog kept below its validation/cancellation
+    /// MessageDialog while the current local player auth is suspended.
+    pub(crate) league_signup_dialog: Option<PendingLeagueSignupDialog>,
+    /// UserClose(false) blocks inside its cancellation notification before
+    /// returning failure to LeaguePlrAuth. Reject the current player and
+    /// resume the remaining players only after that notification closes.
+    pub(crate) cancelled_league_signup_continuation: Option<LeaguePlayerAuthContinuation>,
+    /// Keyboard-active z=+1 dialog. This can differ from the visual top while
+    /// a z=+2 chat exists: inserting another message below chat does not call
+    /// `Screen::ActivateDialog`.
+    pub(crate) message_dialog_active_index: Option<usize>,
+    /// Dialog whose button owns `CMouse::pDragElement`. A newer z=+1 dialog
+    /// may be inserted above it while z=+2 chat keeps the old dialog active.
+    pub(crate) message_dialog_pointer_capture_index: Option<usize>,
+    /// The modal C4DefinitionSelDlg opened from the scenario book's
+    /// "Choose definitions" checkbox. Its nested error message is kept in
+    /// `message_dialogs`, so this controller remains alive underneath it.
+    pub(crate) definition_selector: Option<clonk_frontend::definition_sel::DefinitionSelController>,
+    /// Scenario/root retained until the selector accepts or cancels.
+    pub(crate) pending_definition_selection: Option<PendingDefinitionSelection>,
+    /// Local-client target and path/wire-name map for C4PlayerSelDlg.
+    pub(crate) pending_lobby_player_selection: Option<PendingLobbyPlayerSelection>,
+    /// Classic input dialog shared by startup prompts, game options, and the
+    /// compact running-chat layout.
+    pub(crate) game_option_input_dialog: Option<PendingGameOptionInputDialog>,
+    /// `C4GUI::Screen::pContext`: the recursively open classic context-menu
+    /// tree. The first caller is a startup player row; the chassis is shared
+    /// by every later context-menu producer.
+    pub(crate) context_menu: Option<ClassicContextMenu<AppContextMenuCommand>>,
+    /// Player row whose C4GUI::ComboBox owns the shared context menu. This
+    /// keeps the simple combo's arrow/highlight in its open phase.
+    pub(crate) context_menu_lobby_team_player: Option<i32>,
+    /// Core lobby/runtime option row whose C4GUI::ComboBox owns the shared
+    /// context menu. The frontend retains this identity to render its open
+    /// arrow phase.
+    pub(crate) context_menu_lobby_option: Option<LobbyOptionKind>,
+    /// Client row whose popup owns the shared context menu. A synchronized
+    /// removal closes this menu before input can target a row that no longer
+    /// exists.
+    pub(crate) context_menu_lobby_kick_client: Option<i32>,
+    /// Player row whose root context menu is open. An authoritative update
+    /// that removes the row closes the stale popup before it can dispatch.
+    pub(crate) context_menu_lobby_player: Option<(i32, i32, bool)>,
+    /// C4GUI::ComboBox remembers the last menu index after Screen closes an
+    /// outside-clicked menu. Retain that owner for the remainder of the same
+    /// pointer-down so clicking the open combo closes instead of reopening it.
+    pub(crate) context_menu_pointer_dismissed_lobby_team_player: Option<i32>,
+    pub(crate) context_menu_pointer_dismissed_lobby_option: Option<LobbyOptionKind>,
+    /// A context action may close on pointer-down. Retain that button until
+    /// release so the underlying screen cannot receive a synthetic click.
+    pub(crate) context_menu_pointer_capture: Option<ContextMenuPointerButton>,
+    /// A modal may close on key-down. Retain consumed physical keys until
+    /// their matching key-up so the underlying screen cannot activate.
+    pub(crate) message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
+    pub(crate) league_signup_consumed_keys: HashSet<VirtualKeyCode>,
+    pub(crate) league_signup_pointer_capture: bool,
+    pub(crate) league_signup_pointer_position: Option<GuiPoint>,
+    pub(crate) definition_selector_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Physical keys consumed by the join-address Edit until their matching
+    /// release, even if a multiline paste moves focus back to the game list.
+    pub(crate) netdlg_edit_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Retain a left/touch gesture if the selector closes before its matching
+    /// release so the underlying scenario book cannot receive that release.
+    pub(crate) definition_selector_pointer_capture: bool,
+    pub(crate) game_option_input_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Physical pointer/gesture whose release belongs to the modal input
+    /// dialog even if the dialog closes before that release arrives.
+    pub(crate) game_option_input_pointer_capture: Option<ContextMenuPointerButton>,
+    pub(crate) game_option_input_pointer_position: Option<GuiPoint>,
+    pub(crate) game_option_input_last_click: Option<Instant>,
+    pub(crate) game_option_consumed_keys: HashSet<VirtualKeyCode>,
+    pub(crate) game_option_pointer_capture: bool,
+    /// Monotonic counter bumped by every event that can change what the
+    /// startup menu shows; `menu_frame_cache` is only replayed while it
+    /// still matches the version it was rendered at.
+    pub(crate) menu_render_version: u64,
+    pub(crate) menu_frame_cache: Option<MenuFrameCache>,
+    pub(crate) menu_backdrop_cache: StartupBackdropCache,
+    /// Last scenario-list row click (index, time) for double-click detection
+    /// (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
+    pub(crate) scensel_last_click: Option<(usize, Instant)>,
+    /// Focus selected by RenameEdit completion during an outside pointer
+    /// press. The same gesture may still activate its target, but C++
+    /// Dialog::SetFocus cancels that target's focus transfer.
+    pub(crate) scensel_rename_pointer_focus: Option<ScenselFocusSnapshot>,
+    /// Last search-edit click for C4GUI::Edit's double-click word selection.
+    pub(crate) scensel_search_last_click: Option<Instant>,
+    /// Last definition-list label click for multi-selection double-click
+    /// toggling (C4FileSelDlg::OnSelDblClick).
+    pub(crate) definition_selector_last_click: Option<(usize, Instant)>,
+    /// Last player-list row click (index, time) for forwarding the list box's
+    /// double-click event (C4StartupPlrSelDlg.cpp:574-575).
+    pub(crate) plrsel_last_click: Option<(usize, Instant)>,
+    /// Last network-game row click for C4StartupNetDlg's list-box
+    /// `OnSelDblClick -> DoOK` callback.
+    pub(crate) netdlg_last_click: Option<(usize, Instant)>,
+    /// Last join-address edit click for C4GUI::Edit's double-click word
+    /// selection. This is independent from the game-list row gesture.
+    pub(crate) netdlg_join_edit_last_click: Option<Instant>,
+    /// C4MessageBoard's mode, LogBuffer cursor, and per-graphics-frame
+    /// Fader/ScreenFader state.
+    pub(crate) message_board: ClassicMessageBoardState,
+    /// Process-global C4ChartDialog singleton and its stronger Escape latch.
+    pub(crate) network_chart_dialog: Option<clonk_frontend::network_chart::NetworkChartDialog>,
+    pub(crate) network_chart_consumed_keys: HashSet<VirtualKeyCode>,
+    pub(crate) network_chart_pointer_capture: bool,
+    /// `ActivateDialog`/new-dialog insertion can move the z=0 chart after
+    /// already shown z=+1/+2 dialogs in the Screen's absolute list.
+    pub(crate) network_chart_elevated: bool,
+    /// Process-global C4ChatInputDialog projection for ordinary game chat.
+    pub(crate) running_chat: Option<RunningChatState>,
+    /// A paste may close its chat owner on key-down; retain the physical V
+    /// until release so the replacement screen cannot receive an orphaned up.
+    pub(crate) chat_paste_consumed_keys: HashSet<VirtualKeyCode>,
+    /// C4GUI::Edit retains an equal start/end selection as its hidden drag
+    /// anchor even though the painted selection is empty.
+    pub(crate) lobby_chat_drag_anchor: Option<usize>,
+    pub(crate) message_input_history: VecDeque<String>,
+    /// `C4Player::ShowStartup` for the local player: device hint + name
+    /// until the first control com (src/C4Player.cpp:1376,1735).
+    pub(crate) show_startup_hint: bool,
+    /// `LC_APP_HUD_DEBUG=1`: draw the FRAME/POS/VEL debug lines on top of
+    /// the C++-faithful HUD.
+    pub(crate) debug_hud: bool,
+}
+
+/// The last composed startup-menu frame. Menu mode is fully event-driven
+/// (`update()` does no work there), so until an input/network event bumps
+/// `menu_render_version` the frame is replayed as a copy instead of
+/// re-running the expensive software composition.
+pub(crate) struct MenuFrameCache {
+    pub(crate) view: StartupView,
+    pub(crate) version: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) native_text_deferred: bool,
+    pub(crate) frame: Vec<u8>,
+}
+
+/// The static layer of a startup view — the full-screen bilinear background
+/// blit, or a whole parity-rendered screen — which is identical from frame
+/// to frame. Re-renders restore it with a copy and draw only the dynamic
+/// widgets on top, instead of re-running the per-pixel software blit.
+#[derive(Default)]
+pub(crate) struct StartupBackdropCache {
+    pub(crate) key: Option<StartupBackdropKey>,
+    pub(crate) pixels: Vec<u8>,
+    /// Stable retained resource for graphical presentation. Keeping the same
+    /// Surface identity lets the backend reuse the uploaded backdrop.
+    pub(crate) retained: Option<Surface>,
+}
+
+/// Everything the static layer's pixels depend on.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct StartupBackdropKey {
+    pub(crate) view: StartupView,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) fair_crew: bool,
+    pub(crate) record: bool,
+    pub(crate) network_host_selector: bool,
+}
+
+/// Restores the cached static layer for `key` into `surface`, or renders it
+/// through `render` and caches the result.
+pub(crate) fn restore_or_render_backdrop(
+    cache: &mut StartupBackdropCache,
+    key: StartupBackdropKey,
+    surface: &mut Surface,
+    render: impl FnOnce(&mut Surface),
+) {
+    let cache_hit = cache.key == Some(key) && cache.pixels.len() == surface.pixels().len();
+    if !cache_hit {
+        let mut retained = Surface::new(surface.width(), surface.height(), surface.format());
+        if surface.is_clonk_text_capture_active() {
+            retained.begin_clonk_text_capture();
+        }
+        render(&mut retained);
+        let _ = retained.take_clonk_text_capture();
+        cache.key = Some(key);
+        cache.pixels.clear();
+        cache.pixels.extend_from_slice(retained.pixels());
+        cache.retained = Some(retained);
+    } else if cache.retained.is_none() {
+        cache.retained = Surface::from_bytes(
+            surface.width(),
+            surface.height(),
+            surface.format(),
+            cache.pixels.clone(),
+        )
+        .ok();
+    }
+
+    if surface.is_gpu_scene_capture_active() {
+        if let Some(retained) = cache.retained.as_ref() {
+            let _ = surface.copy_transformed(
+                retained,
+                retained.bounds(),
+                SurfacePoint::new(0, 0),
+                &Transform::identity(),
+            );
+        }
+    } else {
+        surface.pixels_mut().copy_from_slice(&cache.pixels);
+    }
+}
+
+pub(crate) struct RecordingTemplate {
+    pub(crate) group: MutableGroup,
+    pub(crate) output_path: PathBuf,
+    pub(crate) initial_stream_chunk: Vec<u8>,
+    pub(crate) runtime_seed: Option<RuntimeRecordingSeed>,
+    pub(crate) description_title: Vec<u8>,
+    pub(crate) description_definition_modules: Vec<Vec<u8>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RuntimeRecordingSeed {
+    /// `Game.Parameters.Scenario`: retained across FileSaveAs and used by
+    /// C4Record::Start to derive the record basename.
+    pub(crate) scenario_path: PathBuf,
+    /// `Game.ScenarioFilename`: retargeted by FileSaveAs and copied by the
+    /// non-initial C4GameSaveRecord.
+    pub(crate) scenario_source_path: PathBuf,
+    pub(crate) scenario_identifier: String,
+    pub(crate) scenario_title: LegacyCString,
+    pub(crate) definition_modules: Vec<String>,
+    pub(crate) description_definition_modules: Vec<Vec<u8>>,
+    /// Process-loaded SetModules path pair shared by the initial and every
+    /// later non-initial record image.
+    pub(crate) definition_executable_path: String,
+    pub(crate) definition_path: String,
+    pub(crate) scenario_origin: String,
+    pub(crate) parameters: clonk_network::JoinGameParametersEnvelope,
+    pub(crate) scenario_defaults: clonk_network::InitialNetworkScenarioDefaults,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum InitialRecordingSource<'a> {
+    /// Fresh startup already captured this projection before
+    /// `Script.Initialize`.
+    Fresh(&'a clonk_engine::InitialNetworkGameData),
+    /// A restored savegame must first materialize its virtual C4 save source,
+    /// then capture the fInitial projection after native string/pointer
+    /// enumeration has run.
+    Loaded {
+        music_enabled: bool,
+        source_save_player_infos: Option<&'a [u8]>,
+        source_title_png: Option<&'a [u8]>,
+    },
+}
+
+pub(crate) struct RecordingSession {
+    pub(crate) writer: ControlRecordWriter,
+    pub(crate) ctrl_rec: File,
+    pub(crate) output_path: PathBuf,
+    pub(crate) league_streaming: bool,
+    stream_writer_pos: usize,
+    pub(crate) disk_writer_pos: usize,
+    pub(crate) description_title: Vec<u8>,
+    pub(crate) description_definition_modules: Vec<Vec<u8>>,
+}
+
+pub(crate) type StartupNetworkResult = std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>;
+
+pub(crate) struct StartupNetworkAttempt {
+    cancellation: NetworkStartupCancellation,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl StartupNetworkAttempt {
+    fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    fn join(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::error!("startup network launcher panicked during teardown");
+            }
+        }
+    }
+}
+
+pub(crate) struct StartupNetworkConnection {
+    pub(crate) receiver: Option<Receiver<StartupNetworkResult>>,
+    pub(crate) selected_scenario: Option<(String, String)>,
+    pub(crate) purpose: StartupNetworkPurpose,
+    pub(crate) authenticated_league_players: Option<Vec<clonk_engine::ControlPlayerInfoEntry>>,
+    attempt: Option<StartupNetworkAttempt>,
+}
+
+impl StartupNetworkConnection {
+    pub(crate) fn new(
+        receiver: Receiver<StartupNetworkResult>,
+        selected_scenario: Option<(String, String)>,
+        purpose: StartupNetworkPurpose,
+    ) -> Self {
+        Self {
+            receiver: Some(receiver),
+            selected_scenario,
+            purpose,
+            authenticated_league_players: None,
+            attempt: None,
+        }
+    }
+
+    pub(crate) fn with_attempt(mut self, attempt: StartupNetworkAttempt) -> Self {
+        self.attempt = Some(attempt);
+        self
+    }
+
+    pub(crate) fn finish_attempt(&mut self) {
+        if let Some(mut attempt) = self.attempt.take() {
+            attempt.join();
+        }
+    }
+
+    fn cancel_attempt(&mut self) {
+        if let Some(attempt) = self.attempt.as_ref() {
+            attempt.cancel();
+        }
+        // If readiness won the cancellation race, dropping this receiver
+        // makes the producer drop its newly constructed NetworkManager and
+        // synchronously join the live transport before its launcher exits.
+        self.receiver.take();
+        if let Some(mut attempt) = self.attempt.take() {
+            attempt.join();
+        }
+    }
+}
+
+impl Drop for StartupNetworkConnection {
+    fn drop(&mut self) {
+        self.cancel_attempt();
+    }
+}
+
+pub(crate) fn spawn_startup_network_attempt<F>(
+    name: &str,
+    operation: F,
+) -> io::Result<(Receiver<StartupNetworkResult>, StartupNetworkAttempt)>
+where
+    F: FnOnce(NetworkStartupCancellation) -> StartupNetworkResult + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    let cancellation = NetworkStartupCancellation::new();
+    let worker_cancellation = cancellation.clone();
+    let worker = thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let result = operation(worker_cancellation);
+            let _ = sender.send(result);
+        })?;
+    Ok((
+        receiver,
+        StartupNetworkAttempt {
+            cancellation,
+            worker: Some(worker),
+        },
+    ))
+}
+
+pub(crate) struct ClassicDirectReferenceQueryResult {
+    pub(crate) settings: ClientSettings,
+    pub(crate) password_needed: bool,
+}
+
+pub(crate) struct ClassicDirectReferenceQuery {
+    pub(crate) receiver: Receiver<std::result::Result<ClassicDirectReferenceQueryResult, NetworkStartError>>,
+}
+
+impl RecordingSession {
+    pub(crate) fn new(template: RecordingTemplate, league_streaming: bool, ctrl_rec: File) -> Self {
+        Self {
+            writer: ControlRecordWriter::new(),
+            ctrl_rec,
+            output_path: template.output_path,
+            league_streaming,
+            stream_writer_pos: 0,
+            disk_writer_pos: 0,
+            description_title: template.description_title,
+            description_definition_modules: template.description_definition_modules,
+        }
+    }
+
+    pub(crate) fn flush_control_delta(&mut self) -> io::Result<()> {
+        let bytes = self.writer.bytes();
+        debug_assert!(self.disk_writer_pos <= bytes.len());
+        while self.disk_writer_pos < bytes.len() {
+            match self.ctrl_rec.write(&bytes[self.disk_writer_pos..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to advance live CtrlRec",
+                    ));
+                }
+                Ok(written) => self.disk_writer_pos += written,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.ctrl_rec.flush()
+    }
+
+    pub(crate) fn take_stream_delta(&mut self) -> Option<Vec<u8>> {
+        if !self.league_streaming {
+            return None;
+        }
+        let bytes = self.writer.bytes();
+        debug_assert!(self.stream_writer_pos <= bytes.len());
+        let delta = bytes[self.stream_writer_pos..].to_vec();
+        self.stream_writer_pos = bytes.len();
+        (!delta.is_empty()).then_some(delta)
+    }
+}
+
+pub(crate) fn record_scenario_origin(
+    scenario_path: &Path,
+    app_paths: Option<&AppPaths>,
+    fallback: &str,
+) -> String {
+    let relative = if scenario_path.is_relative() {
+        Some(scenario_path.to_path_buf())
+    } else {
+        app_paths.and_then(|paths| {
+            scenario_path
+                .strip_prefix(paths.install_root())
+                .ok()
+                .map(Path::to_path_buf)
+        })
+    };
+    let origin = relative.map_or_else(
+        || c4_filename_from_path(scenario_path),
+        |path| path.to_string_lossy().replace('\\', "/"),
+    );
+    if origin.is_empty() {
+        fallback.to_string()
+    } else {
+        origin
+    }
+}
+
+pub(crate) fn clean_initial_record_group(group: &mut MutableGroup) {
+    let stale_entries = group
+        .entry_names()
+        .into_iter()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".c4p")
+                || lower == "title.bmp"
+                || lower == "icon.bmp"
+                || lower == "info.txt"
+                || (lower.starts_with("title") && lower.ends_with(".txt"))
+                || (lower.starts_with("desc") && lower.ends_with(".rtf"))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for entry in stale_entries {
+        group.remove_entry(&entry);
+    }
+}
+
+/// Close the destination image after a failed record save, preserving every
+/// component mutation completed before the failure. `C4GameSave` owns its
+/// group while saving, so its destructor closes the partially written group
+/// even when `Save` returns false.
+fn persist_partial_recording_group(
+    group: &MutableGroup,
+    output_path: &Path,
+    maker: &[u8],
+) -> std::result::Result<(), String> {
+    let mut partial = group.clone();
+    if !maker.is_empty() {
+        partial.set_maker_bytes_recursively(maker);
+    }
+    let packed = partial.pack().map_err(|error| error.to_string())?;
+    replace_file_from_same_directory(output_path, &packed).map_err(|error| error.to_string())
+}
+
+pub(crate) fn partial_recording_failure(
+    group: &MutableGroup,
+    output_path: &Path,
+    maker: &[u8],
+    failure: String,
+) -> String {
+    match persist_partial_recording_group(group, output_path, maker) {
+        Ok(()) => failure,
+        Err(persist_error) => format!(
+            "{failure}; additionally failed to close partial record {}: {persist_error}",
+            output_path.display()
+        ),
+    }
+}
+
+fn c4_filename_from_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let bytes = path.as_bytes();
+    let mut filename_start = 0;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte != b'/' && !(cfg!(windows) && byte == b'\\') {
+            continue;
+        }
+        if index >= 4 && bytes[index - 4..index - 1].eq_ignore_ascii_case(b".c4") {
+            return path[filename_start..].replace('\\', "/");
+        }
+        filename_start = index + 1;
+    }
+    path[filename_start..].replace('\\', "/")
+}
+
+pub(crate) fn recorded_player_resource_name(core: &clonk_engine::NetworkResourceCore) -> Vec<u8> {
+    let basename = core
+        .filename
+        .as_bytes()
+        .rsplit(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'))
+        .next()
+        .unwrap_or_default();
+    let mut target = core.id.to_string().into_bytes();
+    target.push(b'-');
+    target.extend_from_slice(basename);
+    target
+}
+
+pub(crate) fn has_player_group_extension(name: &[u8]) -> bool {
+    name.get(name.len().saturating_sub(4)..)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(b".c4p"))
+}
+
+pub(crate) fn path_to_legacy_bytes(path: &Path) -> Vec<u8> {
+    resource_path_identity::path_wire_bytes(path)
+}
+
+pub(crate) fn path_as_legacy_text(path: &Path) -> String {
+    clonk_script::c4_string_from_bytes(&path_to_legacy_bytes(path))
+}
+
+pub(crate) fn league_record_name(path: &Path) -> Option<LegacyCString> {
+    LegacyCString::from_bytes(path_to_legacy_bytes(path))
+}
+
+pub(crate) fn raw_definition_description_modules(paths: &[PathBuf]) -> Vec<Vec<u8>> {
+    paths
+        .iter()
+        .map(|path| path_to_legacy_bytes(path))
+        .collect()
+}
+
+pub(crate) fn path_from_group_name_bytes(bytes: &[u8]) -> PathBuf {
+    resource_path_identity::path_from_wire_bytes(bytes)
+}
+
+pub(crate) fn normalize_legacy_path_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
+    for byte in &mut bytes {
+        if *byte == b'\\' {
+            *byte = std::path::MAIN_SEPARATOR as u8;
+        }
+    }
+    bytes
+}
+
+pub(crate) fn concatenate_legacy_path(prefix: &Path, suffix: &[u8]) -> PathBuf {
+    let mut bytes = path_to_legacy_bytes(prefix);
+    bytes.extend_from_slice(suffix);
+    path_from_group_name_bytes(&normalize_legacy_path_bytes(bytes))
+}
+
+pub(crate) fn path_with_trailing_native_separator(path: &Path) -> PathBuf {
+    let mut bytes = path_to_legacy_bytes(path);
+    let separator = std::path::MAIN_SEPARATOR as u8;
+    if bytes.last() != Some(&separator) {
+        bytes.push(separator);
+    }
+    path_from_group_name_bytes(&bytes)
+}
+
+pub(crate) fn count_direct_stream_player_crew_files(group: &Group) -> std::result::Result<usize, String> {
+    let mut direct_crew = 0;
+    for entry in group.entries().map_err(|error| error.to_string())? {
+        let is_crew = entry
+            .name_bytes
+            .get(entry.name_bytes.len().saturating_sub(4)..)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(b".c4i"));
+        if !is_crew {
+            continue;
+        }
+        let child = if group.is_directory() {
+            group.open_child(&entry.relative_path)
+        } else {
+            group.read_entry_bytes_exact(&entry).and_then(|bytes| {
+                Group::from_raw_memory(path_from_group_name_bytes(&entry.name_bytes), bytes)
+            })
+        };
+        let Ok(child) = child else {
+            continue;
+        };
+        if child.read_file("ObjectInfo.txt").is_ok() {
+            direct_crew += 1;
+        }
+    }
+    Ok(direct_crew)
+}
+
+pub(crate) fn replay_control_record_chunks(
+    group: &Group,
+) -> std::result::Result<Vec<clonk_network::ControlRecordChunk>, String> {
+    // C4Playback::Open tries LoadEntryString first. A successfully loaded text
+    // entry is authoritative even when parsing fails; only a load failure
+    // (including native's zero-sized-entry failure) selects CtrlRec.c4b.
+    if let Ok(text) = group.load_entry_string("CtrlRec.txt") {
+        return clonk_network::decode_control_record_text(&text)
+            .map_err(|error| format!("has an invalid CtrlRec.txt stream: {error}"));
+    }
+    let binary = group
+        .read_file("CtrlRec.c4b")
+        .map_err(|error| format!("has no readable CtrlRec.c4b: {error}"))?;
+    clonk_network::decode_control_record(&binary)
+        .map_err(|error| format!("has an invalid CtrlRec.c4b stream: {error}"))
+}
+
+pub(crate) const SEARCH_EDIT_MAX_BYTES: usize = 254;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SearchCursorOperation {
+    Left,
+    Right,
+    Home,
+    End,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SearchEditState {
+    pub(crate) text: String,
+    pub(crate) caret: usize,
+    pub(crate) anchor: usize,
+    focused: bool,
+    pub(crate) horizontal_scroll: i32,
+    pub(crate) dragging: bool,
+    /// C++ retains `iSelectionStart` independently from the visible caret,
+    /// even when the selection is collapsed; an active drag reuses it.
+    pub(crate) drag_anchor: usize,
+    pub(crate) blink_ticks: u32,
+}
+
+impl SearchEditState {
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn caret(&self) -> usize {
+        self.caret
+    }
+
+    pub(crate) fn set_text(&mut self, text: impl Into<String>) {
+        let mut text = text.into();
+        if text.len() > SEARCH_EDIT_MAX_BYTES {
+            let mut end = SEARCH_EDIT_MAX_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        self.text = text;
+        self.caret = self.text.len();
+        self.anchor = self.caret;
+        self.horizontal_scroll = 0;
+        self.drag_anchor = 0;
+        self.blink_ticks = 0;
+    }
+
+    pub(crate) fn focus(&mut self) {
+        if self.focused {
+            return;
+        }
+        self.focused = true;
+        self.anchor = 0;
+        self.caret = self.text.len();
+        self.drag_anchor = 0;
+        self.blink_ticks = 0;
+    }
+
+    fn blur(&mut self) {
+        self.focused = false;
+        self.anchor = self.caret;
+        self.dragging = false;
+        self.drag_anchor = 0;
+        self.blink_ticks = 0;
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    pub(crate) fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        (self.anchor != self.caret).then(|| {
+            let start = self.anchor.min(self.caret);
+            let end = self.anchor.max(self.caret);
+            start..end
+        })
+    }
+
+    fn selected_text(&self) -> Option<&str> {
+        self.selection_range().map(|range| &self.text[range])
+    }
+
+    pub(crate) fn select_all(&mut self) {
+        self.anchor = 0;
+        self.caret = self.text.len();
+        self.drag_anchor = 0;
+        self.blink_ticks = 0;
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        let start = range.start;
+        self.text.replace_range(range, "");
+        self.caret = start;
+        self.anchor = start;
+        self.drag_anchor = start;
+        self.blink_ticks = 0;
+        true
+    }
+
+    pub(crate) fn insert_text(&mut self, text: &str) -> bool {
+        self.delete_selection();
+        let available = SEARCH_EDIT_MAX_BYTES.saturating_sub(self.text.len());
+        let mut sanitized = String::new();
+        for character in text.chars() {
+            if character.is_control() {
+                continue;
+            }
+            let character = if character == '|' { '¦' } else { character };
+            if sanitized.len() + character.len_utf8() > available {
+                break;
+            }
+            sanitized.push(character);
+        }
+        if sanitized.is_empty() {
+            return false;
+        }
+        self.text.insert_str(self.caret, &sanitized);
+        self.caret += sanitized.len();
+        self.anchor = self.caret;
+        self.blink_ticks = 0;
+        true
+    }
+
+    /// `C4GUI::Edit::InsertText`: unlike keyboard input and ordinary Paste,
+    /// the middle-button PRIMARY path inserts bytes without mapping `|` or
+    /// treating line breaks as submit callbacks.
+    pub(crate) fn insert_raw_text(&mut self, text: &str) -> bool {
+        let old_text = self.text.clone();
+        self.delete_selection();
+        let available = SEARCH_EDIT_MAX_BYTES.saturating_sub(self.text.len());
+        let mut end = text.len().min(available);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end > 0 {
+            self.text.insert_str(self.caret, &text[..end]);
+            self.caret += end;
+            self.blink_ticks = 0;
+        }
+        self.anchor = self.caret;
+        self.text != old_text
+    }
+
+    fn previous_boundary(&self, at: usize) -> usize {
+        self.text[..at]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    fn next_boundary(&self, at: usize) -> usize {
+        self.text[at..]
+            .chars()
+            .next()
+            .map(|character| at + character.len_utf8())
+            .unwrap_or(self.text.len())
+    }
+
+    fn is_word_spacer(character: char) -> bool {
+        character.is_ascii() && !character.is_ascii_alphanumeric() && character != '_'
+    }
+
+    fn word_target(&self, direction: i32) -> usize {
+        if direction < 0 {
+            let mut cursor = self.caret;
+            let mut nonspace_found = false;
+            while cursor > 0 {
+                let previous = self.previous_boundary(cursor);
+                let character = self.text[previous..cursor]
+                    .chars()
+                    .next()
+                    .expect("non-empty character slice");
+                if Self::is_word_spacer(character) {
+                    if nonspace_found {
+                        break;
+                    }
+                } else {
+                    nonspace_found = true;
+                }
+                cursor = previous;
+            }
+            cursor
+        } else {
+            let mut cursor = self.caret;
+            let mut space_found = false;
+            while cursor < self.text.len() {
+                let next = self.next_boundary(cursor);
+                let character = self.text[cursor..next]
+                    .chars()
+                    .next()
+                    .expect("non-empty character slice");
+                if Self::is_word_spacer(character) {
+                    space_found = true;
+                } else if space_found {
+                    break;
+                }
+                cursor = next;
+            }
+            cursor
+        }
+    }
+
+    pub(crate) fn move_cursor(&mut self, operation: SearchCursorOperation, ctrl: bool, shift: bool) {
+        if self.selection_range().is_some() && !shift {
+            self.anchor = self.caret;
+            self.drag_anchor = 0;
+        }
+        let old_caret = self.caret;
+        let target = match operation {
+            SearchCursorOperation::Left => {
+                if ctrl {
+                    self.word_target(-1)
+                } else {
+                    self.previous_boundary(self.caret)
+                }
+            }
+            SearchCursorOperation::Right => {
+                if ctrl {
+                    self.word_target(1)
+                } else {
+                    self.next_boundary(self.caret)
+                }
+            }
+            SearchCursorOperation::Home => 0,
+            SearchCursorOperation::End => self.text.len(),
+        };
+        if shift {
+            if target != old_caret && self.selection_range().is_none() {
+                self.anchor = old_caret;
+                self.drag_anchor = old_caret;
+            }
+            self.caret = target;
+        } else {
+            self.caret = target;
+            self.anchor = target;
+        }
+        self.blink_ticks = 0;
+    }
+
+    pub(crate) fn backspace(&mut self, ctrl: bool, shift: bool) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if shift || self.caret == 0 {
+            return false;
+        }
+        let start = if ctrl {
+            self.word_target(-1)
+        } else {
+            self.previous_boundary(self.caret)
+        };
+        self.text.replace_range(start..self.caret, "");
+        self.caret = start;
+        self.anchor = start;
+        self.blink_ticks = 0;
+        true
+    }
+
+    pub(crate) fn delete(&mut self, ctrl: bool, shift: bool) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if shift || self.caret == self.text.len() {
+            return false;
+        }
+        let end = if ctrl {
+            self.word_target(1)
+        } else {
+            self.next_boundary(self.caret)
+        };
+        self.text.replace_range(self.caret..end, "");
+        self.anchor = self.caret;
+        self.blink_ticks = 0;
+        true
+    }
+
+    pub(crate) fn scroll_cursor_in_view(&mut self, cursor_x: i32, client_width: i32, cursor_half: i32) {
+        if client_width < 5 {
+            return;
+        }
+        let cursor_x = cursor_x.saturating_add(cursor_half);
+        if cursor_x < self.horizontal_scroll && self.horizontal_scroll > 0 {
+            self.horizontal_scroll = cursor_x.saturating_sub(2).max(0);
+        }
+        if cursor_x > self.horizontal_scroll
+            && cursor_x > client_width.saturating_add(self.horizontal_scroll)
+        {
+            self.horizontal_scroll =
+                cursor_x.saturating_sub(client_width) + i32::from(self.caret < self.text.len()) * 2;
+        }
+    }
+
+    pub(crate) fn tick_blink(&mut self) -> bool {
+        if !self.focused {
+            return false;
+        }
+        const BLINK_TICKS: u32 = 18;
+        let before = (self.blink_ticks / BLINK_TICKS) % 2;
+        self.blink_ticks = self.blink_ticks.wrapping_add(1);
+        before != (self.blink_ticks / BLINK_TICKS) % 2
+    }
+
+    pub(crate) fn cursor_visible(&self) -> bool {
+        self.focused && (self.blink_ticks / 18).is_multiple_of(2)
+    }
+
+    pub(crate) fn begin_pointer_selection(&mut self, position: usize) {
+        let position = position.min(self.text.len());
+        self.focus();
+        self.anchor = position;
+        self.caret = position;
+        self.dragging = true;
+        self.drag_anchor = position;
+        self.blink_ticks = 0;
+    }
+
+    pub(crate) fn drag_pointer_selection(&mut self, position: usize) {
+        if !self.dragging {
+            return;
+        }
+        self.anchor = self.drag_anchor.min(self.text.len());
+        self.caret = position.min(self.text.len());
+        self.blink_ticks = 0;
+    }
+
+    pub(crate) fn end_pointer_selection(&mut self, position: usize) {
+        if self.dragging {
+            self.anchor = self.drag_anchor.min(self.text.len());
+            self.caret = position.min(self.text.len());
+            self.dragging = false;
+            self.blink_ticks = 0;
+        }
+    }
+
+    pub(crate) fn select_word_at(&mut self, mut position: usize) {
+        position = position.min(self.text.len());
+        if position < self.text.len() {
+            let next = self.next_boundary(position);
+            let character = self.text[position..next]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                if position == 0 {
+                    return;
+                }
+                let previous = self.previous_boundary(position);
+                let character = self.text[previous..position]
+                    .chars()
+                    .next()
+                    .expect("non-empty character slice");
+                if Self::is_word_spacer(character) {
+                    return;
+                }
+                position = previous;
+            }
+        } else if position > 0 {
+            let previous = self.previous_boundary(position);
+            let character = self.text[previous..position]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                return;
+            }
+            position = previous;
+        } else {
+            return;
+        }
+        let mut start = position;
+        while start > 0 {
+            let previous = self.previous_boundary(start);
+            let character = self.text[previous..start]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                break;
+            }
+            start = previous;
+        }
+        let mut end = self.next_boundary(position);
+        while end < self.text.len() {
+            let next = self.next_boundary(end);
+            let character = self.text[end..next]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                break;
+            }
+            end = next;
+        }
+        self.anchor = start;
+        self.caret = end;
+        self.dragging = false;
+        self.drag_anchor = start;
+        self.blink_ticks = 0;
+    }
+}
+
+pub(crate) fn scensel_search_context_entries(
+    edit: &SearchEditState,
+    clipboard_available: bool,
+) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
+    let mut entries = Vec::new();
+    let selection = edit.selection_range();
+    if selection.is_some() {
+        entries.push(
+            ContextMenuEntry::new("Cut")
+                .with_tooltip("Moves the selection to the clipboard.")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::Cut,
+                )),
+        );
+        entries.push(
+            ContextMenuEntry::new("Copy")
+                .with_tooltip("Copies the selection to the clipboard.")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::Copy,
+                )),
+        );
+    }
+    if clipboard_available {
+        entries.push(
+            ContextMenuEntry::new("Paste")
+                .with_tooltip("Inserts the contents of the clipboard.")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::Paste,
+                )),
+        );
+    }
+    if selection.is_some() {
+        entries.push(
+            ContextMenuEntry::new("Clear")
+                .with_tooltip("Clears the selection.")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::Clear,
+                )),
+        );
+    }
+    let whole_text_selected = selection
+        .as_ref()
+        .is_some_and(|range| range.start == 0 && range.end == edit.text().len());
+    if !edit.text().is_empty() && !whole_text_selected {
+        entries.push(
+            ContextMenuEntry::new("Select all")
+                .with_tooltip("Selects the complete text")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::SelectAll,
+                )),
+        );
+    }
+    entries
+}
+
+pub(crate) fn clipboard_text_available() -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.get_text())
+        .is_ok()
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn primary_clipboard_text() -> Option<String> {
+    use arboard::{GetExtLinux, LinuxClipboardKind};
+
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| {
+            clipboard
+                .get()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text()
+        })
+        .ok()
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+pub(crate) fn primary_clipboard_text() -> Option<String> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.get_text())
+        .ok()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn primary_clipboard_text() -> Option<String> {
+    None
+}
+
+pub(crate) trait SelectionEdit {
+    fn selected_text(&self) -> Option<&str>;
+    fn delete_selection(&mut self) -> bool;
+}
+
+impl SelectionEdit for SearchEditState {
+    fn selected_text(&self) -> Option<&str> {
+        SearchEditState::selected_text(self)
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        SearchEditState::delete_selection(self)
+    }
+}
+
+impl<Focus> SelectionEdit for RenameEdit<Focus> {
+    fn selected_text(&self) -> Option<&str> {
+        RenameEdit::selected_text(self)
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        RenameEdit::delete_selection(self)
+    }
+}
+
+pub(crate) fn transfer_edit_selection<E, Edit: SelectionEdit>(
+    edit: &mut Edit,
+    cut: bool,
+    transfer: impl FnOnce(&str) -> Result<(), E>,
+) -> Result<bool, E> {
+    let Some(selected) = edit.selected_text().map(str::to_string) else {
+        return Ok(false);
+    };
+    transfer(&selected)?;
+    if cut {
+        edit.delete_selection();
+    }
+    Ok(true)
+}
+
+pub(crate) fn apply_scensel_search_paste(edit: &mut SearchEditState, text: &str) -> bool {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut segments = text.split('\n').peekable();
+    while let Some(segment) = segments.next() {
+        if segment.is_empty() && segments.peek().is_some() {
+            continue;
+        }
+        if !segment.is_empty() {
+            edit.insert_text(segment);
+        }
+        if segments.peek().is_some() && !segment.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClassicStartupSubscreen {
+    Options(clonk_frontend::startup_options_dlg::OptionsSheet),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClassicStartupAction {
+    OptionsAdvancedSettings,
+    PlayerCrew { index: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClassicIngameMenuChild {
+    NewPlayer,
+    NetworkSurrender,
+    ClientDisconnect,
+    GoalInfo(String),
+    RuleInfo(String),
+    JoinPlayer { file: String, detail: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClassicObjectMenuBoundary {
+    Activate,
+    Get,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunningChatMode {
+    All,
+    Allies,
+    Say,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RunningChatState {
+    pub(crate) history_index: i32,
+    pub(crate) active: bool,
+    pub(crate) kind: RunningChatKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RunningChatKind {
+    Ordinary,
+    MessageBoardInput(clonk_engine::ActiveMessageBoardInput),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeNetworkRole {
+    Offline,
+    Host,
+    Client,
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeveloperConsoleCompletionStyle {
+    Win32,
+    Gtk,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DeveloperConsoleCompletionEntry {
+    Function(String),
+    Separator,
+}
+
+/// Apply the native script-entry combo conventions to the engine-owned
+/// autocomplete catalog. Win32 prepends scenario functions and a divider and
+/// displays calls; GTK appends bare scenario names after the engine list.
+pub(crate) fn developer_console_completion_entries(
+    catalog: &clonk_engine::ConsoleScriptCompletionCatalog,
+    style: DeveloperConsoleCompletionStyle,
+) -> Vec<DeveloperConsoleCompletionEntry> {
+    let function = |name: &str, calls: bool| {
+        DeveloperConsoleCompletionEntry::Function(if calls {
+            format!("{name}()")
+        } else {
+            name.to_string()
+        })
+    };
+    match style {
+        DeveloperConsoleCompletionStyle::Win32 => {
+            let mut entries = catalog
+                .scenario_functions
+                .iter()
+                .rev()
+                .map(|name| function(name, true))
+                .collect::<Vec<_>>();
+            if !catalog.scenario_functions.is_empty() {
+                entries.push(DeveloperConsoleCompletionEntry::Separator);
+            }
+            entries.extend(
+                catalog
+                    .engine_functions
+                    .iter()
+                    .map(|name| function(name, true)),
+            );
+            entries
+        }
+        DeveloperConsoleCompletionStyle::Gtk => catalog
+            .engine_functions
+            .iter()
+            .chain(&catalog.scenario_functions)
+            .map(|name| function(name, false))
+            .collect(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeNetworkStatusBarrier {
+    pub(crate) status: clonk_network::NetworkStatus,
+    pub(crate) local_reached: bool,
+    pub(crate) actual_control_tick: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeStatusReachOutcome {
+    NotReached,
+    Reported,
+    ReportFailed,
+}
+
+pub(crate) fn same_runtime_network_status_barrier(
+    left: clonk_network::NetworkStatus,
+    right: clonk_network::NetworkStatus,
+) -> bool {
+    left.state == right.state && left.target_tick == right.target_tick
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeHelpColumns {
+    pub(crate) left: String,
+    pub(crate) right: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeFlashResources {
+    pub(crate) charset: RuntimeHelpCharset,
+    pub(crate) music: String,
+    pub(crate) speed: String,
+    pub(crate) debug_mode: String,
+    pub(crate) debug_mode_not_allowed: String,
+    pub(crate) no_debug_mode: String,
+    pub(crate) on: String,
+    pub(crate) off: String,
+}
+
+impl RuntimeFlashResources {
+    pub(crate) fn undefined() -> Self {
+        let text = |key: &str| format!("[Undefined: {key}]");
+        Self {
+            charset: RuntimeHelpCharset::Windows1252,
+            music: text("IDS_CTL_MUSIC"),
+            speed: text("IDS_MSG_SPEED"),
+            debug_mode: text("IDS_CTL_DEBUGMODE"),
+            debug_mode_not_allowed: text("IDS_MSG_DEBUGMODENOTALLOWED"),
+            no_debug_mode: text("IDS_MSG_NODEBUGMODE"),
+            on: text("IDS_CTL_ON"),
+            off: text("IDS_CTL_OFF"),
+        }
+    }
+
+    pub(crate) fn on_off(&self, label: &str, enabled: bool) -> String {
+        format!("{label}: {}", if enabled { &self.on } else { &self.off })
+    }
+
+    pub(crate) fn music_on_off(&self, enabled: bool) -> String {
+        self.on_off(&self.music, enabled)
+    }
+
+    pub(crate) fn debug_mode_on_off(&self, enabled: bool) -> String {
+        self.on_off(&self.debug_mode, enabled)
+    }
+
+    pub(crate) fn speed(&self, frame_skip: i32) -> String {
+        format_resource_string(self.speed.clone(), &[&frame_skip.to_string()])
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeFlashMessage {
+    pub(crate) text: String,
+    pub(crate) remaining_draws: u16,
+    pub(crate) y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimePhysicalKey {
+    Keyboard(VirtualKeyCode),
+    Gamepad { slot: u8, button: u8 },
+    Raw(u32),
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeKeyChord {
+    pub(crate) physical: RuntimePhysicalKey,
+    pub(crate) modifiers: ModifiersState,
+}
+
+impl RuntimeKeyChord {
+    pub(crate) fn keyboard(key: VirtualKeyCode, modifiers: ModifiersState) -> Self {
+        Self {
+            physical: RuntimePhysicalKey::Keyboard(key),
+            modifiers,
+        }
+    }
+
+    pub(crate) fn matches(self, key: VirtualKeyCode, modifiers: ModifiersState) -> bool {
+        let c4_modifiers =
+            modifiers & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if self.modifiers != c4_modifiers {
+            return false;
+        }
+        match self.physical {
+            RuntimePhysicalKey::Keyboard(configured) => configured == key,
+            RuntimePhysicalKey::Raw(configured) => {
+                input::encode_virtual_key_code(key).is_some_and(|raw| raw as u32 == configured)
+            }
+            RuntimePhysicalKey::Gamepad { .. } | RuntimePhysicalKey::Disabled => false,
+        }
+    }
+
+    pub(crate) fn matches_gamepad_button(self, slot: u8, button: u8) -> bool {
+        if !self.modifiers.is_empty() {
+            return false;
+        }
+        match self.physical {
+            RuntimePhysicalKey::Gamepad {
+                slot: configured_slot,
+                button: configured_button,
+            } => {
+                configured_slot == slot
+                    && (configured_button == 10 + button
+                        || configured_button == 0xff
+                        || (configured_button == 0xfc && button < 4)
+                        || (configured_button == 0xfb && button >= 4)
+                        || (configured_button == 0xfe && button.is_multiple_of(2))
+                        || (configured_button == 0xfd && !button.is_multiple_of(2)))
+            }
+            RuntimePhysicalKey::Keyboard(_)
+            | RuntimePhysicalKey::Raw(_)
+            | RuntimePhysicalKey::Disabled => false,
+        }
+    }
+
+    pub(crate) fn matches_gamepad_direction(self, slot: u8, direction: ControlButton) -> bool {
+        if !self.modifiers.is_empty() {
+            return false;
+        }
+        let button = match direction {
+            ControlButton::Left => 1,
+            ControlButton::Up => 2,
+            ControlButton::Right => 3,
+            ControlButton::Down => 4,
+        };
+        matches!(
+            self.physical,
+            RuntimePhysicalKey::Gamepad {
+                slot: configured_slot,
+                button: configured_button,
+            } if configured_slot == slot && configured_button == button
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeKeyConfig {
+    pub(crate) overrides: BTreeMap<String, Vec<RuntimeKeyChord>>,
+    pub(crate) net_observer_next_player: Vec<RuntimeKeyChord>,
+    pub(crate) chart_toggle: Vec<RuntimeKeyChord>,
+}
+
+impl RuntimeKeyConfig {
+    pub(crate) fn override_for(&self, name: &str) -> Option<&[RuntimeKeyChord]> {
+        self.overrides.get(name).map(Vec::as_slice)
+    }
+
+    pub(crate) fn keyboard_override_matches(
+        &self,
+        name: &str,
+        key: VirtualKeyCode,
+        modifiers: ModifiersState,
+    ) -> Option<bool> {
+        self.override_for(name)
+            .map(|codes| codes.iter().any(|code| code.matches(key, modifiers)))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeGlobalKeyOutcome {
+    Unhandled,
+    UnhandledAfterDeniedDebug,
+    Handled,
+    DownstreamWithoutEngineDispatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeDebugKey {
+    Mode,
+    Vertices,
+    ActionCycle,
+    SolidMask,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeCustomGamepadAction {
+    Chat(RunningChatMode),
+    Scoreboard,
+    Abort,
+    Chart,
+    SpeedUp,
+    SpeedDown,
+    Menu(ControlCommand),
+    MenuOpen,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeFlashProducerBoundary {
+    ObserverPrompt,
+    ObserverClear,
+    RuntimeJoin,
+    ControlRate,
+    FairCrew,
+}
+
+impl RuntimeFlashProducerBoundary {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::ObserverPrompt,
+        Self::ObserverClear,
+        Self::RuntimeJoin,
+        Self::ControlRate,
+        Self::FairCrew,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClassicScoreboardTrigger {
+    UserToggle,
+    ScriptVisibility,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScoreboardPointerTarget {
+    Close,
+    Title,
+    Dialog,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScoreboardTitleDrag {
+    pub(crate) pointer: GuiPoint,
+    pub(crate) origin: (i32, i32),
+}
+
+/// Presentation-only state owned by the live native `C4ScoreboardDlg`.
+/// The deterministic matrix/refcount remain in `clonk-engine`; this cache has
+/// exactly the dialog lifetime and is rebuilt only by native `Update` events.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ScoreboardDialogRuntime {
+    pub(crate) presentation: Option<clonk_frontend::scoreboard::ScoreboardPresentationState>,
+    pub(crate) layout_revision: u64,
+    pub(crate) preferred: Option<clonk_frontend::classic_gui::IntRect>,
+    pub(crate) pointer: Option<GuiPoint>,
+    pub(crate) title_drag: Option<ScoreboardTitleDrag>,
+    pub(crate) close_hovered: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RunningDialogStackEntry {
+    Scoreboard,
+    RuntimeClientList,
+    Message(u64),
+    Chat,
+}
+
+impl RunningDialogStackEntry {
+    pub(crate) fn z_order(self) -> i8 {
+        match self {
+            Self::Scoreboard | Self::RuntimeClientList => 0,
+            Self::Message(_) => 1,
+            Self::Chat => 2,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClassicViewportBoundary {
+    LocalViewportUnavailable { owner: i32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClassicParityBoundary {
+    GlobalGuiBootstrapResources {
+        issues: Vec<ClassicGuiBootstrapIssue>,
+    },
+    StartupBootstrapResources {
+        issues: Vec<ClassicStartupBootstrapIssue>,
+    },
+    StartupSubscreen(ClassicStartupSubscreen),
+    StartupAction(ClassicStartupAction),
+    StartupModel {
+        view: StartupView,
+        missing: &'static str,
+    },
+    StartupStatusOverlay {
+        view: StartupView,
+        status: String,
+    },
+    StartupGameOver {
+        view: StartupView,
+    },
+    StartupScreen {
+        view: StartupView,
+    },
+    StartupMainResources {
+        missing: Vec<&'static str>,
+    },
+    ScenarioStartInspection {
+        path: PathBuf,
+        detail: String,
+    },
+    EditorScenario {
+        identifier: String,
+    },
+    EditScenario {
+        identifier: String,
+    },
+    IngameMenuResources {
+        missing: Vec<&'static str>,
+    },
+    HudResources {
+        missing: Vec<&'static str>,
+    },
+    IngameMenuDefinitionIcon {
+        definition_id: String,
+        detail: String,
+    },
+    GameOverResources {
+        missing: Vec<String>,
+    },
+    GuiOverlayResources {
+        overlay: &'static str,
+        detail: String,
+    },
+    ScriptMenuPointerResources {
+        detail: String,
+    },
+    IngameMenuChild(ClassicIngameMenuChild),
+    ObjectMenu(ClassicObjectMenuBoundary),
+    SaveBrowser(SaveBrowserMode),
+    AppObjectMenu(AppObjectMenuMode),
+    RuntimeHelpResources {
+        detail: String,
+    },
+    RuntimeFlashResources {
+        detail: String,
+    },
+    NetworkControlPacing {
+        detail: String,
+    },
+    RuntimeKeyConfig {
+        detail: String,
+    },
+    RuntimeAudioSystem {
+        action: &'static str,
+    },
+    RuntimeFlashProducer(RuntimeFlashProducerBoundary),
+    Scoreboard {
+        trigger: ClassicScoreboardTrigger,
+        rows: usize,
+        columns: usize,
+        show_count: i32,
+    },
+    RunningViewport(ClassicViewportBoundary),
+    HudGameMessage {
+        count: usize,
+    },
+    RunningShortcut {
+        key: &'static str,
+    },
+    LoaderScreen {
+        context: &'static str,
+        detail: String,
+    },
+    GameLobby(ClassicGameLobbyBoundary),
+}
+
+impl fmt::Display for ClassicParityBoundary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GlobalGuiBootstrapResources { issues } => write!(
+                f,
+                "classic process-global C4GUI bootstrap is unavailable ({}); refusing startup, loading, and running UI before mutation, cache, or pixels",
+                issues
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::StartupBootstrapResources { issues } => write!(
+                f,
+                "classic startup bootstrap is unavailable ({}); refusing every startup root before cache or pixels",
+                issues
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::StartupSubscreen(subscreen) => write!(
+                f,
+                "classic startup subscreen {subscreen:?} is not implemented; refusing incomplete Rust pane"
+            ),
+            Self::StartupAction(action) => write!(
+                f,
+                "classic startup action {action:?} is not implemented; refusing generic status or side effect"
+            ),
+            Self::StartupModel { view, missing } => write!(
+                f,
+                "classic startup model {missing} is unavailable for {view:?}; refusing generic Rust fallback"
+            ),
+            Self::StartupStatusOverlay { view, status } => write!(
+                f,
+                "classic startup status presentation is unavailable in {view:?}: {status}; refusing generic Rust status overlay"
+            ),
+            Self::StartupGameOver { view } => write!(
+                f,
+                "classic game-over evaluation dialog is running-mode only, but stale state reached startup view {view:?}; refusing a startup overlay or silent omission"
+            ),
+            Self::StartupScreen { view } => write!(
+                f,
+                "classic startup screen {view:?} is unavailable; refusing generic Rust fallback"
+            ),
+            Self::StartupMainResources { missing } => write!(
+                f,
+                "classic startup main-menu resources are unavailable (missing {})",
+                missing.join(", ")
+            ),
+            Self::ScenarioStartInspection { path, detail } => write!(
+                f,
+                "cannot verify classic scenario-start constraints for {}: {detail}",
+                path.display()
+            ),
+            Self::EditorScenario { identifier } => write!(
+                f,
+                "classic editor entry `{identifier}` is unavailable in the Rust menu"
+            ),
+            Self::EditScenario { identifier } => write!(
+                f,
+                "classic Edit action for `{identifier}` is unavailable in the Rust menu"
+            ),
+            Self::IngameMenuResources { missing } => write!(
+                f,
+                "classic in-game menu resources are unavailable (missing {})",
+                missing.join(", ")
+            ),
+            Self::HudResources { missing } => write!(
+                f,
+                "classic HUD resources are unavailable (missing {}); refusing generic Rust fallback",
+                missing.join(", ")
+            ),
+            Self::IngameMenuDefinitionIcon {
+                definition_id,
+                detail,
+            } => write!(
+                f,
+                "classic in-game goal/rule symbol definition `{definition_id}` is unavailable: {detail}; refusing a blank symbol substitute"
+            ),
+            Self::GameOverResources { missing } => write!(
+                f,
+                "classic game-over resources are unavailable (missing {}); refusing generic Rust fallback",
+                missing.join(", ")
+            ),
+            Self::GuiOverlayResources { overlay, detail } => write!(
+                f,
+                "classic {overlay} resources are unavailable: {detail}; refusing overlay construction or base pixels"
+            ),
+            Self::ScriptMenuPointerResources { detail } => write!(
+                f,
+                "classic script-menu pointer resources are unavailable: {detail}; refusing world-pointer fallthrough"
+            ),
+            Self::IngameMenuChild(ClassicIngameMenuChild::JoinPlayer { file, detail }) => write!(
+                f,
+                "classic offline in-game player join failed for `{file}`: {detail}; refusing status-text fallback"
+            ),
+            Self::IngameMenuChild(child) => write!(
+                f,
+                "classic in-game menu child {child:?} is not implemented; refusing status/no-op substitute"
+            ),
+            Self::ObjectMenu(kind) => write!(
+                f,
+                "classic object menu {kind:?} is not implemented; refusing generic Rust object menu"
+            ),
+            Self::SaveBrowser(mode) => write!(
+                f,
+                "classic {mode:?} save/load screen is unavailable; refusing generic Rust browser"
+            ),
+            Self::AppObjectMenu(mode) => write!(
+                f,
+                "classic app-owned object menu {mode:?} is unavailable; refusing generic Rust pane"
+            ),
+            Self::RuntimeHelpResources { detail } => write!(
+                f,
+                "classic runtime F1 help resources are unavailable: {detail}; refusing partial help pixels"
+            ),
+            Self::RuntimeFlashResources { detail } => write!(
+                f,
+                "classic timed flash-message resources are unavailable: {detail}; refusing partial flash pixels or producer mutation"
+            ),
+            Self::NetworkControlPacing { detail } => write!(
+                f,
+                "classic network control pacing is unavailable: {detail}; refusing a partial local TargetFPS mutation"
+            ),
+            Self::RuntimeKeyConfig { detail } => write!(
+                f,
+                "classic process-global key configuration is unavailable: {detail}; refusing to guess key ownership or dispatch"
+            ),
+            Self::RuntimeAudioSystem { action } => write!(
+                f,
+                "classic audio system is unavailable; refusing {action} and any partial option, playback, or flash mutation"
+            ),
+            Self::RuntimeFlashProducer(producer) => write!(
+                f,
+                "classic timed flash producer {producer:?} is unavailable because its authoritative runtime state is not modeled; refusing the producer action and partial flash mutation"
+            ),
+            Self::Scoreboard {
+                trigger,
+                rows,
+                columns,
+                show_count,
+            } => write!(
+                f,
+                "classic C4ScoreboardDlg cannot render exact live data for {trigger:?} (rows={rows}, columns={columns}, show_count={show_count}); refusing partial scoreboard pixels"
+            ),
+            Self::RunningViewport(ClassicViewportBoundary::LocalViewportUnavailable { owner }) => {
+                write!(
+                    f,
+                    "declared local player {owner} has no authoritative local viewport; refusing the solid navy fallback and an arbitrary first-object focus/selection"
+                )
+            }
+            Self::HudGameMessage { count } => write!(
+                f,
+                "classic C4GameMessage renderer is unavailable for {count} visible message(s)"
+            ),
+            Self::RunningShortcut { key } => write!(
+                f,
+                "running shortcut {key} has no classic renderer/action in the Rust port"
+            ),
+            Self::LoaderScreen { context, detail } => write!(
+                f,
+                "classic C4LoaderScreen is unavailable during {context}: {detail}; refusing generic loading approximation"
+            ),
+            Self::GameLobby(ClassicGameLobbyBoundary::Resources { detail }) => write!(
+                f,
+                "classic game-lobby resources are unavailable: {detail}; refusing generic lobby"
+            ),
+            Self::GameLobby(ClassicGameLobbyBoundary::Model { detail }) => write!(
+                f,
+                "classic game-lobby model is unavailable: {detail}; refusing guessed lobby state"
+            ),
+            Self::GameLobby(ClassicGameLobbyBoundary::Child(child)) => write!(
+                f,
+                "classic game-lobby child {child:?} is not implemented; refusing generic child pane"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ClassicParityBoundary {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HudMessageDrawability {
+    NotDrawable,
+    Drawable,
+}
+
+fn c4_object_local_int(object: &ObjectSnapshot, name: &str) -> i32 {
+    // C4Value::getInt converts Int/Bool/nil and returns zero when conversion
+    // fails. `as_c4_int` exposes exactly the deterministic stored cases; all
+    // other snapshot variants therefore have the same zero result.
+    object
+        .local_vars
+        .get(name)
+        .and_then(|value| value.as_c4_int())
+        .unwrap_or(0)
+}
+
+fn c4_parallax_view_coordinate(
+    coordinate: i32,
+    target: i32,
+    logical_extent: i32,
+    parallax: i32,
+) -> i32 {
+    if parallax == 0 && coordinate < 0 {
+        coordinate + target + logical_extent
+    } else {
+        // Preserve C++'s operation order and signed integer truncation.
+        coordinate - target * (parallax - 100) / 100
+    }
+}
+
+pub(crate) fn c4_message_target_position(
+    target: &ObjectSnapshot,
+    offset: Vector2,
+    shape_height: i32,
+    viewport: ActiveViewportProjection,
+) -> Vector2 {
+    let (x, y) = if target.category & C4D_PARALLAX != 0 {
+        (
+            c4_parallax_view_coordinate(
+                target.position.x,
+                viewport.target_x,
+                viewport.logical_width,
+                c4_object_local_int(target, "__local_0"),
+            ),
+            c4_parallax_view_coordinate(
+                target.position.y,
+                viewport.target_y,
+                viewport.logical_height,
+                c4_object_local_int(target, "__local_1"),
+            ),
+        )
+    } else {
+        (target.position.x, target.position.y)
+    };
+    Vector2::new(x + offset.x, y + offset.y - shape_height / 2 - 5)
+}
+
+pub(crate) fn report_classic_parity_boundary(error: ClassicParityBoundary) -> ClassicParityBoundary {
+    tracing::error!(boundary = ?error, error = %error, "classic menu parity boundary reached");
+    error
+}
+
+pub(crate) fn classic_parity_engine_error(error: ClassicParityBoundary) -> EngineError {
+    EngineError::ClassicMenuParityBoundary {
+        detail: error.to_string(),
+    }
+}
+
+pub(crate) fn scenario_activation_engine_error(
+    scenario_title: &str,
+    error: EngineError,
+) -> ScenarioActivationError {
+    ScenarioActivationError::Recoverable(format!("Failed to start {scenario_title}: {error}"))
+}
+
+pub(crate) fn scenario_activation_scenario_error(
+    scenario_title: &str,
+    error: ScenarioError,
+) -> ScenarioActivationError {
+    ScenarioActivationError::Recoverable(format!("Failed to start {scenario_title}: {error}"))
+}
+
+fn classic_startup_subscreen_error(subscreen: ClassicStartupSubscreen) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::StartupSubscreen(subscreen),
+    ))
+}
+
+fn classic_startup_action_error(action: ClassicStartupAction) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::StartupAction(action),
+    ))
+}
+
+pub(crate) fn classic_game_lobby_error(boundary: ClassicGameLobbyBoundary) -> anyhow::Error {
+    anyhow::Error::new(report_classic_parity_boundary(
+        ClassicParityBoundary::GameLobby(boundary),
+    ))
+}
+
+pub(crate) fn classic_game_lobby_child_error(child: ClassicGameLobbyChild) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Child(child)),
+    ))
+}
+
+pub(crate) fn classic_game_lobby_model_engine_error(detail: impl Into<String>) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model {
+            detail: detail.into(),
+        }),
+    ))
+}
+
+pub(crate) fn classic_ingame_menu_child_error(child: ClassicIngameMenuChild) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::IngameMenuChild(child),
+    ))
+}
+
+pub(crate) fn classic_object_menu_error(kind: ClassicObjectMenuBoundary) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::ObjectMenu(kind),
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameSchedule {
+    pub(crate) simulation_interval: Duration,
+    pub(crate) refresh_interval: Duration,
+    /// `None` denotes the startup timer. Running timers carry the unique
+    /// engine/SetGameSpeed reset token even when their duration is unchanged.
+    pub(crate) running_revision: Option<u64>,
+}
+
+/// C4Application's automatic `Game.DoSkipFrame` latch. A slow graphics pass
+/// arms exactly one skip; consuming that skip clears the latch before any
+/// later pass can arm it again (src/C4Application.cpp:463-476).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AutomaticFrameSkip {
+    skip_next_graphics: bool,
+}
+
+impl AutomaticFrameSkip {
+    /// Returns whether this graphics pass should be skipped. Disabling the
+    /// game parameter also clears any stale latch at a game-mode boundary.
+    pub(crate) fn begin_graphics_pass(&mut self, enabled: bool) -> bool {
+        if !enabled {
+            self.skip_next_graphics = false;
+            return false;
+        }
+        std::mem::take(&mut self.skip_next_graphics)
+    }
+
+    /// A manual/network `DoSkipFrame` consumes the same application pass as
+    /// an automatic skip, so an armed automatic latch must not spill into the
+    /// following graphics opportunity.
+    pub(crate) fn consume_suppressed_graphics_pass(&mut self) {
+        self.skip_next_graphics = false;
+    }
+
+    pub(crate) fn finish_graphics_pass(
+        &mut self,
+        enabled: bool,
+        graphics_duration: Duration,
+        game_tick_delay: Duration,
+    ) {
+        // Native uses `(pre_gfx + tick_delay) < now`, not `<=`.
+        self.skip_next_graphics = enabled && graphics_duration > game_tick_delay;
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PresentationBenchmarkMeasurement {
+    started: Option<Instant>,
+    simulation_frame: u64,
+    submissions: u64,
+    refreshed_frames: u64,
+    automatic_graphics_skips: u64,
+    graphics_total: Duration,
+    graphics_max: Duration,
+    graphics_samples: Vec<Duration>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PresentationBenchmarkReport {
+    pub(crate) elapsed: Duration,
+    pub(crate) submissions: u64,
+    pub(crate) refreshed_frames: u64,
+    pub(crate) simulation_frames: u64,
+    pub(crate) automatic_graphics_skips: u64,
+    pub(crate) graphics_average: Duration,
+    pub(crate) graphics_max: Duration,
+    pub(crate) graphics_p50: Duration,
+    pub(crate) graphics_p95: Duration,
+    pub(crate) graphics_p99: Duration,
+    pub(crate) graphics_samples: Vec<Duration>,
+}
+
+impl PresentationBenchmarkReport {
+    pub(crate) fn machine_line(&self) -> String {
+        let elapsed_seconds = self.elapsed.as_secs_f64();
+        let submission_fps = self.submissions as f64 / elapsed_seconds;
+        let simulation_fps = self.simulation_frames as f64 / elapsed_seconds;
+        let graphics_samples_ns = self
+            .graphics_samples
+            .iter()
+            .map(|sample| sample.as_nanos().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} automatic_graphics_skips={} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6} graphics_pass_sample_count={} graphics_pass_p50_ms={:.6} graphics_pass_p95_ms={:.6} graphics_pass_p99_ms={:.6} graphics_pass_samples_ns=[{graphics_samples_ns}]",
+            self.submissions,
+            self.refreshed_frames,
+            self.simulation_frames,
+            self.automatic_graphics_skips,
+            self.graphics_average.as_secs_f64() * 1_000.0,
+            self.graphics_max.as_secs_f64() * 1_000.0,
+            self.graphics_samples.len(),
+            self.graphics_p50.as_secs_f64() * 1_000.0,
+            self.graphics_p95.as_secs_f64() * 1_000.0,
+            self.graphics_p99.as_secs_f64() * 1_000.0,
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PresentationBenchmark {
+    window: Duration,
+    first_successful_presentation: Option<Instant>,
+    measurement: PresentationBenchmarkMeasurement,
+    finished: bool,
+}
+
+impl PresentationBenchmark {
+    pub(crate) fn new(window: Duration) -> Self {
+        Self {
+            window,
+            first_successful_presentation: None,
+            measurement: PresentationBenchmarkMeasurement::default(),
+            finished: false,
+        }
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        running: bool,
+        now: Instant,
+        simulation_frame: u64,
+    ) -> Option<PresentationBenchmarkReport> {
+        if self.finished {
+            return None;
+        }
+        if !running {
+            self.first_successful_presentation = None;
+            self.measurement = PresentationBenchmarkMeasurement::default();
+            return None;
+        }
+        let first_presentation = self.first_successful_presentation?;
+        let Some(started) = self.measurement.started else {
+            if now.saturating_duration_since(first_presentation) >= PRESENTATION_BENCHMARK_WARMUP {
+                self.measurement.started = Some(now);
+                self.measurement.simulation_frame = simulation_frame;
+            }
+            return None;
+        };
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed < self.window {
+            return None;
+        }
+
+        self.finished = true;
+        let submissions = self.measurement.submissions;
+        let graphics_average = if submissions == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(
+                self.measurement.graphics_total.as_secs_f64() / submissions as f64,
+            )
+        };
+        let graphics_samples = std::mem::take(&mut self.measurement.graphics_samples);
+        let (graphics_p50, graphics_p95, graphics_p99) =
+            graphics_pass_percentiles(&graphics_samples);
+        Some(PresentationBenchmarkReport {
+            elapsed,
+            submissions,
+            refreshed_frames: self.measurement.refreshed_frames,
+            simulation_frames: simulation_frame.saturating_sub(self.measurement.simulation_frame),
+            automatic_graphics_skips: self.measurement.automatic_graphics_skips,
+            graphics_average,
+            graphics_max: self.measurement.graphics_max,
+            graphics_p50,
+            graphics_p95,
+            graphics_p99,
+            graphics_samples,
+        })
+    }
+
+    pub(crate) fn record_successful_presentation(
+        &mut self,
+        now: Instant,
+        graphics_duration: Duration,
+        refreshed: bool,
+    ) {
+        if self.finished {
+            return;
+        }
+        self.first_successful_presentation.get_or_insert(now);
+        if self.measurement.started.is_none() {
+            return;
+        }
+        self.measurement.submissions = self.measurement.submissions.saturating_add(1);
+        self.measurement.refreshed_frames = self
+            .measurement
+            .refreshed_frames
+            .saturating_add(u64::from(refreshed));
+        self.measurement.graphics_total = self
+            .measurement
+            .graphics_total
+            .saturating_add(graphics_duration);
+        self.measurement.graphics_max = self.measurement.graphics_max.max(graphics_duration);
+        self.measurement.graphics_samples.push(graphics_duration);
+    }
+
+    pub(crate) fn record_automatic_graphics_skip(&mut self) {
+        if self.finished || self.measurement.started.is_none() {
+            return;
+        }
+        self.measurement.automatic_graphics_skips =
+            self.measurement.automatic_graphics_skips.saturating_add(1);
+    }
+}
+
+pub(crate) fn graphics_pass_percentiles(samples: &[Duration]) -> (Duration, Duration, Duration) {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let nearest_rank = |percentile: usize| {
+        let index = sorted
+            .len()
+            .saturating_mul(percentile)
+            .div_ceil(100)
+            .saturating_sub(1);
+        sorted.get(index).copied().unwrap_or_default()
+    };
+    (nearest_rank(50), nearest_rank(95), nearest_rank(99))
+}
+
+pub(crate) fn parse_presentation_benchmark_window(raw: &str) -> Option<Duration> {
+    raw.parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+}
+
+pub(crate) fn presentation_benchmark_from_env() -> Option<PresentationBenchmark> {
+    std::env::var(PRESENTATION_BENCHMARK_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_presentation_benchmark_window)
+        .map(PresentationBenchmark::new)
+}
+
+pub(crate) fn presentation_benchmark_asserts_native_tick() -> bool {
+    std::env::var(PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK_ENV).is_ok_and(|value| value == "1")
+}
+
+pub(crate) fn parse_presentation_benchmark_keep_running(raw: Option<&str>) -> bool {
+    raw == Some("1")
+}
+
+pub(crate) fn presentation_benchmark_keeps_running() -> bool {
+    parse_presentation_benchmark_keep_running(
+        std::env::var(PRESENTATION_BENCHMARK_KEEP_RUNNING_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub(crate) fn validate_native_tick_presentation_budget(
+    report: &PresentationBenchmarkReport,
+) -> std::result::Result<(), String> {
+    if report.submissions == 0 || report.refreshed_frames == 0 {
+        return Err("benchmark produced no refreshed presentation".to_string());
+    }
+    if report.automatic_graphics_skips != 0 {
+        return Err(format!(
+            "automatic graphics skips must be zero (observed {})",
+            report.automatic_graphics_skips
+        ));
+    }
+    if report.graphics_average > INGAME_FRAME_INTERVAL {
+        return Err(format!(
+            "average graphics pass {:.6}ms exceeds the native 28ms game tick",
+            report.graphics_average.as_secs_f64() * 1_000.0
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn presentation_benchmark_context_line(
+    runtime_players: usize,
+    synchronized_player_infos: usize,
+    activated_nonhost_clients: usize,
+    runtime_crew_objects: usize,
+    runtime_players_with_exactly_one_live_sf5b_crew: usize,
+) -> String {
+    format!(
+        "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players={runtime_players} synchronized_player_infos={synchronized_player_infos} activated_nonhost_clients={activated_nonhost_clients} runtime_crew_objects={runtime_crew_objects} runtime_players_with_exactly_one_live_sf5b_crew={runtime_players_with_exactly_one_live_sf5b_crew}"
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PresentationBenchmarkNetworkEvidence {
+    pub(crate) local_client_id: ClientId,
+    pub(crate) preferred_message_route_peer_ids: Vec<ClientId>,
+    pub(crate) tcp_preferred_message_routes: usize,
+    pub(crate) udp_preferred_message_routes: usize,
+    pub(crate) unknown_preferred_message_routes: usize,
+    pub(crate) nonnegative_ping_peer_count: usize,
+    pub(crate) nonnegative_lag_peer_count: usize,
+    pub(crate) max_nonnegative_ping_ms: Option<i32>,
+    pub(crate) max_nonnegative_lag_ms: Option<i32>,
+    pub(crate) max_packet_loss: u32,
+    pub(crate) control_presend: i32,
+    pub(crate) avg_control_send_time_us: i64,
+}
+
+impl PresentationBenchmarkNetworkEvidence {
+    pub(crate) fn machine_line(&self) -> String {
+        let peer_ids = self
+            .preferred_message_route_peer_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "LC_APP_PRESENTATION_BENCHMARK_NETWORK inspection_status=ok local_client_id={} preferred_message_route_peer_count={} preferred_message_route_peer_ids=[{peer_ids}] tcp_preferred_message_routes={} udp_preferred_message_routes={} unknown_preferred_message_routes={} nonnegative_ping_peer_count={} nonnegative_lag_peer_count={} max_nonnegative_ping_ms={} max_nonnegative_lag_ms={} max_packet_loss={} control_presend={} avg_control_send_time_us={}",
+            self.local_client_id,
+            self.preferred_message_route_peer_ids.len(),
+            self.tcp_preferred_message_routes,
+            self.udp_preferred_message_routes,
+            self.unknown_preferred_message_routes,
+            self.nonnegative_ping_peer_count,
+            self.nonnegative_lag_peer_count,
+            self.max_nonnegative_ping_ms.unwrap_or(-1),
+            self.max_nonnegative_lag_ms.unwrap_or(-1),
+            self.max_packet_loss,
+            self.control_presend,
+            self.avg_control_send_time_us,
+        )
+    }
+}
+
+pub(crate) fn summarize_presentation_benchmark_network(
+    local_client_id: ClientId,
+    connections: &[clonk_network::RuntimeNetworkConnection],
+    control_presend: i32,
+    avg_control_send_time_us: i64,
+) -> PresentationBenchmarkNetworkEvidence {
+    let mut preferred_message_routes = BTreeMap::new();
+    for connection in connections {
+        if connection.usage.split('/').any(|usage| usage == "Msg") {
+            preferred_message_routes
+                .entry(connection.client_id)
+                .or_insert(connection);
+        }
+    }
+    let mut evidence = PresentationBenchmarkNetworkEvidence {
+        local_client_id,
+        preferred_message_route_peer_ids: preferred_message_routes.keys().copied().collect(),
+        tcp_preferred_message_routes: 0,
+        udp_preferred_message_routes: 0,
+        unknown_preferred_message_routes: 0,
+        nonnegative_ping_peer_count: 0,
+        nonnegative_lag_peer_count: 0,
+        max_nonnegative_ping_ms: None,
+        max_nonnegative_lag_ms: None,
+        max_packet_loss: 0,
+        control_presend,
+        avg_control_send_time_us,
+    };
+    for connection in preferred_message_routes.values() {
+        match connection.protocol {
+            clonk_network::NetworkProtocol::Tcp => {
+                evidence.tcp_preferred_message_routes += 1;
+            }
+            clonk_network::NetworkProtocol::Udp => {
+                evidence.udp_preferred_message_routes += 1;
+            }
+            _ => {
+                evidence.unknown_preferred_message_routes += 1;
+            }
+        }
+        if connection.ping_ms >= 0 {
+            evidence.nonnegative_ping_peer_count += 1;
+            evidence.max_nonnegative_ping_ms = Some(
+                evidence
+                    .max_nonnegative_ping_ms
+                    .map_or(connection.ping_ms, |current| {
+                        current.max(connection.ping_ms)
+                    }),
+            );
+        }
+        if connection.lag_ms >= 0 {
+            evidence.nonnegative_lag_peer_count += 1;
+            evidence.max_nonnegative_lag_ms = Some(
+                evidence
+                    .max_nonnegative_lag_ms
+                    .map_or(connection.lag_ms, |current| current.max(connection.lag_ms)),
+            );
+        }
+        evidence.max_packet_loss = evidence.max_packet_loss.max(connection.packet_loss);
+    }
+    evidence
+}
+
+pub(crate) fn inspect_presentation_benchmark_network(
+    app: &GameApp,
+) -> Option<std::result::Result<PresentationBenchmarkNetworkEvidence, String>> {
+    let network = app.network.as_ref()?;
+    let Some(control_clock) = app.network_control_clock else {
+        return Some(Err("network_control_clock_unavailable".to_string()));
+    };
+    Some(
+        network
+            .runtime_connections()
+            .map(|connections| {
+                summarize_presentation_benchmark_network(
+                    network.local_client_id(),
+                    &connections,
+                    control_clock.control_presend(),
+                    control_clock.avg_control_send_time(),
+                )
+            })
+            .map_err(|error| {
+                tracing::error!(
+                    %error,
+                    "presentation benchmark runtime connection inspection failed"
+                );
+                "runtime_connection_inspection_failed".to_string()
+            }),
+    )
+}
+
+/// Count the distinct live objects retained by all runtime Crew lists. Native
+/// MakeCrewMember requires active CrewMember objects before inserting them
+/// (src/C4Player.cpp:1173-1203), and AssignDeath clears Alive before removing
+/// the object from its player's crew (src/C4Object.cpp:1170-1200).
+pub(crate) fn runtime_crew_object_count(snapshot: &SimulationSnapshot) -> usize {
+    snapshot
+        .players
+        .iter()
+        .flat_map(|player| player.crew.iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter(|crew| {
+            snapshot.object(*crew).is_some_and(|object| {
+                object.crew_member && object.status.is_active() && object.alive
+            })
+        })
+        .count()
+}
+
+/// Count players whose Crew contains exactly one live, owner-matched SF5B.
+/// HarpoonRace creates one SF5B owned by each player and calls MakeCrewMember
+/// with it (HarpoonRace.c4s/Script.c:66-73); C++ retains that exact object in
+/// the player's Crew (src/C4Player.cpp:1173-1203).
+pub(crate) fn runtime_players_with_exactly_one_live_sf5b_crew(snapshot: &SimulationSnapshot) -> usize {
+    snapshot
+        .players
+        .iter()
+        .filter(|player| {
+            player
+                .crew
+                .iter()
+                .filter(|crew| {
+                    snapshot.object(**crew).is_some_and(|object| {
+                        object.definition_id == "SF5B"
+                            && object.owner == player.id
+                            && object.crew_member
+                            && object.status.is_active()
+                            && object.alive
+                    })
+                })
+                .count()
+                == 1
+        })
+        .count()
+}
+
+pub(crate) fn finish_presentation_benchmark(
+    control_flow: &mut ControlFlow,
+    report: PresentationBenchmarkReport,
+    assert_native_tick: bool,
+    runtime_players: usize,
+    synchronized_player_infos: usize,
+    activated_nonhost_clients: usize,
+    runtime_crew_objects: usize,
+    runtime_players_with_exactly_one_live_sf5b_crew: usize,
+    network_evidence: Option<std::result::Result<PresentationBenchmarkNetworkEvidence, String>>,
+    keep_running: bool,
+) {
+    println!("{}", report.machine_line());
+    println!(
+        "{}",
+        presentation_benchmark_context_line(
+            runtime_players,
+            synchronized_player_infos,
+            activated_nonhost_clients,
+            runtime_crew_objects,
+            runtime_players_with_exactly_one_live_sf5b_crew,
+        )
+    );
+    if let Some(network_evidence) = network_evidence {
+        match network_evidence {
+            Ok(network_evidence) => println!("{}", network_evidence.machine_line()),
+            Err(error_code) => println!(
+                "LC_APP_PRESENTATION_BENCHMARK_NETWORK inspection_status=error error_code={error_code}"
+            ),
+        }
+    }
+    if assert_native_tick {
+        if let Err(error) = validate_native_tick_presentation_budget(&report) {
+            eprintln!("LC_APP_PRESENTATION_BENCHMARK result=fail error={error}");
+            control_flow.set_exit_with_code(2);
+            return;
+        }
+        println!("LC_APP_PRESENTATION_BENCHMARK result=pass native_tick_budget_ms=28");
+    }
+    if !keep_running {
+        control_flow.set_exit();
+    }
+}
+
+pub(crate) fn advance_graphics_deadline(deadline: Instant, now: Instant, interval: Duration) -> Instant {
+    let next = deadline + interval;
+    if next > now {
+        next
+    } else {
+        // Coalesce missed timer periods instead of issuing catch-up redraws.
+        now + interval
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NetworkControlPacing {
+    pub(crate) behind: u32,
+    pub(crate) overflow: bool,
+    pub(crate) skip_render: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SimulationPassOutcome {
+    pub(crate) did_update: bool,
+    pub(crate) executed_frames: u32,
+    pub(crate) skipped_render_frames: u32,
+    pub(crate) skip_redraw: bool,
+    pub(crate) immediate_network_retry: bool,
+}
+
+pub(crate) fn frame_schedule_for_mode(
+    mode: AppMode,
+    game_tick_delay_ms: u64,
+    game_tick_delay_revision: u64,
+    max_refresh_delay_ms: u64,
+) -> FrameSchedule {
+    match mode {
+        AppMode::Menu | AppMode::Loading => FrameSchedule {
+            simulation_interval: STARTUP_FRAME_INTERVAL,
+            refresh_interval: STARTUP_FRAME_INTERVAL,
+            running_revision: None,
+        },
+        AppMode::Running => {
+            let game_tick_delay_ms = game_tick_delay_ms.max(1);
+            let max_refresh_ms = max_refresh_delay_ms.max(1);
+            // C4Application::SetGameTickDelay keeps graphics/input wakeups
+            // responsive at slow game speeds by choosing a divisor no larger
+            // than the configured Graphics.MaxRefreshDelay.
+            let refresh_ms = if game_tick_delay_ms < max_refresh_ms {
+                game_tick_delay_ms
+            } else {
+                game_tick_delay_ms / game_tick_delay_ms.div_ceil(max_refresh_ms)
+            };
+            FrameSchedule {
+                simulation_interval: Duration::from_millis(game_tick_delay_ms),
+                refresh_interval: Duration::from_millis(refresh_ms.max(1)),
+                running_revision: Some(game_tick_delay_revision),
+            }
+        }
+    }
+}
+
+pub(crate) fn synchronize_frame_schedule(
+    mode: AppMode,
+    game_tick_delay_ms: u64,
+    game_tick_delay_revision: u64,
+    max_refresh_delay_ms: u64,
+    frame_schedule: &mut FrameSchedule,
+    accumulator: &mut Duration,
+) -> bool {
+    let next_schedule = frame_schedule_for_mode(
+        mode,
+        game_tick_delay_ms,
+        game_tick_delay_revision,
+        max_refresh_delay_ms,
+    );
+    if next_schedule == *frame_schedule {
+        return false;
+    }
+    *frame_schedule = next_schedule;
+    *accumulator = Duration::ZERO;
+    true
+}
+
+pub(crate) fn accumulate_frame_time_for_mode(
+    mode: AppMode,
+    game_tick_delay_ms: u64,
+    game_tick_delay_revision: u64,
+    max_refresh_delay_ms: u64,
+    frame_schedule: &mut FrameSchedule,
+    accumulator: &mut Duration,
+    elapsed: Duration,
+) {
+    // A speed of 1 means a full 1000 ms tick. Keep the runaway-catch-up cap,
+    // but never clamp below one complete simulation interval.
+    let accumulated_limit = MAX_ACCUMULATED_TIME.max(frame_schedule.simulation_interval);
+    let clamped = elapsed.min(accumulated_limit);
+    *accumulator = (*accumulator + clamped).min(accumulated_limit);
+    synchronize_frame_schedule(
+        mode,
+        game_tick_delay_ms,
+        game_tick_delay_revision,
+        max_refresh_delay_ms,
+        frame_schedule,
+        accumulator,
+    );
+}
+
+/// Executes one FullSpeed update, timer-paced updates, and any C++-style
+/// network catch-up frames in one event-loop pass. Immediate frames do not
+/// consume elapsed-time budget; a stalled pre-execution gate breaks the loop
+/// instead of spinning.
+pub(crate) fn advance_simulation_pass(
+    app: &mut GameApp,
+    frame_schedule: &mut FrameSchedule,
+    accumulator: &mut Duration,
+) -> Result<SimulationPassOutcome, EngineError> {
+    let mut outcome = SimulationPassOutcome::default();
+    let mut catch_up = false;
+    let mut full_speed_due = app.mode == AppMode::Running && app.full_speed;
+    let mut network_retry_due = app.take_network_control_retry();
+    if full_speed_due {
+        // FullSpeed is driven by one Winit Poll iteration at a time. Discard
+        // timer debt so this pass cannot monopolize the event loop.
+        *accumulator = Duration::ZERO;
+    }
+
+    loop {
+        let timer_due = *accumulator >= frame_schedule.simulation_interval;
+        if !timer_due && !catch_up && !full_speed_due && !network_retry_due {
+            break;
+        }
+
+        let executed_interval = frame_schedule.simulation_interval;
+        let immediate_network_retry =
+            network_retry_due && !timer_due && !catch_up && !full_speed_due;
+        let frame_before = app.engine.frame();
+        if let Err(error) = app.update() {
+            // Script errors during the simulation tick show in the log and
+            // the game keeps running, like the C++ fail-safe exec; only
+            // engine-internal errors are fatal.
+            if matches!(error, EngineError::Script { .. }) {
+                tracing::warn!(error = %error, "script error during tick; continuing like C++");
+            } else {
+                return Err(error);
+            }
+        }
+        if timer_due {
+            *accumulator -= executed_interval;
+        }
+        full_speed_due = false;
+        network_retry_due = false;
+        outcome.did_update = true;
+
+        let frame_advanced = app.engine.frame() != frame_before;
+        let pacing = if frame_advanced {
+            app.network_control_pacing()
+        } else {
+            NetworkControlPacing::default()
+        };
+        let frame_skip = u64::try_from(app.frame_skip).unwrap_or(1);
+        let manual_skip =
+            frame_advanced && frame_skip > 1 && app.engine.frame().rem_euclid(frame_skip) != 0;
+        let skip_render = pacing.skip_render || manual_skip;
+        if frame_advanced {
+            if immediate_network_retry {
+                // CStdApp::Execute consumes DoNotDelay by anchoring LastExecute
+                // to this packet-driven retry instead of retaining timer debt.
+                *accumulator = Duration::ZERO;
+                outcome.immediate_network_retry = true;
+            }
+            outcome.executed_frames = outcome.executed_frames.saturating_add(1);
+            if skip_render {
+                outcome.skipped_render_frames = outcome.skipped_render_frames.saturating_add(1);
+            }
+        }
+        // Winit already coalesces intermediate catch-up frames into this one
+        // pass. The post-pass redraw follows only the latest C++ frame-skip
+        // decision; an earlier skipped frame must not hide recovered state.
+        outcome.skip_redraw = frame_advanced && skip_render;
+        catch_up = frame_advanced && pacing.overflow;
+
+        let schedule_changed = synchronize_frame_schedule(
+            app.mode,
+            app.engine.game_tick_delay_ms(),
+            app.engine.game_tick_delay_revision(),
+            app.max_refresh_delay_ms,
+            frame_schedule,
+            accumulator,
+        );
+        if schedule_changed && !catch_up {
+            break;
+        }
+    }
+
+    Ok(outcome)
+}
+
+pub(crate) struct MenuState {
+    pub(crate) menu: StartupMenu,
+    pointer_position: Option<GuiPoint>,
+    pub(crate) stack: Vec<MenuLayer>,
+    /// Entries from the current layer that survive the submitted search.
+    /// C++ keeps the loader tree intact and rebuilds only the visible list
+    /// (`C4StartupScenSelDlg::UpdateList`, cpp:1472-1538).
+    visible_entries: Vec<FrontendScenario>,
+    /// Current edit buffer/caret/selection. C++ does not filter until Enter
+    /// invokes `OnSearchBarEnter`.
+    pub(crate) search_edit: SearchEditState,
+    /// Last submitted edit buffer used by `visible_entries`.
+    pub(crate) applied_search_text: String,
+    /// Inline `CallbackRenameEdit` projected over the selected row label.
+    pub(crate) rename_edit: Option<ScenarioRenameState>,
+    /// Logical-pixel offset of the left scenario `C4GUI::ListBox`.
+    pub(crate) scenario_list_scroll: i32,
+    /// Selection last passed through `ScrollRangeInView`. Keeping this
+    /// separate prevents a later render from undoing deliberate wheel/thumb
+    /// scrolling when the selection itself did not change.
+    pub(crate) list_scroll_selection: Option<Option<usize>>,
+    /// Logical-pixel offset of the right-page `C4GUI::TextWindow`.
+    pub(crate) selection_info_scroll: i32,
+    /// Captured classic scrollbar interaction. C++ retains the pin position
+    /// while an arrow is held so one-pixel steps cannot stall on integer
+    /// offset rounding (C4GuiContainers.cpp:391-473).
+    pub(crate) scrollbar_interaction: Option<ScenselScrollbarInteraction>,
+    /// Mutable state of the selection-dependent "Choose definitions"
+    /// checkbox. C++ resets these flags from C4S only when selection changes;
+    /// canceling the child selector retains a user toggle.
+    pub(crate) definition_checkbox_enabled: bool,
+    pub(crate) definition_checkbox_checked: bool,
+    pub(crate) definition_checkbox_focused: bool,
+    /// Recursive C4GUI dialog focus outside the embedded game-option window.
+    /// The option controller owns the individual icon focus while this is
+    /// `Options`; disabled icon buttons remain traversable like C++ buttons.
+    dialog_focus: ScenselDialogFocus,
+    /// Whether a synthetic "Back" row is injected at index 0. The network
+    /// lobby's generic list uses it; the C++-faithful scenario book does not
+    /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
+    pub(crate) include_back: bool,
+    /// FullscreenDialog creates the scenario title before the Tabular. A
+    /// HideTitle map deletes it; returning to a book re-adds it at the end of
+    /// the dialog, changing both presence and mouse-over z-order.
+    pub(crate) scensel_title_present: bool,
+    pub(crate) scensel_title_topmost: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ScenarioRenameState {
+    pub(crate) identifier: String,
+    pub(crate) edit: RenameEdit<ScenselFocusSnapshot>,
+    pub(crate) last_click: Option<Instant>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct StartupCrewRenameState {
+    pub(crate) index: usize,
+    pub(crate) player_path: PathBuf,
+    pub(crate) file_name: String,
+    pub(crate) edit: RenameEdit<PlrSelControl>,
+    pub(crate) last_click: Option<Instant>,
+    pub(crate) ignore_pointer_up: bool,
+}
+
+/// `C4GUI::Dialog::AdvanceFocus` order for C4StartupScenSelDlg. The option
+/// strip is one recursive child here and owns its constructor-ordered icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScenselDialogFocus {
+    Search,
+    List,
+    Back,
+    Definitions,
+    Options,
+    Open,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScenselFocusSnapshot {
+    pub(crate) dialog: ScenselDialogFocus,
+    pub(crate) option: Option<GameOptionButton>,
+}
+
+pub(crate) const SCENSEL_SCROLLBAR_PART: i32 = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScenselScrollbarTarget {
+    List,
+    Description,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScenselScrollbarInteractionKind {
+    Dragging,
+    Arrow(i32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScenselScrollbarInteraction {
+    pub(crate) target: ScenselScrollbarTarget,
+    pub(crate) kind: ScenselScrollbarInteractionKind,
+    pub(crate) pin: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScenselScrollbarSpec {
+    pub(crate) target: ScenselScrollbarTarget,
+    pub(crate) rect: clonk_frontend::classic_gui::IntRect,
+    pub(crate) max_scroll: i32,
+    pub(crate) offset: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MapFolderRect {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) w: i32,
+    pub(crate) h: i32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MapFolderScenarioButton {
+    pub(crate) entry: Option<FrontendScenario>,
+    pub(crate) base_image: Option<ImageData>,
+    pub(crate) overlay_image: Option<ImageData>,
+    single_click: bool,
+    pub(crate) area: MapFolderRect,
+    pub(crate) title: String,
+    pub(crate) title_font_size: i32,
+    pub(crate) title_color_inactive: u32,
+    pub(crate) title_color_active: u32,
+    pub(crate) title_offset_x: i32,
+    pub(crate) title_offset_y: i32,
+    pub(crate) title_align: u8,
+    pub(crate) title_use_book_font: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MapFolderAccessOverlay {
+    pub(crate) image: Option<ImageData>,
+    pub(crate) area: MapFolderRect,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MapFolderData {
+    pub(crate) source_path: PathBuf,
+    pub(crate) background: ImageData,
+    pub(crate) scenario_info_area: MapFolderRect,
+    pub(crate) fullscreen_background: bool,
+    pub(crate) hide_title: bool,
+    pub(crate) scenarios: Vec<MapFolderScenarioButton>,
+    pub(crate) access_overlays: Vec<MapFolderAccessOverlay>,
+    pub(crate) selected_button: Option<usize>,
+}
+
+impl MapFolderData {
+    pub(crate) fn selected_entry(&self) -> Option<&FrontendScenario> {
+        self.selected_button
+            .and_then(|index| self.scenarios.get(index))
+            .and_then(|button| button.entry.as_ref())
+    }
+}
+
+#[derive(Clone, Debug)]
+enum MenuLayerStyle {
+    Book,
+    Map(MapFolderData),
+}
+
+pub(crate) fn scensel_scrollbar_pin_travel(bar_height: i32) -> Option<i32> {
+    (bar_height > 3 * SCENSEL_SCROLLBAR_PART).then_some(bar_height - 3 * SCENSEL_SCROLLBAR_PART)
+}
+
+pub(crate) fn scensel_scrollbar_pin_from_offset(offset: i32, max_scroll: i32, bar_height: i32) -> Option<i32> {
+    let travel = scensel_scrollbar_pin_travel(bar_height)?;
+    (max_scroll > 0).then(|| {
+        let offset = offset.clamp(0, max_scroll);
+        i32::try_from(i64::from(travel) * i64::from(offset) / i64::from(max_scroll))
+            .unwrap_or(travel)
+    })
+}
+
+pub(crate) fn scensel_scrollbar_offset_from_pin(pin: i32, max_scroll: i32, bar_height: i32) -> Option<i32> {
+    let travel = scensel_scrollbar_pin_travel(bar_height)?;
+    (max_scroll > 0).then(|| {
+        let pin = pin.clamp(0, travel);
+        i32::try_from(i64::from(max_scroll) * i64::from(pin) / i64::from(travel))
+            .unwrap_or(max_scroll)
+    })
+}
+
+pub(crate) fn scensel_scrollbar_jump_pin(pointer_y: i32, bar_height: i32) -> Option<i32> {
+    let travel = scensel_scrollbar_pin_travel(bar_height)?;
+    Some((pointer_y - SCENSEL_SCROLLBAR_PART - SCENSEL_SCROLLBAR_PART / 2).clamp(0, travel))
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MenuLayer {
+    pub(crate) title: String,
+    pub(crate) entries: Vec<FrontendScenario>,
+    /// The folder entry this layer lists the children of (None at root);
+    /// shown on the right page when nothing is selected
+    /// (C4StartupScenSelDlg::UpdateSelection, cpp:1566-1572).
+    folder: Option<FrontendScenario>,
+    style: MenuLayerStyle,
+}
+
+pub(crate) struct MainMenuState {
+    pub(crate) menu: StartupMainMenu,
+    pub(crate) participants_label: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartupView {
+    MainMenu,
+    ScenarioBrowser,
+    NetworkLobby,
+    /// C4StartupNetDlg — the network game browser ("Start Network Game").
+    NetworkGame,
+    Options,
+    About,
+    /// C4StartupPlrSelDlg — the player selection dialog.
+    PlayerSelection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartupDialog {
+    MainMenu,
+    ScenarioBrowser(ScenarioSelectorMode),
+    NetworkGame,
+    Options,
+    About,
+    PlayerSelection,
+}
+
+pub(crate) const STARTUP_DIALOG_FADE_STEPS: u8 = 10;
+pub(crate) const INGAME_MOUSE_CAPTION_DELAY: u8 = 10;
+
+pub(crate) struct StartupDialogFade {
+    pub(crate) outgoing: Option<StartupDialog>,
+    pub(crate) incoming: StartupDialog,
+    /// Number of already presented fade frames. C++ advances opacity before
+    /// drawing, so the first presentation changes this from zero to one.
+    pub(crate) step: u8,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) underlay: Vec<u8>,
+    pub(crate) outgoing_frame: Option<Vec<u8>>,
+    pub(crate) outgoing_native_frame: Option<Vec<u8>>,
+    pub(crate) outgoing_native_text: Vec<clonk_graphics::clonk_font::CapturedClonkText>,
+    pub(crate) outgoing_native_fonts: Option<Arc<clonk_frontend::clonk_fonts::NativeClonkFontSet>>,
+    pub(crate) underlay_gpu_recorder: Option<GpuSceneRecorder>,
+    pub(crate) outgoing_gpu_plan: Option<NativePresentationPlan>,
+}
+
+pub(crate) struct StartupDialogFadeLayers {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) underlay: Vec<u8>,
+    pub(crate) outgoing_frame: Vec<u8>,
+    pub(crate) outgoing_native_frame: Vec<u8>,
+    pub(crate) outgoing_native_text: Vec<clonk_graphics::clonk_font::CapturedClonkText>,
+    pub(crate) underlay_gpu_recorder: Option<GpuSceneRecorder>,
+    pub(crate) outgoing_gpu_plan: Option<NativePresentationPlan>,
+}
+
+#[cfg(test)]
+impl StartupView {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::MainMenu,
+        Self::ScenarioBrowser,
+        Self::NetworkLobby,
+        Self::NetworkGame,
+        Self::Options,
+        Self::About,
+        Self::PlayerSelection,
+    ];
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IngameMouseState {
+    pub(crate) start: ViewportPointer,
+    pub(crate) last: ViewportPointer,
+    /// Last endpoint at which `C4Player::FoWIsVisible` allowed DragSelect to
+    /// rebuild the local Selection. The pointer/frame keeps moving through
+    /// fog; the actual ordered membership is cached in `ingame_dragged_objects`.
+    pub(crate) selection_last: ViewportPointer,
+    pub(crate) moved: bool,
+    /// The stored DownCursor was Crosshair/Dig, so crossing the drag
+    /// threshold enters C4MC_Drag_Selecting rather than moving an object.
+    pub(crate) selection_frame: bool,
+    /// Once a drag first finds crew or carryables, C++ keeps that selection
+    /// type for the rest of the frame's lifetime.
+    pub(crate) selection_kind: IngameDragSelectionKind,
+    /// Value-copied `DownRegion`: its command, data, and target remain the
+    /// down-time payload even if the HUD changes before button-up.
+    pub(crate) down_region: Option<IngameViewportRegion>,
+    /// `UpdateTargetRegion` cancels an active landscape selection frame and
+    /// resets DownCursor so it cannot restart while the button stays down.
+    pub(crate) selection_cancelled_by_region: bool,
+    /// Region drag eligibility is fixed when the pointer first crosses the
+    /// drag threshold, matching C4MouseControl::DragNone.
+    pub(crate) region_drag_started: bool,
+    /// World carryable/vehicle eligibility is likewise latched at the first
+    /// threshold crossing so opening a GUI cannot manufacture a moving drag.
+    pub(crate) world_drag_started: bool,
+    /// DragMoving refreshes this fully resolved cursor on later pointer
+    /// updates; button up consumes it without re-running DragMoving.
+    pub(crate) region_drag_cursor: Option<IngameRegionDragCursor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IngameMouseHelpCaption {
+    pub(crate) text: String,
+    pub(crate) keep_moves: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IngameMouseCursorKind {
+    Region,
+    Help,
+    Crosshair,
+    Dig,
+    DigMaterial,
+    Enter,
+    Grab,
+    Ungrab,
+    Carryable,
+    DigObject,
+    Chop,
+    Build,
+    Select,
+    Attack,
+    JumpLeft,
+    JumpRight,
+    Scrolling(clonk_frontend::MouseCursorPhase),
+    Drop,
+    ThrowLeft(Vector2),
+    ThrowRight(Vector2),
+    Put,
+    Vehicle,
+    VehiclePut,
+    Construct,
+    Nothing,
+}
+
+impl IngameMouseCursorKind {
+    pub(crate) fn phase(self) -> MouseCursorPhase {
+        match self {
+            Self::Region => MouseCursorPhase::Region,
+            Self::Help => MouseCursorPhase::Help,
+            Self::Crosshair => MouseCursorPhase::Crosshair,
+            Self::Dig => MouseCursorPhase::Dig,
+            Self::DigMaterial => MouseCursorPhase::DigMaterial,
+            Self::Enter => MouseCursorPhase::Enter,
+            Self::Grab => MouseCursorPhase::Grab,
+            Self::Ungrab => MouseCursorPhase::Ungrab,
+            Self::Carryable => MouseCursorPhase::Object,
+            Self::DigObject => MouseCursorPhase::DigObject,
+            Self::Chop => MouseCursorPhase::Chop,
+            Self::Build => MouseCursorPhase::Build,
+            Self::Select => MouseCursorPhase::Select,
+            Self::Attack => MouseCursorPhase::Attack,
+            Self::JumpLeft => MouseCursorPhase::JumpLeft,
+            Self::JumpRight => MouseCursorPhase::JumpRight,
+            Self::Scrolling(phase) => phase,
+            Self::Drop => MouseCursorPhase::Drop,
+            Self::ThrowLeft(_) => MouseCursorPhase::ThrowLeft,
+            Self::ThrowRight(_) => MouseCursorPhase::ThrowRight,
+            Self::Put => MouseCursorPhase::Put,
+            Self::Vehicle => MouseCursorPhase::Vehicle,
+            Self::VehiclePut => MouseCursorPhase::VehiclePut,
+            Self::Construct => MouseCursorPhase::Construct,
+            Self::Nothing => MouseCursorPhase::Nothing,
+        }
+    }
+
+    pub(crate) fn throw_landing(self) -> Option<Vector2> {
+        match self {
+            Self::ThrowLeft(landing) | Self::ThrowRight(landing) => Some(landing),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn allows_add_marker(self) -> bool {
+        !matches!(
+            self,
+            Self::Region | Self::Select | Self::JumpLeft | Self::JumpRight
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IngameMouseCaption {
+    pub(crate) text: String,
+    pub(crate) viewport_index: usize,
+    pub(crate) position: Vector2,
+    pub(crate) caption_bottom_y: Option<i32>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct IngameMouseCaptionState {
+    pub(crate) cursor: IngameMouseCursorKind,
+    pub(crate) time_on_target: u8,
+    pub(crate) keep_caption: usize,
+    pub(crate) caption: Option<IngameMouseCaption>,
+}
+
+impl Default for IngameMouseCaptionState {
+    fn default() -> Self {
+        Self {
+            cursor: IngameMouseCursorKind::Region,
+            time_on_target: 0,
+            keep_caption: 0,
+            caption: None,
+        }
+    }
+}
+
+impl IngameMouseCaptionState {
+    pub(crate) fn begin_move(&mut self) {
+        if self.keep_caption != 0 {
+            self.keep_caption -= 1;
+        } else {
+            self.caption = None;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IngameDragSelectionKind {
+    Unknown,
+    Crew,
+    Objects,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IngameViewportRegion {
+    ViewportButton(clonk_frontend::hud::ViewportButton),
+    Command(u8),
+    Inventory(ObjectId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IngameRegionDragCursor {
+    Drop,
+    Throw,
+    Put(ObjectId),
+    Vehicle,
+    VehiclePut(ObjectId),
+}
+
+impl IngameViewportRegion {
+    pub(crate) fn control(self) -> (u8, i32) {
+        match self {
+            Self::ViewportButton(button) => (button.command(), 0),
+            Self::Command(command) => (command, 0),
+            // COM_Contents (C4Constants.h:188); Data is the target number.
+            Self::Inventory(target) => (9, target.as_u64() as i32),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IngameButtonMouseState {
+    pub(crate) motion: IngameMouseState,
+    /// The copied C4MouseControl::DownTarget. Moving-drag classification must
+    /// use the cursor at button-down, not whichever object is below release.
+    pub(crate) down_target: Option<ObjectId>,
+    /// The down target came from a viewport region rather than the world pick
+    /// layer. Region drags use cached Carryable/Grab state; only the physical
+    /// right button expands same-ID inventory groups.
+    pub(crate) down_region: bool,
+    /// Fog replaced the native DownCursor with Nothing. Moving into a visible
+    /// area later must remain DragNone and use the release-time cursor.
+    pub(crate) down_cursor_nothing: bool,
+    /// The copied DownCursor was C4MC_Cursor_Help. Crossing the drag
+    /// threshold must remain DragNone and button-up must emit no command.
+    pub(crate) down_cursor_help: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LobbyParticipantState {
+    pub(crate) name: String,
+    pub(crate) ready: bool,
+    #[allow(dead_code)]
+    pub(crate) kind: ParticipantKind,
+}
+
+impl LobbyParticipantState {
+    fn new(name: impl Into<String>, kind: ParticipantKind) -> Self {
+        Self {
+            name: name.into(),
+            ready: false,
+            kind,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LobbyPointerRegion {
+    Menu,
+    Panel,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NetworkLobbyLayout {
+    pub(crate) exit_button: GuiRect,
+    pub(crate) ready_button: GuiRect,
+    pub(crate) start_button: Option<GuiRect>,
+    preload_button: Option<GuiRect>,
+    pub(crate) sheet_buttons: Vec<(LobbySheet, GuiRect)>,
+    roster_client: GuiRect,
+    pub(crate) resource_save_buttons: Vec<(i32, GuiRect)>,
+    pub(crate) external_chat_button: Option<GuiRect>,
+    menu_region_max_x: f32,
+}
+
+impl NetworkLobbyLayout {
+    fn from_classic(
+        layout: &LobbyLayout,
+        active_sheet: LobbySheet,
+        resource_rows: &BTreeMap<i32, LobbyResourceRow>,
+        resource_scroll: i32,
+        text_line_height: i32,
+    ) -> Self {
+        let as_gui_rect = |rect: clonk_frontend::classic_gui::IntRect| {
+            GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
+        };
+        let sheet_buttons = layout
+            .tab_buttons
+            .iter()
+            .filter_map(|button| button.sheet.map(|sheet| (sheet, as_gui_rect(button.rect))))
+            .collect();
+        let external_chat_button = layout
+            .tab_buttons
+            .iter()
+            .find(|button| button.control == LobbyControl::ChatDialog)
+            .map(|button| as_gui_rect(button.rect));
+        let row_height = text_line_height.max(1).saturating_add(4);
+        let resource_save_buttons = if active_sheet == LobbySheet::Resources {
+            resource_rows
+                .values()
+                .enumerate()
+                .filter(|(_, row)| row.save_possible)
+                .filter_map(|(index, row)| {
+                    let y = layout.roster_client.y
+                        + i32::try_from(index)
+                            .unwrap_or(i32::MAX)
+                            .saturating_mul(row_height)
+                        - resource_scroll
+                        + 1;
+                    let rect = clonk_frontend::classic_gui::IntRect {
+                        x: layout.roster_client.x + layout.roster_client.w - 18,
+                        y,
+                        w: 16,
+                        h: 16,
+                    };
+                    let visible = rect.x < layout.roster_client.x + layout.roster_client.w
+                        && rect.x + rect.w > layout.roster_client.x
+                        && rect.y < layout.roster_client.y + layout.roster_client.h
+                        && rect.y + rect.h > layout.roster_client.y;
+                    visible.then(|| (row.id, as_gui_rect(rect)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            exit_button: as_gui_rect(layout.exit_button),
+            ready_button: as_gui_rect(layout.ready_checkbox),
+            start_button: layout.run_button.map(as_gui_rect),
+            preload_button: layout.preload_button.map(as_gui_rect),
+            sheet_buttons,
+            roster_client: as_gui_rect(layout.roster_client),
+            resource_save_buttons,
+            external_chat_button,
+            // C4GameLobby has no startup scenario-selector pane. Keep all
+            // ordinary pointer traffic on the fullscreen dialog itself.
+            menu_region_max_x: -1.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NetworkLobbyState {
+    /// The native client constructs one C4GameLobby::MainDlg for the whole
+    /// lobby lifetime. Keep the Rust controller equally persistent so roster
+    /// selection/focus/scroll, edit capture and TextWindow scroll state all
+    /// survive rendering projections and authoritative refreshes.
+    pub(crate) controller: ClassicGameLobby,
+    pub(crate) participants: BTreeMap<ClientId, LobbyParticipantState>,
+    /// Authoritative PlayerInfo projection shared with the host's persistent
+    /// controller so peer lobbies converge after the same direct control.
+    pub(crate) roster_rows: Vec<LobbyRosterRow>,
+    /// Distinguishes the initial participant-only fallback from an
+    /// authoritative projection that is legitimately empty.
+    pub(crate) roster_rows_authoritative: bool,
+    client_telemetry: clonk_network::RuntimeLobbyClientTelemetry,
+    pub(crate) active_players: i32,
+    pub(crate) max_players: i32,
+    pub(crate) has_teams: bool,
+    pub(crate) league_mode: bool,
+    /// Construction-time snapshot of C4ChatDlg::IsChatActive(). The native
+    /// lobby does not add or remove this button as IRC state later changes.
+    has_external_chat: bool,
+    pub(crate) active_sheet: LobbySheet,
+    /// Client-side C4Network2ResDlg snapshot. Network updates continue while
+    /// hidden; the reconstructed controller receives it only when active.
+    pub(crate) resource_rows: BTreeMap<i32, LobbyResourceRow>,
+    pub(crate) resource_scroll: i32,
+    pub(crate) scenario_description: LobbyScenarioDescriptionState,
+    scenario_scroll: i32,
+    pub(crate) resources_loaded: bool,
+    pub(crate) preload: LobbyPreloadState,
+    pub(crate) labels: LobbyLabels,
+    pub(crate) logs: Vec<LobbyLogLine>,
+    pub(crate) chat_edit: LobbyChatEditView,
+    pub(crate) chat_history_index: i32,
+    /// Active one-second `/sound` marker per sender. `true` is the muted icon.
+    client_sound_status: HashMap<ClientId, (bool, Instant)>,
+    pub(crate) local_client_id: ClientId,
+    pub(crate) is_host: bool,
+    selected_identifier: Option<String>,
+    selected_title: Option<String>,
+    /// Raw C++ countdown timer. `None` is the distinguished abort packet;
+    /// `Some(0)` is the final start transition.
+    pub(crate) countdown: Option<i32>,
+    pub(crate) layout: Option<NetworkLobbyLayout>,
+    pub(crate) pointer: Option<GuiPoint>,
+    pub(crate) last_roster_click: Option<(LobbyRosterId, Instant)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LobbyAction {
+    ExitRequested,
+    ToggleReady,
+    StartGame,
+    Preload,
+    SelectSheet(LobbySheet),
+    SaveResource(i32),
+    OpenExternalIrcChat,
+    SubmitMessage(String),
+    ChatEdited,
+}
+
+pub(crate) const DEFAULT_LOBBY_COUNTDOWN_SECONDS: i32 = 5;
+pub(crate) const ALMOST_START_LOBBY_COUNTDOWN_SECONDS: i32 = 10;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MessageControlOutcome {
+    pub(crate) rejected: bool,
+    pub(crate) displayed: bool,
+    pub(crate) say_displayed: bool,
+    pub(crate) sound_attempted: bool,
+    pub(crate) sound_played: bool,
+    pub(crate) lobby_sound: bool,
+    pub(crate) attention_requested: bool,
+}
+
+pub(crate) const CONTROL_LOG_COLOR: u32 = 0x00af_afaf;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HostLobbyCountdown {
+    pub(crate) remaining: i32,
+}
+
+impl HostLobbyCountdown {
+    pub(crate) fn new() -> Self {
+        Self::with_seconds(DEFAULT_LOBBY_COUNTDOWN_SECONDS)
+    }
+
+    pub(crate) fn with_seconds(seconds: i32) -> Self {
+        Self {
+            remaining: seconds.max(0),
+        }
+    }
+
+    pub(crate) fn advance(&mut self) -> (i32, bool) {
+        self.remaining = (self.remaining - 1).max(0);
+        let broadcast = self.remaining <= ALMOST_START_LOBBY_COUNTDOWN_SECONDS
+            || (self.remaining <= 600 && self.remaining % 10 == 0)
+            || self.remaining % 60 == 0;
+        (self.remaining, broadcast)
+    }
+}
+
+pub(crate) const DEFAULT_LOBBY_READY_CHECK_COOLDOWN_SECONDS: i64 = 10;
+const MINIMUM_LOBBY_READY_CHECK_COOLDOWN_SECONDS: i64 = 5;
+pub(crate) const LOBBY_READY_CHECK_PROMPT_SECONDS: u32 = 15;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LeagueVoteSubject {
+    pub(crate) vote_type: u8,
+    pub(crate) data: i32,
+}
+
+const LEAGUE_VOTE_TIMEOUT_SECONDS: i64 = 10;
+const LEAGUE_VOTE_MIN_INTERVAL_SECONDS: i64 = 120;
+
+impl From<clonk_engine::VoteControlData> for LeagueVoteSubject {
+    fn from(vote: clonk_engine::VoteControlData) -> Self {
+        Self {
+            vote_type: vote.vote_type,
+            data: vote.data,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LeagueVoteState {
+    pub(crate) ballots: Vec<clonk_engine::VoteControlData>,
+    pub(crate) paused_for_vote: bool,
+    started_at_seconds: Option<i64>,
+    last_own_vote_at_seconds: Option<i64>,
+}
+
+impl LeagueVoteState {
+    pub(crate) fn add(&mut self, vote: clonk_engine::VoteControlData) {
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        self.add_at(vote, now);
+    }
+
+    pub(crate) fn add_at(&mut self, vote: clonk_engine::VoteControlData, now: i64) {
+        if self.ballots.is_empty() {
+            self.started_at_seconds = Some(now);
+        }
+        self.ballots.push(vote);
+    }
+
+    pub(crate) fn take_timed_out_subject_at(&mut self, now: i64) -> Option<LeagueVoteSubject> {
+        let subject = self
+            .started_at_seconds
+            .zip(self.ballots.first())
+            .filter(|(started_at, _)| now > started_at.saturating_add(LEAGUE_VOTE_TIMEOUT_SECONDS))
+            .map(|(_, vote)| LeagueVoteSubject::from(*vote));
+        if subject.is_some() {
+            self.started_at_seconds = Some(now);
+        }
+        subject
+    }
+
+    pub(crate) fn try_submit_own_vote_at(&mut self, subject: LeagueVoteSubject, now: i64) -> bool {
+        if self.subject_active(subject) {
+            return true;
+        }
+        if self.last_own_vote_at_seconds.is_some_and(|last_vote| {
+            now < last_vote.saturating_add(LEAGUE_VOTE_MIN_INTERVAL_SECONDS)
+        }) {
+            return false;
+        }
+        self.last_own_vote_at_seconds = Some(now);
+        true
+    }
+
+    pub(crate) fn first_ballot(&self, client_id: i32, subject: LeagueVoteSubject) -> Option<bool> {
+        self.ballots
+            .iter()
+            .find(|vote| vote.by_client == client_id && LeagueVoteSubject::from(**vote) == subject)
+            .map(|vote| vote.approve)
+    }
+
+    pub(crate) fn end(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+        local_client_id: Option<i32>,
+    ) -> Option<i32> {
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        self.end_at(subject, approve, local_client_id, now)
+    }
+
+    pub(crate) fn end_at(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+        local_client_id: Option<i32>,
+        now: i64,
+    ) -> Option<i32> {
+        let origin = self
+            .ballots
+            .iter()
+            .find(|vote| LeagueVoteSubject::from(**vote) == subject)
+            .map(|vote| vote.by_client);
+        self.ballots
+            .retain(|vote| LeagueVoteSubject::from(*vote) != subject);
+        self.started_at_seconds = Some(now);
+        if approve
+            && origin
+                .zip(local_client_id)
+                .is_some_and(|(origin, local_client)| origin == local_client)
+        {
+            self.last_own_vote_at_seconds = None;
+        }
+        origin
+    }
+
+    pub(crate) fn subject_active(&self, subject: LeagueVoteSubject) -> bool {
+        self.ballots
+            .iter()
+            .any(|vote| LeagueVoteSubject::from(*vote) == subject)
+    }
+
+    pub(crate) fn first_subject_needing_vote(
+        &self,
+        local_client_id: i32,
+    ) -> Option<clonk_engine::VoteControlData> {
+        self.ballots.iter().copied().find(|vote| {
+            self.first_ballot(local_client_id, LeagueVoteSubject::from(*vote))
+                .is_none()
+        })
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.ballots.clear();
+        self.paused_for_vote = false;
+        self.started_at_seconds = None;
+        self.last_own_vote_at_seconds = None;
+    }
+}
+
+pub(crate) fn lobby_ready_check_message(remaining_seconds: u32) -> String {
+    format!("The host wants to know whether you're ready.|{remaining_seconds} seconds remaining.")
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LobbyReadyCheckCooldown {
+    pub(crate) duration: Duration,
+    last_reset: Option<Instant>,
+}
+
+impl Default for LobbyReadyCheckCooldown {
+    fn default() -> Self {
+        Self::from_config_seconds(DEFAULT_LOBBY_READY_CHECK_COOLDOWN_SECONDS)
+    }
+}
+
+impl LobbyReadyCheckCooldown {
+    pub(crate) fn from_config_seconds(seconds: i64) -> Self {
+        let seconds = seconds.max(MINIMUM_LOBBY_READY_CHECK_COOLDOWN_SECONDS);
+        Self {
+            duration: Duration::from_secs(u64::try_from(seconds).unwrap_or(5)),
+            last_reset: None,
+        }
+    }
+
+    pub(crate) fn try_reset_at(&mut self, now: Instant) -> bool {
+        let elapsed = self
+            .last_reset
+            .and_then(|last_reset| now.checked_duration_since(last_reset))
+            .is_none_or(|elapsed| elapsed >= self.duration);
+        if elapsed {
+            self.last_reset = Some(now);
+        }
+        elapsed
+    }
+
+    pub(crate) fn remaining_seconds_at(&self, now: Instant) -> u64 {
+        self.last_reset
+            .and_then(|last_reset| now.checked_duration_since(last_reset))
+            .filter(|elapsed| *elapsed < self.duration)
+            .map(|elapsed| (self.duration - elapsed).as_secs())
+            .unwrap_or(0)
+    }
+}
+
+impl NetworkLobbyState {
+    pub(crate) fn new(local_client_id: ClientId, local_name: String, is_host: bool) -> Self {
+        let mut participants = BTreeMap::new();
+        participants.insert(
+            local_client_id,
+            LobbyParticipantState::new(local_name, ParticipantKind::Player),
+        );
+        if !is_host && local_client_id != 0 {
+            participants
+                .entry(0)
+                .or_insert_with(|| LobbyParticipantState::new("Host", ParticipantKind::Player));
+        }
+        let controller = ClassicGameLobby::new(
+            if is_host {
+                LobbyRole::Host
+            } else {
+                LobbyRole::Client
+            },
+            String::new(),
+            0,
+            1,
+            false,
+            false,
+            false,
+            false,
+            DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+            Vec::new(),
+        );
+        Self {
+            controller,
+            participants,
+            roster_rows: Vec::new(),
+            roster_rows_authoritative: false,
+            client_telemetry: clonk_network::RuntimeLobbyClientTelemetry::default(),
+            active_players: 0,
+            max_players: 1,
+            has_teams: false,
+            league_mode: false,
+            has_external_chat: false,
+            active_sheet: LobbySheet::Players,
+            resource_rows: BTreeMap::new(),
+            resource_scroll: 0,
+            scenario_description: LobbyScenarioDescriptionState::default(),
+            scenario_scroll: 0,
+            resources_loaded: false,
+            preload: LobbyPreloadState::new(false),
+            labels: LobbyLabels::default(),
+            logs: Vec::new(),
+            chat_edit: LobbyChatEditView::default(),
+            chat_history_index: -1,
+            client_sound_status: HashMap::new(),
+            local_client_id,
+            is_host,
+            selected_identifier: None,
+            selected_title: None,
+            countdown: None,
+            layout: None,
+            pointer: None,
+            last_roster_click: None,
+        }
+    }
+
+    pub(crate) fn with_external_chat(mut self, has_external_chat: bool) -> Self {
+        self.has_external_chat = has_external_chat;
+        self.controller.set_has_external_chat(has_external_chat);
+        self
+    }
+
+    pub(crate) fn with_preloading(mut self, automatic: bool, labels: LobbyLabels) -> Self {
+        self.preload = LobbyPreloadState::new(automatic);
+        self.controller.set_labels(labels.clone());
+        self.labels = labels;
+        self
+    }
+
+    pub(crate) fn scenario_label(&self) -> String {
+        self.selected_title
+            .clone()
+            .unwrap_or_else(|| "Select a scenario from the list".to_string())
+    }
+
+    pub(crate) fn selected_identifier(&self) -> Option<&str> {
+        self.selected_identifier.as_deref()
+    }
+
+    pub(crate) fn select_scenario(&mut self, identifier: &str, title: &str) {
+        self.selected_identifier = Some(identifier.to_string());
+        self.selected_title = Some(title.to_string());
+    }
+
+    pub(crate) fn set_scenario_title(&mut self, title: &str) {
+        self.selected_title = (!title.is_empty()).then(|| title.to_string());
+        self.controller.set_scenario_title(title);
+    }
+
+    pub(crate) fn update_layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
+        let role = if self.is_host {
+            LobbyRole::Host
+        } else {
+            LobbyRole::Client
+        };
+        let mut layout = clonk_frontend::game_lobby::game_lobby_layout(
+            width as i32,
+            height as i32,
+            34,
+            22,
+            role,
+            self.has_teams,
+            self.has_external_chat,
+        );
+        if self.active_sheet == LobbySheet::Resources
+            && self.preload.manual_button_present
+            && self.preload.eligible
+        {
+            layout.preload_button = Some(clonk_frontend::classic_gui::IntRect {
+                x: layout.roster.x,
+                y: layout.roster.y + (layout.roster.h - 32).max(0),
+                w: layout.roster.w,
+                h: 32.min(layout.roster.h),
+            });
+        }
+        self.layout = Some(NetworkLobbyLayout::from_classic(
+            &layout,
+            self.active_sheet,
+            &self.resource_rows,
+            self.resource_scroll,
+            22,
+        ));
+        self.layout.as_ref().expect("layout just initialised")
+    }
+
+    pub(crate) fn pointer_region(&self, point: GuiPoint) -> LobbyPointerRegion {
+        if let Some(layout) = self.layout.as_ref() {
+            if point.x <= layout.menu_region_max_x {
+                LobbyPointerRegion::Menu
+            } else {
+                LobbyPointerRegion::Panel
+            }
+        } else {
+            LobbyPointerRegion::Menu
+        }
+    }
+
+    pub(crate) fn handle_panel_pointer_move(&mut self, point: GuiPoint) {
+        self.pointer = Some(point);
+    }
+
+    pub(crate) fn pointer_left(&mut self) {
+        self.pointer = None;
+        self.last_roster_click = None;
+        self.controller.pointer_left();
+    }
+
+    pub(crate) fn exit_hotkey(&self) -> Option<char> {
+        expand_hotkey_markup(&self.labels.exit).1
+    }
+
+    pub(crate) fn register_peer(&mut self, client_id: ClientId, name: String, kind: ParticipantKind) {
+        let ready = self
+            .participants
+            .get(&client_id)
+            .map(|participant| participant.ready)
+            .unwrap_or(false);
+        self.participants
+            .insert(client_id, LobbyParticipantState { name, ready, kind });
+    }
+
+    pub(crate) fn replace_participants_from_clients(
+        &mut self,
+        clients: &[clonk_engine::ClientCoreControlData],
+    ) {
+        self.participants = clients
+            .iter()
+            .filter_map(|client| {
+                ClientId::try_from(client.client_id).ok().map(|client_id| {
+                    (
+                        client_id,
+                        LobbyParticipantState {
+                            name: legacy_presentation_text(client.name.as_bytes()),
+                            ready: client.lobby_ready,
+                            kind: if client.observer {
+                                ParticipantKind::Observer
+                            } else {
+                                ParticipantKind::Player
+                            },
+                        },
+                    )
+                })
+            })
+            .collect();
+    }
+
+    pub(crate) fn unregister_peer(&mut self, client_id: ClientId) {
+        if client_id == self.local_client_id {
+            return;
+        }
+        self.participants.remove(&client_id);
+        self.client_sound_status.remove(&client_id);
+        if !self.is_host && client_id == 0 {
+            self.participants
+                .entry(0)
+                .or_insert_with(|| LobbyParticipantState::new("Host", ParticipantKind::Player));
+        }
+    }
+
+    pub(crate) fn toggle_local_ready(&mut self) -> bool {
+        if let Some(participant) = self.participants.get_mut(&self.local_client_id) {
+            participant.ready = !participant.ready;
+            participant.ready
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn apply_ready_check(&mut self, packet: clonk_network::ReadyCheckPacket) -> Option<ClientId> {
+        if packet.data.vote_requested() {
+            return None;
+        }
+        let Ok(client_id) = ClientId::try_from(packet.client_id) else {
+            return None;
+        };
+        let participant = self.participants.get_mut(&client_id)?;
+        let ready = packet.data.is_ready();
+        if participant.ready == ready {
+            return None;
+        }
+        participant.ready = ready;
+        Some(client_id)
+    }
+
+    pub(crate) fn apply_lobby_countdown(&mut self, packet: clonk_network::LobbyCountdownPacket) {
+        self.countdown = (!packet.is_abort()).then_some(packet.countdown());
+    }
+
+    pub(crate) fn local_ready(&self) -> bool {
+        self.participants
+            .get(&self.local_client_id)
+            .map(|participant| participant.ready)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn push_log(&mut self, line: LobbyLogLine) {
+        self.logs.push(line.clone());
+        self.controller.push_log(line);
+    }
+
+    pub(crate) fn note_client_sound(&mut self, client_id: i32, muted: bool) {
+        if let Ok(client_id) = ClientId::try_from(client_id) {
+            self.client_sound_status
+                .insert(client_id, (muted, Instant::now()));
+        }
+        self.controller.note_client_sound(client_id, muted);
+    }
+
+    pub(crate) fn set_client_telemetry(
+        &mut self,
+        telemetry: clonk_network::RuntimeLobbyClientTelemetry,
+    ) -> bool {
+        let mut changed = self.client_telemetry != telemetry;
+        self.client_telemetry = telemetry;
+        changed |= apply_classic_lobby_client_telemetry(
+            &mut self.roster_rows,
+            self.local_client_id,
+            &self.client_telemetry,
+        );
+        changed
+    }
+
+    fn participant_roster_rows(&self) -> Vec<LobbyRosterRow> {
+        let mut rows = self
+            .participants
+            .iter()
+            .map(|(client_id, participant)| {
+                LobbyRosterRow::Client(LobbyClientRow {
+                    id: i32::try_from(*client_id).unwrap_or(i32::MAX),
+                    name: participant.name.clone(),
+                    nick: String::new(),
+                    color: [255, 255, 255, 255],
+                    status: if let Some((muted, _)) = self.client_sound_status.get(client_id) {
+                        if *muted {
+                            LobbyClientStatus::MutedSound
+                        } else {
+                            LobbyClientStatus::Sound
+                        }
+                    } else if *client_id == 0 {
+                        LobbyClientStatus::Host
+                    } else if matches!(participant.kind, ParticipantKind::Observer) {
+                        LobbyClientStatus::Observer
+                    } else if participant.ready {
+                        LobbyClientStatus::Ready
+                    } else {
+                        LobbyClientStatus::Client
+                    },
+                    local: *client_id == self.local_client_id,
+                    connected: *client_id != self.local_client_id,
+                    resource_progress: None,
+                    ping_ms: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        apply_classic_lobby_client_telemetry(
+            &mut rows,
+            self.local_client_id,
+            &self.client_telemetry,
+        );
+        rows
+    }
+
+    pub(crate) fn visible_roster_rows(&self) -> Vec<LobbyRosterRow> {
+        if self.roster_rows_authoritative {
+            self.roster_rows.clone()
+        } else {
+            self.participant_roster_rows()
+        }
+    }
+
+    pub(crate) fn visible_client_is_local(&self, client_id: i32) -> Option<bool> {
+        self.visible_roster_rows()
+            .into_iter()
+            .find_map(|row| match row {
+                LobbyRosterRow::Client(client) if client.id == client_id => Some(client.local),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn sync_classic_controller(&mut self) {
+        let now = Instant::now();
+        self.client_sound_status.retain(|_, (_, started)| {
+            now.checked_duration_since(*started)
+                .is_none_or(|elapsed| elapsed < Duration::from_secs(1))
+        });
+        let rows = self.visible_roster_rows();
+        let local_ready = self.local_ready();
+        if !self.has_teams && self.active_sheet == LobbySheet::Teams {
+            self.active_sheet = LobbySheet::Players;
+        }
+        self.controller
+            .set_scenario_title(self.selected_title.as_deref().unwrap_or_default());
+        self.controller.set_has_teams(self.has_teams);
+        self.controller.set_league_mode(self.league_mode);
+        self.controller
+            .set_has_external_chat(self.has_external_chat);
+        if self.controller.rows() != rows {
+            self.controller.set_rows(rows);
+        }
+        self.controller
+            .set_player_count(self.active_players, self.max_players.max(1));
+        if self.controller.resources_loaded() != self.resources_loaded {
+            let _ = self.controller.set_resources_loaded(self.resources_loaded);
+        }
+        self.controller.set_ready(local_ready);
+        if self.controller.labels() != &self.labels {
+            self.controller.set_labels(self.labels.clone());
+        }
+        self.controller
+            .set_preload_button_state(self.preload.manual_button_present, self.preload.eligible);
+        self.controller.set_active_sheet(self.active_sheet);
+        if self.controller.scenario_text() != &self.scenario_description.text {
+            self.controller
+                .set_scenario_text(self.scenario_description.text.clone());
+        }
+        self.controller.set_scenario_scroll(self.scenario_scroll);
+        let resources = self.resource_rows.values().cloned().collect::<Vec<_>>();
+        if self.controller.resource_rows() != resources {
+            self.controller.set_resource_rows(resources);
+        }
+        self.controller.set_resource_scroll(self.resource_scroll);
+        if self.controller.logs() != self.logs {
+            self.controller.set_logs(self.logs.clone());
+        }
+        if self.controller.chat_edit_view() != &self.chat_edit {
+            self.controller.set_chat_edit_view(self.chat_edit.clone());
+        }
+    }
+
+    /// Reads interaction-owned state back out of the retained controller
+    /// after it has processed input, so the adapter's authoritative fields
+    /// stay coherent with what the one live MainDlg now shows.
+    fn retain_controller_state(&mut self) {
+        self.resource_scroll = self.controller.resource_scroll();
+        self.scenario_scroll = self.controller.scenario_scroll();
+        self.chat_edit = self.controller.chat_edit_view().clone();
+    }
+
+    pub(crate) fn synchronize_classic_controller(
+        &mut self,
+        width: i32,
+        height: i32,
+        fonts: &clonk_frontend::ClonkFontSet,
+        scenario_game_options: &GameOptionButtons,
+    ) -> (LobbyLayout, LobbyRosterLayout, GameOptionButtons) {
+        self.sync_classic_controller();
+        // C4GameLobby owns one C4GameOptionButtons instance for the dialog
+        // lifetime. Render a projection of the retained application strip so
+        // hover, press, focus, and tooltip timing survive frame boundaries.
+        let mut options = scenario_game_options.clone();
+        options.set_lobby_league(self.league_mode);
+        options.set_countdown(self.controller.countdown().is_locked());
+        let layout = self.controller.layout(width, height, fonts);
+        options.set_bounds(layout.game_option_strip);
+        let _ = self.controller.chat_scroll_metrics(&layout, &fonts.text);
+        let roster = self.controller.right_list_layout(&layout, fonts);
+        self.layout = Some(NetworkLobbyLayout::from_classic(
+            &layout,
+            self.active_sheet,
+            &self.resource_rows,
+            self.resource_scroll,
+            fonts.text.line_height,
+        ));
+        (layout, roster, options)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn classic_render_state(
+        &mut self,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<(ClassicGameLobby, GameOptionButtons)> {
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (_, _, options) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
+        Ok((self.controller.clone(), options))
+    }
+
+    pub(crate) fn with_classic_controller_input<T>(
+        &mut self,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+        input: impl FnOnce(&mut ClassicGameLobby, &LobbyLayout, &LobbyRosterLayout) -> T,
+    ) -> Result<T> {
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (layout, roster, _) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
+        let result = input(&mut self.controller, &layout, &roster);
+        self.retain_controller_state();
+        Ok(result)
+    }
+
+    pub(crate) fn classic_pointer_move(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.pointer = Some(point);
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| controller.pointer_move(point, layout, roster),
+        )
+    }
+
+    pub(crate) fn classic_pointer_down(
+        &mut self,
+        point: GuiPoint,
+        double_click: bool,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                if double_click {
+                    controller.pointer_double_click(point, layout, roster)
+                } else {
+                    controller.pointer_down(point, layout, roster)
+                }
+            },
+        )
+    }
+
+    fn classic_pointer_up(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                controller.pointer_up(point, layout, roster, Instant::now())
+            },
+        )
+    }
+
+    pub(crate) fn classic_note_pointer_button(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<()> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                controller.note_pointer_button(point, layout, roster);
+            },
+        )
+    }
+
+    pub(crate) fn classic_secondary_down(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| controller.pointer_secondary_down(point, layout, roster),
+        )
+    }
+
+    pub(crate) fn classic_context_key(
+        &mut self,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                let actions = controller.chat_context_from_key(layout);
+                if !actions.is_empty() {
+                    return actions;
+                }
+                let anchor = controller
+                    .selected_roster_id()
+                    .and_then(|selected| {
+                        roster.rows.iter().find(|row_layout| {
+                            controller
+                                .rows()
+                                .get(row_layout.index)
+                                .is_some_and(|row| &row.id() == selected)
+                        })
+                    })
+                    .map(|row| {
+                        GuiPoint::new(
+                            (row.rect.x + row.rect.w / 2) as f32,
+                            (row.rect.y + row.rect.h / 2) as f32,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        GuiPoint::new(
+                            (layout.roster.x + layout.roster.w / 2) as f32,
+                            (layout.roster.y + layout.roster.h / 2) as f32,
+                        )
+                    });
+                controller.request_focused_context(anchor)
+            },
+        )
+    }
+
+    pub(crate) fn classic_hotkey(&mut self, hotkey: char) -> Vec<ClassicLobbyAction> {
+        self.sync_classic_controller();
+        self.controller.hotkey(hotkey, Instant::now())
+    }
+
+    pub(crate) fn classic_middle_down(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| controller.pointer_middle_down(point, layout, roster),
+        )
+    }
+
+    pub(crate) fn classic_touch(
+        &mut self,
+        phase: TouchPhase,
+        point: GuiPoint,
+        double_click: bool,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.pointer = (!matches!(phase, TouchPhase::Cancelled)).then_some(point);
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| match phase {
+                TouchPhase::Started if double_click => {
+                    controller.pointer_double_click(point, layout, roster)
+                }
+                TouchPhase::Started => controller.touch_start(point, layout, roster),
+                TouchPhase::Moved => controller.touch_move(point, layout, roster),
+                TouchPhase::Ended => controller.touch_end(point, layout, roster, Instant::now()),
+                TouchPhase::Cancelled => controller.touch_cancel(),
+            },
+        )
+    }
+
+    pub(crate) fn render_classic(
+        &mut self,
+        surface: &mut Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+        include_tooltips: bool,
+        active: bool,
+        gamma: &clonk_graphics::GammaRamp,
+    ) -> Result<()> {
+        let resources = assets.game_lobby_resources()?;
+        let option_resources = assets.game_option_resources()?;
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (_, _, options) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
+        let result = if include_tooltips {
+            self.controller.render(
+                surface,
+                &resources,
+                &options,
+                &option_resources,
+                active,
+                Some(gamma),
+            )
+        } else {
+            self.controller.render_without_tooltips(
+                surface,
+                &resources,
+                &options,
+                &option_resources,
+                active,
+                Some(gamma),
+            )
+        };
+        self.retain_controller_state();
+        result
+    }
+
+    pub(crate) fn render_classic_tooltips(
+        &mut self,
+        surface: &mut Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+        gamma: &clonk_graphics::GammaRamp,
+    ) -> Result<()> {
+        let resources = assets.game_lobby_resources()?;
+        let option_resources = assets.game_option_resources()?;
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (_, _, options) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
+        self.controller.render_tooltips(
+            surface,
+            &resources,
+            &options,
+            &option_resources,
+            true,
+            Some(gamma),
+        )
+    }
+
+    pub(crate) fn wheel_right_sheet(
+        &mut self,
+        delta: i32,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<(bool, bool)> {
+        let Some(point) = self.pointer else {
+            return Ok((false, false));
+        };
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (layout, roster, _) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
+        let contains = |rect: clonk_frontend::classic_gui::IntRect| {
+            point.x >= rect.x as f32
+                && point.y >= rect.y as f32
+                && point.x < (rect.x + rect.w) as f32
+                && point.y < (rect.y + rect.h) as f32
+        };
+        let scroll_window_captured =
+            contains(layout.chat_log_client) || contains(layout.roster_client);
+        self.controller.note_pointer_wheel();
+        let outside_scroll_window = contains(layout.chat_log) && !contains(layout.chat_log_client)
+            || contains(layout.roster) && !contains(layout.roster_client);
+        let changed =
+            !outside_scroll_window && self.controller.wheel(point, delta, &layout, &roster);
+        self.retain_controller_state();
+        Ok((changed, scroll_window_captured))
+    }
+
+    pub(crate) fn browse_chat_history(&mut self, older: bool, history: &VecDeque<String>) -> bool {
+        self.chat_history_index += if older { 1 } else { -1 };
+        let horizontal_scroll = self.chat_edit.horizontal_scroll;
+        let text = usize::try_from(self.chat_history_index)
+            .ok()
+            .and_then(|index| history.get(index))
+            .filter(|text| !text.is_empty())
+            .cloned();
+        let inserted = match text {
+            Some(text) => {
+                self.chat_edit = LobbyChatEditView {
+                    caret: text.len(),
+                    selection: (!text.is_empty()).then_some((0, text.len())),
+                    text,
+                    horizontal_scroll,
+                    cursor_visible: true,
+                };
+                true
+            }
+            None => {
+                self.chat_history_index = -1;
+                lobby_chat_clear_preserving_scroll(&mut self.chat_edit);
+                false
+            }
+        };
+        self.controller.set_chat_edit_view(self.chat_edit.clone());
+        inserted
+    }
+
+    fn take_chat_submission(&mut self) -> String {
+        let text = self.chat_edit.text.clone();
+        lobby_chat_clear_preserving_scroll(&mut self.chat_edit);
+        self.controller.set_chat_edit_view(self.chat_edit.clone());
+        self.chat_history_index = -1;
+        text
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyCode, state: ElementState) -> Option<LobbyAction> {
+        if state != ElementState::Pressed || self.controller.focus() != LobbyControl::ChatInput {
+            return None;
+        }
+        match key {
+            KeyCode::Escape => Some(LobbyAction::ExitRequested),
+            KeyCode::Enter => Some(LobbyAction::SubmitMessage(self.take_chat_submission())),
+            KeyCode::Up => {
+                // The app routes history so lobby and running dialogs share
+                // C4MessageInput's one process-local BackBuffer.
+                Some(LobbyAction::ChatEdited)
+            }
+            KeyCode::Down => Some(LobbyAction::ChatEdited),
+            KeyCode::Left => {
+                let _ = lobby_chat_apply_edit_key(
+                    &mut self.chat_edit,
+                    LobbyChatEditKey::Left,
+                    LobbyChatKeyModifiers::default(),
+                );
+                Some(LobbyAction::ChatEdited)
+            }
+            KeyCode::Right => {
+                let _ = lobby_chat_apply_edit_key(
+                    &mut self.chat_edit,
+                    LobbyChatEditKey::Right,
+                    LobbyChatKeyModifiers::default(),
+                );
+                Some(LobbyAction::ChatEdited)
+            }
+            KeyCode::Space => Some(LobbyAction::ChatEdited),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn pointer_position(&self) -> Option<GuiPoint> {
+        self.pointer
+    }
+}
+
+impl IngameMouseState {
+    pub(crate) fn new(start: ViewportPointer, selection_frame: bool) -> Self {
+        Self {
+            start,
+            last: start,
+            selection_last: start,
+            moved: false,
+            selection_frame,
+            selection_kind: IngameDragSelectionKind::Unknown,
+            down_region: None,
+            selection_cancelled_by_region: false,
+            region_drag_started: false,
+            world_drag_started: false,
+            region_drag_cursor: None,
+        }
+    }
+
+    pub(crate) fn update(&mut self, pointer: ViewportPointer) {
+        self.last = pointer;
+        if !self.moved {
+            let dx = (self.last.world.x - self.start.world.x).abs();
+            let dy = (self.last.world.y - self.start.world.y).abs();
+            if dx >= MOUSE_DRAG_THRESHOLD || dy >= MOUSE_DRAG_THRESHOLD {
+                self.moved = true;
+            }
+        }
+    }
+
+    fn update_with_fog(&mut self, pointer: ViewportPointer, fog_blocked: bool) -> bool {
+        let was_moved = self.moved;
+        self.update(pointer);
+        if !was_moved && self.moved && fog_blocked {
+            // DragNone refuses to enter a drag while the threshold-crossing
+            // endpoint is fog-covered. A later visible endpoint may still
+            // start the retained button gesture.
+            self.moved = false;
+            return false;
+        }
+        if self.moved && self.selection_frame && !fog_blocked {
+            self.selection_last = pointer;
+        }
+        !was_moved && self.moved
+    }
+}
+
+impl IngameButtonMouseState {
+    pub(crate) fn new(start: ViewportPointer, down_target: Option<ObjectId>, down_region: bool) -> Self {
+        Self {
+            motion: IngameMouseState::new(start, down_target.is_none() && !down_region),
+            down_target,
+            down_region,
+            down_cursor_nothing: false,
+            down_cursor_help: false,
+        }
+    }
+
+    pub(crate) fn update_with_fog(&mut self, pointer: ViewportPointer, fog_blocked: bool) -> bool {
+        if self.down_cursor_help {
+            self.motion.update(pointer);
+            return false;
+        }
+        if self.down_cursor_nothing {
+            self.motion.last = pointer;
+            return false;
+        }
+        self.motion.update_with_fog(pointer, fog_blocked)
+    }
+}
+
+impl MenuLayer {
+    fn new(title: impl Into<String>, entries: Vec<FrontendScenario>) -> Self {
+        Self {
+            title: title.into(),
+            entries,
+            folder: None,
+            style: MenuLayerStyle::Book,
+        }
+    }
+
+    fn for_folder(folder: FrontendScenario) -> Self {
+        Self {
+            title: folder.title.clone(),
+            entries: folder.children.clone(),
+            folder: Some(folder),
+            style: MenuLayerStyle::Book,
+        }
+    }
+}
+
+impl MenuState {
+    pub(crate) fn new(menu: StartupMenu, entries: Vec<FrontendScenario>) -> Self {
+        let visible_entries = entries.clone();
+        Self {
+            menu,
+            pointer_position: None,
+            stack: vec![MenuLayer::new("Scenarios", entries)],
+            visible_entries,
+            search_edit: SearchEditState::default(),
+            applied_search_text: String::new(),
+            rename_edit: None,
+            scenario_list_scroll: 0,
+            list_scroll_selection: None,
+            selection_info_scroll: 0,
+            scrollbar_interaction: None,
+            definition_checkbox_enabled: false,
+            definition_checkbox_checked: false,
+            definition_checkbox_focused: false,
+            dialog_focus: ScenselDialogFocus::List,
+            include_back: true,
+            scensel_title_present: true,
+            scensel_title_topmost: false,
+        }
+    }
+
+    /// Switches Back-row injection and rebuilds the visible entries.
+    pub(crate) fn set_include_back(&mut self, include_back: bool) {
+        if self.include_back != include_back {
+            self.include_back = include_back;
+            self.refresh_menu_entries();
+        }
+    }
+
+    /// The scenario behind the menu's selected row, if any.
+    pub(crate) fn selected_scenario(&self) -> Option<&FrontendScenario> {
+        if let Some(map) = self.current_map() {
+            return map.selected_entry();
+        }
+        let offset = usize::from(self.include_back);
+        let index = self.menu.selected_index()?.checked_sub(offset)?;
+        self.visible_entries.get(index)
+    }
+
+    pub(crate) fn current_map(&self) -> Option<&MapFolderData> {
+        match &self.stack.last()?.style {
+            MenuLayerStyle::Book => None,
+            MenuLayerStyle::Map(map) => Some(map),
+        }
+    }
+
+    fn current_map_mut(&mut self) -> Option<&mut MapFolderData> {
+        match &mut self.stack.last_mut()?.style {
+            MenuLayerStyle::Book => None,
+            MenuLayerStyle::Map(map) => Some(map),
+        }
+    }
+
+    pub(crate) fn start_renaming_selected(&mut self, previous_focus: ScenselFocusSnapshot) -> bool {
+        if self.rename_edit.is_some() || self.current_map().is_some() {
+            return false;
+        }
+        let Some((identifier, mut title)) = self
+            .selected_scenario()
+            .map(|selected| (selected.identifier.clone(), selected.title.clone()))
+        else {
+            return false;
+        };
+        Markup::strip_markup(&mut title);
+        self.search_edit.blur();
+        self.definition_checkbox_focused = false;
+        self.dialog_focus = ScenselDialogFocus::List;
+        self.rename_edit = Some(ScenarioRenameState {
+            identifier,
+            edit: RenameEdit::new(title, Some(previous_focus)),
+            last_click: None,
+        });
+        true
+    }
+
+    pub(crate) fn abort_renaming(&mut self) -> Option<ScenselFocusSnapshot> {
+        let mut rename = self.rename_edit.take()?;
+        rename.edit.abort();
+        rename.edit.take_previous_focus()
+    }
+
+    pub(crate) fn resolve_renaming(&mut self, result: RenameEditResult) -> Option<ScenselFocusSnapshot> {
+        let resolution = self.rename_edit.as_mut()?.edit.resolve(result);
+        if resolution == RenameEditResolution::KeepEditing {
+            return None;
+        }
+        let mut rename = self
+            .rename_edit
+            .take()
+            .expect("finished rename state remains installed");
+        rename.edit.take_previous_focus()
+    }
+
+    pub(crate) fn replace_discovered_entries(
+        &mut self,
+        entries: Vec<FrontendScenario>,
+        selected_identifier: Option<&str>,
+        select_first_when_missing: bool,
+        apply_live_search: bool,
+    ) -> Vec<StartupMenuAction> {
+        let folder_identifiers = self
+            .stack
+            .iter()
+            .filter_map(|layer| {
+                layer
+                    .folder
+                    .as_ref()
+                    .map(|folder| folder.identifier.clone())
+            })
+            .collect::<Vec<_>>();
+        self.stack = vec![MenuLayer::new("Scenarios", entries)];
+        for identifier in folder_identifiers {
+            let Some(folder) = self
+                .current_entries()
+                .iter()
+                .find(|entry| {
+                    entry.identifier == identifier && matches!(entry.kind, ScenarioKind::Folder)
+                })
+                .cloned()
+            else {
+                break;
+            };
+            self.stack.push(MenuLayer::for_folder(folder));
+        }
+        // UpdateList reads the live edit text, not merely the last submitted
+        // query, after F5/MissionAccess rebuilds the list.
+        if apply_live_search {
+            self.applied_search_text = self.search_edit.text().to_string();
+        }
+        self.rename_edit = None;
+        self.pointer_position = None;
+        self.scenario_list_scroll = 0;
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
+        self.refresh_menu_entries();
+        let selected = selected_identifier
+            .and_then(|identifier| {
+                self.visible_entries
+                    .iter()
+                    .position(|entry| entry.identifier == identifier)
+            })
+            .or_else(|| {
+                (select_first_when_missing && !self.visible_entries.is_empty()).then_some(0)
+            });
+        let actions = selected
+            .map(|index| index + usize::from(self.include_back))
+            .and_then(|index| self.menu.select_entry_by_index(index).ok())
+            .unwrap_or_default();
+        self.sync_definition_checkbox_to_selection();
+        actions
+    }
+
+    /// The folder whose contents are currently listed (None at root).
+    pub(crate) fn current_folder(&self) -> Option<&FrontendScenario> {
+        self.stack.last().and_then(|layer| layer.folder.as_ref())
+    }
+
+    /// The list caption: current folder name, or "Scenarios" at the root
+    /// (C4StartupScenSelDlg::UpdateList, cpp:1527-1535).
+    pub(crate) fn book_caption(&self) -> &str {
+        self.current_folder()
+            .map(|folder| folder.title.as_str())
+            .unwrap_or("Scenarios")
+    }
+
+    pub(crate) fn pointer_position(&self) -> Option<GuiPoint> {
+        self.pointer_position
+    }
+
+    pub(crate) fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.pointer_position = position;
+    }
+
+    pub(crate) fn current_entries(&self) -> &[FrontendScenario] {
+        self.stack
+            .last()
+            .map(|layer| layer.entries.as_slice())
+            .unwrap_or_default()
+    }
+
+    fn activation_path(&self, identifier: &str) -> Option<Vec<FrontendScenario>> {
+        let mut path = self
+            .stack
+            .iter()
+            .filter_map(|layer| layer.folder.clone())
+            .collect::<Vec<_>>();
+        path.extend(find_frontend_entry_path(
+            self.current_entries(),
+            identifier,
+        )?);
+        Some(path)
+    }
+
+    pub(crate) fn require_supported_activation(
+        &self,
+        identifier: &str,
+    ) -> std::result::Result<Option<ScenarioKind>, ClassicParityBoundary> {
+        Ok(self
+            .activation_path(identifier)
+            .and_then(|path| path.last().map(|entry| entry.kind)))
+    }
+
+    pub(crate) fn visible_entries(&self) -> &[FrontendScenario] {
+        &self.visible_entries
+    }
+
+    pub(crate) fn set_search_text(&mut self, text: impl Into<String>) {
+        self.search_edit.set_text(text);
+    }
+
+    pub(crate) fn insert_search_text(&mut self, text: &str) {
+        self.search_edit.insert_text(text);
+    }
+
+    pub(crate) fn search_text(&self) -> &str {
+        self.search_edit.text()
+    }
+
+    pub(crate) fn set_search_focused(&mut self, focused: bool) {
+        if focused {
+            self.definition_checkbox_focused = false;
+            self.dialog_focus = ScenselDialogFocus::Search;
+            self.search_edit.focus();
+        } else {
+            self.search_edit.blur();
+            if self.dialog_focus == ScenselDialogFocus::Search {
+                self.dialog_focus = ScenselDialogFocus::List;
+            }
+        }
+    }
+
+    pub(crate) fn search_focused(&self) -> bool {
+        self.search_edit.is_focused()
+    }
+
+    pub(crate) fn sync_definition_checkbox_to_selection(&mut self) {
+        let (enabled, checked) = self
+            .selected_scenario()
+            .filter(|entry| matches!(entry.kind, ScenarioKind::Scenario))
+            .map(|entry| {
+                (
+                    !entry.local_only.unwrap_or(false),
+                    entry.allow_user_change.unwrap_or(false),
+                )
+            })
+            .unwrap_or((false, false));
+        self.definition_checkbox_enabled = enabled;
+        self.definition_checkbox_checked = checked;
+        if !enabled {
+            self.definition_checkbox_focused = false;
+            if self.dialog_focus == ScenselDialogFocus::Definitions {
+                self.dialog_focus = ScenselDialogFocus::List;
+            }
+        }
+    }
+
+    pub(crate) fn toggle_definition_checkbox(&mut self) -> bool {
+        if !self.definition_checkbox_enabled {
+            return false;
+        }
+        self.definition_checkbox_checked = !self.definition_checkbox_checked;
+        true
+    }
+
+    pub(crate) fn set_definition_checkbox_focused(&mut self, focused: bool) -> bool {
+        let focused = focused && self.definition_checkbox_enabled;
+        if self.definition_checkbox_focused == focused {
+            return false;
+        }
+        self.definition_checkbox_focused = focused;
+        if focused {
+            self.search_edit.blur();
+            self.dialog_focus = ScenselDialogFocus::Definitions;
+        } else if self.dialog_focus == ScenselDialogFocus::Definitions {
+            self.dialog_focus = ScenselDialogFocus::List;
+        }
+        true
+    }
+
+    pub(crate) fn set_dialog_focus(&mut self, focus: ScenselDialogFocus) {
+        let focus = if focus == ScenselDialogFocus::Definitions && !self.definition_checkbox_enabled
+        {
+            ScenselDialogFocus::List
+        } else {
+            focus
+        };
+        self.dialog_focus = focus;
+        if focus == ScenselDialogFocus::Search {
+            self.search_edit.focus();
+        } else {
+            self.search_edit.blur();
+        }
+        self.definition_checkbox_focused = focus == ScenselDialogFocus::Definitions;
+    }
+
+    pub(crate) const fn dialog_focus(&self) -> ScenselDialogFocus {
+        self.dialog_focus
+    }
+
+    pub(crate) fn scenario_list_scroll(&self) -> i32 {
+        self.scenario_list_scroll
+    }
+
+    pub(crate) fn scenario_list_max_scroll(&self, viewport_height: i32, pitch: i32) -> i32 {
+        let row_count = self.visible_entries.len() + usize::from(self.include_back);
+        let content_height = i32::try_from(row_count)
+            .unwrap_or(i32::MAX)
+            .saturating_mul(pitch)
+            .saturating_sub(i32::from(row_count > 0));
+        content_height.saturating_sub(viewport_height).max(0)
+    }
+
+    pub(crate) fn scroll_scenario_list_by(&mut self, amount: i32, viewport_height: i32, pitch: i32) -> bool {
+        let max_scroll = self.scenario_list_max_scroll(viewport_height, pitch);
+        let next = self
+            .scenario_list_scroll
+            .saturating_add(amount)
+            .clamp(0, max_scroll);
+        if next == self.scenario_list_scroll {
+            return false;
+        }
+        self.scenario_list_scroll = next;
+        self.list_scroll_selection = Some(self.menu.selected_index());
+        true
+    }
+
+    pub(crate) fn ensure_list_selection_visible(
+        &mut self,
+        viewport_height: i32,
+        pitch: i32,
+        item_height: i32,
+    ) {
+        let Some(selection) = self.menu.selected_index() else {
+            self.scenario_list_scroll = self
+                .scenario_list_scroll
+                .min(self.scenario_list_max_scroll(viewport_height, pitch));
+            return;
+        };
+        let row_y = i32::try_from(selection)
+            .unwrap_or(i32::MAX)
+            .saturating_mul(pitch);
+        if self.scenario_list_scroll > row_y {
+            self.scenario_list_scroll = row_y;
+        } else if self.scenario_list_scroll.saturating_add(viewport_height)
+            < row_y.saturating_add(item_height)
+        {
+            self.scenario_list_scroll = row_y
+                .saturating_add(item_height)
+                .saturating_sub(viewport_height);
+        }
+        self.scenario_list_scroll = self
+            .scenario_list_scroll
+            .clamp(0, self.scenario_list_max_scroll(viewport_height, pitch));
+        self.list_scroll_selection = Some(self.menu.selected_index());
+    }
+
+    pub(crate) fn select_list_index(&mut self, index: usize) -> Vec<StartupMenuAction> {
+        match self.menu.select_entry_by_index(index) {
+            Ok(actions) => actions,
+            Err(err) => {
+                tracing::error!(error = %err, index, "failed to select scenario list row");
+                Vec::new()
+            }
+        }
+    }
+
+    pub(crate) fn move_list_selection_clamped(&mut self, delta: isize) -> Vec<StartupMenuAction> {
+        let count = self.visible_entries.len() + usize::from(self.include_back);
+        if count == 0 {
+            return Vec::new();
+        }
+        let current = self.menu.selected_index().unwrap_or_else(|| {
+            if delta.is_negative() {
+                count - 1
+            } else {
+                0
+            }
+        });
+        let next = current.saturating_add_signed(delta).min(count - 1);
+        if next == current && self.menu.selected_index().is_some() {
+            return Vec::new();
+        }
+        self.select_list_index(next)
+    }
+
+    pub(crate) fn select_list_home(&mut self) -> Vec<StartupMenuAction> {
+        if self.visible_entries.is_empty() && !self.include_back {
+            Vec::new()
+        } else {
+            self.select_list_index(0)
+        }
+    }
+
+    pub(crate) fn select_list_end(&mut self) -> Vec<StartupMenuAction> {
+        let count = self.visible_entries.len() + usize::from(self.include_back);
+        count
+            .checked_sub(1)
+            .map(|index| self.select_list_index(index))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn page_list_selection(
+        &mut self,
+        direction: i32,
+        viewport_height: i32,
+        pitch: i32,
+        item_height: i32,
+    ) -> Vec<StartupMenuAction> {
+        let count = self.visible_entries.len() + usize::from(self.include_back);
+        let Some(current) = self.menu.selected_index().filter(|index| *index < count) else {
+            return if direction < 0 {
+                self.select_list_end()
+            } else {
+                self.select_list_home()
+            };
+        };
+        let pitch = pitch.max(1);
+        let viewport_height = viewport_height.max(1);
+        let max_scroll = self.scenario_list_max_scroll(viewport_height, pitch);
+        let target = if direction >= 0 {
+            let last_fully_visible = |scroll: i32| {
+                scroll
+                    .saturating_add(viewport_height)
+                    .saturating_sub(item_height)
+                    .max(0)
+                    / pitch
+            };
+            let mut target = last_fully_visible(self.scenario_list_scroll)
+                .max(current as i32)
+                .min(count.saturating_sub(1) as i32) as usize;
+            if target <= current && current + 1 < count {
+                self.scenario_list_scroll = self
+                    .scenario_list_scroll
+                    .saturating_add(viewport_height)
+                    .min(max_scroll);
+                target = last_fully_visible(self.scenario_list_scroll)
+                    .max(current.saturating_add(1) as i32)
+                    .min(count.saturating_sub(1) as i32) as usize;
+            }
+            target
+        } else {
+            let first_fully_visible = |scroll: i32| scroll.saturating_add(pitch - 1).max(0) / pitch;
+            let mut target = first_fully_visible(self.scenario_list_scroll)
+                .max(0)
+                .min(current as i32) as usize;
+            if target >= current && current > 0 {
+                self.scenario_list_scroll = self
+                    .scenario_list_scroll
+                    .saturating_sub(viewport_height)
+                    .max(0);
+                target = first_fully_visible(self.scenario_list_scroll)
+                    .min(current.saturating_sub(1) as i32)
+                    .max(0) as usize;
+            }
+            target
+        };
+        if target == current {
+            return Vec::new();
+        }
+        let actions = self.select_list_index(target);
+        self.list_scroll_selection = Some(self.menu.selected_index());
+        actions
+    }
+
+    /// Mirrors `C4GUI::ListBox::CharIn`: search once from the row after the
+    /// selection, wrap before the current row, and compare the raw first byte.
+    pub(crate) fn select_list_character(&mut self, character: char) -> Vec<StartupMenuAction> {
+        if self.dialog_focus != ScenselDialogFocus::List
+            || self.current_map().is_some()
+            || !character.is_ascii()
+        {
+            return Vec::new();
+        }
+        let offset = usize::from(self.include_back);
+        let count = self.visible_entries.len() + offset;
+        if count == 0 {
+            return Vec::new();
+        }
+
+        let selected = self.menu.selected_index().filter(|index| *index < count);
+        let start = selected.map_or(0, |index| (index + 1) % count);
+        let candidates = if selected.is_some() {
+            count.saturating_sub(1)
+        } else {
+            count
+        };
+        let input = character as u8;
+        let target = (0..candidates).find_map(|delta| {
+            let index = (start + delta) % count;
+            let entry = self.visible_entries.get(index.checked_sub(offset)?)?;
+            entry
+                .title
+                .as_bytes()
+                .first()
+                .is_some_and(|first| first.eq_ignore_ascii_case(&input))
+                .then_some(index)
+        });
+        target
+            .map(|index| self.select_list_index(index))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn scroll_selection_info_by(
+        &mut self,
+        amount: i32,
+        metrics: clonk_frontend::startup_scensel::SelectionInfoScrollMetrics,
+    ) -> bool {
+        let next = metrics.clamp_offset(self.selection_info_scroll.saturating_add(amount));
+        if next == self.selection_info_scroll {
+            return false;
+        }
+        self.selection_info_scroll = next;
+        true
+    }
+
+    /// Applies the edit buffer like `OnSearchBarEnter -> UpdateList`
+    /// (C4StartupScenSelDlg.h:434-437), preserving the selected entry by
+    /// identity when it still survives and otherwise selecting the first.
+    pub(crate) fn submit_search(&mut self) -> Vec<StartupMenuAction> {
+        let old_selection = self
+            .selected_scenario()
+            .map(|entry| entry.identifier.clone());
+        self.applied_search_text = self.search_edit.text().to_string();
+        self.refresh_menu_entries();
+        let index = old_selection
+            .as_deref()
+            .and_then(|identifier| {
+                self.visible_entries
+                    .iter()
+                    .position(|entry| entry.identifier == identifier)
+            })
+            .or_else(|| (!self.visible_entries.is_empty()).then_some(0));
+        index
+            .map(|index| index + usize::from(self.include_back))
+            .map(|index| match self.menu.select_entry_by_index(index) {
+                Ok(actions) => actions,
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to select submitted scenario search result");
+                    Vec::new()
+                }
+            })
+            .unwrap_or_else(|| {
+                self.sync_definition_checkbox_to_selection();
+                Vec::new()
+            })
+    }
+
+    pub(crate) fn clear_search(&mut self) {
+        self.search_edit = SearchEditState::default();
+        self.applied_search_text.clear();
+    }
+
+    pub(crate) fn menu(&mut self) -> &mut StartupMenu {
+        &mut self.menu
+    }
+
+    pub(crate) fn configure_current_folder_map(
+        &mut self,
+        show_folder_maps: bool,
+        screen_width: i32,
+        screen_height: i32,
+        mission_access: &MissionAccessStore,
+        languages: &[String],
+    ) -> bool {
+        let Some(layer) = self.stack.last_mut() else {
+            return false;
+        };
+        layer.style = MenuLayerStyle::Book;
+        if !show_folder_maps {
+            if !self.scensel_title_present {
+                self.scensel_title_present = true;
+                self.scensel_title_topmost = true;
+            }
+            return false;
+        }
+        let Some(folder) = layer.folder.clone() else {
+            if !self.scensel_title_present {
+                self.scensel_title_present = true;
+                self.scensel_title_topmost = true;
+            }
+            return false;
+        };
+        let Some(map) = load_map_folder_data(
+            &folder,
+            screen_width,
+            screen_height,
+            mission_access,
+            languages,
+        ) else {
+            if !self.scensel_title_present {
+                self.scensel_title_present = true;
+                self.scensel_title_topmost = true;
+            }
+            return false;
+        };
+        if map.hide_title {
+            self.scensel_title_present = false;
+        }
+        layer.style = MenuLayerStyle::Map(map);
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
+        self.sync_definition_checkbox_to_selection();
+        true
+    }
+
+    pub(crate) fn activate_map_button(&mut self, index: usize) -> Option<StartupMenuAction> {
+        let map = self.current_map_mut()?;
+        let button = map.scenarios.get(index)?;
+        let entry = button.entry.clone();
+        let previous_identifier = map.selected_entry().map(|entry| entry.identifier.clone());
+        let single_click = button.single_click;
+        map.selected_button = Some(index);
+        let entry = entry?;
+        let summary = clonk_frontend::ScenarioSummary {
+            identifier: entry.identifier.clone(),
+            title: entry.title.clone(),
+            kind: entry.kind,
+        };
+        if single_click || previous_identifier.as_deref() == Some(entry.identifier.as_str()) {
+            Some(if summary.kind == ScenarioKind::Folder {
+                StartupMenuAction::OpenEntry(summary)
+            } else {
+                StartupMenuAction::StartScenario(summary)
+            })
+        } else {
+            Some(StartupMenuAction::SelectionChanged(summary))
+        }
+    }
+
+    pub(crate) fn start_selected_map_scenario(&self) -> Option<StartupMenuAction> {
+        let entry = self.current_map()?.selected_entry()?;
+        let summary = clonk_frontend::ScenarioSummary {
+            identifier: entry.identifier.clone(),
+            title: entry.title.clone(),
+            kind: entry.kind,
+        };
+        Some(if summary.kind == ScenarioKind::Folder {
+            StartupMenuAction::OpenEntry(summary)
+        } else {
+            StartupMenuAction::StartScenario(summary)
+        })
+    }
+
+    pub(crate) fn deselect_map(&mut self) -> bool {
+        let Some(map) = self.current_map_mut() else {
+            return false;
+        };
+        let changed = map.selected_button.take().is_some();
+        self.selection_info_scroll = 0;
+        self.sync_definition_checkbox_to_selection();
+        changed
+    }
+
+    pub(crate) fn enter_folder(&mut self, identifier: &str) {
+        let Some(folder) = self
+            .current_entries()
+            .iter()
+            .find(|entry| {
+                entry.identifier == identifier && matches!(entry.kind, ScenarioKind::Folder)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        self.stack.push(MenuLayer::for_folder(folder));
+        self.pointer_position = None;
+        self.scenario_list_scroll = 0;
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
+        self.definition_checkbox_focused = false;
+        self.dialog_focus = ScenselDialogFocus::List;
+        self.clear_search();
+        self.refresh_menu_entries();
+    }
+
+    pub(crate) fn leave_folder(&mut self) {
+        if self.stack.len() <= 1 {
+            return;
+        }
+        self.stack.pop();
+        self.pointer_position = None;
+        self.scenario_list_scroll = 0;
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
+        self.definition_checkbox_focused = false;
+        self.dialog_focus = ScenselDialogFocus::List;
+        self.clear_search();
+        self.refresh_menu_entries();
+    }
+
+    pub(crate) fn refresh_menu_entries(&mut self) {
+        let needle = self.applied_search_text.to_lowercase();
+        self.visible_entries = if needle.is_empty() {
+            self.current_entries().to_vec()
+        } else {
+            let mut matches = Vec::new();
+            collect_current_folder_search_matches(self.current_entries(), &needle, &mut matches);
+            matches
+        };
+        let entries = build_menu_entries(&self.visible_entries, self.include_back);
+        if let Err(err) = self.menu.set_entries(entries) {
+            tracing::error!(error = %err, "failed to update startup menu entries");
+        }
+        self.list_scroll_selection = None;
+    }
+
+    pub(crate) fn label_path(&self) -> String {
+        if self.stack.is_empty() {
+            return String::new();
+        }
+        self.stack
+            .iter()
+            .map(|layer| layer.title.clone())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+
+    pub(crate) fn select_default_entry(&mut self) -> Vec<StartupMenuAction> {
+        if self.current_map().is_some() {
+            self.sync_definition_checkbox_to_selection();
+            return Vec::new();
+        }
+        if self.current_entries().is_empty() {
+            return Vec::new();
+        }
+        // The first real entry (past the Back row when present), mirroring
+        // SelectFirstEntry (C4StartupScenSelDlg.cpp:1536-1537).
+        let target_index = usize::from(self.include_back);
+        match self.menu.select_entry_by_index(target_index) {
+            Ok(actions) => actions,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to select default scenario entry");
+                Vec::new()
+            }
+        }
+    }
+}
+
+fn collect_current_folder_search_matches(
+    entries: &[FrontendScenario],
+    needle: &str,
+    matches: &mut Vec<FrontendScenario>,
+) {
+    for entry in entries {
+        let mut name = entry.title.clone();
+        Markup::strip_markup(&mut name);
+        if name.to_lowercase().contains(needle) {
+            matches.push(entry.clone());
+        }
+    }
+}
+
+fn find_frontend_entry_path(
+    entries: &[FrontendScenario],
+    identifier: &str,
+) -> Option<Vec<FrontendScenario>> {
+    for entry in entries {
+        if entry.identifier == identifier {
+            return Some(vec![entry.clone()]);
+        }
+        if let Some(mut descendants) = find_frontend_entry_path(&entry.children, identifier) {
+            let mut path = Vec::with_capacity(descendants.len() + 1);
+            path.push(entry.clone());
+            path.append(&mut descendants);
+            return Some(path);
+        }
+    }
+    None
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ParsedMapFolder {
+    scenario_info_area: MapFolderRect,
+    pub(crate) min_res_x: i32,
+    pub(crate) min_res_y: i32,
+    fullscreen_background: bool,
+    hide_title: bool,
+    pub(crate) scenarios: Vec<ParsedMapFolderScenario>,
+    access_overlays: Vec<ParsedMapFolderAccess>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ParsedMapFolderScenario {
+    pub(crate) filename: String,
+    base_image: String,
+    overlay_image: String,
+    single_click: bool,
+    area: MapFolderRect,
+    title: String,
+    title_font_size: i32,
+    title_color_inactive: u32,
+    title_color_active: u32,
+    title_offset_x: i32,
+    title_offset_y: i32,
+    title_align: u8,
+    title_use_book_font: bool,
+    image_dump: bool,
+}
+
+impl Default for ParsedMapFolderScenario {
+    fn default() -> Self {
+        Self {
+            filename: String::new(),
+            base_image: String::new(),
+            overlay_image: String::new(),
+            single_click: false,
+            area: MapFolderRect::default(),
+            title: String::new(),
+            title_font_size: 20,
+            title_color_inactive: 0x7fff_ffff,
+            title_color_active: 0x0fff_ffff,
+            title_offset_x: 0,
+            title_offset_y: 0,
+            title_align: 1,
+            title_use_book_font: true,
+            image_dump: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParsedMapFolderAccess {
+    password: String,
+    overlay_image: String,
+    area: MapFolderRect,
+}
+
+#[derive(Clone, Copy)]
+enum ParsedMapFolderSection {
+    None,
+    Root,
+    Scenario(usize),
+    Access(usize),
+}
+
+pub(crate) fn parse_map_folder(text: &str) -> Result<ParsedMapFolder> {
+    let mut parsed = ParsedMapFolder::default();
+    let mut section = ParsedMapFolderSection::None;
+    let mut section_indentation = 0;
+    let mut root_active = false;
+    let mut saw_root = false;
+    let mut seen_values = HashSet::new();
+
+    for raw_line in text.lines() {
+        let raw_line = raw_line.trim_end_matches('\r');
+        let indentation = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let line = raw_line[indentation..].trim_end();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let name = &line[1..line.len() - 1];
+            if indentation == 0 {
+                root_active = name == "FolderMap";
+                section_indentation = 0;
+                section = if root_active {
+                    saw_root = true;
+                    ParsedMapFolderSection::Root
+                } else {
+                    ParsedMapFolderSection::None
+                };
+                continue;
+            }
+            if !root_active || (indentation > section_indentation && section_indentation > 0) {
+                section = ParsedMapFolderSection::None;
+                section_indentation = indentation;
+                continue;
+            }
+            section_indentation = indentation;
+            section = match name {
+                "Scenario" => {
+                    parsed.scenarios.push(ParsedMapFolderScenario::default());
+                    ParsedMapFolderSection::Scenario(parsed.scenarios.len() - 1)
+                }
+                "AccessGfx" => {
+                    parsed
+                        .access_overlays
+                        .push(ParsedMapFolderAccess::default());
+                    ParsedMapFolderSection::Access(parsed.access_overlays.len() - 1)
+                }
+                _ => ParsedMapFolderSection::None,
+            };
+            continue;
+        }
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        let value = map_folder_string(raw_value);
+        if indentation == 0 && root_active {
+            section = ParsedMapFolderSection::Root;
+            section_indentation = 0;
+        }
+        let section_key = match section {
+            ParsedMapFolderSection::None => None,
+            ParsedMapFolderSection::Root if indentation == 0 => Some((0_u8, 0_usize)),
+            ParsedMapFolderSection::Root => None,
+            ParsedMapFolderSection::Scenario(index)
+                if indentation >= section_indentation && section_indentation > 0 =>
+            {
+                Some((1, index))
+            }
+            ParsedMapFolderSection::Access(index)
+                if indentation >= section_indentation && section_indentation > 0 =>
+            {
+                Some((2, index))
+            }
+            ParsedMapFolderSection::Scenario(_) | ParsedMapFolderSection::Access(_) => None,
+        };
+        let Some((section_kind, section_index)) = section_key else {
+            continue;
+        };
+        if !seen_values.insert((section_kind, section_index, key.to_string())) {
+            continue;
+        }
+        match section {
+            ParsedMapFolderSection::None => {}
+            ParsedMapFolderSection::Root => match key {
+                "ScenInfoArea" => parsed.scenario_info_area = parse_map_folder_rect(&value)?,
+                "MinResX" => parsed.min_res_x = parse_map_folder_i32(&value, key)?,
+                "MinResY" => parsed.min_res_y = parse_map_folder_i32(&value, key)?,
+                "FullscreenBG" => {
+                    parsed.fullscreen_background = parse_map_folder_bool(&value, key)?
+                }
+                "HideTitle" => parsed.hide_title = parse_map_folder_bool(&value, key)?,
+                _ => {}
+            },
+            ParsedMapFolderSection::Scenario(index) => {
+                let scenario = &mut parsed.scenarios[index];
+                match key {
+                    "File" => scenario.filename = value,
+                    "BaseImage" => scenario.base_image = value,
+                    "OverlayImage" => scenario.overlay_image = value,
+                    "SingleClick" => scenario.single_click = parse_map_folder_bool(&value, key)?,
+                    "Area" => scenario.area = parse_map_folder_rect(&value)?,
+                    "Title" => scenario.title = value,
+                    "TitleFontSize" => {
+                        scenario.title_font_size = parse_map_folder_i32(&value, key)?
+                    }
+                    "TitleColorInactive" => {
+                        scenario.title_color_inactive = parse_map_folder_u32(&value, key)?
+                    }
+                    "TitleColorActive" => {
+                        scenario.title_color_active = parse_map_folder_u32(&value, key)?
+                    }
+                    "TitleOffX" => scenario.title_offset_x = parse_map_folder_i32(&value, key)?,
+                    "TitleOffY" => scenario.title_offset_y = parse_map_folder_i32(&value, key)?,
+                    "TitleAlign" => {
+                        scenario.title_align = value
+                            .parse::<u8>()
+                            .with_context(|| format!("invalid FolderMap {key} value `{value}`"))?
+                    }
+                    "TitleUseBookFont" => {
+                        scenario.title_use_book_font = parse_map_folder_bool(&value, key)?
+                    }
+                    "ImageDump" => scenario.image_dump = parse_map_folder_bool(&value, key)?,
+                    _ => {}
+                }
+            }
+            ParsedMapFolderSection::Access(index) => {
+                let access = &mut parsed.access_overlays[index];
+                match key {
+                    "Access" => access.password = value,
+                    "OverlayImage" => access.overlay_image = value,
+                    "Area" => access.area = parse_map_folder_rect(&value)?,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    anyhow::ensure!(saw_root, "FolderMap.txt has no [FolderMap] root");
+    Ok(parsed)
+}
+
+fn map_folder_string(raw: &str) -> String {
+    let value = raw.trim();
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn parse_map_folder_i32(value: &str, key: &str) -> Result<i32> {
+    value
+        .parse::<i32>()
+        .with_context(|| format!("invalid FolderMap {key} value `{value}`"))
+}
+
+fn parse_map_folder_u32(value: &str, key: &str) -> Result<u32> {
+    let parsed = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .map(|hex| u32::from_str_radix(hex, 16))
+        .unwrap_or_else(|| value.parse::<u32>());
+    parsed.with_context(|| format!("invalid FolderMap {key} value `{value}`"))
+}
+
+fn parse_map_folder_bool(value: &str, key: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => anyhow::bail!("invalid FolderMap {key} value `{value}`"),
+    }
+}
+
+fn parse_map_folder_rect(value: &str) -> Result<MapFolderRect> {
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<i32>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("invalid FolderMap rectangle `{value}`"))?;
+    anyhow::ensure!(
+        values.len() == 4,
+        "invalid FolderMap rectangle `{value}`: expected four values"
+    );
+    Ok(MapFolderRect {
+        x: values[0],
+        y: values[1],
+        w: values[2],
+        h: values[3],
+    })
+}
+
+pub(crate) fn load_map_folder_data(
+    folder: &FrontendScenario,
+    screen_width: i32,
+    screen_height: i32,
+    mission_access: &MissionAccessStore,
+    languages: &[String],
+) -> Option<MapFolderData> {
+    if !folder
+        .path
+        .as_deref()
+        .and_then(Path::extension)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
+    {
+        return None;
+    }
+
+    let mut seen = HashSet::new();
+    for path in folder.path.iter().chain(folder.source_paths.iter()) {
+        if !seen.insert(scenario_root_key(path)) {
+            continue;
+        }
+        let group = match open_group_path_for_folder_map(path) {
+            Ok(group) => group,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "failed to inspect FolderMap group");
+                continue;
+            }
+        };
+        let bytes = match group.load_entry_string("FolderMap.txt") {
+            Ok(bytes) => bytes,
+            Err(GroupError::EntryNotFound(_)) => continue,
+            Err(GroupError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "FolderMap data could not be loaded; using book view");
+                continue;
+            }
+        };
+        let text = clonk_resources::decode_legacy_script_text(&bytes);
+        match build_map_folder_data(
+            path,
+            &group,
+            folder,
+            &text,
+            screen_width,
+            screen_height,
+            mission_access,
+            languages,
+        ) {
+            Ok(map) => return Some(map),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "FolderMap could not be initialized; using book view");
+            }
+        }
+    }
+    None
+}
+
+fn build_map_folder_data(
+    source_path: &Path,
+    group: &Group,
+    folder: &FrontendScenario,
+    text: &str,
+    screen_width: i32,
+    screen_height: i32,
+    mission_access: &MissionAccessStore,
+    languages: &[String],
+) -> Result<MapFolderData> {
+    let text = clonk_resources::localize_script_source(group, text, languages)?;
+    let parsed = parse_map_folder(&text)?;
+    anyhow::ensure!(
+        parsed.min_res_x == 0 || parsed.min_res_x <= screen_width,
+        "FolderMap requires width {}, current width is {screen_width}",
+        parsed.min_res_x
+    );
+    anyhow::ensure!(
+        parsed.min_res_y == 0 || parsed.min_res_y <= screen_height,
+        "FolderMap requires height {}, current height is {screen_height}",
+        parsed.min_res_y
+    );
+
+    let background = load_map_folder_background(group)?;
+    let mut scenario_info_area = parsed.scenario_info_area;
+    if scenario_info_area.w == 0 {
+        let width = i32::try_from(background.width()).unwrap_or(i32::MAX);
+        let height = i32::try_from(background.height()).unwrap_or(i32::MAX);
+        scenario_info_area = MapFolderRect {
+            x: width * 2 / 3,
+            y: height / 16,
+            w: width / 3,
+            h: height * 7 / 8,
+        };
+    }
+
+    let mut scenarios = Vec::with_capacity(parsed.scenarios.len());
+    for scenario in parsed.scenarios {
+        let entry = folder.children.iter().find(|entry| {
+            entry
+                .identifier
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&scenario.filename))
+        });
+        let replacement = entry
+            .map(|entry| entry.title.as_str())
+            .unwrap_or("<c ff0000>ERROR</c>");
+        let title = scenario.title.replace("TITLE", replacement);
+        let base_image = if scenario.base_image.is_empty() || scenario.image_dump {
+            None
+        } else {
+            Some(load_map_folder_image(group, &scenario.base_image)?)
+        };
+        let overlay_image = if scenario.overlay_image.is_empty() {
+            None
+        } else {
+            Some(load_map_folder_image(group, &scenario.overlay_image)?)
+        };
+        if entry.is_some_and(|entry| !entry.has_mission_access(mission_access)) {
+            continue;
+        }
+        scenarios.push(MapFolderScenarioButton {
+            entry: entry.cloned(),
+            base_image,
+            overlay_image,
+            single_click: scenario.single_click,
+            area: scenario.area,
+            title,
+            title_font_size: scenario.title_font_size,
+            title_color_inactive: scenario.title_color_inactive,
+            title_color_active: scenario.title_color_active,
+            title_offset_x: scenario.title_offset_x,
+            title_offset_y: scenario.title_offset_y,
+            title_align: scenario.title_align,
+            title_use_book_font: scenario.title_use_book_font,
+        });
+    }
+
+    let mut access_overlays = Vec::new();
+    for access in parsed.access_overlays {
+        let image = (!access.overlay_image.is_empty())
+            .then(|| load_map_folder_image(group, &access.overlay_image))
+            .transpose()?;
+        if access.password.is_empty() || mission_access.contains(&access.password) {
+            access_overlays.push(MapFolderAccessOverlay {
+                image,
+                area: access.area,
+            });
+        }
+    }
+
+    Ok(MapFolderData {
+        source_path: source_path.to_path_buf(),
+        background,
+        scenario_info_area,
+        fullscreen_background: parsed.fullscreen_background,
+        hide_title: parsed.hide_title,
+        scenarios,
+        access_overlays,
+        selected_button: None,
+    })
+}
+
+fn load_map_folder_background(group: &Group) -> Result<ImageData> {
+    for extension in ["png", "bmp", "jpeg", "jpg"] {
+        let name = format!("FolderMap.{extension}");
+        match group.read_file(&name) {
+            Ok(bytes) => return decode_map_folder_image(&name, &bytes),
+            Err(GroupError::EntryNotFound(_)) => {}
+            Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("loading {name}")),
+        }
+    }
+    anyhow::bail!("FolderMap background graphic is missing")
+}
+
+fn load_map_folder_image(group: &Group, name: &str) -> Result<ImageData> {
+    if Path::new(name).extension().is_none() {
+        for extension in ["png", "bmp", "jpeg", "jpg"] {
+            let candidate = format!("{name}.{extension}");
+            match group.read_file(&candidate) {
+                Ok(bytes) => return decode_map_folder_image(&candidate, &bytes),
+                Err(GroupError::EntryNotFound(_)) => {}
+                Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("loading FolderMap image `{candidate}`"));
+                }
+            }
+        }
+        anyhow::bail!("FolderMap image `{name}` is missing")
+    }
+    let bytes = group
+        .read_file(name)
+        .with_context(|| format!("loading FolderMap image `{name}`"))?;
+    decode_map_folder_image(name, &bytes)
+}
+
+fn decode_map_folder_image(name: &str, bytes: &[u8]) -> Result<ImageData> {
+    let image = image::load_from_memory(bytes)
+        .with_context(|| format!("decoding FolderMap image `{name}`"))?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    let mut pixels = image.into_raw();
+    for pixel in pixels.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            pixel[..3].fill(0);
+        }
+    }
+    Ok(ImageData::new(width, height, pixels))
+}
+
+pub(crate) fn open_group_path_for_folder_map(path: &Path) -> std::result::Result<Group, GroupError> {
+    if path.exists() {
+        return Group::open(path);
+    }
+
+    // Packed child groups expose a logical `outer.c4f/inner.c4f` root even
+    // though only `outer.c4f` exists in the filesystem. Reopen the nearest
+    // real ancestor and traverse children through the group's
+    // case-insensitive index instead of treating the logical path as a file.
+    let mut ancestor = path.to_path_buf();
+    let mut children = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name().map(|name| name.to_os_string()) else {
+            return Err(GroupError::Missing(path.to_path_buf()));
+        };
+        children.push(PathBuf::from(name));
+        if !ancestor.pop() {
+            return Err(GroupError::Missing(path.to_path_buf()));
+        }
+    }
+    let mut group = Group::open(&ancestor)?;
+    for child in children.iter().rev() {
+        group = open_child_flexible(&group, child)?
+            .ok_or_else(|| GroupError::EntryNotFound(path.to_path_buf()))?;
+    }
+    Ok(group)
+}
+
+pub(crate) fn packed_group_bytes(path: &Path, maker: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    // A packed top-level group is copied byte-for-byte. C4Group::raw_image is
+    // the uncompressed nested image and therefore is not a standalone file.
+    if path.is_file() {
+        return fs::read(path).map_err(|error| error.to_string());
+    }
+    if path.is_dir() {
+        let group = Group::open(path).map_err(|error| error.to_string())?;
+        let mut group = MutableGroup::from_group(&group).map_err(|error| error.to_string())?;
+        if !maker.is_empty() {
+            group.set_maker_bytes_recursively(maker);
+        }
+        return group.pack().map_err(|error| error.to_string());
+    }
+
+    // A logical child below a packed ancestor has no physical path. Re-wrap
+    // its exact raw image in C4Group's standalone gzip envelope.
+    let group = open_group_path_for_folder_map(path).map_err(|error| error.to_string())?;
+    let image = group.raw_image().map_err(|error| error.to_string())?;
+    clonk_resources::compress_c4group_image(&image).map_err(|error| error.to_string())
+}
+
+impl MainMenuState {
+    pub(crate) fn new(menu: StartupMainMenu, participants_label: String) -> Self {
+        Self {
+            menu,
+            participants_label,
+        }
+    }
+
+    pub(crate) fn pointer_position(&self) -> Option<GuiPoint> {
+        self.menu.pointer_position()
+    }
+
+    pub(crate) fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.menu.set_pointer_position(position);
+    }
+
+    pub(crate) fn participants_contains(&self, point: GuiPoint) -> bool {
+        self.menu
+            .participants_contains(&self.participants_label, point)
+    }
+
+    pub(crate) fn tooltip_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        self.menu.tooltip_at(&self.participants_label, point)
+    }
+
+    pub(crate) fn handle_pointer_move(&mut self, point: GuiPoint) -> Vec<MainMenuAction> {
+        self.menu.handle_pointer_move(point)
+    }
+
+    pub(crate) fn handle_pointer_down(&mut self, point: GuiPoint) -> Vec<MainMenuAction> {
+        self.menu.handle_pointer_down(point)
+    }
+
+    pub(crate) fn handle_pointer_up(&mut self, point: GuiPoint) -> Vec<MainMenuAction> {
+        self.menu.handle_pointer_up(point)
+    }
+
+    pub(crate) fn handle_key_down(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
+        self.menu.handle_key_down(key)
+    }
+
+    pub(crate) fn handle_key_up(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
+        self.menu.handle_key_up(key)
+    }
+
+    pub(crate) fn pointer_left(&mut self) {
+        self.menu.pointer_left();
+    }
+
+    pub(crate) fn resize(&mut self, width: f32, height: f32) {
+        self.menu.resize(width, height);
+    }
+
+    pub(crate) fn render(&mut self, surface: &mut Surface, draw_focus: bool) {
+        self.menu
+            .render_with_draw_focus(surface, &self.participants_label, draw_focus);
+    }
+
+    pub(crate) fn render_chrome(&mut self, surface: &mut Surface) {
+        self.menu.render_chrome(surface);
+    }
+
+    pub(crate) fn render_native_text(
+        &self,
+        surface: &mut Surface,
+        fonts: &clonk_frontend::clonk_fonts::NativeClonkFontSet,
+        physical_offset: (i32, i32),
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
+        self.menu.render_native_text_with_offset(
+            surface,
+            fonts,
+            &self.participants_label,
+            physical_offset,
+            gamma,
+        );
+    }
+
+    pub(crate) fn update_participants_label(&mut self, label: String) {
+        self.participants_label = label;
+    }
+}
+
+pub(crate) const PLACEHOLDER_PREVIEW_WIDTH: u32 = 320;
+pub(crate) const PLACEHOLDER_PREVIEW_HEIGHT: u32 = 200;
+
+pub(crate) fn generate_preview_placeholder(kind: ScenarioKind, title: &str) -> ImageData {
+    let (top, bottom, accent) = preview_palette(kind);
+    let mut pixels =
+        vec![0u8; (PLACEHOLDER_PREVIEW_WIDTH * PLACEHOLDER_PREVIEW_HEIGHT * 4) as usize];
+
+    let mut hasher = DefaultHasher::new();
+    title.hash(&mut hasher);
+    let seed = hasher.finish();
+
+    let stripe_spacing = 5 + (seed % 5) as u32;
+    let stripe_offset = if stripe_spacing == 0 {
+        0
+    } else {
+        (seed as u32) % stripe_spacing
+    };
+    let noise_seed = seed.rotate_left(17) ^ 0x9e37_79b9_7f4a_7c15;
+    let highlight_start = PLACEHOLDER_PREVIEW_HEIGHT.saturating_sub(48);
+
+    for y in 0..PLACEHOLDER_PREVIEW_HEIGHT {
+        let t = if PLACEHOLDER_PREVIEW_HEIGHT > 1 {
+            y as f32 / (PLACEHOLDER_PREVIEW_HEIGHT - 1) as f32
+        } else {
+            0.0
+        };
+        let mut base = lerp_color(top, bottom, t);
+        if y >= highlight_start {
+            let emphasis = (y - highlight_start) as f32 / 48.0;
+            base = blend_toward(base, accent, (0.25 + emphasis * 0.45).clamp(0.0, 0.65));
+        }
+
+        for x in 0..PLACEHOLDER_PREVIEW_WIDTH {
+            let mut color = base;
+            if ((x + y + stripe_offset) % stripe_spacing) == 0 {
+                color = blend_toward(color, accent, 0.35);
+            }
+
+            let base_noise = noise_seed
+                .wrapping_add((x as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                .wrapping_add((y as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+            let noise = (base_noise ^ (base_noise >> 32)) as u8;
+            let jitter = (noise as i16 - 128) / 18;
+            color = adjust_color_brightness(color, jitter);
+
+            let idx = ((y * PLACEHOLDER_PREVIEW_WIDTH + x) * 4) as usize;
+            pixels[idx] = color.r;
+            pixels[idx + 1] = color.g;
+            pixels[idx + 2] = color.b;
+            pixels[idx + 3] = color.a;
+        }
+    }
+
+    ImageData::new(
+        PLACEHOLDER_PREVIEW_WIDTH,
+        PLACEHOLDER_PREVIEW_HEIGHT,
+        pixels,
+    )
+}
+
+fn preview_palette(kind: ScenarioKind) -> (Color, Color, Color) {
+    match kind {
+        ScenarioKind::Scenario => (
+            Color::opaque(36, 52, 104),
+            Color::opaque(14, 20, 40),
+            Color::opaque(220, 184, 104),
+        ),
+        ScenarioKind::Folder => (
+            Color::opaque(30, 68, 72),
+            Color::opaque(14, 26, 32),
+            Color::opaque(160, 216, 200),
+        ),
+        ScenarioKind::Editor => (
+            Color::opaque(96, 52, 32),
+            Color::opaque(32, 20, 16),
+            Color::opaque(228, 164, 100),
+        ),
+    }
+}
+
+fn lerp_color(start: Color, end: Color, t: f32) -> Color {
+    let clamped = t.clamp(0.0, 1.0);
+    let lerp_channel = |s: u8, e: u8| -> u8 {
+        (s as f32 + (e as f32 - s as f32) * clamped)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::new(
+        lerp_channel(start.r, end.r),
+        lerp_channel(start.g, end.g),
+        lerp_channel(start.b, end.b),
+        255,
+    )
+}
+
+fn blend_toward(base: Color, target: Color, factor: f32) -> Color {
+    lerp_color(base, target, factor.clamp(0.0, 1.0))
+}
+
+fn adjust_color_brightness(color: Color, delta: i16) -> Color {
+    let adjust = |channel: u8| -> u8 {
+        let value = channel as i16 + delta;
+        value.clamp(0, 255) as u8
+    };
+    Color::new(adjust(color.r), adjust(color.g), adjust(color.b), color.a)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FrontendScenario {
+    pub(crate) identifier: String,
+    pub(crate) title: String,
+    pub(crate) description: Option<String>,
+    pub(crate) kind: ScenarioKind,
+    pub(crate) is_editable: bool,
+    pub(crate) is_playable: bool,
+    /// Scenario.txt `[Head] MissionAccess`. This is presentation/catalog
+    /// metadata only; the live process-local store decides current access.
+    pub(crate) mission_access: Option<String>,
+    pub(crate) path: Option<PathBuf>,
+    /// Every real/logical group path that contributed to this merged entry.
+    /// `path` remains the first-root presentation source, while parity
+    /// preflights must inspect all contributors.
+    pub(crate) source_paths: Vec<PathBuf>,
+    pub(crate) root_label: Option<String>,
+    pub(crate) preview: Option<ImageData>,
+    /// Right-page Title.png/Title.bmp picture (C4ScenarioListLoader::Entry
+    /// fctTitle); unlike `preview` this never falls back to Loader/Icon art.
+    pub(crate) title_picture: Option<ImageData>,
+    pub(crate) children: Vec<FrontendScenario>,
+    pub(crate) folder_index: Option<i32>,
+    pub(crate) icon_index: Option<i32>,
+    pub(crate) difficulty: Option<i32>,
+    /// Author of packed groups (C4StartupScenSelDlg.cpp:536-552).
+    pub(crate) author: Option<String>,
+    /// Version.txt contents (C4StartupScenSelDlg.cpp:554).
+    pub(crate) version: Option<String>,
+    /// Scenario.txt [Definitions] LocalOnly (C4Scenario.cpp:482).
+    pub(crate) local_only: Option<bool>,
+    /// Scenario.txt [Definitions] AllowUserChange (C4Scenario.cpp:483).
+    pub(crate) allow_user_change: Option<bool>,
+    /// Ordered external modules from [Definitions], used to seed the fixed
+    /// entries in C4DefinitionSelDlg.
+    pub(crate) definition_modules: Vec<String>,
+}
+
