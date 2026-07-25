@@ -2180,6 +2180,81 @@
     }
 
     #[test]
+    fn crew_death_sound_starts_from_the_dying_object_rendered_audibility() {
+        // C4Object::GetAudibility (C4Object.cpp:5622-5628) returns the cached
+        // Audible whenever it is not -1; only C4GraphicsSystem::Execute's
+        // ResetAudibility (C4GraphicsSystem.cpp:158-159) invalidates it. The
+        // object's own movement never does. A crew death is exactly that
+        // case: AssignDeath moves the falling clonk, clears the cursor, and
+        // the scenario relaunches a replacement elsewhere before the frame's
+        // audio is mixed (EkeReloaded SFT.c4d/Script.c:702-721 -> HarpoonRace
+        // RelaunchPlayer). The listener is therefore already across the map
+        // while the dying clonk still carries the audibility drawn in the
+        // frame it died in, so its Sound("SF_Die") must still get a channel.
+        let dir = tempdir().expect("death sound fixture");
+        let scenario = dir.path().join("Death.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("SF_Die.wav"), silent_pcm_wav(10_000))
+            .expect("write death sample");
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.configure_scenario(Some(&scenario));
+
+        let clonk = make_object(1, "SF5B", Vector2::new(2_000, 100));
+        let viewports = [audio_viewport(0, 1, clonk.position)];
+        let mut drawn = make_snapshot(vec![clonk.clone()], Vec::new());
+        drawn.players = vec![PlayerState {
+            id: 1,
+            cursor: Some(clonk.id),
+            viewports: vec![clonk_engine::PlayerViewport::new(clonk.position)],
+            ..Default::default()
+        }];
+        audio.cache_rendered_object_audibility(
+            &HashMap::from([(
+                clonk.id,
+                vec![RenderedAudibilityCall::World {
+                    point: clonk.position,
+                }],
+            )]),
+            &drawn,
+            &viewports,
+        );
+
+        let mut corpse = clonk;
+        corpse.position.y += 1;
+        let replacement = make_object(2, "SF5B", Vector2::new(100, 100));
+        let mut died = make_snapshot(vec![corpse.clone(), replacement.clone()], Vec::new());
+        died.players = vec![PlayerState {
+            id: 1,
+            cursor: Some(replacement.id),
+            viewports: vec![clonk_engine::PlayerViewport::new(replacement.position)],
+            ..Default::default()
+        }];
+        assert_eq!(
+            compute_mix_values_for(100, Some(corpse.id), None, &died, &viewports),
+            (0.0, 0.0),
+            "the relaunched listener alone would silence the death sound",
+        );
+
+        audio
+            .start_sound(
+                "SF_Die",
+                Some(corpse.id),
+                100,
+                false,
+                false,
+                None,
+                &died,
+                &viewports,
+            )
+            .expect("the death sound starts");
+        let key = SoundInstanceKey::new("SF_Die", Some(corpse.id));
+        assert!(
+            audio.active_channels[&key].channel.is_some(),
+            "the retained draw audibility must keep the death sound audible",
+        );
+    }
+
+    #[test]
     fn post_render_attached_mix_releases_then_restores_channel_capacity() {
         let dir = tempdir().expect("post-render sound fixture");
         let scenario = dir.path().join("Audio.c4s");
@@ -5130,3 +5205,5 @@
             .expect("ownerless observer viewport renders");
         assert!(frame.iter().any(|byte| *byte != 0x7a));
     }
+
+

@@ -750,7 +750,7 @@
     }
 
     #[test]
-    fn rendered_object_audibility_cache_retains_until_render_and_falls_back_after_motion() {
+    fn rendered_object_audibility_cache_retains_until_the_next_completed_render() {
         let line = make_object(1, "LINE", Vector2::new(2_000, 100));
         let mut snapshot = make_snapshot(vec![line.clone()], Vec::new());
         snapshot.definition_lines.insert(
@@ -777,6 +777,10 @@
             "a sound tick without a completed render retains the prior draw cache",
         );
 
+        // C4Object::GetAudibility (C4Object.cpp:5622-5628) only recomputes
+        // when Audible is -1, which C4GraphicsSystem::Execute's
+        // ResetAudibility sets. Movement between the draw and the mix leaves
+        // the drawn pair in place and observably apart from the origin mix.
         snapshot.objects[0].position.x += 1;
         assert_eq!(
             compute_mix_values_for_with_rendered_audibility(
@@ -787,8 +791,13 @@
                 &viewports,
                 &audio.rendered_object_audibility,
             ),
+            (0.5, 0.7),
+            "movement without a new render keeps the retained draw audibility",
+        );
+        assert_eq!(
             compute_mix_values_for(100, Some(line.id), None, &snapshot, &viewports),
-            "movement without a new render rejects the stale cache and uses the origin",
+            (0.0, 1.0),
+            "the live origin mix remains observably different",
         );
 
         audio.cache_rendered_object_audibility(&HashMap::new(), &snapshot, &viewports);

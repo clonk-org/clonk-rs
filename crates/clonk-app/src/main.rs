@@ -7538,13 +7538,19 @@ fn compute_mix_values_for_with_rendered_audibility(
     )
 }
 
+/// `C4Object::GetAudibility` (C4Object.cpp:5622-5628): the drawn Audible /
+/// AudiblePan pair is authoritative until the next completed graphics pass
+/// runs `ResetAudibility` (C4GraphicsSystem.cpp:158-159). The object moving
+/// away from where it was drawn never invalidates it, so a sound started
+/// after the object has already moved this frame still mixes at the drawn
+/// audibility rather than falling back to a live listener distance.
 fn cached_attached_object_mix_values(
     target: &ObjectSnapshot,
     rendered_object_audibility: &HashMap<ObjectId, CachedObjectAudibilityMix>,
 ) -> Option<(u8, f32)> {
-    let cached = rendered_object_audibility.get(&target.id)?;
-    (cached.object_position == target.position)
-        .then_some((cached.audibility, cached.pan as f32 / 100.0))
+    rendered_object_audibility
+        .get(&target.id)
+        .map(|cached| (cached.audibility, cached.pan as f32 / 100.0))
 }
 
 fn reduce_rendered_object_audibility(
