@@ -590,12 +590,7 @@ impl GameApp {
                 id: player.id,
                 client_id,
                 name: player_name(player),
-                color: [
-                    ((color >> 16) & 0xff) as u8,
-                    ((color >> 8) & 0xff) as u8,
-                    (color & 0xff) as u8,
-                    255,
-                ],
+                color: readable_lobby_rgba(color),
                 icon,
                 joined_player_overlay: joined_player.and_then(|joined_player| {
                     default_crew_icon.as_ref().map(|crew| {
@@ -731,12 +726,7 @@ impl GameApp {
             id: 0,
             name: c4_presentation_text(local_name),
             nick: c4_presentation_text(nick),
-            color: [
-                ((local_client_color >> 16) & 0xff) as u8,
-                ((local_client_color >> 8) & 0xff) as u8,
-                (local_client_color & 0xff) as u8,
-                255,
-            ],
+            color: readable_lobby_rgba(local_client_color),
             status: LobbyClientStatus::Host,
             local: true,
             connected: false,
@@ -3132,10 +3122,7 @@ impl GameApp {
                             true
                         });
                     if removed_frontend_copy {
-                        let color = (u32::from(line.color[0]) << 16)
-                            | (u32::from(line.color[1]) << 8)
-                            | u32::from(line.color[2]);
-                        self.append_control_message_log(line.text, color, None);
+                        self.append_control_message_log(line.text, 0x00ff_1f1f, None);
                     }
                 }
                 _ => unreachable!("countdown presentation emitted a non-countdown action"),
@@ -5148,16 +5135,17 @@ impl GameApp {
     }
 
     fn append_lobby_command_log(&mut self, message: String) {
+        let color = readable_lobby_rgba(0x00ff_1f1f);
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.push_log(LobbyLogLine {
                 text: message.clone(),
-                color: [255, 31, 31, 255],
+                color,
             });
         } else if self.startup_view == StartupView::NetworkLobby {
             if let Some(lobby) = self.network_lobby.as_mut() {
                 lobby.push_log(LobbyLogLine {
                     text: message,
-                    color: [255, 31, 31, 255],
+                    color,
                 });
             }
         }

@@ -905,6 +905,26 @@ pub struct LobbyLogLine {
     pub color: [u8; 4],
 }
 
+/// Raise a GUI text color to the native lightness floor used for labels on
+/// black backgrounds (`C4GUI::MakeColorReadableOnBlack`, C4Gui.cpp:71-89).
+pub fn make_color_readable_on_black(color: u32) -> [u8; 4] {
+    let red = (color >> 16) & 0xff;
+    let green = (color >> 8) & 0xff;
+    let blue = color & 0xff;
+    let lightness = red * 50 + green * 87 + blue * 27;
+    let increment = if lightness < 16_575 {
+        (16_575 - lightness) / 164
+    } else {
+        0
+    };
+    [
+        (red + increment).min(255) as u8,
+        (green + increment).min(255) as u8,
+        (blue + increment).min(255) as u8,
+        0xff,
+    ]
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LobbyCountdownState {
     #[default]
@@ -4056,7 +4076,7 @@ impl GameLobby {
             LobbyCountdownPacket::Abort if previous.is_any() => {
                 let line = LobbyLogLine {
                     text: self.labels.start_aborted.clone(),
-                    color: [255, 31, 31, 255],
+                    color: make_color_readable_on_black(0x00ff_1f1f),
                 };
                 self.logs.push(line.clone());
                 self.chat_follow_bottom = true;
@@ -4075,7 +4095,7 @@ impl GameLobby {
                 };
                 let line = LobbyLogLine {
                     text,
-                    color: [255, 31, 31, 255],
+                    color: make_color_readable_on_black(0x00ff_1f1f),
                 };
                 self.logs.push(line.clone());
                 self.chat_follow_bottom = true;
@@ -8344,9 +8364,13 @@ mod tests {
             ]
         );
         let actions = lobby.apply_countdown_packet(LobbyCountdownPacket::Seconds(9));
+        // Lobby countdown logs enter MainDlg::OnLog, whose AddTextLine call
+        // enables readable-on-black conversion (src/C4GameLobby.cpp:738-753;
+        // src/C4GuiLabels.cpp:293-299).
         assert!(matches!(
             actions.last(),
-            Some(LobbyAction::AppendLog(LobbyLogLine { text, .. })) if text == "9..."
+            Some(LobbyAction::AppendLog(LobbyLogLine { text, color }))
+                if text == "9..." && *color == [255, 32, 32, 255]
         ));
         let _ = lobby.apply_countdown_packet(LobbyCountdownPacket::Abort);
         assert_eq!(

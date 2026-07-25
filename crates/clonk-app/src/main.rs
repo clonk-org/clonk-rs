@@ -3615,12 +3615,7 @@ impl GameApp {
             })
             .map(|client_id| self.control_message_lobby_chat_color(client_id))
             .unwrap_or(color);
-        let rgba = [
-            ((color >> 16) & 0xff) as u8,
-            ((color >> 8) & 0xff) as u8,
-            (color & 0xff) as u8,
-            0xff,
-        ];
+        let rgba = clonk_frontend::game_lobby::make_color_readable_on_black(color);
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.push_log(LobbyLogLine {
                 text: line,

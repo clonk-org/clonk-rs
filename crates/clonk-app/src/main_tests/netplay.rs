@@ -3474,8 +3474,8 @@
                 .map(|line| (&*line.text, line.color))
                 .collect::<Vec<_>>(),
             [
-                ("Host only!", [255, 31, 31, 255]),
-                ("Host only!", [255, 31, 31, 255]),
+                ("Host only!", [255, 32, 32, 255]),
+                ("Host only!", [255, 32, 32, 255]),
             ]
         );
     }

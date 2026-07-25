@@ -4262,13 +4262,10 @@ pub(crate) fn initial_control_clients(
     clients
 }
 
-pub(crate) fn lobby_rgba(color: u32) -> [u8; 4] {
-    [
-        ((color >> 16) & 0xff) as u8,
-        ((color >> 8) & 0xff) as u8,
-        (color & 0xff) as u8,
-        0xff,
-    ]
+pub(crate) fn readable_lobby_rgba(color: u32) -> [u8; 4] {
+    // Lobby client/player names are GUI labels with readable-on-black enabled
+    // (src/C4PlayerInfoListBox.cpp:72-87, 143, 648-685, 737-750, 824-825).
+    clonk_frontend::game_lobby::make_color_readable_on_black(color)
 }
 
 /// Reduce the selected message/data route snapshot to the value displayed by
@@ -4451,7 +4448,7 @@ pub(crate) fn classic_lobby_roster_projection(
             id: player.id,
             client_id,
             name,
-            color: lobby_rgba(if hide_random_color {
+            color: readable_lobby_rgba(if hide_random_color {
                 player.original_color
             } else {
                 player.color
@@ -4524,7 +4521,7 @@ pub(crate) fn classic_lobby_roster_projection(
             id: core.client_id,
             name: legacy_presentation_text(core.name.as_bytes()),
             nick: legacy_presentation_text(core.nick.as_bytes()),
-            color: lobby_rgba(first_user_color),
+            color: readable_lobby_rgba(first_user_color),
             status: if players.is_none() {
                 LobbyClientStatus::Unknown
             } else if core.client_id == 0 {
