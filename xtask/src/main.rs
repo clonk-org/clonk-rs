@@ -30,12 +30,11 @@ const MACOS_ICON_STEM: &str = "ClonkRust";
 const MACOS_ICON_SOURCE: &str = "planet/Graphics.c4g/Logo.png";
 /// Everything the staged payload keeps outside `bin/`, relocated into
 /// `Contents/Resources` so the bundle stays self-contained.
-const MACOS_BUNDLED_RESOURCES: [&str; 8] = [
+const MACOS_BUNDLED_RESOURCES: [&str; 7] = [
     "planet",
     "content",
     "licenses",
     "COPYING",
-    "TRADEMARK",
     "README.md",
     "credits.txt",
     "THIRD_PARTY_GAME_CONTENT.md",
@@ -1035,10 +1034,6 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
         &package_dir.join("COPYING"),
     )?;
     copy_file(
-        &paths.repo_root.join("TRADEMARK"),
-        &package_dir.join("TRADEMARK"),
-    )?;
-    copy_file(
         &paths.repo_root.join("README.md"),
         &package_dir.join("README.md"),
     )?;
@@ -1866,7 +1861,6 @@ mod tests {
 
         for name in [
             "COPYING",
-            "TRADEMARK",
             "README.md",
             "credits.txt",
             "THIRD_PARTY_GAME_CONTENT.md",
@@ -1975,7 +1969,6 @@ mod tests {
             PathBuf::from("bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
             PathBuf::from("bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
             PathBuf::from("COPYING"),
-            PathBuf::from("TRADEMARK"),
             PathBuf::from("README.md"),
             PathBuf::from("credits.txt"),
             PathBuf::from("THIRD_PARTY_GAME_CONTENT.md"),

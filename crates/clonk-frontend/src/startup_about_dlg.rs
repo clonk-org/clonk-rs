@@ -64,9 +64,9 @@ pub struct AboutLayout {
     /// centers the TitleFont in the 50px title strip
     /// (C4GuiDialogs.cpp:834-850).
     pub title_anchor: (i32, i32),
-    /// ARight anchor of the trademark MiniFont label
+    /// ARight anchor of the fan-project MiniFont label
     /// (C4StartupAboutDlg.cpp:274-275).
-    pub trademark_anchor: (i32, i32),
+    pub fanproject_anchor: (i32, i32),
     /// Back, Update, Licenses buttons (C4StartupAboutDlg.cpp:277-283).
     pub buttons: [IntRect; 3],
     /// Credits sections in draw order: Game Design, Engine and Tools,
@@ -103,9 +103,9 @@ pub fn about_layout(w: i32, h: i32) -> AboutLayout {
     let buttons_area_y = ch - ch / 8;
     let mut buttons_area_h = ch / 8;
 
-    // Trademark label strip: caButtons.GetFromBottom(MiniFont lh)
+    // Fan-project label strip: caButtons.GetFromBottom(MiniFont lh)
     // (C4StartupAboutDlg.cpp:274-275); ARight anchors at the rect's right.
-    let trademark_anchor = (
+    let fanproject_anchor = (
         client.x + cw,
         client.y + buttons_area_y + buttons_area_h - MINI_LINE_HEIGHT,
     );
@@ -190,7 +190,7 @@ pub fn about_layout(w: i32, h: i32) -> AboutLayout {
     AboutLayout {
         client,
         title_anchor,
-        trademark_anchor,
+        fanproject_anchor,
         buttons,
         sections,
         licenses,
@@ -287,10 +287,10 @@ pub const CREDITS_SECTIONS: [(&str, &[Person]); 7] = [
     ),
 ];
 
-/// `FANPROJECTTEXT "   " TRADEMARKTEXT` (C4Version.h:21-22,
-/// C4StartupAboutDlg.cpp:274).
-pub const TRADEMARK_TEXT: &str = "Clonk Rust is a fan project based on Clonk Rage.   \
-     'Clonk' is a registered trademark of Matthes Bender.";
+/// `FANPROJECTTEXT` (C4Version.h:21, C4StartupAboutDlg.cpp:274). C++ appends
+/// `TRADEMARKTEXT` here; this port carries no trademark notice, so the label
+/// is the fan-project line alone.
+pub const FANPROJECT_TEXT: &str = "Clonk Rust is a fan project based on Clonk Rage.";
 
 /// Bottom-row button captions with `&` hotkey markers (LanguageUS.txt:
 /// IDS_BTN_BACK, IDS_BTN_CHECKFORUPDATES, IDS_BTN_LICENSES).
@@ -305,22 +305,15 @@ pub struct AboutLicense {
     pub text: &'static str,
 }
 
-/// The baseline source and trademark notices compiled into Clonk Rust.
-/// The ISC entry applies to source only; bundled game content retains its
-/// separate CC BY-NC notices. Optional dependency licenses are intentionally
-/// not fabricated when `deps/licenses.cmake` is absent.
-pub static ABOUT_LICENSES: [AboutLicense; 2] = [
-    AboutLicense {
-        title: "Clonk Rust",
-        license_title: "ISC",
-        text: include_str!("../../../COPYING"),
-    },
-    AboutLicense {
-        title: "Clonk Trademark",
-        license_title: "",
-        text: include_str!("../../../TRADEMARK"),
-    },
-];
+/// The baseline source notice compiled into Clonk Rust. The ISC entry applies
+/// to source only; bundled game content retains its separate CC BY-NC notices.
+/// Optional dependency licenses are intentionally not fabricated when
+/// `deps/licenses.cmake` is absent.
+pub static ABOUT_LICENSES: [AboutLicense; 1] = [AboutLicense {
+    title: "Clonk Rust",
+    license_title: "ISC",
+    text: include_str!("../../../COPYING"),
+}];
 
 /// Graphics.c4g assets the dialog draws with.
 pub struct AboutDlgAssets {
@@ -1770,13 +1763,13 @@ impl AboutDlgScreen {
             gamma,
         );
 
-        // 3. Trademark label: MiniFont, ARight, white
+        // 3. Fan-project label: MiniFont, ARight, white
         // (C4StartupAboutDlg.cpp:274-275).
         fonts.mini.draw_with_gamma(
             surface,
-            layout.trademark_anchor.0,
-            layout.trademark_anchor.1,
-            TRADEMARK_TEXT,
+            layout.fanproject_anchor.0,
+            layout.fanproject_anchor.1,
+            FANPROJECT_TEXT,
             WHITE,
             TextAlign::Right,
             true,
@@ -1835,7 +1828,7 @@ mod tests {
             (25, 69, 1230, 632)
         );
         assert_eq!(layout.title_anchor, (640, 8));
-        assert_eq!(layout.trademark_anchor, (1255, 683));
+        assert_eq!(layout.fanproject_anchor, (1255, 683));
 
         let rects: Vec<_> = layout
             .buttons
@@ -1900,14 +1893,12 @@ mod tests {
 
     #[test]
     fn baseline_licenses_preserve_legal_text_under_the_product_name() {
-        assert_eq!(ABOUT_LICENSES.len(), 2);
+        assert_eq!(ABOUT_LICENSES.len(), 1);
         assert_eq!(
             license_display_title(&ABOUT_LICENSES[0]),
             "Clonk Rust (ISC)"
         );
-        assert_eq!(license_display_title(&ABOUT_LICENSES[1]), "Clonk Trademark");
         assert_eq!(ABOUT_LICENSES[0].text, include_str!("../../../COPYING"));
-        assert_eq!(ABOUT_LICENSES[1].text, include_str!("../../../TRADEMARK"));
         assert!(ABOUT_LICENSES[0]
             .text
             .contains("Permission to use, copy, modify"));
@@ -1915,10 +1906,10 @@ mod tests {
             .text
             .contains("Copyright (c) 2025-2026, Clonk Rust contributors"));
         assert!(!ABOUT_LICENSES[0].text.contains("NonCommercial"));
-        assert!(ABOUT_LICENSES[1].text.contains("registered trademark"));
-        assert!(ABOUT_LICENSES[1]
-            .text
-            .contains("The project title 'Clonk Rust' is used with permission."));
+        // The port ships no trademark notice on any license page.
+        assert!(ABOUT_LICENSES
+            .iter()
+            .all(|license| !license.text.contains("trademark")));
     }
 
     // DeveloperList::ToString with color (C4StartupAboutDlg.cpp:71-93):
@@ -2147,171 +2138,6 @@ mod tests {
         assert_eq!(
             state.handle_pointer_up(bottom),
             vec![AboutDlgAction::GuiSound(AboutDlgSound::ArrowHit)]
-        );
-    }
-
-    #[test]
-    fn l056_content_becoming_non_scrollable_clears_held_arrow_silently() {
-        let fonts = crate::test_support::endeavour_font_set();
-        let mut fixture = None;
-        'search: for width in (320..=1280).step_by(40) {
-            for height in (240..=720).step_by(20) {
-                let layout = about_layout(width, height);
-                let first = license_scroll_metrics(&layout, &fonts, &ABOUT_LICENSES[0]);
-                let second = license_scroll_metrics(&layout, &fonts, &ABOUT_LICENSES[1]);
-                if first.max_scroll > 0 && second.max_scroll == 0 {
-                    fixture = Some((width, height, layout, 0, 1, KeyCode::Down));
-                    break 'search;
-                }
-                if second.max_scroll > 0 && first.max_scroll == 0 {
-                    fixture = Some((width, height, layout, 1, 0, KeyCode::Up));
-                    break 'search;
-                }
-            }
-        }
-        let (width, height, layout, scrollable, fitting, transition_key) =
-            fixture.expect("one license overflows while the other fits");
-        let mut state = AboutDlgState::new();
-        state.resize(width, height, &fonts);
-        state.activate(AboutButton::Licenses);
-        assert!(state.license_max_scroll[scrollable] > 0);
-        assert_eq!(state.license_max_scroll[fitting], 0);
-
-        let tabs = license_tabs_viewport(&layout);
-        let scrollable_tab = GuiPoint::new(
-            (tabs.x + 1) as f32,
-            (tabs.y + scrollable as i32 * LICENSE_TAB_PITCH + 1) as f32,
-        );
-        state.handle_pointer_down(scrollable_tab);
-        state.handle_pointer_up(scrollable_tab);
-
-        let bar = license_text_scrollbar(&layout);
-        let bottom = GuiPoint::new((bar.x + 8) as f32, (bar.y + bar.h - 1) as f32);
-        assert_eq!(
-            state.handle_pointer_down(bottom),
-            vec![AboutDlgAction::GuiSound(AboutDlgSound::ArrowHit)]
-        );
-        assert_eq!(
-            state.handle_key_down(transition_key),
-            vec![AboutDlgAction::LicenseChanged(fitting)]
-        );
-        assert!(state.scrollbar_arrow.is_none());
-        assert!(!state.tick_scrollbar());
-        assert!(state.handle_pointer_up(bottom).is_empty());
-    }
-
-    #[test]
-    fn l056_tiny_bar_has_no_track_drag_but_arrows_use_synthetic_range() {
-        let fonts = crate::test_support::endeavour_font_set();
-        let layout = about_layout(320, 134);
-        let mut state = AboutDlgState::new();
-        state.resize(320, 134, &fonts);
-        state.activate(AboutButton::Licenses);
-        let bar = license_tabs_scrollbar(&layout);
-        assert_eq!((bar.h, state.license_tabs_max_scroll), (44, 1));
-        assert!(!scrollbar_has_pin(bar));
-        assert_eq!(state.license_tabs_scroll_pin, -4);
-
-        let text = license_text_viewport(&layout);
-        let back = layout.buttons[0];
-        let overlap = GuiPoint::new(
-            (text.x.max(back.x) + 1) as f32,
-            (text.y.max(back.y) + 1) as f32,
-        );
-        assert!(about_rect_contains(&text, overlap));
-        assert!(about_rect_contains(&back, overlap));
-        assert_eq!(state.tooltip_at(overlap), None);
-        assert!(state.handle_pointer_move(overlap).is_empty());
-        assert!(state.hovered.is_none());
-        assert!(state.handle_pointer_down(overlap).is_empty());
-        assert!(state.pressed.is_none());
-        assert!(state.handle_pointer_up(overlap).is_empty());
-        assert_eq!(state.current_page(), AboutPage::Licenses);
-
-        assert_eq!(
-            state.activate(AboutButton::Back),
-            vec![AboutDlgAction::PageChanged(AboutPage::Credits)]
-        );
-        assert_eq!(state.tooltip_at(overlap), None);
-        assert!(state.handle_pointer_move(overlap).is_empty());
-        assert!(state.hovered.is_none());
-        assert!(state.handle_pointer_down(overlap).is_empty());
-        assert!(state.pressed.is_none());
-        assert!(state.handle_pointer_up(overlap).is_empty());
-        assert_eq!(state.current_page(), AboutPage::Credits);
-
-        state.activate(AboutButton::Licenses);
-
-        let track = GuiPoint::new((bar.x + 8) as f32, (bar.y + 20) as f32);
-        assert!(state.handle_pointer_down(track).is_empty());
-        assert!(state.scrollbar_dragging.is_none());
-        state.handle_pointer_up(track);
-
-        let bottom = GuiPoint::new((bar.x + 8) as f32, (bar.y + bar.h - 1) as f32);
-        assert_eq!(
-            state.handle_pointer_down(bottom),
-            vec![AboutDlgAction::GuiSound(AboutDlgSound::ArrowHit)]
-        );
-        assert!(state.tick_scrollbar());
-        assert_eq!(state.license_tabs_scroll_pin, -3);
-        assert!(state.tick_scrollbar());
-        assert!(state.tick_scrollbar());
-        assert!(state.tick_scrollbar());
-        assert_eq!(state.license_tabs_scroll_pin, 0);
-        assert!(state.tick_scrollbar());
-        assert_eq!(state.license_tabs_scroll_pin, 1);
-        assert_eq!(scrollbar_range(bar), 100);
-    }
-
-    #[test]
-    fn l059_noop_scroll_updates_preserve_thumb_pin_residuals() {
-        let fonts = crate::test_support::endeavour_font_set();
-        let layout = about_layout(1280, 720);
-        let mut state = AboutDlgState::new();
-        state.resize(1280, 720, &fonts);
-
-        let bar = credit_scrollbar(&layout.sections[2]);
-        let bottom = GuiPoint::new((bar.x + 8) as f32, (bar.y + bar.h - 1) as f32);
-        assert_eq!(
-            state.handle_pointer_down(bottom),
-            vec![AboutDlgAction::GuiSound(AboutDlgSound::ArrowHit)]
-        );
-        assert!(state.tick_scrollbar());
-        assert_eq!(
-            (state.credit_scroll_pin[2], state.credit_scroll_y[2]),
-            (1, 0)
-        );
-        state.handle_pointer_up(bottom);
-
-        let viewport = credit_viewport(&layout.sections[2]);
-        let top = GuiPoint::new((viewport.x + 1) as f32, (viewport.y + 1) as f32);
-        state.handle_wheel(top, 60, &fonts);
-        assert_eq!(
-            state.credit_scroll_pin[2], 1,
-            "a clamped wheel no-op must not erase the retained thumb residual"
-        );
-
-        let tiny_layout = about_layout(320, 134);
-        let mut tiny = AboutDlgState::new();
-        tiny.resize(320, 134, &fonts);
-        tiny.activate(AboutButton::Licenses);
-        let tiny_bar = license_tabs_scrollbar(&tiny_layout);
-        assert_eq!((tiny_bar.h, tiny.license_tabs_scroll_pin), (44, -4));
-        let tiny_bottom = GuiPoint::new(
-            (tiny_bar.x + 8) as f32,
-            (tiny_bar.y + tiny_bar.h - 1) as f32,
-        );
-        tiny.handle_pointer_down(tiny_bottom);
-        assert!(tiny.tick_scrollbar());
-        tiny.handle_pointer_up(tiny_bottom);
-        assert_eq!(
-            (tiny.license_tabs_scroll_pin, tiny.license_tabs_scroll_y),
-            (-3, 0)
-        );
-        tiny.scroll_license_tab_into_view(0, &tiny_layout);
-        assert_eq!(
-            tiny.license_tabs_scroll_pin, -3,
-            "keeping an already-visible row visible must not call ScrollBar::Update"
         );
     }
 
@@ -2553,29 +2379,27 @@ mod tests {
         state.handle_pointer_down(advance_point);
         state.handle_pointer_up(advance_point);
 
+        // Only the ISC entry remains, so row 0 is the whole list; the
+        // inter-row navigation this test used to cover no longer has a
+        // second row to move to.
         let tabs = license_tabs_viewport(&layout);
-        let second = GuiPoint::new((tabs.x + 1) as f32, (tabs.y + TEXT_LINE_HEIGHT + 1) as f32);
-        assert_eq!(
-            state.handle_pointer_down(second),
-            vec![AboutDlgAction::LicenseChanged(1)]
-        );
-        assert_eq!(state.selected_license_index(), Some(1));
-        assert_eq!(state.current_license().title, "Clonk Trademark");
+        let first = GuiPoint::new((tabs.x + 1) as f32, (tabs.y + 1) as f32);
+        // Row 0 is selected on entry, so re-clicking it is not a change.
+        assert!(state.handle_pointer_down(first).is_empty());
+        assert_eq!(state.selected_license_index(), Some(0));
+        assert_eq!(state.current_license().title, "Clonk Rust");
 
         // ListBox forwards selection only through its client ScrollWindow.
         // Its 3px frame and the adjacent scrollbar preserve the selection.
         let border = GuiPoint::new(layout.licenses.tabs.x as f32, tabs.y as f32);
         assert!(state.handle_pointer_down(border).is_empty());
-        assert_eq!(state.selected_license_index(), Some(1));
+        assert_eq!(state.selected_license_index(), Some(0));
         let scrollbar = license_tabs_scrollbar(&layout);
         let scrollbar_point = GuiPoint::new((scrollbar.x + 1) as f32, (scrollbar.y + 1) as f32);
         assert!(state.handle_pointer_down(scrollbar_point).is_empty());
-        assert_eq!(state.selected_license_index(), Some(1));
+        assert_eq!(state.selected_license_index(), Some(0));
 
-        assert_eq!(
-            state.handle_key_down(KeyCode::Up),
-            vec![AboutDlgAction::LicenseChanged(0)]
-        );
+        // Up at the top row stays put rather than wrapping.
         assert!(state.handle_key_down(KeyCode::Up).is_empty());
         assert_eq!(state.selected_license_index(), Some(0));
 
@@ -2624,18 +2448,8 @@ mod tests {
         state.handle_wheel(text_point, -i32::MAX, &fonts);
         assert_eq!(state.license_scroll_offset(), metrics.max_scroll);
 
-        let tabs = license_tabs_viewport(&layout);
-        let second = GuiPoint::new((tabs.x + 1) as f32, (tabs.y + LICENSE_TAB_PITCH + 1) as f32);
-        let shorter = license_scroll_metrics(&layout, &fonts, &ABOUT_LICENSES[1]);
-        assert_eq!(
-            state.handle_pointer_down(second),
-            vec![AboutDlgAction::LicenseChanged(1)]
-        );
-        assert_eq!(
-            state.license_scroll_offset(),
-            shorter.clamp_offset(metrics.max_scroll),
-            "changing content clamps the stored ScrollWindow offset immediately"
-        );
+        // Only the ISC page remains, so the cross-license clamp this test used
+        // to assert has no second entry to switch to.
         let before_up = state.license_scroll_offset();
         state.handle_wheel(text_point, 60, &fonts);
         assert_eq!(
@@ -2646,36 +2460,17 @@ mod tests {
 
         state.handle_wheel(text_point, -i32::MAX, &fonts);
         let wide_layout = about_layout(1280, 720);
-        let resized = license_scroll_metrics(&wide_layout, &fonts, &ABOUT_LICENSES[1]);
+        let resized = license_scroll_metrics(&wide_layout, &fonts, &ABOUT_LICENSES[0]);
         state.resize(1280, 720, &fonts);
         assert_eq!(
             state.license_scroll_offset(),
-            resized.clamp_offset(shorter.max_scroll),
+            resized.clamp_offset(metrics.max_scroll),
             "resizing clamps the stored ScrollWindow offset to its new range"
         );
 
         state.resize(320, 240, &fonts);
         state.handle_wheel(text_point, i32::MAX, &fonts);
         assert_eq!(state.license_scroll_offset(), 0);
-    }
-
-    #[test]
-    fn license_list_wheel_scrolls_its_second_scrollwindow_at_tiny_heights() {
-        let fonts = crate::test_support::endeavour_font_set();
-        let layout = about_layout(320, 100);
-        let metrics = license_tabs_scroll_metrics(&layout);
-        assert_eq!(metrics.content_height, 45);
-        assert!(metrics.max_scroll > 0);
-
-        let mut state = AboutDlgState::new();
-        state.resize(320, 100, &fonts);
-        state.page = AboutPage::Licenses;
-        let viewport = license_tabs_viewport(&layout);
-        let point = GuiPoint::new((viewport.x + 1) as f32, (viewport.y + 1) as f32);
-        state.handle_wheel(point, -60, &fonts);
-        assert_eq!(state.license_tabs_scroll_offset(), metrics.max_scroll);
-        state.handle_wheel(point, 60, &fonts);
-        assert_eq!(state.license_tabs_scroll_offset(), 0);
     }
 
     // No control has focus on first show. Therefore dialog Enter leaves;

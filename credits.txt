@@ -60,14 +60,11 @@ preserved notices. It does not amend those notices, is not an ISC or CC BY-NC
 relicensing, and does not grant broader rights in the packs or their assets.
 See `THIRD_PARTY_GAME_CONTENT.md` for the complete notice.
 
-Licenses and trademark
-----------------------
+Licenses
+--------
 
-See COPYING, TRADEMARK, and the licenses directory distributed with Clonk
-Rust. Content groups also include their applicable license and attribution
-files.
+See COPYING and the licenses directory distributed with Clonk Rust. Content
+groups also include their applicable license and attribution files.
 
 This software is based in part of the work of the FreeType Team.
 https://freetype.org
-
-'Clonk' is a registered trademark of Matthes Bender.

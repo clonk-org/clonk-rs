@@ -178,6 +178,32 @@ live comparison.
 
 ## Open
 
+- Intentional divergence from C++ (2026-07-24), not a gap to close: the port
+  ships **no trademark notice**. C++ draws `FANPROJECTTEXT " " TRADEMARKTEXT`
+  (`C4Version.h:21-22`) in the main-menu and About footers
+  (`C4StartupMainDlg.cpp:72-74`, `C4StartupAboutDlg.cpp:274-275`); Rust now
+  draws the `FANPROJECTTEXT` half alone. The About licenses list drops its
+  `Clonk Trademark` page, leaving one entry (`COPYING`), which widens the
+  already-recorded gap in `MENU_PARITY.md` that Rust does not ingest the
+  `deps/licenses.cmake` corpus — with one row, list navigation has no second
+  row, so `license_list_pointer_and_keyboard_selection_follow_listbox_rules`
+  no longer covers inter-row selection. `IDS_DEV_LICENSE` keeps its CC BY-NC
+  content half and loses its trademark half; `IDS_DLG_LICENSE` is now
+  `Clonk Game Content License`. Label anchors are unchanged — both labels are
+  right-aligned, so their geometry is text-length independent and no startup
+  pixel baseline needed re-recording. The one re-recorded golden is
+  `loader_screen::tests::real_graphics_and_endeavour_frame_hash_is_stable`,
+  whose fixture lost a log line; its renderer is untouched. Four About-dialog
+  tests that pinned C4GUI ListBox/ScrollWindow rules across a two-row list were
+  deleted outright, since a one-row list gives them no subject:
+  `l056_content_becoming_non_scrollable_clears_held_arrow_silently`,
+  `l056_tiny_bar_has_no_track_drag_but_arrows_use_synthetic_range`,
+  `l059_noop_scroll_updates_preserve_thumb_pin_residuals`, and
+  `license_list_wheel_scrolls_its_second_scrollwindow_at_tiny_heights`. That
+  list-widget coverage is simply gone; restoring it needs a second list entry
+  or an `AboutDlgState` that can be driven over a test-supplied license set.
+  Do **not** "restore parity" here by re-adding the notice; this is a
+  deliberate licensing decision by the maintainer, not a port defect.
 - Flaky test (observed 2026-07-24, not fixed): `clonk-network`
   `session::tests::dual_client_reconnects_a_missing_tcp_route` failed once in a
   full `cargo nextest run --workspace` and was not reproducible — 5/5 green in

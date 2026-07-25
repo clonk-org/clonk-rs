@@ -143,7 +143,6 @@ const BUTTON_SPACING: f32 = 12.0;
 const PANEL_PADDING: f32 = 32.0;
 
 const FANPROJECT_TEXT: &str = "Clonk Rust is a fan project based on Clonk Rage.";
-const TRADEMARK_TEXT: &str = "'Clonk' is a registered trademark of Matthes Bender.";
 
 // Keep the source notice authoritative and separate from the CC BY-NC game
 // content terms shipped alongside the relevant content groups.
@@ -433,11 +432,10 @@ impl StartupAboutDialog {
         );
         fill_rect(surface, &footer_rect, FOOTER_BACKGROUND_COLOR);
 
-        let footer_text = format!("{}   {}", FANPROJECT_TEXT, TRADEMARK_TEXT);
         draw_text(
             surface,
             &footer_rect,
-            &footer_text,
+            FANPROJECT_TEXT,
             TEXT_SECONDARY_COLOR,
             COPYRIGHT_FONT_SIZE,
             8.0,

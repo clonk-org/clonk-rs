@@ -41,7 +41,7 @@ By default, the command writes
 beneath `CARGO_TARGET_DIR`). The archive contains the `clonk-game` launcher,
 the `clonk-app` runtime, the pinned content submodule — base packs plus the
 authorized Eke Reloaded and ClonkMars packs — credits, and project, content,
-trademark, and Rust dependency notices. The legacy
+and Rust dependency notices. The legacy
 `c4group` update utility is optional: packaged builds run without it, while a
 copy installed alongside the game is still probed and a broken executable is
 reported before startup.
@@ -76,8 +76,7 @@ declaration does **not** relicense the bundled game data: graphics, audio,
 scripts, text, and other assets under [`planet/`](planet/) and the
 [`content/`](content/) submodule remain under their own `COPYING` files and
 the terms collected in [`licenses/`](licenses/), including the Clonk content
-license. The trademark terms in [`TRADEMARK`](TRADEMARK) also continue to
-apply.
+license.
 
 The Eke Reloaded and ClonkMars packs inside the content submodule are
 redistributed under the specific permission and attribution terms recorded in

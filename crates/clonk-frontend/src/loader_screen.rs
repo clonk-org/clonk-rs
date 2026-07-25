@@ -7,8 +7,8 @@
 //! resources are constructor errors.
 //!
 //! The C++ loader does **not** have a dedicated copyright, version or footer
-//! label.  During startup the fan-project and trademark strings are ordinary
-//! log-buffer lines; a version string is not drawn by `C4LoaderScreen` at all.
+//! label.  During startup the fan-project string is an ordinary log-buffer
+//! line; a version string is not drawn by `C4LoaderScreen` at all.
 
 use crate::clonk_fonts::{NativeClonkFont, NativeClonkFontSet};
 use crate::{ClonkFontSet, ImageData};
@@ -2551,7 +2551,6 @@ mod tests {
         state.progress = 37;
         state.log = LoaderLog::Visible(vec![
             "Clonk Rust is a fan project based on Clonk Rage.".into(),
-            "'Clonk' is a registered trademark of Matthes Bender.".into(),
             "Loading definitions ".into(),
         ]);
         state.process = Some(64);
@@ -2564,7 +2563,9 @@ mod tests {
         // Snapshot over LoaderSky1.jpg, GUIProgress.png and Endeavour.ttf.
         // The title's 0xdd alpha uses C++ inverted-alpha blit addition rather
         // than multiplicative modulation, including on filtered edge texels.
-        assert_eq!(fnv1a64(surface.pixels()), 12_627_294_570_409_940_921);
+        // Re-recorded 2026-07-24 when the trademark log line left the fixture;
+        // the renderer is unchanged, only this fixture's line count.
+        assert_eq!(fnv1a64(surface.pixels()), 2_045_718_955_757_962_211);
     }
 
     #[test]

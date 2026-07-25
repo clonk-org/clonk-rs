@@ -3812,16 +3812,16 @@
             )
         );
 
-        let trademark = commands
+        let fanproject = commands
             .iter()
             .find(|command| command.text.starts_with("Clonk Rust is a fan project"))
-            .expect("captured trademark footer label");
+            .expect("captured fan-project footer label");
         assert_eq!(
             (
-                trademark.role,
-                trademark.align,
-                trademark.x,
-                trademark.y
+                fanproject.role,
+                fanproject.align,
+                fanproject.x,
+                fanproject.y
             ),
             (
                 clonk_graphics::clonk_font::ClonkFontRole::GuiMini,
@@ -3845,7 +3845,7 @@
             (3303.0, 1919.0)
         );
         assert_eq!(
-            projection.logical_to_physical(trademark.x.into(), trademark.y.into()),
+            projection.logical_to_physical(fanproject.x.into(), fanproject.y.into()),
             (3387.0, 2084.0)
         );
     }

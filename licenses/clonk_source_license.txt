@@ -6,9 +6,6 @@ Any third-party library code contained in any package is included for your
 convenience only and is covered by their respective licenses. See below for 
 a list.
 
-'Clonk' is a registered trademark of Matthes Bender. See accompanying
-text file for use of this trademark.
-
 This license does not apply to game content such as graphics, sounds,
 scripting or text files.
 

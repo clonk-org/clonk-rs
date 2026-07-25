@@ -5,8 +5,10 @@ use clonk_graphics::{Color, Surface, TextFont};
 use clonk_gui::{ButtonTextures, Rect as GuiRect, Size as GuiSize};
 use std::sync::Arc;
 
-const TRADEMARK_TEXT: &str = "Clonk Rust is a fan project based on Clonk Rage.   \
-                              'Clonk' is a registered trademark of Matthes Bender.";
+/// `FANPROJECTTEXT` (C4Version.h:21). C++ appends `TRADEMARKTEXT` here; this
+/// port carries no trademark notice, so the label is the fan-project line
+/// alone.
+const FANPROJECT_TEXT: &str = "Clonk Rust is a fan project based on Clonk Rage.";
 
 /// Text attached to one classic startup-dialog tooltip target.
 ///
@@ -91,9 +93,9 @@ pub struct MainMenuLayout {
     pub buttons: [IntRect; 6],
     /// Right-aligned anchor of the participants label (C4StartupMainDlg.cpp:69).
     pub participants_anchor: (i32, i32),
-    /// Right-aligned x anchor of the trademark line (C4StartupMainDlg.cpp:72-74);
+    /// Right-aligned x anchor of the fan-project line (C4StartupMainDlg.cpp:72-74);
     /// its y depends on the mini font's line height.
-    pub trademark_anchor_x: i32,
+    pub fanproject_anchor_x: i32,
 }
 
 /// Computes the C4StartupMainDlg layout for a `w`x`h` screen.
@@ -140,7 +142,7 @@ pub fn main_menu_layout(w: i32, h: i32) -> MainMenuLayout {
         client,
         buttons,
         participants_anchor: (client.x + client.w * 39 / 40, client.y + client.h * 9 / 10),
-        trademark_anchor_x: client.x + client.w,
+        fanproject_anchor_x: client.x + client.w,
     }
 }
 
@@ -338,7 +340,7 @@ impl StartupMainMenu {
             && point.y < (rect.y + rect.h) as f32
     }
 
-    fn trademark_contains(&self, point: GuiPoint) -> bool {
+    fn fanproject_contains(&self, point: GuiPoint) -> bool {
         let layout = main_menu_layout(
             self.size.width.max(1.0) as i32,
             self.size.height.max(1.0) as i32,
@@ -346,19 +348,19 @@ impl StartupMainMenu {
         let (width, line_height) = self.clonk_fonts.as_ref().map_or_else(
             || {
                 (
-                    self.font.measure_text(TRADEMARK_TEXT, 12.0).width.round() as i32,
+                    self.font.measure_text(FANPROJECT_TEXT, 12.0).width.round() as i32,
                     18,
                 )
             },
             |fonts| {
                 (
-                    fonts.mini.measure(TRADEMARK_TEXT, false).0,
+                    fonts.mini.measure(FANPROJECT_TEXT, false).0,
                     fonts.mini.line_height,
                 )
             },
         );
         let rect = IntRect {
-            x: layout.trademark_anchor_x - width,
+            x: layout.fanproject_anchor_x - width,
             y: layout.client.y + layout.client.h - line_height / 2,
             w: width,
             h: line_height,
@@ -372,7 +374,7 @@ impl StartupMainMenu {
     /// Returns the native tooltip target at `point`, without applying the
     /// screen-wide CMouse delay.
     pub fn tooltip_at(&self, participants_label: &str, point: GuiPoint) -> Option<StartupTooltip> {
-        if self.trademark_contains(point) {
+        if self.fanproject_contains(point) {
             return None;
         }
         if self.participants_contains(participants_label, point) {
@@ -605,11 +607,12 @@ impl StartupMainMenu {
 
         // Participants label: white TitleFont (22px), right-aligned at
         // client*(39/40, 9/10) (C4StartupMainDlg.cpp:69-70).
-        // Trademark line: white MiniFont (12px), right-aligned at the client
+        // Fan-project line: white MiniFont (12px), right-aligned at the client
         // rect's right edge, half a line above its bottom
-        // (C4StartupMainDlg.cpp:72-74; FANPROJECTTEXT/TRADEMARKTEXT,
-        // C4Version.h:21-22).
-        let trademark = TRADEMARK_TEXT;
+        // (C4StartupMainDlg.cpp:72-74). C++ draws FANPROJECTTEXT followed by
+        // TRADEMARKTEXT (C4Version.h:21-22); this port draws the fan-project
+        // half only, so the label is shorter than the C++ original.
+        let fanproject = FANPROJECT_TEXT;
         let (anchor_x, anchor_y) = layout.participants_anchor;
         if let Some(fonts) = self.clonk_fonts.as_ref() {
             let (expanded_label, _) = expand_hotkey_markup(participants_label);
@@ -625,9 +628,9 @@ impl StartupMainMenu {
             );
             fonts.mini.draw_with_gamma(
                 surface,
-                layout.trademark_anchor_x,
+                layout.fanproject_anchor_x,
                 layout.client.y + layout.client.h - fonts.mini.line_height / 2,
-                trademark,
+                fanproject,
                 [255, 255, 255, 255],
                 TextAlign::Right,
                 false,
@@ -657,9 +660,9 @@ impl StartupMainMenu {
 
         let mini_size = 12.0;
         let mini_line_height = 18; // Endeavour 12px: (1303+308)*12/1024 (StdFont.cpp:351)
-        let metrics = self.font.measure_text(trademark, mini_size);
+        let metrics = self.font.measure_text(fanproject, mini_size);
         let label_rect = GuiRect::new(
-            (layout.trademark_anchor_x as f32 - metrics.width).max(0.0),
+            (layout.fanproject_anchor_x as f32 - metrics.width).max(0.0),
             (layout.client.y + layout.client.h - mini_line_height / 2) as f32,
             metrics.width,
             mini_size,
@@ -667,7 +670,7 @@ impl StartupMainMenu {
         draw_text(
             surface,
             &label_rect,
-            trademark,
+            fanproject,
             white,
             mini_size,
             0.0,
@@ -743,12 +746,12 @@ impl StartupMainMenu {
             physical_offset,
             gamma,
         );
-        let trademark = TRADEMARK_TEXT;
+        let fanproject = FANPROJECT_TEXT;
         fonts.mini.draw_to_physical_surface_with_offset(
             surface,
-            layout.trademark_anchor_x,
+            layout.fanproject_anchor_x,
             layout.client.y + layout.client.h - fonts.mini.logical_line_height() / 2,
-            trademark,
+            fanproject,
             [255, 255, 255, 255],
             TextAlign::Right,
             false,
@@ -1032,8 +1035,8 @@ mod tests {
         // Participants label anchor (right-aligned): client*(39/40, 9/10) + origin.
         assert_eq!(layout.participants_anchor, (1224, 637));
 
-        // Trademark label anchor: right edge of the client rect.
-        assert_eq!(layout.trademark_anchor_x, 1255);
+        // Fan-project label anchor: right edge of the client rect.
+        assert_eq!(layout.fanproject_anchor_x, 1255);
         assert_eq!(layout.client.y + layout.client.h, 701);
     }
 
@@ -1100,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn later_trademark_label_occludes_participants_tooltip_overlap() {
+    fn later_fanproject_label_occludes_participants_tooltip_overlap() {
         let fonts = endeavour_font_set();
         let mut menu = StartupMainMenu::new(Arc::new(BitmapFont::new()), None);
         menu.set_clonk_fonts(Some(Arc::clone(&fonts)));
@@ -1108,13 +1111,13 @@ mod tests {
         let label = "Players: Ada";
         let participants = menu.participants_rect(label);
         let layout = main_menu_layout(640, 480);
-        let trademark_y = layout.client.y + layout.client.h - fonts.mini.line_height / 2;
+        let fanproject_y = layout.client.y + layout.client.h - fonts.mini.line_height / 2;
         let point = GuiPoint::new(
             (participants.x + participants.w - 1) as f32,
-            trademark_y.max(participants.y) as f32,
+            fanproject_y.max(participants.y) as f32,
         );
         assert!(menu.participants_contains(label, point));
-        assert!(menu.trademark_contains(point));
+        assert!(menu.fanproject_contains(point));
         assert_eq!(menu.tooltip_at(label, point), None);
     }
 
