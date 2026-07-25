@@ -59,11 +59,22 @@
             .expect("completed second pulse");
         assert_eq!(app.game_time_seconds(), 1);
 
-        // Two elapsed seconds without another game tick are two timer pulses
-        // but still only observe the already-consumed bool latch.
+        // A gap longer than one second collapses to a single pulse. C++ fires
+        // `pWindow->Sec1Timer()` at most once per Execute, on a plain
+        // `seconds != LastExecute.tv_sec` comparison that cannot queue a
+        // backlog (StdAppUnix.cpp:288-291), and Win32 never queues WM_TIMER
+        // more than once (StdAppWin32.cpp:132). Replaying one pass per elapsed
+        // second instead froze the app after any suspend or long load.
         advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_secs(2))
-            .expect("two elapsed timer pulses");
+            .expect("coalesced timer pulse");
         assert_eq!(app.game_time_seconds(), 1);
+
+        // The sub-second phase survives the coalescing, so the timer cannot
+        // drift: 60.25s of backlog leaves exactly the 0.25s remainder pending.
+        seconds = Duration::ZERO;
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(60_250))
+            .expect("long suspend coalesces");
+        assert_eq!(seconds, Duration::from_millis(250));
     }
 
     #[test]

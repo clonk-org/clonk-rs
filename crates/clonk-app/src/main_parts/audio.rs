@@ -370,6 +370,22 @@ pub(crate) fn advance_game_clock_from_elapsed(
 ) -> Result<bool, EngineError> {
     app.guard_classic_global_gui_bootstrap()?;
     *accumulator += elapsed;
+    // Both C++ paths coalesce a missed second rather than replaying it: Win32
+    // never queues WM_TIMER more than once (StdAppWin32.cpp:132) and the unix
+    // path fires at most one callback per Execute. Replaying each missed second
+    // serializes them all into a single event-loop pass, and `sec1_timer` is not
+    // cheap -- it runs the network status reach-check, inactive-client
+    // deactivation, lobby countdown/ready/telemetry refreshes and the host
+    // league vote timeout. Any gap in pumping the loop (a suspend, a long load,
+    // a modal) therefore froze the app for one such pass per second elapsed.
+    //
+    // Keep one pending second plus the sub-second phase and drop the backlog
+    // beyond it. Normal operation never reaches this branch, so the timer's
+    // phase is preserved and it cannot drift.
+    if *accumulator >= GAME_SECOND_INTERVAL * 2 {
+        *accumulator =
+            GAME_SECOND_INTERVAL + Duration::from_nanos(u64::from(accumulator.subsec_nanos()));
+    }
     let mut changed = false;
     while *accumulator >= GAME_SECOND_INTERVAL {
         changed |= app.sec1_timer()?;
