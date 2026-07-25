@@ -22,6 +22,17 @@
     "description": "content/ is a deliberately pinned game-data submodule, not a dependency to track.",
     "enabled": false
   },
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "description": "A security fix must reach a pull request immediately, so it overrides everything below: the monthly schedule, the compatible-update grouping, and the dashboard approval that otherwise holds major and 0.x bumps.",
+    "enabled": true,
+    "schedule": [],
+    "groupName": null,
+    "dependencyDashboardApproval": false,
+    "minimumReleaseAge": null,
+    "prCreation": "immediate",
+    "labels": ["dependencies", "security"]
+  },
   "packageRules": [
     {
       "description": "The whole workspace shares one Cargo.lock, so separate compatible-update pull requests would each invalidate the others. Collect them into one.",
@@ -30,10 +41,24 @@
       "groupName": "cargo minor and patch"
     },
     {
+      "description": "Cargo treats a 0.x minor bump as incompatible, so it breaks a build exactly like a major does. Hold those for review rather than folding them into the compatible-update group.",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor"],
+      "matchCurrentVersion": "<1.0.0",
+      "groupName": null,
+      "dependencyDashboardApproval": true
+    },
+    {
       "description": "Workflow action bumps are independent of the Rust build; keep them in their own pull request.",
       "matchManagers": ["github-actions"],
       "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
       "groupName": "github actions"
+    },
+    {
+      "description": "This action is pinned to the commit tagged for the exact channel in rust-toolchain.toml. It publishes no semver releases, so Renovate cannot resolve a digest for it, and advancing it independently would desync the CI toolchain from the pinned Rust version.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["dtolnay/rust-toolchain"],
+      "enabled": false
     },
     {
       "description": "This engine is held to bit-for-bit parity with the C++ oracle and its CI is currently disabled, so a major bump must not open unreviewed. Tick it on the dependency dashboard to request the pull request.",

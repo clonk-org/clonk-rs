@@ -1375,6 +1375,26 @@ impl Engine {
         self.finish_host_solid_mask_operations(outermost, result)
     }
 
+    /// Apply every held same-call `Enter` whose container has materialized,
+    /// repeating until no further link resolves so a chain of freshly created
+    /// containers binds in one pass.
+    fn apply_materialized_deferred_enters(
+        &mut self,
+        deferred_enters: &mut Vec<(ObjectId, ObjectId)>,
+    ) -> Result<(), EngineError> {
+        while let Some(position) = deferred_enters
+            .iter()
+            .position(|(_, container)| self.find_object_index(*container).is_some())
+        {
+            let (object_id, container) = deferred_enters.remove(position);
+            if self.find_object_index(object_id).is_none() {
+                continue;
+            }
+            self.apply_container_change(object_id, None, Some(container), false)?;
+        }
+        Ok(())
+    }
+
     fn process_spawn_queue_with_outcomes_inner(
         &mut self,
         queue: Vec<SpawnConfig>,
@@ -1382,12 +1402,27 @@ impl Engine {
     ) -> Result<Vec<ObjectId>, EngineError> {
         let mut pending: VecDeque<_> = queue.into_iter().collect();
         let mut created = Vec::new();
+        // C4Object::Enter binds two objects that already exist, because
+        // FnCreateObject hands back a live C4Object (C4Object.cpp:1560-1620;
+        // C4Script.cpp FnCreateObject). One call may therefore create its
+        // content before the container it enters, as Hazard's
+        // Arena_RelaunchClonk does. Materialize in creation order and hold
+        // such a link until the queued container exists.
+        let mut deferred_enters: Vec<(ObjectId, ObjectId)> = Vec::new();
         // Live targets must commit before the first pending object's
         // Initialize. Only targets represented by an unmaterialized
         // SpawnConfig remain deferred.
         let mut nested_outcomes =
             self.apply_nested_object_outcomes_retaining_missing(nested_outcomes)?;
-        while let Some(config) = pending.pop_front() {
+        while let Some(mut config) = pending.pop_front() {
+            if let (Some(object_id), Some(container)) = (config.id, config.container) {
+                if self.find_object_index(container).is_none()
+                    && pending.iter().any(|queued| queued.id == Some(container))
+                {
+                    config.container = None;
+                    deferred_enters.push((object_id, container));
+                }
+            }
             // C++ CreateObject with an unknown id is C4Id2Def -> nullptr
             // (C4Script.cpp FnCreateObject): the call yields nil, never an
             // error, so unknown spawns are skipped rather than fatal.
@@ -1412,9 +1447,12 @@ impl Engine {
             for spawn in additional {
                 pending.push_back(spawn);
             }
+            self.apply_materialized_deferred_enters(&mut deferred_enters)?;
         }
         // Any remainder belongs to a same-call object removed before its
         // SpawnConfig materialized; preserve the prior silent-miss behavior.
+        // A held Enter whose container never materialized shares that fate:
+        // C4Object::Enter on a removed container does not happen either.
         Ok(created)
     }
 }

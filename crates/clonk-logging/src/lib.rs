@@ -5,11 +5,16 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt};
+use tracing::Metadata;
+use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt, OptionalWriter};
 use tracing_subscriber::{fmt, EnvFilter};
 
 static INITIALIZED: OnceLock<()> = OnceLock::new();
 const DEFAULT_DEPENDENCY_FILTER: &str = "wgpu_core::device=warn";
+/// Target of the C4Script `Log()`/`DebugLog()` stream. It is the Rust
+/// counterpart of the C++ logger whose output `C4LogSystem::GuiSink` shows
+/// in-game (`src/C4Log.cpp:226-240`).
+pub const SCRIPT_LOG_TARGET: &str = "clonk-script";
 
 /// Process-local copy of formatted log output consumed by the developer
 /// console. The capture is intentionally independent from the bounded GUI
@@ -29,6 +34,59 @@ impl ConsoleLogCapture {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let drained = std::mem::take(&mut *bytes);
         format_console_log(&String::from_utf8_lossy(&drained))
+    }
+}
+
+/// Message-board destination of `C4LogSystem::GuiSink`
+/// (`src/C4Log.cpp:226-240`): every line the C4Script logger emits reaches
+/// `C4MessageBoard::AddLog`, which drops empty messages
+/// (`src/C4MessageBoard.cpp:327-347`). The application drains this on its own
+/// thread, mirroring the sink's `ExecuteInMainThread` marshalling.
+#[derive(Clone, Debug, Default)]
+pub struct GameLogCapture {
+    inner: ConsoleLogCapture,
+}
+
+impl GameLogCapture {
+    /// Remove and return every line logged since the previous drain, formatted
+    /// with the GUI sink's `%*%v` pattern (`src/C4Log.cpp:44-83,187-204`).
+    pub fn take(&self) -> Vec<String> {
+        self.inner
+            .take()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+impl<'a> MakeWriter<'a> for GameLogCapture {
+    type Writer = ConsoleLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.inner.make_writer()
+    }
+}
+
+/// The GuiSink's message-board attachment: it receives the C4Script logger and
+/// nothing else, so engine-internal Rust tracing — which has no C++ `Log()`
+/// counterpart — never reaches `C4MessageBoard::AddLog`.
+#[derive(Clone, Debug, Default)]
+struct ScriptLogSink(Option<GameLogCapture>);
+
+impl<'a> MakeWriter<'a> for ScriptLogSink {
+    type Writer = OptionalWriter<ConsoleLogWriter>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        OptionalWriter::none()
+    }
+
+    fn make_writer_for(&'a self, meta: &Metadata<'_>) -> Self::Writer {
+        self.0
+            .as_ref()
+            .filter(|_| meta.target() == SCRIPT_LOG_TARGET)
+            .map(|capture| OptionalWriter::some(capture.make_writer()))
+            .unwrap_or_else(OptionalWriter::none)
     }
 }
 
@@ -113,15 +171,17 @@ pub fn init_verbose(verbose: bool) {
 /// `LC_LOG` and `RUST_LOG` directives keep the same precedence as [`init`]. Calling this after a
 /// subscriber has already been initialized returns [`io::ErrorKind::AlreadyExists`].
 pub fn init_verbose_with_file(verbose: bool, log_path: &Path) -> io::Result<()> {
-    init_verbose_with_file_and_capture(verbose, log_path, None)
+    init_verbose_with_file_and_capture(verbose, log_path, None, None)
 }
 
-/// Initialise session logging and optionally mirror the formatted stream into
-/// the developer-console log pane.
+/// Initialise session logging, mirror the formatted stream into the
+/// developer-console log pane when one is open, and always feed the C4Script
+/// log stream to the in-game message board.
 pub fn init_verbose_with_file_and_capture(
     verbose: bool,
     log_path: &Path,
     capture: Option<ConsoleLogCapture>,
+    game_log: Option<GameLogCapture>,
 ) -> io::Result<()> {
     if INITIALIZED.get().is_some() {
         return Err(io::Error::new(
@@ -132,13 +192,14 @@ pub fn init_verbose_with_file_and_capture(
 
     let file = open_session_log(log_path);
     let default_level = if verbose { "debug" } else { "info" };
+    let board = ScriptLogSink(game_log);
 
     match file {
         Ok(file) => {
             let init_result = if let Some(capture) = capture {
                 fmt()
                     .with_env_filter(env_filter(default_level))
-                    .with_writer(io::stderr.and(Mutex::new(file)).and(capture))
+                    .with_writer(io::stderr.and(Mutex::new(file)).and(capture).and(board))
                     .with_ansi(false)
                     .with_target(false)
                     .with_level(true)
@@ -146,7 +207,7 @@ pub fn init_verbose_with_file_and_capture(
             } else {
                 fmt()
                     .with_env_filter(env_filter(default_level))
-                    .with_writer(io::stderr.and(Mutex::new(file)))
+                    .with_writer(io::stderr.and(Mutex::new(file)).and(board))
                     .with_ansi(false)
                     .with_target(false)
                     .with_level(true)
@@ -165,7 +226,7 @@ pub fn init_verbose_with_file_and_capture(
                 if let Some(capture) = capture {
                     let _ = fmt()
                         .with_env_filter(env_filter(default_level))
-                        .with_writer(io::stderr.and(capture))
+                        .with_writer(io::stderr.and(capture).and(board))
                         .with_ansi(false)
                         .with_target(false)
                         .with_level(true)
@@ -173,7 +234,8 @@ pub fn init_verbose_with_file_and_capture(
                 } else {
                     let _ = fmt()
                         .with_env_filter(env_filter(default_level))
-                        .with_writer(io::stderr)
+                        .with_writer(io::stderr.and(board))
+                        .with_ansi(false)
                         .with_target(false)
                         .with_level(true)
                         .try_init();
@@ -184,17 +246,34 @@ pub fn init_verbose_with_file_and_capture(
     }
 }
 
-/// Initialise stderr logging and optionally mirror it into the developer
-/// console when no file-backed application paths are available.
-pub fn init_verbose_with_capture(verbose: bool, capture: ConsoleLogCapture) {
+/// Initialise stderr logging, mirror it into the developer console when one is
+/// open, and keep feeding the in-game message board when no file-backed
+/// application paths are available.
+pub fn init_verbose_with_capture(
+    verbose: bool,
+    capture: Option<ConsoleLogCapture>,
+    game_log: Option<GameLogCapture>,
+) {
+    let board = ScriptLogSink(game_log);
+    let default_level = if verbose { "debug" } else { "info" };
     INITIALIZED.get_or_init(|| {
-        let _ = fmt()
-            .with_env_filter(env_filter(if verbose { "debug" } else { "info" }))
-            .with_writer(io::stderr.and(capture))
-            .with_ansi(false)
-            .with_target(false)
-            .with_level(true)
-            .try_init();
+        if let Some(capture) = capture {
+            let _ = fmt()
+                .with_env_filter(env_filter(default_level))
+                .with_writer(io::stderr.and(capture).and(board))
+                .with_ansi(false)
+                .with_target(false)
+                .with_level(true)
+                .try_init();
+        } else {
+            let _ = fmt()
+                .with_env_filter(env_filter(default_level))
+                .with_writer(io::stderr.and(board))
+                .with_ansi(false)
+                .with_target(false)
+                .with_level(true)
+                .try_init();
+        }
     });
 }
 

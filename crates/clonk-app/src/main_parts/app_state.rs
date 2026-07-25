@@ -317,6 +317,10 @@ pub(crate) struct GameApp {
     /// Thread-safe tracing mirror drained by the console window each app
     /// iteration. It remains `None` for the fullscreen client.
     pub(crate) console_log_capture: Option<clonk_logging::ConsoleLogCapture>,
+    /// `C4LogSystem::GuiSink`'s message-board attachment: the C4Script log
+    /// stream the running board draws (`src/C4Log.cpp:226-240`). Fixtures that
+    /// never install a subscriber leave it `None`.
+    pub(crate) game_log_capture: Option<clonk_logging::GameLogCapture>,
     /// C4Game::fScriptCreatedObjects: set only when Scenario Initialize
     /// changed the live object count and cleared after the scenario-save
     /// double-object warning.

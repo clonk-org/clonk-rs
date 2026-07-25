@@ -2067,3 +2067,49 @@
         app.return_to_menu();
         assert_eq!(app.offline_halt_count, 0, "Game::Default clears the halt");
     }
+
+    #[test]
+    fn c4script_log_lines_reach_the_running_message_board() {
+        // C4LogSystem::GuiSink hands every logged line to the message board
+        // while it is active, and LogNotify scrolls it into view
+        // (src/C4Log.cpp:226-240; src/C4MessageBoard.cpp:327-347,354-366).
+        // Content death/kill announcements — Hazard's Killstats, for one —
+        // are ordinary C4Script Log() calls and must land there.
+        use tracing_subscriber::fmt::writer::MakeWriter;
+
+        let capture = clonk_logging::GameLogCapture::default();
+        let write_line = |text: &str| {
+            let mut writer = capture.make_writer();
+            std::io::Write::write_all(
+                &mut writer,
+                format!("2026-07-25T03:13:01.914633Z  INFO {text}\n").as_bytes(),
+            )
+            .expect("record a script log line");
+        };
+
+        let mut app = new_state_only_running_sandbox_app();
+        app.game_log_capture = Some(capture.clone());
+        write_line("Beta is dead.");
+        app.drain_game_log_capture();
+        assert_eq!(app.message_board_line().as_deref(), Some("Beta is dead."));
+
+        // C4MessageBoard::AddLog returns before touching the log buffer while
+        // the board is inactive, which outside a game it always is
+        // (C4MessageBoard::Init/Clear).
+        let mut menu = new_state_only_menu_app(320, 200);
+        menu.game_log_capture = Some(capture.clone());
+        write_line("The goal has been chosen: Alienhunt");
+        menu.drain_game_log_capture();
+        assert!(menu.message_board.log_history.is_empty());
+
+        // The drained line is consumed, not replayed into the next game.
+        app.drain_game_log_capture();
+        assert_eq!(
+            app.message_board
+                .log_history
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["Player join: Player", "Beta is dead."]
+        );
+    }

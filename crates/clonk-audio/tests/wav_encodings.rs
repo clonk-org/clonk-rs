@@ -389,6 +389,36 @@ fn terminal_unpadded_data_still_requires_the_declared_payload() {
 }
 
 #[test]
+fn overlong_riff_length_is_capped_to_the_available_bytes() {
+    // SDL_wave.c caps the chunk-search envelope at the real stream size, so
+    // Mix_LoadWAV_RW (C4AudioSystemSdl.cpp:285) still loads writers that count
+    // the "RIFF" magic and length field in the declared RIFF length. Five
+    // EkeReloaded.c4d/Sound.c4d samples ship with exactly that +8 overrun.
+    let sound = riff_wav(&pcm_fmt(8), None, &[0, 128, 255]);
+    let reference = decode_audio(&sound).expect("well-formed fixture decodes");
+
+    for overrun in [8_u32, 100_000] {
+        let mut overlong = sound.clone();
+        let riff_len = u32::try_from(overlong.len() - 8).unwrap() + overrun;
+        overlong[4..8].copy_from_slice(&riff_len.to_le_bytes());
+        let decoded = decode_audio(&overlong).expect("overlong RIFF length still decodes");
+        assert_eq!(decoded.sample_rate, reference.sample_rate);
+        assert_eq!(decoded.frames, reference.frames);
+    }
+
+    // A RIFF length *shorter* than the file still bounds the scan: an envelope
+    // closing after `fmt ` makes SDL report "Missing data chunk in WAVE file"
+    // rather than reading the `data` chunk that follows it in the buffer.
+    let mut truncated_envelope = sound;
+    let fmt_only_len = u32::try_from(4 + 8 + pcm_fmt(8).len()).unwrap();
+    truncated_envelope[4..8].copy_from_slice(&fmt_only_len.to_le_bytes());
+    assert!(matches!(
+        decode_audio(&truncated_envelope),
+        Err(AudioDecodeError::InvalidData("missing WAV data"))
+    ));
+}
+
+#[test]
 fn malformed_or_unsupported_wav_encodings_remain_typed_errors() {
     fn assert_invalid(wav: &[u8]) {
         assert!(matches!(

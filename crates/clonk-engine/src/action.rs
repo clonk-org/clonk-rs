@@ -349,6 +349,12 @@ pub struct ActionSpec {
     pub dig_free: Option<i32>,
     #[serde(default)]
     pub attach: u32,
+    /// `Sound=` (C4ActionDef::Sound, C4Def.cpp:104): a looping,
+    /// object-attached sample started when the numeric action slot is
+    /// entered and stopped when it is left (C4Object.cpp:4149-4152,
+    /// 4186-4190). Presentation-only — never synchronized state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<String>,
 }
 
 impl ActionSpec {
@@ -372,6 +378,7 @@ impl ActionSpec {
             energy_usage: 0,
             dig_free: None,
             attach: 0,
+            sound: None,
         }
     }
 
@@ -392,6 +399,11 @@ impl ActionSpec {
 
     pub fn with_procedure(mut self, procedure: impl Into<String>) -> Self {
         self.procedure = Some(procedure.into());
+        self
+    }
+
+    pub fn with_sound(mut self, sound: impl Into<String>) -> Self {
+        self.sound = Some(sound.into());
         self
     }
 

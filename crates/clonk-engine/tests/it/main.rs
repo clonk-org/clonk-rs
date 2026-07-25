@@ -38,6 +38,8 @@ mod global_call;
 mod goldrush_scenario_batches;
 mod hangle_movement;
 mod harpoonrace_reload;
+mod hazard_death_relaunch;
+mod spawn_container_order;
 mod harpoonrace_worldgen;
 mod hazard_crosshair;
 mod hazard_squat_aim;

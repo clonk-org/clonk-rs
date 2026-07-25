@@ -5895,7 +5895,7 @@ pub(crate) fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "EndCall" => Value::String(spec.end_call.clone().unwrap_or_default().into()),
             "AbortCall" => Value::String(spec.abort_call.clone().unwrap_or_default().into()),
             "PhaseCall" => Value::String(spec.phase_call.clone().unwrap_or_default().into()),
-            "Sound" => Value::String(String::new().into()),
+            "Sound" => Value::String(spec.sound.clone().unwrap_or_default().into()),
             "NoOtherAction" => Value::Int(i32::from(spec.no_other_action)),
             "ObjectDisabled" => Value::Int(i32::from(spec.disabled)),
             "DigFree" => Value::Int(spec.dig_free.unwrap_or(0)),

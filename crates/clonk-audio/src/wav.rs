@@ -394,11 +394,17 @@ fn parse_wave(data: &[u8]) -> Result<ParsedWave, AudioDecodeError> {
     if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WAVE" {
         return Err(AudioDecodeError::InvalidData("invalid WAV header"));
     }
+    // SDL_wave.c caps the chunk-search envelope at the real stream size instead
+    // of rejecting an overlong RIFF length, so Mix_LoadWAV_RW
+    // (C4AudioSystemSdl.cpp:285) still loads writers that count the "RIFF"
+    // magic and length field in the declared length. A *shorter* declared
+    // length keeps bounding the scan.
     let riff_end = usize::try_from(read_u32(data, 4)?)
         .ok()
         .and_then(|length| length.checked_add(8))
-        .filter(|end| *end >= 12 && *end <= data.len())
-        .ok_or(AudioDecodeError::InvalidData("invalid WAV header"))?;
+        .filter(|end| *end >= 12)
+        .ok_or(AudioDecodeError::InvalidData("invalid WAV header"))?
+        .min(data.len());
 
     let mut position = 12;
     let mut fmt_range = None;

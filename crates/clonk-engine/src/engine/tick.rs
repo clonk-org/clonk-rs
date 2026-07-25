@@ -1617,7 +1617,66 @@ impl Engine {
         Ok(())
     }
 
+    /// `C4Object::SetAction`'s ActMap-sound pair (C4Object.cpp:4149-4152,
+    /// 4186-4190): leaving a numeric action slot stops that slot's `Sound=`
+    /// and entering one starts it as an object-attached loop at volume 100.
+    ///
+    /// C++ emits both inside `SetAction`; the port reconciles the frame's
+    /// resulting selection instead, because the Rust action state is mutated
+    /// from a dozen sites (script `SetAction`, the ExecAction `NextAction`
+    /// wrap, command/procedure/economy forcing, `ChangeDef`) and a hook per
+    /// site would leak a stuck loop the moment one was missed. Sound is
+    /// client-local presentation, never synchronized or save-persisted, so
+    /// deriving it from observed state costs no determinism. The one residual
+    /// is an A->B->A round trip completed inside a single frame, which C++
+    /// would stop and restart within that same 1/36s.
+    fn reconcile_action_sounds(&mut self) {
+        for index in 0..self.objects.len() {
+            let object = &self.objects[index];
+            // A removed object's looping instances are halted by
+            // DetachObjectSounds (C4SoundSystem::ClearPointers), which C++
+            // reaches from removal rather than from SetAction. Drop the
+            // tracking without emitting a redundant stop of our own.
+            if object.destroyed || !object.state.status.is_active() {
+                self.objects[index].active_action_sound = None;
+                continue;
+            }
+            let desired = self
+                .definitions
+                .get(&object.definition_id)
+                .map(Definition::action_library)
+                .and_then(|library| library.spec_for_state(&object.state.action))
+                .and_then(|spec| spec.sound.clone());
+            if desired == object.active_action_sound {
+                continue;
+            }
+            let id = object.id;
+            if let Some(previous) = self.objects[index].active_action_sound.take() {
+                self.pending_audio.push(AudioCommand::StopSound {
+                    name: previous,
+                    target: Some(id),
+                });
+            }
+            if let Some(sound) = desired {
+                self.pending_audio.push(AudioCommand::PlaySound {
+                    name: sound.clone(),
+                    target: Some(id),
+                    volume: 100,
+                    looped: true,
+                    // `StartSoundEffect` goes straight to `NewInstance`
+                    // (C4SoundSystem.cpp:54-58). The IsSoundPlaying gate is
+                    // FnSound's alone (C4Script.cpp:2317-2319), so the action
+                    // sound must not inherit it.
+                    multiple: true,
+                    custom_falloff: None,
+                });
+                self.objects[index].active_action_sound = Some(sound);
+            }
+        }
+    }
+
     pub(crate) fn drain_tick_presentation(&mut self) -> TickPresentation {
+        self.reconcile_action_sounds();
         let scoreboard_presentations = self.take_scoreboard_presentations();
         let menu_requests = self.pending_menu_requests.drain(..).collect();
         for command in &self.pending_audio {
