@@ -233,7 +233,7 @@ live comparison.
 - Test gap (2026-07-25): `advance_game_clock_from_elapsed` now coalesces a
   one-second-timer backlog instead of replaying one `sec1_timer` pass per
   elapsed second, matching C++ (`seconds != LastExecute.tv_sec` fires
-  `Sec1Timer()` at most once per Execute, oracle-src-pinned
+  `Sec1Timer()` at most once per Execute, LegacyClonk 7d43b47
   src/StdAppUnix.cpp:288-291; Win32 never queues WM_TIMER twice,
   StdAppWin32.cpp:132). The behavior is verified against that C++ source, but
   the accompanying test only pins that the sub-second phase survives -- it does
@@ -320,7 +320,7 @@ an ordered-map model gap.
   labels async `"[!]Asynchroner Netzwerkmodus (experimentell!)"`,
   `C4GameOptions.cpp:93`). Approved 2026-07-25. The async *mechanism* itself is
   already a faithful port -- `force_expired_async_control` mirrors
-  `PackCompleteCtrl` (oracle-src-pinned src/C4GameControlNetwork.cpp:741-784)
+  `PackCompleteCtrl` (LegacyClonk 7d43b47 src/C4GameControlNetwork.cpp:741-784)
   and the deadline mirrors :754 exactly; only the default changes.
   In lockstep the host cannot publish tick T until every client's control for T
   arrives, so the slowest link paces the whole session and one bad peer stalls
@@ -358,7 +358,7 @@ an ordered-map model gap.
 
 - **PreSend is sized from the delivery-time envelope, not the mean**
   (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;
-  C++ `C4GameControlNetwork::CalcPerformance`, oracle-src-pinned
+  C++ `C4GameControlNetwork::CalcPerformance`, LegacyClonk 7d43b47
   src/C4GameControlNetwork.cpp:382-447). Approved 2026-07-24.
   C++ derives the PreSend horizon from a 1/150 EWMA of the *mean* control send
   time. Two consequences, both of which stall every participant rather than the
@@ -394,7 +394,7 @@ an ordered-map model gap.
 
 - **One datagram may hold the reliable-UDP hub for at most 2 ms**
   (`crates/clonk-network/src/udp_runtime.rs`, `RELIABLE_UDP_SEND_BUDGET`;
-  C++ `C4NetIOSimpleUDP::Send`, oracle-src-pinned src/C4NetIO.cpp:1772-1790).
+  C++ `C4NetIOSimpleUDP::Send`, LegacyClonk 7d43b47 src/C4NetIO.cpp:1772-1790).
   Approved 2026-07-25. This restores C++'s failure mode, with one bounded
   softening.
   C++ issues a single non-blocking `sendto` and, on EWOULDBLOCK/EINPROGRESS,
@@ -419,7 +419,7 @@ an ordered-map model gap.
 
 - **Control-sized reliable-UDP datagrams are sent three times**
   (`crates/clonk-network/src/udp.rs`, `reliable_udp_redundant_copies`;
-  C++ `C4NetIOUDP::SendDirect`, oracle-src-pinned src/C4NetIO.cpp:3128).
+  C++ `C4NetIOUDP::SendDirect`, LegacyClonk 7d43b47 src/C4NetIO.cpp:3128).
   Approved 2026-07-24, copy count raised from 2 to 3 on 2026-07-25.
   C++ sends each data datagram once and repairs a loss with a request/resend
   round trip. Because reliable-UDP delivery is strictly ordered
@@ -434,7 +434,7 @@ an ordered-map model gap.
   carries the same packet number, and both engines discard a fragment they have
   already stored -- Rust at `ReliableUdpPartialPacket::add_fragment`
   (udp.rs:508-522), C++ at `C4NetIOUDP::Packet::AddFragment`
-  (oracle-src-pinned src/C4NetIO.cpp:2615-2620). The delivered packet stream,
+  (LegacyClonk 7d43b47 src/C4NetIO.cpp:2615-2620). The delivered packet stream,
   its ordering and the wire format are unchanged.
   Only inner packets of <= 256 bytes qualify, which covers control (10-27 bytes
   on the wire) and excludes resource transfer, whose chunks fragment into full
@@ -461,7 +461,7 @@ an ordered-map model gap.
 
 - **Reliable-UDP re-ask damping, 1 s -> 250 ms** (`crates/clonk-network/src/udp.rs`,
   `RELIABLE_UDP_RECHECK_INTERVAL`; C++ `C4NetIOUDP::Peer::iReCheckInterval`,
-  oracle-src-pinned src/C4NetIO.cpp:1914). Approved 2026-07-24.
+  LegacyClonk 7d43b47 src/C4NetIO.cpp:1914). Approved 2026-07-24.
   The first repair request is immediate in both engines, so this interval only
   governs the case where a repair request is itself lost. C++ then waits a full
   second, which in a lockstep session freezes every participant rather than only
