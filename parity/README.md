@@ -31,6 +31,7 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `script_value_convert` | `src/C4Value.cpp:488-598` `C4ScriptCnvMap` + `ConvertTo` | type-coercion rules for `getInt`/`getStr`/… and parameter marshaling |
 | `script_killer` | `src/C4ScriptKiller.h`, called by `src/C4Script.cpp:1333-1347` | GetKiller/SetKiller fallback target, player validation, direct assignment, foreign/arrow targeting |
 | `eval_direct_exec_context` | complete `FnEval` + `C4AulScript::DirectExec` scope setup (`src/C4Script.cpp:4501-4513`; `src/C4AulExec.cpp:1674-1683`) | object-definition, definition-only, and `Game.Script` receiver selection; object `LocalNamed`, temporary Def, parent, and caller strictness |
+| `definition_commanded_effect_position` | complete `C4Effect::Execute` + `C4AulScriptFunc::Exec` forwarding + `C4AulExec::Exec` script-context setup + `FnGetX`/`FnGetY` (`src/C4Effect.cpp:319-363`; `src/C4AulExec.cpp:330-364,1638-1649`; `src/C4Script.cpp:1198-1202,1293-1297`) | an ID-commanded effect keeps its affected carrier argument while implicit position calls see the null command-object receiver |
 | `landscape_path` | `src/C4LandscapePath.h`, called by `src/C4Landscape.cpp:890-915` | 17×15 PixCnt traversal and authoritative pixel-plane occupancy at cell edges |
 | `action_direction` | `src/C4ActionDirection.h`, called by `C4Object::ExecAction`/`SetDir` | raw-C4Fixed facing, TurnAction fixed-position resync, and stale pre-transition phase ordering |
 | `action_swim_direction` | `src/C4ActionDirection.h`, called by DFA_SWIM/`SetDir` | SwimAccel facing changes, TurnAction two-axis fixed-position resync, and stale Swim phase ordering |
@@ -119,6 +120,15 @@ live shadow-diff — see "Phase 2" below.
   receiver/setup/strict/source forwarding but does not run C++ `ParseFn` or
   expression execution; full scheduled-expression parity still requires a
   native scenario differential.
+- `definition_commanded_effect_position` mechanically extracts the complete
+  production `C4Effect::Execute`, `C4AulScriptFunc::Exec` engine-call
+  forwarding, `C4AulExec::Exec` script-context setup, and `FnGetX`/`FnGetY`.
+  Its scaffold gives an ID-commanded effect a carrier at `(320,-50)` but no
+  command object, then records that the timer receives the carrier as its
+  explicit target while its implicit position receiver remains null. Rust
+  drives the same case through real `AddEffect` and effect-timer dispatch;
+  callback lookup by command ID is also pinned by the focused engine
+  regression.
 - `landscape_path` calls the production `C4LandscapePath.h` traversal used by
   `_PathFree`. Its edge-water input is the minimized Goldrush frame-143 live
   divergence; Rust runs the same density plane through a real `PixelGrid`.

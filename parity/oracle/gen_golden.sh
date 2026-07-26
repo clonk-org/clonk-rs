@@ -108,6 +108,42 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4AulExec.cpp" > "$gen/script_direct_exec_scope.inc"
 
+# A definition-commanded effect resolves its callback code through
+# idCommandTarget but C4Effect::Execute still passes pCommandTarget as the
+# callback receiver. Lift the complete Execute body, the real script-function
+# engine-call forwarding and context setup, and the two position hosts whose
+# implicit target is cthr->Obj. The focused scaffold makes the affected
+# pForObj/carrier distinct from that nullable callback receiver.
+awk '
+  /^void C4Effect::Execute\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Effect.cpp" > "$gen/effect_execute.inc"
+
+awk '
+  /^C4Value C4AulScriptFunc::Exec\(C4Object \*pObj,/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4AulExec.cpp" > "$gen/aul_script_func_exec.inc"
+
+awk '
+  /^C4Value C4AulExec::Exec\(C4AulScriptFunc \*pSFunc,/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4AulExec.cpp" > "$gen/aul_exec_script_context.inc"
+
+for host_name in GetX GetY; do
+  awk -v host_name="$host_name" '
+    $0 ~ "^static std::optional<C4ValueInt> Fn" host_name "\\(" { p = 1 }
+    p { print }
+    p && /^}$/ { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$src/C4Script.cpp" > "$gen/script_fn_${host_name}.inc"
+done
+
 # Network game startup must place the synchronized C4GameParameters lists,
 # not a client's local Scenario.txt lists. Lift the complete production
 # conversion and placement methods so the HarpoonRace fixture below executes

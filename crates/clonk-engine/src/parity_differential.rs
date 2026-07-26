@@ -8,11 +8,13 @@
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
 //! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
 //! `src/C4SolidMaskBitmap.h`, plus complete `FnEval`, DirectExec's temporary
-//! context setup, `C4Object::DigOutMaterialCast`, `C4Game::ShakeObjects`,
-//! `C4Object::Fling`, `C4Landscape::ClearPix`, `BlastFreePix`, `BlastFree`,
-//! `ExecuteScan`, and `DoScan` bodies and the `C4SGame::ConvertGoals`,
-//! `C4Game::InitRules`/`InitGoals`, and bottom/top/side-flight
-//! `C4Object::ContactAction` arms) by
+//! context setup, `C4Effect::Execute`, C4AulScriptFunc's engine-call
+//! forwarding and script-context setup, `FnGetX`/`FnGetY`,
+//! `C4Object::DigOutMaterialCast`,
+//! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
+//! `BlastFreePix`, `BlastFree`, `ExecuteScan`, and `DoScan` bodies and the
+//! `C4SGame::ConvertGoals`, `C4Game::InitRules`/`InitGoals`, and
+//! bottom/top/side-flight `C4Object::ContactAction` arms) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
@@ -42,9 +44,9 @@ use crate::scenario::{
 use crate::{
     contact_action_wall_tumble_x, ActionSpec, ActionState, CommandDirection, Definition,
     DefinitionPicture, DefinitionRect, DefinitionSpriteImage, DefinitionTargetRect, Direction,
-    Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo, PhysicsSettings,
-    PlayerConfig, Scenario, ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING, CATEGORY_OBJECT,
-    OWNER_NONE,
+    EffectVarValue, Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo,
+    PhysicsSettings, PlayerConfig, Scenario, ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING,
+    CATEGORY_OBJECT, OWNER_NONE,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -2594,6 +2596,150 @@ func ScenarioHelper() { return 73; }
                     rust,
                 );
             }
+        }
+    }
+
+    // 10c. C4Effect::Execute passes pCommandTarget—not the affected pForObj—
+    // to C4AulFunc::Exec (oracle-src-pinned src/C4Effect.cpp:319-363).
+    // With only idCommandTarget set, the mechanically extracted C++ path
+    // therefore gives FnGetX/FnGetY a null cthr->Obj while retaining the
+    // carrier as the timer's first argument (src/C4AulExec.cpp:330-364,
+    // 1638-1649; src/C4Script.cpp:1198-1202,1293-1297).
+    {
+        let section = &golden["definition_commanded_effect_position"];
+        let carrier_script = r#"#strict 2
+func Arm()
+{
+    return AddEffect("Origin", this(), 100, 1, 0, PROB);
+}
+"#;
+        let callback_script = r#"#strict 2
+func FxOriginTimer(object target, int number, int time)
+{
+    EffectVar(0, target, number) = GetX();
+    EffectVar(1, target, number) = GetY();
+    EffectVar(2, target, number) = GetX(target);
+    EffectVar(3, target, number) = GetY(target);
+    EffectVar(4, target, number) = time;
+    EffectVar(5, target, number) = !this();
+    EffectVar(6, target, number) = GetID(target) == CARR;
+    EffectVar(7, target, number) = number;
+    return 0;
+}
+"#;
+
+        let mut carrier = Definition::from_script("CARR", "Effect carrier", carrier_script)
+            .expect("effect receiver differential carrier compiles");
+        carrier.set_c4_callback_convention(true);
+        let mut callback = Definition::from_script("PROB", "Effect callback", callback_script)
+            .expect("effect receiver differential callback compiles");
+        callback.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(carrier)
+            .expect("effect receiver differential carrier registers");
+        engine
+            .register_definition(callback)
+            .expect("effect receiver differential callback registers");
+        let carrier = engine
+            .spawn_object(
+                SpawnConfig::new("CARR")
+                    .with_position(crate::Vector2::new(
+                        i(section, "carrier_x") as i32,
+                        i(section, "carrier_y") as i32,
+                    ))
+                    .with_mobile(false),
+            )
+            .expect("effect receiver differential carrier spawns");
+        let carrier_index = engine
+            .find_object_index(carrier)
+            .expect("effect receiver differential carrier exists");
+        engine
+            .call_object_function(carrier_index, "Arm", Vec::new())
+            .expect("definition-commanded effect installs");
+        engine
+            .tick_without_snapshot()
+            .expect("definition-commanded effect timer runs");
+
+        let carrier_index = engine
+            .find_object_index(carrier)
+            .expect("effect receiver differential carrier remains");
+        let carrier_state = &engine.objects[carrier_index].state;
+        let effect = carrier_state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Origin")
+            .expect("definition-commanded effect remains active");
+        let var_i64 = |index: usize, field: &str| match effect.var(index) {
+            EffectVarValue::Int(value) => i64::from(value),
+            EffectVarValue::Bool(value) => i64::from(value),
+            EffectVarValue::RawBool(value) => i64::from(value != 0),
+            value => panic!(
+                "definition_commanded_effect_position `{field}` has unexpected value {value:?}"
+            ),
+        };
+        let position_var = |index: usize, field: &str| match effect.var(index) {
+            EffectVarValue::Nil => Value::Null,
+            EffectVarValue::Int(value) => Value::from(value),
+            value => panic!(
+                "definition_commanded_effect_position `{field}` has unexpected value {value:?}"
+            ),
+        };
+
+        for (index, (field, rust)) in [
+            ("carrier_x", i64::from(carrier_state.position.x)),
+            ("carrier_y", i64::from(carrier_state.position.y)),
+            (
+                "has_id_command_target",
+                i64::from(effect.command_id.as_deref() == Some("PROB")),
+            ),
+            (
+                "command_target_is_null",
+                i64::from(effect.command_target.is_none()),
+            ),
+            (
+                "callback_ran",
+                i64::from(!matches!(effect.var(4), EffectVarValue::Nil)),
+            ),
+            (
+                "callback_receiver_is_null",
+                var_i64(5, "callback_receiver_is_null"),
+            ),
+            (
+                "callback_target_is_carrier",
+                var_i64(6, "callback_target_is_carrier"),
+            ),
+            ("number", var_i64(7, "number")),
+            ("time", var_i64(4, "time")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            expect_eq(
+                "definition_commanded_effect_position",
+                index,
+                field,
+                i(section, field),
+                rust,
+            );
+        }
+        for (index, (field, effect_var)) in [
+            ("implicit_x", 0_usize),
+            ("implicit_y", 1),
+            ("explicit_x", 2),
+            ("explicit_y", 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            expect_json_eq(
+                "definition_commanded_effect_position",
+                index,
+                field,
+                section[field].clone(),
+                position_var(effect_var, field),
+            );
         }
     }
 

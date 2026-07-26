@@ -18,6 +18,10 @@
 //     called by `C4Script.cpp`; the oracle exercises that exact code.
 //   * `FnEval` and DirectExec's temporary Def/LocalNamed/parent setup are
 //     mechanically extracted from `C4Script.cpp` and `C4AulExec.cpp`.
+//   * `C4Effect::Execute`, C4AulScriptFunc's engine-call forwarding,
+//     C4AulExec's script-context setup, and `FnGetX`/`FnGetY` are
+//     mechanically extracted to pin the null `this` of an
+//     idCommandTarget-only object effect independently from its carrier.
 //   * `C4LandscapePath.h` is the production coarse-cell traversal used by
 //     `C4Landscape::_PathFree`; the oracle feeds it real PixCnt-style inputs.
 //   * `C4ActionDirection.h` is the production raw-xdir direction decision used
@@ -49,12 +53,15 @@
 //
 // Regenerate the golden with `parity/oracle/gen_golden.sh`.
 
-#include <cstdint>
 #include <algorithm>
+#include <array>
+#include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -92,6 +99,306 @@ int Rnd3()
     FRndPtr3++; if (FRndPtr3 == FRndRes) FRndPtr3 = 0;
     return FRndBuf3[FRndPtr3];
 }
+
+// --- Definition-commanded effect receiver + implicit GetX/GetY -------------
+// Hazard's SHT1 projectile installs HitCheck on the projectile object while
+// selecting the callback code by C4ID and leaving pCommandTarget null. The
+// production Execute body passes that null pointer through
+// C4AulScriptFunc::Exec into C4AulExec::Exec; its exact script-context setup
+// leaves cthr->Obj null, so bare GetX/GetY return nil even though the carrier
+// is still the callback's first argument.
+namespace effect_position_oracle
+{
+using C4ValueInt = int32_t;
+using C4ID = unsigned long;
+inline constexpr int C4AUL_MAX_Par = 10;
+inline constexpr int32_t C4Fx_Execute_Kill = -1;
+inline constexpr int ASS_PARSED = 1;
+
+struct C4Effect;
+struct C4Def
+{
+};
+
+struct C4Object
+{
+    C4Effect *pEffects{};
+    C4Def *Def{};
+    int32_t Status{1};
+    int32_t x{};
+    int32_t y{};
+};
+
+struct C4AulScriptContext;
+struct C4AulContext
+{
+    C4Object *Obj{};
+    C4Def *Def{};
+    C4AulScriptContext *Caller{};
+};
+
+#include "script_fn_GetX.inc"
+#include "script_fn_GetY.inc"
+
+struct C4Value
+{
+    enum class Kind
+    {
+        Integer,
+        Object,
+    };
+
+    Kind kind{Kind::Integer};
+    int32_t integer{};
+    C4Object *object{};
+
+    int32_t getInt() const { return integer; }
+    void Set(const C4Value &value) { *this = value; }
+};
+
+static C4Value C4VObj(C4Object *object)
+{
+    return C4Value{C4Value::Kind::Object, 0, object};
+}
+
+static C4Value C4VInt(int32_t value)
+{
+    return C4Value{C4Value::Kind::Integer, value, nullptr};
+}
+
+static const C4Value C4VNull{};
+
+struct PositionProbe
+{
+    bool callbackRan{};
+    C4Object *receiver{};
+    C4Object *target{};
+    int32_t number{};
+    int32_t time{};
+    std::optional<C4ValueInt> implicitX;
+    std::optional<C4ValueInt> implicitY;
+    std::optional<C4ValueInt> explicitX;
+    std::optional<C4ValueInt> explicitY;
+};
+
+static PositionProbe positionProbe;
+
+struct C4AulParSet
+{
+    C4Value Par[C4AUL_MAX_Par]{};
+
+    C4AulParSet() = default;
+    C4AulParSet(
+        const C4Value &par0,
+        const C4Value &par1 = C4Value(),
+        const C4Value &par2 = C4Value(),
+        const C4Value &par3 = C4Value(),
+        const C4Value &par4 = C4Value(),
+        const C4Value &par5 = C4Value(),
+        const C4Value &par6 = C4Value(),
+        const C4Value &par7 = C4Value(),
+        const C4Value &par8 = C4Value(),
+        const C4Value &par9 = C4Value())
+        : Par{par0, par1, par2, par3, par4, par5, par6, par7, par8, par9}
+    {
+    }
+};
+
+struct C4AulScript
+{
+    int State{ASS_PARSED};
+    C4Def *Def{};
+};
+
+struct C4AulBCC
+{
+};
+
+struct C4AulScriptFunc;
+
+struct C4AulScriptContext : C4AulContext
+{
+    C4Value *Return{};
+    C4Value *Pars{};
+    C4Value *Vars{};
+    C4AulScriptFunc *Func{};
+    bool TemporaryScript{};
+    C4AulBCC *CPos{};
+};
+
+struct C4AulFunc
+{
+    virtual ~C4AulFunc() = default;
+    virtual C4Value Exec(
+        C4Object *pObj = nullptr,
+        const C4AulParSet &parameters = C4AulParSet{},
+        bool fPassErrors = false,
+        bool nonStrict3WarnConversionOnly = false,
+        bool convertNilToIntBool = true) = 0;
+};
+
+struct C4ValueMapNames
+{
+    int iSize{};
+};
+
+struct C4AulScriptFunc : C4AulFunc
+{
+    C4AulScript *Owner{};
+    C4AulScript *pOrgScript{};
+    C4AulBCC *Code{};
+    C4ValueMapNames VarNamed{};
+
+    bool HasStrictNil() const noexcept { return false; }
+    C4Value Exec(
+        C4Object *pObj = nullptr,
+        const C4AulParSet &pPars = C4AulParSet{},
+        bool fPassErrors = false,
+        bool nonStrict3WarnConversionOnly = false,
+        bool convertNilToIntBool = true) override;
+};
+
+static bool TryCheckConvertFunctionParameters(
+    C4Object *,
+    C4AulFunc *,
+    C4Value *,
+    bool,
+    bool,
+    bool,
+    bool)
+{
+    return true;
+}
+
+struct C4AulExec
+{
+    std::array<C4Value, 32> valueStack{};
+    C4Value *pCurVal{valueStack.data()};
+    C4AulScriptContext currentContext{};
+
+    void PushValue(const C4Value &value)
+    {
+        ++pCurVal;
+        pCurVal->Set(value);
+    }
+
+    void PushNullVals(int count)
+    {
+        while (count-- > 0)
+            PushValue(C4VNull);
+    }
+
+    void PushContext(const C4AulScriptContext &context)
+    {
+        currentContext = context;
+    }
+
+    C4Value Exec(
+        C4AulScriptFunc *pSFunc,
+        C4Object *pObj,
+        const C4Value *pnPars,
+        bool fPassErrors,
+        bool fTemporaryScript = false);
+
+    C4Value Exec(C4AulBCC *, bool)
+    {
+        C4Object *target = currentContext.Pars[0].object;
+
+        positionProbe.callbackRan = true;
+        positionProbe.receiver = currentContext.Obj;
+        positionProbe.target = target;
+        positionProbe.number = currentContext.Pars[1].integer;
+        positionProbe.time = currentContext.Pars[2].integer;
+        positionProbe.implicitX = FnGetX(&currentContext, nullptr);
+        positionProbe.implicitY = FnGetY(&currentContext, nullptr);
+        positionProbe.explicitX = FnGetX(&currentContext, target);
+        positionProbe.explicitY = FnGetY(&currentContext, target);
+        return C4VInt(0);
+    }
+};
+
+static C4AulExec AulExec;
+
+#include "aul_script_func_exec.inc"
+#include "aul_exec_script_context.inc"
+
+struct C4Effect
+{
+    C4Object *pCommandTarget{};
+    C4ID idCommandTarget{};
+    int32_t iPriority{100};
+    int32_t iTime{};
+    int32_t iIntervall{1};
+    int32_t iNumber{1};
+    C4Effect *pNext{};
+    C4AulFunc *pFnTimer{};
+
+    bool IsDead() { return !iPriority; }
+    void Kill(C4Object *) { iPriority = 0; }
+    void Execute(C4Object *pObj);
+};
+
+struct GameState
+{
+    C4Effect *pGlobalEffects{};
+};
+
+static GameState Game;
+
+#include "effect_execute.inc"
+
+static void printOptional(std::optional<C4ValueInt> value)
+{
+    if (value)
+        printf("%d", *value);
+    else
+        printf("null");
+}
+
+static void printDefinitionCommandedEffectPositionCase()
+{
+    positionProbe = PositionProbe{};
+    Game = GameState{};
+
+    C4Object carrier;
+    carrier.x = 320;
+    carrier.y = -50;
+
+    C4AulScript callbackOwner;
+    C4AulBCC callbackCode;
+    C4AulScriptFunc timer;
+    timer.Owner = &callbackOwner;
+    timer.pOrgScript = &callbackOwner;
+    timer.Code = &callbackCode;
+    C4Effect effect;
+    effect.pCommandTarget = nullptr;
+    effect.idCommandTarget = 0x424f5250UL; // little-endian "PROB"
+    effect.pFnTimer = &timer;
+    carrier.pEffects = &effect;
+
+    effect.Execute(&carrier);
+
+    printf("\"definition_commanded_effect_position\":{"
+           "\"carrier_x\":%d,\"carrier_y\":%d,"
+           "\"has_id_command_target\":%d,\"command_target_is_null\":%d,"
+           "\"callback_ran\":%d,\"callback_receiver_is_null\":%d,"
+           "\"callback_target_is_carrier\":%d,\"number\":%d,\"time\":%d,"
+           "\"implicit_x\":",
+           carrier.x, carrier.y, effect.idCommandTarget != 0,
+           effect.pCommandTarget == nullptr, positionProbe.callbackRan,
+           positionProbe.receiver == nullptr,
+           positionProbe.target == &carrier, positionProbe.number,
+           positionProbe.time);
+    printOptional(positionProbe.implicitX);
+    printf(",\"implicit_y\":");
+    printOptional(positionProbe.implicitY);
+    printf(",\"explicit_x\":");
+    printOptional(positionProbe.explicitX);
+    printf(",\"explicit_y\":");
+    printOptional(positionProbe.explicitY);
+    printf("}");
+}
+} // namespace effect_position_oracle
 
 // --- BlastFree: exact production bodies ------------------------------------
 // gen_golden.sh extracts ClearPix, BlastFreePix, and BlastFree unchanged from
@@ -2339,6 +2646,11 @@ int main()
     // 10b. FnEval's exact Obj -> Def -> Game.Script receiver selection and
     //      DirectExec's exact temporary Def/LocalNamed/parent setup.
     printEvalDirectExecContextCases();
+    printf(",\n");
+
+    // 10c. C4ID-only effect callbacks retain their affected object as the
+    //      first callback argument but execute with a null object receiver.
+    effect_position_oracle::printDefinitionCommandedEffectPositionCase();
     printf(",\n");
 
     // 11. C4Landscape::_PathFree coarse-cell occupancy. The edge-water case

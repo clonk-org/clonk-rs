@@ -4679,13 +4679,24 @@ fn get_position_component(
             return Ok(Value::Nil);
         }
 
-        let object = match context.object_context() {
-            Some(object) => object,
-            None => return Ok(Value::Nil),
+        // FnGetX/FnGetY default to cthr->Obj, not the affected object that
+        // C4Effect carries as pForObj (C4Script.cpp:1198-1202,1293-1297).
+        // Definition-commanded effects have a mutable carrier scope but a
+        // null script receiver, so their implicit coordinate origin is nil.
+        let Some(target) = context.script_object_context else {
+            return Ok(Value::Nil);
         };
-
-        let position = object.effective_position();
-        Ok(Value::Int(component.extract(position)))
+        let position = context
+            .object_scope(target)
+            .map(ObjectScopeContext::effective_position)
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.position())
+            });
+        Ok(position
+            .map(|position| Value::Int(component.extract(position)))
+            .unwrap_or(Value::Nil))
     })
 }
 

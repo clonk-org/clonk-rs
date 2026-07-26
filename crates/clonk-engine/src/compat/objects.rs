@@ -4472,8 +4472,19 @@ pub(crate) fn find_at_point(args: &[Value]) -> Result<Value, RuntimeError> {
     let origin = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .and_then(EffectHostContext::object_context)
-            .map(ObjectScopeContext::effective_position)
+            .and_then(|context| {
+                // System.c4g adds FnGetX/FnGetY's cthr->Obj position. An
+                // effect's mutable pForObj carrier is not that receiver.
+                let target = context.script_object_context?;
+                context
+                    .object_scope(target)
+                    .map(ObjectScopeContext::effective_position)
+                    .or_else(|| {
+                        context
+                            .get_world_object(target)
+                            .map(|object| object.position())
+                    })
+            })
             .unwrap_or(Vector2::ZERO)
     });
     Ok(Value::Array(vec![

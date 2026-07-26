@@ -3020,6 +3020,84 @@ func Probe(target) {
     }
 
     #[test]
+    fn definition_commanded_effect_has_no_implicit_position_receiver() {
+        // C4Effect selects Fx* CODE from idCommandTarget but executes it on
+        // pCommandTarget, which is null here (C4Effect.cpp:42-56,342-345).
+        // Bare GetX/GetY therefore default to null cthr->Obj and return nil
+        // (C4Script.cpp:1198-1202,1293-1297), even though pForObj still
+        // carries the affected object's mutable effect list.
+        let carrier_script = r#"#strict 2
+func Initialize()
+{
+    AddEffect("Origin", this(), 100, 1, 0, PROB);
+    return true;
+}
+"#;
+        let callback_script = r#"#strict 2
+func FxOriginTimer(object target, int number, int time)
+{
+    EffectVar(0, target, number) = GetX();
+    EffectVar(1, target, number) = GetY();
+    EffectVar(2, target, number) = GetX(target);
+    EffectVar(3, target, number) = GetY(target);
+    EffectVar(4, target, number) = time;
+    return 0;
+}
+"#;
+
+        let mut carrier =
+            Definition::from_script("CARR", "Carrier", carrier_script).expect("carrier compiles");
+        carrier.set_c4_callback_convention(true);
+        let mut callback =
+            Definition::from_script("PROB", "Probe", callback_script).expect("probe compiles");
+        callback.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(carrier)
+            .expect("carrier registers");
+        engine
+            .register_definition(callback)
+            .expect("probe registers");
+        let carrier = engine
+            .spawn_object(
+                SpawnConfig::new("CARR").with_position(Vector2::new(320, -50)),
+            )
+            .expect("carrier spawns");
+
+        engine
+            .tick_without_snapshot()
+            .expect("definition-commanded timer runs");
+
+        let carrier = engine
+            .find_object_index(carrier)
+            .expect("carrier remains live");
+        let effect = engine.objects[carrier]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Origin")
+            .expect("effect remains active");
+        assert_eq!(
+            (
+                effect.var(0),
+                effect.var(1),
+                effect.var(2),
+                effect.var(3),
+                effect.var(4)
+            ),
+            (
+                EffectVarValue::Nil,
+                EffectVarValue::Nil,
+                EffectVarValue::Int(320),
+                EffectVarValue::Int(-50),
+                EffectVarValue::Int(1)
+            ),
+            "the carrier stays an explicit argument without becoming implicit this"
+        );
+    }
+
+    #[test]
     fn removed_command_target_silently_kills_object_and_global_effects() {
         // C4Game::ClearPointers -> C4Object/C4Effect::ClearPointers marks
         // every foreign effect using the removed object as its command
