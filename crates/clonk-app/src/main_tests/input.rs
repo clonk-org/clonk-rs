@@ -3825,15 +3825,123 @@
     }
 
     #[test]
+    fn l094_scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
+        // C4PortraitSelDlg is inserted above C4StartupPlrPropertiesDlg by
+        // ShowModalDlg, so Window::Draw finishes every parent element before
+        // drawing the selector and its opaque thumbnails/chrome. Screen::Draw
+        // then paints an open ComboBox ContextMenu after every dialog
+        // (pinned C4StartupPlrSelDlg.cpp:1509-1517;
+        // C4FileSelDlg.cpp:628-629; C4Gui.cpp:573-579;
+        // C4GuiContainers.cpp:33-44; C4Gui.cpp:669-689).
+        for retained_gpu in [false, true] {
+            let mut app = new_real_classic_menu_app(640, 480);
+            app.graphics.set_runtime_sprite_filtering(3.0, false);
+            app.configure_native_startup_fonts(3.0, false);
+            app.retained_gpu_ordered_capture_active = retained_gpu;
+            app.open_new_startup_player_properties();
+            app
+                .startup_player_properties_dialog
+                .as_mut()
+                .expect("new-player properties dialog")
+                .controller
+                .open_portrait_selector(
+                    vec![
+                        clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                            "User",
+                            "/portrait-test",
+                        ),
+                        clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                            "Home",
+                            "/portrait-home",
+                        ),
+                    ],
+                    0,
+                    Vec::new(),
+                );
+            let selector = app
+                .startup_player_properties_dialog
+                .as_mut()
+                .expect("new-player properties dialog")
+                .controller
+                .portrait_selector_mut()
+                .expect("open portrait selector");
+            let combo =
+                clonk_frontend::startup_portraitsel::portrait_sel_layout(640, 480, 2)
+                    .location_combo;
+            selector.handle_pointer_down(clonk_frontend::GuiPoint::new(
+                (combo.x + combo.w / 2) as f32,
+                (combo.y + combo.h / 2) as f32,
+            ));
+
+            let (_, _, plan) = render_ordered_test_frame(&mut app, 3.0, 1920, 1440);
+            let text_batch = |needle: &str| {
+                plan.batches
+                    .iter()
+                    .position(|batch| batch.text.iter().any(|command| command.text == needle))
+                    .unwrap_or_else(|| panic!("captured scale-native text `{needle}`"))
+            };
+            let parent_batch = text_batch("New player");
+            let selector_batch = text_batch("Location:");
+            let popup_batch = text_batch("Home");
+            assert!(
+                parent_batch < selector_batch,
+                "parent native text must be committed before selector chrome \
+                 (retained GPU: {retained_gpu}): parent={parent_batch}, \
+                 selector={selector_batch}"
+            );
+            assert!(
+                selector_batch < popup_batch,
+                "selector text must be committed before context-menu chrome \
+                 (retained GPU: {retained_gpu}): selector={selector_batch}, \
+                 popup={popup_batch}"
+            );
+            let selector_batch = &plan.batches[selector_batch];
+            let popup_batch = &plan.batches[popup_batch];
+            if retained_gpu {
+                assert!(selector_batch.logical_layer.is_none());
+                assert!(
+                    selector_batch
+                        .gpu_recorder
+                        .as_ref()
+                        .is_some_and(|recorder| !recorder.is_empty()),
+                    "the retained selector batch must record chrome after parent native text"
+                );
+                assert!(popup_batch.logical_layer.is_none());
+                assert!(
+                    popup_batch
+                        .gpu_recorder
+                        .as_ref()
+                        .is_some_and(|recorder| !recorder.is_empty()),
+                    "the retained popup batch must record chrome after selector native text"
+                );
+            } else {
+                assert!(selector_batch.gpu_recorder.is_none());
+                assert!(
+                    selector_batch.logical_layer.is_some(),
+                    "the CPU selector batch must composite chrome after parent native text"
+                );
+                assert!(popup_batch.gpu_recorder.is_none());
+                assert!(
+                    popup_batch.logical_layer.is_some(),
+                    "the CPU popup batch must composite chrome after selector native text"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn l094_picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon() {
         let _lock = env_lock().lock();
         let program_data = tempdir().expect("portrait program data");
         let user_data = tempdir().expect("portrait user data");
+        let home = tempdir().expect("portrait home");
+        fs::create_dir(home.path().join("Desktop")).expect("create portrait desktop");
         fs::create_dir_all(program_data.path().join("planet/System.c4g"))
             .expect("create program path marker");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(program_data.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("HOME", Some(home.path())),
         ]);
         let paths = AppPaths::discover().expect("discover portrait paths");
         paths.ensure_user_dirs().expect("create portrait user path");
@@ -3870,16 +3978,88 @@
             .as_ref()
             .and_then(|pending| pending.controller.portrait_selector())
             .expect("Picture opens the nested selector");
-        assert_eq!(selector.locations().len(), 2);
-        assert_eq!(selector.locations()[0].path, paths.user_data_dir());
-        assert_eq!(selector.locations()[1].path, paths.install_root());
+        // C4PortraitSelDlg adds the branded user/program paths followed by
+        // each existing platform location (pinned C4FileSelDlg.cpp:534-561).
+        let expected_locations = vec![
+            clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                "LegacyClonk User Path",
+                paths.user_data_dir(),
+            ),
+            clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                "LegacyClonk Program Directory",
+                PathBuf::from(format!(
+                    "{}{}",
+                    paths.install_root().display(),
+                    std::path::MAIN_SEPARATOR
+                )),
+            ),
+        ];
+        #[cfg(not(target_os = "windows"))]
+        let mut expected_locations = expected_locations;
+        #[cfg(target_os = "macos")]
+        expected_locations.push(
+            clonk_frontend::startup_portraitsel::PortraitLocation::new("Home", home.path()),
+        );
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        expected_locations.push(
+            clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                "Home Folder",
+                home.path(),
+            ),
+        );
+        #[cfg(not(target_os = "windows"))]
+        expected_locations.push(
+            clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                "Desktop",
+                home.path().join("Desktop"),
+            ),
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(selector.locations(), expected_locations);
+        assert!(
+            selector.locations()[1]
+                .path
+                .to_string_lossy()
+                .ends_with(std::path::MAIN_SEPARATOR),
+            "Config.General.ExePath keeps its trailing separator in the selector caption \
+             (`C4Config.cpp:1263-1270`, `C4FileSelDlg.cpp:269-271,543`)"
+        );
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                &selector.locations()[..expected_locations.len()],
+                expected_locations.as_slice()
+            );
+            assert_eq!(
+                selector.locations().last(),
+                Some(
+                    &clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                        "Home Folder",
+                        home.path(),
+                    )
+                )
+            );
+            let shell_labels = selector.locations()
+                [expected_locations.len()..selector.locations().len() - 1]
+                .iter()
+                .map(|location| location.label.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                ["My Documents", "My Pictures", "Desktop"]
+                    .into_iter()
+                    .filter(|label| shell_labels.contains(label))
+                    .eq(shell_labels.iter().copied()),
+                "existing Windows shell folders retain the pinned C++ order"
+            );
+        }
         assert_eq!(
-            selector.items()[0].choice(),
+            selector.items()[1].choice(),
             &clonk_frontend::startup_portraitsel::PortraitChoice::None
         );
         assert_eq!(selector.items().len(), 2);
+        assert_eq!(selector.items()[0].filename(), Some("Custom.PNG"));
         assert!(matches!(
-            selector.items()[1].thumbnail(),
+            selector.items()[0].thumbnail(),
             clonk_frontend::startup_portraitsel::PortraitThumbnail::Pending
         ));
         assert_eq!(
@@ -3898,12 +4078,12 @@
                 .as_ref()
                 .and_then(|pending| pending.controller.portrait_selector())
                 .expect("selector remains open")
-                .items()[1]
+                .items()[0]
                 .thumbnail(),
             clonk_frontend::startup_portraitsel::PortraitThumbnail::Ready(_)
         ));
 
-        for _ in 0..5 {
+        for _ in 0..6 {
             let actions = app
                 .startup_player_properties_dialog
                 .as_mut()
@@ -3912,12 +4092,24 @@
                 .handle_key_down(KeyCode::Tab);
             assert!(actions.is_empty());
         }
+        // C4GuiDialogs.cpp:386-421 and C4FileSelDlg.cpp:162-169,564-572
+        // place Location after the wrapped dialog controls. ComboBox Down
+        // opens its ContextMenu; two menu Downs highlight index one.
+        for key in [KeyCode::Down, KeyCode::Down, KeyCode::Down] {
+            let actions = app
+                .startup_player_properties_dialog
+                .as_mut()
+                .expect("properties remain open")
+                .controller
+                .handle_key_down(key);
+            assert!(actions.is_empty());
+        }
         let actions = app
             .startup_player_properties_dialog
             .as_mut()
             .expect("properties remain open")
             .controller
-            .handle_key_down(KeyCode::Right);
+            .handle_key_down(KeyCode::Enter);
         app.process_startup_player_properties_actions(actions);
         let selector = app
             .startup_player_properties_dialog
@@ -3926,9 +4118,16 @@
             .expect("selector remains open after changing location");
         assert_eq!(selector.current_location_index(), 1);
         assert_eq!(selector.items().len(), 2);
-        assert_eq!(selector.items()[1].filename(), Some("Program.BMP"));
+        assert_eq!(selector.items()[0].filename(), Some("Program.BMP"));
+        assert_eq!(
+            selector.items()[1].choice(),
+            &clonk_frontend::startup_portraitsel::PortraitChoice::None
+        );
 
         app.process_startup_player_properties_actions(vec![
+            clonk_frontend::startup_plrproperties::PlayerPropertiesAction::PortraitSelectorClosed {
+                location_index: 1,
+            },
             clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ApplyPicture(
                 clonk_frontend::startup_portraitsel::PortraitSelCommit {
                     choice: clonk_frontend::startup_portraitsel::PortraitChoice::None,
@@ -3961,7 +4160,15 @@
             .expect("properties remain open")
             .controller
             .handle_key_down(KeyCode::Escape);
-        assert!(actions.is_empty(), "selector cancel is handled by the parent controller");
+        assert_eq!(
+            actions,
+            vec![
+                clonk_frontend::startup_plrproperties::PlayerPropertiesAction::
+                    PortraitSelectorClosed { location_index: 1 }
+            ],
+            "C4FileSelDlg.cpp:575-580 persists the current row when Cancel closes the selector"
+        );
+        app.process_startup_player_properties_actions(actions);
         let controller = &app
             .startup_player_properties_dialog
             .as_ref()
@@ -4020,14 +4227,23 @@
             .expect("properties remain open")
             .controller
             .handle_key_down(KeyCode::Escape);
-        assert!(actions.is_empty());
+        assert_eq!(
+            actions,
+            vec![
+                clonk_frontend::startup_plrproperties::PlayerPropertiesAction::
+                    PortraitSelectorClosed { location_index: 0 }
+            ]
+        );
+        app.process_startup_player_properties_actions(actions);
+        fs::remove_file(paths.config_file()).expect("simulate failed extraction-flag persistence");
         app.process_startup_player_properties_actions(vec![
             clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
         ]);
         assert_eq!(
             fs::read(clonk_path).expect("read retained replacement"),
             b"user replacement",
-            "the persisted flag makes stock extraction one-shot"
+            "C++ keeps UserPortraitsWritten true in process even when its disk state is lost \
+             (`C4FileSelDlg.cpp:605-626`)"
         );
         reset_cached_app_paths();
     }
@@ -4128,6 +4344,480 @@
             .controller;
         assert!(controller.portrait_selector().is_none());
         assert!(controller.validation_error().is_none());
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn l094_properties_high_cluster_does_not_cancel_the_parent_screen() {
+        // Dialog's AnyHighButton binding owns the complete physical input,
+        // including Button::Select's abstract MenuToggle alias
+        // (`C4GuiDialogs.cpp:364-375`, `C4GamePadCon.cpp:216-241`).
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_player_selection_dialog();
+        app.open_new_startup_player_properties();
+
+        let slot = GamepadSlot::new(0);
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                slot,
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                slot,
+                action: GamepadActionType::MenuToggle,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("properties dialog owns the complete high-button cluster");
+
+        assert!(app.startup_player_properties_dialog.is_none());
+        assert_eq!(app.startup_view, StartupView::PlayerSelection);
+        assert!(app.startup_player_dialog.is_some());
+        assert!(!app.exit_requested);
+    }
+
+    #[test]
+    fn l094_portrait_selector_honors_exact_keyboard_modifiers() {
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_new_startup_player_properties();
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties")
+            .controller
+            .open_portrait_selector(
+                vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                    "User",
+                    PathBuf::from("."),
+                )],
+                0,
+                vec![
+                    clonk_frontend::startup_portraitsel::PortraitFileEntry::from_path(
+                        PathBuf::from("./King.png"),
+                    )
+                    .expect("portrait entry"),
+                ],
+            );
+
+        // ListBox owns Alt+Return, but activation is inert without a selected
+        // item. FileSel's dialog-level confirmation binds only bare Return
+        // (`C4GuiListBox.cpp:72-81,386-394`,
+        // `C4FileSelDlg.cpp:118-123`).
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Alt+Enter without a selection is inert");
+        assert!(app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .is_some());
+        assert!(app.message_dialogs.is_empty());
+
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift+Tab traverses backward");
+        assert_eq!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .and_then(|pending| pending.controller.portrait_selector())
+                .expect("selector remains open")
+                .focus(),
+            clonk_frontend::startup_portraitsel::PortraitSelControl::Location
+        );
+
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release modifiers");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("bare Tab traverses forward");
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("select first portrait");
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("hold Control");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Ctrl+Enter is consumed");
+
+        let selector = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("Ctrl+Enter must not confirm the portrait selector");
+        assert_eq!(selector.selected_index(), Some(0));
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn l094_portrait_selector_alt_o_activates_the_native_ok_hotkey() {
+        // LanguageUS gives the standard OK button the `&OK` mnemonic, and
+        // Dialog routes Alt plus that alphanumeric to Button::OnHotkey
+        // (`LanguageUS.txt:531`, `C4GuiButton.cpp:54-77`,
+        // `C4GuiDialogs.cpp:359-362,569-580`).
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_new_startup_player_properties();
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties")
+            .controller
+            .open_portrait_selector(
+                vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                    "User",
+                    PathBuf::from("."),
+                )],
+                0,
+                Vec::new(),
+            );
+
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::O, ElementState::Pressed)
+            .expect("Alt+O invokes OK");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert!(app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .is_some());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn l094_portrait_selector_does_not_bind_keypad_enter_as_return() {
+        // FileSel registers K_RETURN. X11 and SDL define that as the main
+        // Return key/scancode, distinct from keypad Enter
+        // (`C4FileSelDlg.cpp:118-123`, `StdApp.h:107,159`).
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_new_startup_player_properties();
+        let controller = &mut app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties")
+            .controller;
+        controller.open_portrait_selector(
+            vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                "User",
+                PathBuf::from("."),
+            )],
+            0,
+            Vec::new(),
+        );
+        controller.handle_key_down(KeyCode::Down);
+
+        app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed)
+            .expect("keypad Enter remains unbound");
+
+        assert!(app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .is_some());
+        assert!(app.message_dialogs.is_empty());
+    }
+
+    #[test]
+    fn l094_portrait_selector_outside_right_down_aborts_the_location_popup() {
+        // Screen aborts a ContextMenu on outside RightDown before routing the
+        // underlying event (`C4Gui.cpp:766-776`).
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_new_startup_player_properties();
+        let controller = &mut app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties")
+            .controller;
+        controller.open_portrait_selector(
+            vec![
+                clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                    "User",
+                    PathBuf::from("."),
+                ),
+                clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                    "Program",
+                    PathBuf::from(".."),
+                ),
+            ],
+            0,
+            Vec::new(),
+        );
+        controller.handle_key_down_with_tab_direction(KeyCode::Tab, true);
+        controller.handle_key_down(KeyCode::Down);
+        assert!(controller
+            .portrait_selector()
+            .expect("selector remains open")
+            .is_location_popup_open());
+
+        app.handle_cursor_moved(PhysicalPosition::new(0.0, 0.0))
+            .expect("move outside location popup");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("right-down aborts popup");
+
+        assert!(!app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("selector remains open")
+            .is_location_popup_open());
+    }
+
+    #[test]
+    fn l094_portrait_selector_f5_requires_dialog_keyboard_activation() {
+        // FileSel binds F5 through DlgKeyCB. The binding requires the active
+        // dialog and is suppressed while Screen owns a ContextMenu
+        // (`C4FileSelDlg.cpp:119-123`, `C4Gui.h:1616-1629`,
+        // `C4GuiDialogs.cpp:731-743`).
+        let current = tempdir().expect("current portrait location");
+        let other = tempdir().expect("other portrait location");
+        fs::write(current.path().join("Old.png"), b"old").expect("seed current portrait");
+        fs::write(other.path().join("Other.png"), b"other").expect("seed other portrait");
+        let entries =
+            clonk_frontend::startup_portraitsel::portrait_files_in_location(current.path())
+                .expect("scan initial portraits");
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_new_startup_player_properties();
+        let controller = &mut app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties")
+            .controller;
+        controller.open_portrait_selector(
+            vec![
+                clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                    "Current",
+                    current.path(),
+                ),
+                clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                    "Other",
+                    other.path(),
+                ),
+            ],
+            0,
+            entries,
+        );
+        controller.handle_key_down_with_tab_direction(KeyCode::Tab, true);
+        controller.handle_key_down(KeyCode::Down);
+        controller.handle_key_down(KeyCode::Down);
+        controller.handle_key_down(KeyCode::Down);
+        fs::write(current.path().join("New.bmp"), b"new").expect("add current portrait");
+
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("hold Control");
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("modified F5 remains unbound");
+        let selector = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("selector remains open");
+        assert!(!selector
+            .items()
+            .iter()
+            .any(|item| item.filename() == Some("New.bmp")));
+        assert!(selector.is_location_popup_open());
+
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Control");
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("the open ContextMenu suppresses dialog F5");
+        let selector = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("selector remains open");
+        assert!(!selector
+            .items()
+            .iter()
+            .any(|item| item.filename() == Some("New.bmp")));
+        assert!(selector.is_location_popup_open());
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close the ContextMenu");
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("bare F5 refreshes the active dialog");
+        let selector = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("selector remains open after refresh");
+        assert!(selector
+            .items()
+            .iter()
+            .any(|item| item.filename() == Some("New.bmp")));
+        assert_eq!(selector.selected_index(), None);
+        assert!(!selector.is_location_popup_open());
+    }
+
+    #[test]
+    fn l094_portrait_selector_errors_use_screen_owned_modals() {
+        let mut missing = new_real_classic_menu_app(640, 480);
+        missing.open_new_startup_player_properties();
+        missing
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties")
+            .controller
+            .open_portrait_selector(
+                vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                    "User",
+                    PathBuf::from("."),
+                )],
+                0,
+                Vec::new(),
+            );
+
+        missing
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("missing selection opens an error");
+        assert!(missing
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .is_some());
+        assert_eq!(missing.message_dialogs.len(), 1);
+        assert_eq!(
+            missing.message_dialogs[0].state.message(),
+            "Please select a file first!"
+        );
+
+        let temp = tempdir().expect("corrupt portrait location");
+        let corrupt = temp.path().join("Broken.png");
+        fs::write(&corrupt, b"not an image").expect("write corrupt portrait");
+        let entry = clonk_frontend::startup_portraitsel::PortraitFileEntry::from_path(
+            corrupt.clone(),
+        )
+        .expect("portrait entry");
+        let mut broken = new_real_classic_menu_app(640, 480);
+        broken.open_new_startup_player_properties();
+        let controller = &mut broken
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties")
+            .controller;
+        controller.open_portrait_selector(
+            vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                "User",
+                temp.path(),
+            )],
+            0,
+            vec![entry],
+        );
+        controller.handle_key_down(KeyCode::Down);
+
+        broken
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("corrupt selection closes then reports an error");
+        assert!(broken
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .is_none());
+        assert_eq!(broken.message_dialogs.len(), 1);
+        assert!(
+            broken.message_dialogs[0]
+                .state
+                .message()
+                .starts_with(&format!(
+                    "Error at graphics file {}: ",
+                    corrupt.display()
+                )),
+            "C4StartupPlrPropertiesDlg formats loader errors through IDS_PRC_NOGFXFILE \
+             (`C4StartupPlrSelDlg.cpp:1484-1503`)"
+        );
+    }
+
+    #[test]
+    fn l094_initial_portrait_location_scan_failure_is_silent() {
+        // DirectoryIterator failure yields no file entries; UpdateFileList
+        // still appends the null tile and displays no error
+        // (`C4FileSelDlg.cpp:251-274`, `StdFile.cpp:712-847`).
+        let _lock = env_lock().lock();
+        let root = tempdir().expect("portrait paths");
+        let user_data = root.path().join("not-a-directory");
+        fs::write(&user_data, b"file").expect("block the user directory");
+        let program_data = root.path().join("program");
+        fs::create_dir_all(program_data.join("planet/System.c4g"))
+            .expect("create program path marker");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(&program_data)),
+            ("LC_USER_DATA_DIR", Some(&user_data)),
+            ("HOME", None),
+        ]);
+        let paths = AppPaths::discover().expect("discover portrait paths");
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths);
+        app.open_new_startup_player_properties();
+
+        app.process_startup_player_properties_actions(vec![
+            clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
+        ]);
+
+        let pending = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .expect("properties remain open");
+        let selector = pending
+            .controller
+            .portrait_selector()
+            .expect("selector opens with an empty file list");
+        assert_eq!(selector.items().len(), 1);
+        assert_eq!(
+            selector.items()[0].choice(),
+            &clonk_frontend::startup_portraitsel::PortraitChoice::None
+        );
+        assert_eq!(selector.validation_error(), None);
+    }
+
+    #[test]
+    fn l094_portrait_selector_gamepad_low_toggles_the_focused_checkbox_once() {
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_new_startup_player_properties();
+        let pending = app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties");
+        pending.controller.open_portrait_selector(
+            vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
+                "User",
+                PathBuf::from("."),
+            )],
+            0,
+            Vec::new(),
+        );
+        pending
+            .controller
+            .handle_key_down_with_tab_direction(KeyCode::Tab, false);
+        let before = pending
+            .controller
+            .portrait_selector()
+            .expect("selector remains open")
+            .set_picture();
+
+        let slot = GamepadSlot::new(0);
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                slot,
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                slot,
+                action: GamepadActionType::Select,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("focused checkbox owns the complete low-button cluster");
+
+        let selector = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("checkbox activation must not accept the selector");
+        assert_eq!(selector.set_picture(), !before);
+        assert_eq!(
+            selector.focus(),
+            clonk_frontend::startup_portraitsel::PortraitSelControl::SetPicture
+        );
         assert!(app.status_text.is_empty());
     }
 

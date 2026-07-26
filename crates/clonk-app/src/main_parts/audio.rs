@@ -5655,7 +5655,7 @@ pub(crate) fn startup_player_image_from_rgba(
 
 pub(crate) fn load_startup_portrait_image(path: &Path) -> std::result::Result<ImageData, String> {
     let rgba = image::open(path)
-        .map_err(|error| format!("failed to decode {}: {error}", path.display()))?
+        .map_err(|error| error.to_string())?
         .into_rgba8();
     let (width, height) = rgba.dimensions();
     Ok(startup_player_image_from_rgba(

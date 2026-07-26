@@ -81,6 +81,8 @@ pub enum PlayerPropertiesAction {
     Cancel,
     ChoosePicture,
     PortraitLocationChanged { index: usize, path: PathBuf },
+    PortraitSelectorClosed { location_index: usize },
+    PortraitSelectionRequired,
     ApplyPicture(PortraitSelCommit),
 }
 
@@ -508,6 +510,12 @@ pub struct PlayerPropertiesAssets {
     pub caption: ImageData,
     pub button: ImageData,
     pub button_down: ImageData,
+    /// `GUIContext.png` — the two 16x16 closed/open combo-arrow phases.
+    pub context: ImageData,
+    /// `GUICheckbox.png` — enabled/disabled unchecked/checked phases.
+    pub checkbox: ImageData,
+    /// `GUIScroll.png` — permanent portrait-list scrollbar facets.
+    pub scroll: ImageData,
 }
 
 pub struct PlayerPropertiesController {
@@ -785,15 +793,15 @@ impl PlayerPropertiesController {
         current_location: usize,
         entries: Vec<PortraitFileEntry>,
     ) {
-        let mut selector = PortraitSelController::new(
-            locations,
-            current_location,
-            entries,
-            self.portrait_preview.is_some(),
-            self.big_icon_preview.is_some(),
-        );
+        // The sole C++ caller always passes `true, true`
+        // (`C4StartupPlrSelDlg.cpp:1509-1517`). The selector still keeps both
+        // presentation-only channels independent after the user changes them.
+        let mut selector =
+            PortraitSelController::new(locations, current_location, entries, true, true);
         selector.resize(self.width, self.height);
-        self.pointer_position = None;
+        if let Some(point) = self.pointer_position {
+            selector.handle_pointer_move(point);
+        }
         self.hovered = None;
         self.pointer_pressed = None;
         self.portrait_selector = Some(selector);
@@ -829,6 +837,12 @@ impl PlayerPropertiesController {
 
     pub fn advance_portrait_selector_idle(&mut self) -> Option<PortraitThumbnailRequest> {
         self.portrait_selector.as_mut()?.advance_idle()
+    }
+
+    pub fn tick_portrait_selector_scrollbar(&mut self) -> bool {
+        self.portrait_selector
+            .as_mut()
+            .is_some_and(PortraitSelController::tick_scrollbar)
     }
 
     pub fn complete_portrait_thumbnail(
@@ -938,18 +952,15 @@ impl PlayerPropertiesController {
     }
 
     pub fn pointer_position(&self) -> Option<GuiPoint> {
-        self.portrait_selector
-            .as_ref()
-            .and_then(PortraitSelController::pointer_position)
-            .or(self.pointer_position)
+        self.pointer_position
     }
 
     /// Returns exactly the tooltips assigned by the native player-properties
     /// dialog. Untipped edits, previews, swatches and OK/Cancel controls do
     /// not inherit descriptions from unrelated siblings.
     pub fn tooltip_at(&self, point: GuiPoint, book_small: &ClonkFont) -> Option<StartupTooltip> {
-        if self.portrait_selector.is_some() {
-            return None;
+        if let Some(selector) = self.portrait_selector.as_ref() {
+            return selector.tooltip_at(point);
         }
         let layout = self.layout();
         if contains(layout.control_preview, point) {
@@ -988,6 +999,10 @@ impl PlayerPropertiesController {
     }
 
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.pointer_position = position;
+        if position.is_none() {
+            self.pointer_pressed = None;
+        }
         if let Some(selector) = self.portrait_selector.as_mut() {
             match position {
                 Some(point) => {
@@ -997,27 +1012,19 @@ impl PlayerPropertiesController {
             }
             return;
         }
-        self.pointer_position = position;
         self.hovered = position.and_then(|point| self.hit_control(point));
-        if position.is_none() {
-            self.pointer_pressed = None;
-        }
     }
 
     pub fn pointer_left(&mut self) {
-        if let Some(selector) = self.portrait_selector.as_mut() {
-            selector.pointer_left();
-            return;
-        }
         self.set_pointer_position(None);
     }
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<PlayerPropertiesAction> {
+        self.pointer_position = Some(position);
         if let Some(selector) = self.portrait_selector.as_mut() {
             let actions = selector.handle_pointer_move(position);
             return self.finish_portrait_selector_actions(actions);
         }
-        self.pointer_position = Some(position);
         self.hovered = self.hit_control(position);
         if self.pointer_pressed.is_some_and(is_slider) {
             self.update_slider_from_pointer(self.pointer_pressed.unwrap(), position);
@@ -1026,15 +1033,19 @@ impl PlayerPropertiesController {
     }
 
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<PlayerPropertiesAction> {
+        self.pointer_position = Some(position);
         if let Some(selector) = self.portrait_selector.as_mut() {
             let actions = selector.handle_pointer_down(position);
             return self.finish_portrait_selector_actions(actions);
         }
-        self.pointer_position = Some(position);
         self.hovered = self.hit_control(position);
         self.pointer_pressed = self.hovered;
         if let Some(control) = self.hovered {
-            self.focus = control;
+            // Picture is an IconButton and therefore declines click focus;
+            // the modal selector must return to the parent's prior control.
+            if control != PlayerPropertiesControl::Picture {
+                self.focus = control;
+            }
             if is_slider(control) {
                 self.update_slider_from_pointer(control, position);
             }
@@ -1042,12 +1053,21 @@ impl PlayerPropertiesController {
         Vec::new()
     }
 
+    pub fn handle_pointer_right_down(&mut self, position: GuiPoint) -> Vec<PlayerPropertiesAction> {
+        self.pointer_position = Some(position);
+        let Some(selector) = self.portrait_selector.as_mut() else {
+            return Vec::new();
+        };
+        let actions = selector.handle_pointer_right_down(position);
+        self.finish_portrait_selector_actions(actions)
+    }
+
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<PlayerPropertiesAction> {
+        self.pointer_position = Some(position);
         if let Some(selector) = self.portrait_selector.as_mut() {
             let actions = selector.handle_pointer_up(position);
             return self.finish_portrait_selector_actions(actions);
         }
-        self.pointer_position = Some(position);
         self.hovered = self.hit_control(position);
         let Some(pressed) = self.pointer_pressed.take() else {
             return Vec::new();
@@ -1056,6 +1076,18 @@ impl PlayerPropertiesController {
             return Vec::new();
         }
         self.activate(pressed)
+    }
+
+    pub fn handle_pointer_double_click(
+        &mut self,
+        position: GuiPoint,
+    ) -> Vec<PlayerPropertiesAction> {
+        self.pointer_position = Some(position);
+        let Some(selector) = self.portrait_selector.as_mut() else {
+            return Vec::new();
+        };
+        let actions = selector.handle_pointer_double_click(position);
+        self.finish_portrait_selector_actions(actions)
     }
 
     /// Adds printable window text while the name edit owns focus. The limit
@@ -1081,14 +1113,26 @@ impl PlayerPropertiesController {
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<PlayerPropertiesAction> {
+        self.handle_key_down_with_tab_direction(key, false)
+    }
+
+    pub fn handle_key_down_with_tab_direction(
+        &mut self,
+        key: KeyCode,
+        backwards: bool,
+    ) -> Vec<PlayerPropertiesAction> {
         if let Some(selector) = self.portrait_selector.as_mut() {
-            let actions = selector.handle_key_down(key);
+            let actions = selector.handle_key_down_with_tab_direction(key, backwards);
             return self.finish_portrait_selector_actions(actions);
         }
         match key {
             KeyCode::Escape => vec![PlayerPropertiesAction::Cancel],
             KeyCode::Enter => vec![PlayerPropertiesAction::Submit],
-            KeyCode::Tab | KeyCode::Down => {
+            KeyCode::Tab => {
+                self.move_focus(backwards);
+                Vec::new()
+            }
+            KeyCode::Down => {
                 self.move_focus(false);
                 Vec::new()
             }
@@ -1107,6 +1151,38 @@ impl PlayerPropertiesController {
             KeyCode::Space => self.activate(self.focus),
             KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown => Vec::new(),
         }
+    }
+
+    pub fn handle_gamepad_low_down(&mut self) -> Vec<PlayerPropertiesAction> {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.handle_gamepad_low_down();
+            return self.finish_portrait_selector_actions(actions);
+        }
+        self.handle_key_down(KeyCode::Enter)
+    }
+
+    pub fn handle_gamepad_low_up(&mut self) -> Vec<PlayerPropertiesAction> {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.handle_gamepad_low_up();
+            return self.finish_portrait_selector_actions(actions);
+        }
+        self.handle_key_up(KeyCode::Enter)
+    }
+
+    pub fn handle_gamepad_high_down(&mut self) -> Vec<PlayerPropertiesAction> {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.handle_gamepad_high_down();
+            return self.finish_portrait_selector_actions(actions);
+        }
+        self.handle_key_down(KeyCode::Escape)
+    }
+
+    pub fn handle_gamepad_direction(&mut self, key: KeyCode) -> Vec<PlayerPropertiesAction> {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.handle_gamepad_direction(key);
+            return self.finish_portrait_selector_actions(actions);
+        }
+        self.handle_key_down(key)
     }
 
     pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<PlayerPropertiesAction> {
@@ -1225,12 +1301,30 @@ impl PlayerPropertiesController {
         let mut outer = Vec::new();
         for action in actions {
             match action {
-                PortraitSelAction::Cancel => self.close_portrait_selector(),
+                PortraitSelAction::Cancel => {
+                    let location_index = self
+                        .portrait_selector
+                        .as_ref()
+                        .map(PortraitSelController::current_location_index)
+                        .unwrap_or_default();
+                    self.close_portrait_selector();
+                    outer.push(PlayerPropertiesAction::PortraitSelectorClosed { location_index });
+                }
                 PortraitSelAction::ChangeLocation { index, path } => {
                     outer.push(PlayerPropertiesAction::PortraitLocationChanged { index, path });
                 }
                 PortraitSelAction::Accept(commit) => {
+                    let location_index = self
+                        .portrait_selector
+                        .as_ref()
+                        .map(PortraitSelController::current_location_index)
+                        .unwrap_or_default();
+                    self.close_portrait_selector();
+                    outer.push(PlayerPropertiesAction::PortraitSelectorClosed { location_index });
                     outer.push(PlayerPropertiesAction::ApplyPicture(commit));
+                }
+                PortraitSelAction::SelectionRequired => {
+                    outer.push(PlayerPropertiesAction::PortraitSelectionRequired);
                 }
             }
         }
@@ -1283,13 +1377,26 @@ fn is_slider(control: PlayerPropertiesControl) -> bool {
 pub struct PlayerPropertiesScreen;
 
 impl PlayerPropertiesScreen {
-    /// Painter order is `Window::Draw`'s: `DrawElement` blits the paper, then
-    /// every child in the order `C4StartupPlrPropertiesDlg`'s constructor
-    /// added it (`C4StartupPlrSelDlg.cpp:1116-1235`).
+    /// Draws the player form and an open portrait selector in immediate
+    /// `C4GUI::Window::Draw` order.
     pub fn render(
         surface: &mut Surface,
         assets: &PlayerPropertiesAssets,
         fonts: &ClonkFontSet,
+        book: &BookFonts,
+        controller: &mut PlayerPropertiesController,
+        gamma: Option<&GammaRamp>,
+    ) {
+        Self::render_player_form(surface, assets, book, controller, gamma);
+        Self::render_portrait_selector(surface, assets, fonts, controller, gamma);
+    }
+
+    /// Painter order is `Window::Draw`'s: `DrawElement` blits the paper, then
+    /// every child in the order `C4StartupPlrPropertiesDlg`'s constructor
+    /// added it (`C4StartupPlrSelDlg.cpp:1116-1235`).
+    pub fn render_player_form(
+        surface: &mut Surface,
+        assets: &PlayerPropertiesAssets,
         book: &BookFonts,
         controller: &PlayerPropertiesController,
         gamma: Option<&GammaRamp>,
@@ -1505,15 +1612,77 @@ impl PlayerPropertiesScreen {
                 gamma,
             );
         }
+    }
 
+    /// Draws the modal selector after every player-form element, matching the
+    /// dialog insertion and traversal order of `C4GUI::Screen::ShowDialog`
+    /// (`C4Gui.cpp:573-585`, `C4GuiContainers.cpp:33-44`).
+    pub fn render_portrait_selector(
+        surface: &mut Surface,
+        assets: &PlayerPropertiesAssets,
+        fonts: &ClonkFontSet,
+        controller: &mut PlayerPropertiesController,
+        gamma: Option<&GammaRamp>,
+    ) {
+        if let Some(selector) = controller.portrait_selector.as_mut() {
+            selector.render(
+                surface,
+                Self::portrait_selector_resources(assets, fonts),
+                gamma,
+            );
+        }
+    }
+
+    pub fn render_portrait_selector_dialog(
+        surface: &mut Surface,
+        assets: &PlayerPropertiesAssets,
+        fonts: &ClonkFontSet,
+        controller: &mut PlayerPropertiesController,
+        gamma: Option<&GammaRamp>,
+    ) {
+        if let Some(selector) = controller.portrait_selector.as_mut() {
+            selector.render_dialog(
+                surface,
+                Self::portrait_selector_resources(assets, fonts),
+                gamma,
+            );
+        }
+    }
+
+    pub fn render_portrait_location_popup(
+        surface: &mut Surface,
+        assets: &PlayerPropertiesAssets,
+        fonts: &ClonkFontSet,
+        controller: &PlayerPropertiesController,
+        gamma: Option<&GammaRamp>,
+    ) {
         if let Some(selector) = controller.portrait_selector.as_ref() {
-            let skin = ClassicGuiSkin::new(
+            selector.render_location_popup(
+                surface,
+                Self::portrait_selector_resources(assets, fonts),
+                gamma,
+            );
+        }
+    }
+
+    fn portrait_selector_resources<'a>(
+        assets: &'a PlayerPropertiesAssets,
+        fonts: &'a ClonkFontSet,
+    ) -> PortraitSelResources<'a> {
+        PortraitSelResources {
+            skin: ClassicGuiSkin::new(
                 &assets.caption,
                 &assets.button,
                 &assets.button_down,
                 Some(&assets.button_highlight),
-            );
-            selector.render(surface, PortraitSelResources { skin, fonts }, gamma);
+            ),
+            fonts,
+            icons: &assets.icons,
+            context: &assets.context,
+            checkbox: &assets.checkbox,
+            scroll: &assets.scroll,
+            control: &assets.control,
+            button_highlight: &assets.button_highlight,
         }
     }
 }
@@ -2172,6 +2341,38 @@ mod tests {
     }
 
     #[test]
+    fn picture_pointer_activation_preserves_parent_name_focus() {
+        // Picture is an IconButton, and buttons decline click focus. Closing
+        // the modal child therefore restores the parent's prior Name focus
+        // (`C4StartupPlrSelDlg.cpp:1202-1205`, `C4Gui.h:1058-1075`,
+        // `C4GuiContainers.cpp:695-712`, `C4Gui.cpp:608-625`).
+        let mut state = controller();
+        let picture = state.layout().picture;
+        let point = GuiPoint::new(
+            (picture.x + picture.w / 2) as f32,
+            (picture.y + picture.h / 2) as f32,
+        );
+
+        assert!(state.handle_pointer_down(point).is_empty());
+        assert_eq!(state.focused_control(), PlayerPropertiesControl::Name);
+        assert_eq!(
+            state.handle_pointer_up(point),
+            vec![PlayerPropertiesAction::ChoosePicture]
+        );
+        state.open_portrait_selector(
+            vec![PortraitLocation::new("User Path", "/tmp")],
+            0,
+            Vec::new(),
+        );
+        assert_eq!(
+            state.handle_key_down(KeyCode::Escape),
+            vec![PlayerPropertiesAction::PortraitSelectorClosed { location_index: 0 }]
+        );
+        assert!(state.portrait_selector().is_none());
+        assert_eq!(state.focused_control(), PlayerPropertiesControl::Name);
+    }
+
+    #[test]
     fn portrait_choice_updates_only_checked_image_channels() {
         let old_portrait = ImageData::new(1, 1, vec![10, 20, 30, 255]);
         let old_icon = ImageData::new(1, 1, vec![40, 50, 60, 255]);
@@ -2219,6 +2420,74 @@ mod tests {
         assert!(state.handle_pointer_up(point).is_empty());
         assert_eq!(state.name(), "Parent");
         assert_eq!(state.player().pref_color_dw, original_color);
+    }
+
+    #[test]
+    fn portrait_selector_transitions_preserve_the_global_mouse_coordinate() {
+        // Modal ShowDialog/Close keep Screen's single CMouse coordinate; a
+        // stationary button event after either transition still routes at the
+        // last position (`C4Gui.cpp:608-689`, `C4MouseControl.cpp:145-188`).
+        let mut state = controller();
+        state.resize(640, 480);
+        let picture = state.layout().picture;
+        let opening_point = GuiPoint::new(
+            (picture.x + picture.w / 2) as f32,
+            (picture.y + picture.h / 2) as f32,
+        );
+        state.handle_pointer_move(opening_point);
+        state.open_portrait_selector(
+            vec![PortraitLocation::new("User Path", "/tmp")],
+            0,
+            Vec::new(),
+        );
+        assert_eq!(state.pointer_position(), Some(opening_point));
+
+        let cancel = crate::startup_portraitsel::portrait_sel_layout(640, 480, 1).cancel;
+        let closing_point = GuiPoint::new(
+            (cancel.x + cancel.w / 2) as f32,
+            (cancel.y + cancel.h / 2) as f32,
+        );
+        state.handle_pointer_move(closing_point);
+        state.handle_pointer_down(closing_point);
+        assert_eq!(
+            state.handle_pointer_up(closing_point),
+            vec![PlayerPropertiesAction::PortraitSelectorClosed { location_index: 0 }]
+        );
+        assert!(state.portrait_selector().is_none());
+        assert_eq!(state.pointer_position(), Some(closing_point));
+    }
+
+    #[test]
+    fn open_portrait_selector_defaults_both_image_channels_on() {
+        // The only C++ caller passes true for fSetPicture and fSetBigIcon,
+        // independently of whether either preview currently exists
+        // (`C4StartupPlrSelDlg.cpp:1509-1517`).
+        let mut state = controller();
+        state.open_portrait_selector(
+            vec![PortraitLocation::new("User Path", "/tmp")],
+            0,
+            Vec::new(),
+        );
+
+        let selector = state.portrait_selector().expect("portrait selector");
+        assert!(selector.set_picture());
+        assert!(selector.set_big_icon());
+
+        let mut state = PlayerPropertiesController::edit(
+            0,
+            PlayerFile::default(),
+            "",
+            Some(ImageData::new(1, 1, vec![1, 2, 3, 255])),
+            None,
+        );
+        state.open_portrait_selector(
+            vec![PortraitLocation::new("User Path", "/tmp")],
+            0,
+            Vec::new(),
+        );
+        let selector = state.portrait_selector().expect("portrait selector");
+        assert!(selector.set_picture());
+        assert!(selector.set_big_icon());
     }
 
     #[test]
@@ -2288,5 +2557,22 @@ mod tests {
                 && other.y < label.y + label.h;
             assert!(!overlaps, "movement labels never reach OK/Cancel");
         }
+
+        state.open_portrait_selector(
+            vec![PortraitLocation::new("User", "/portraits")],
+            0,
+            Vec::new(),
+        );
+        let selector_layout = crate::startup_portraitsel::portrait_sel_layout(800, 600, 1);
+        assert_eq!(
+            state.tooltip_at(center(selector_layout.close), &book_small),
+            Some(StartupTooltip::resource("IDS_MNU_CLOSE")),
+            "the nested selector replaces rather than suppresses tooltip targets"
+        );
+        assert_eq!(
+            state.tooltip_at(center(layout.picture), &book_small),
+            None,
+            "the active modal selector cannot leak a parent-form tooltip"
+        );
     }
 }

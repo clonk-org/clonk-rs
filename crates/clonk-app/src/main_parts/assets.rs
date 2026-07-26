@@ -6046,6 +6046,9 @@ impl FrontendAssets {
                 caption: self.dialog_image("GUICaption.png")?,
                 button: self.dialog_image("GUIButton.png")?,
                 button_down: self.dialog_image("GUIButtonDown.png")?,
+                context: self.dialog_image("GUIContext.png")?,
+                checkbox: self.dialog_image("GUICheckbox.png")?,
+                scroll: self.dialog_image("GUIScroll.png")?,
             },
         )
     }

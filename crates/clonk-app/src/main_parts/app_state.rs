@@ -166,6 +166,11 @@ pub(crate) struct GameApp {
     pub(crate) advertised_game_reference: Option<clonk_network::HostGameReference>,
     pub(crate) startup_player_dialog: Option<clonk_frontend::startup_plrsel::PlrSelController>,
     pub(crate) startup_player_properties_dialog: Option<PendingStartupPlayerProperties>,
+    /// Process-local C4Config state set after the first stock extraction
+    /// attempt, independently of whether the config file can be saved.
+    pub(crate) startup_user_portraits_written: bool,
+    /// Process-local C4Config row remembered when the selector closes.
+    pub(crate) startup_last_portrait_folder_index: Option<usize>,
     pub(crate) startup_player_files: Vec<StartupPlayerFile>,
     pub(crate) startup_player_models: Vec<clonk_frontend::startup_plrsel::PlrSelPlayer>,
     pub(crate) startup_crew_files: Vec<StartupCrewFile>,

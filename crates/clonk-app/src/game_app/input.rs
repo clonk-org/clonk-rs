@@ -3571,17 +3571,96 @@ impl GameApp {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
+            let c4_modifiers = self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            if state == ElementState::Pressed
+                && c4_modifiers.is_empty()
+                && key == VirtualKeyCode::F5
+            {
+                let location = self
+                    .startup_player_properties_dialog
+                    .as_ref()
+                    .and_then(|pending| pending.controller.portrait_selector())
+                    .filter(|selector| !selector.is_location_popup_open())
+                    .and_then(|selector| {
+                        selector.current_location().map(|location| {
+                            (selector.current_location_index(), location.path.clone())
+                        })
+                    });
+                if let Some((index, path)) = location {
+                    self.reload_startup_player_portrait_location(index, &path);
+                }
+                self.mark_menu_dirty();
+                return Ok(());
+            }
+            #[cfg(target_os = "windows")]
+            let gui_key = map_key_code(key);
+            #[cfg(not(target_os = "windows"))]
+            let gui_key = (key != VirtualKeyCode::NumpadEnter)
+                .then(|| map_key_code(key))
+                .flatten();
+            let portrait_ok_hotkey = state == ElementState::Pressed
+                && key == VirtualKeyCode::O
+                && (c4_modifiers == ModifiersState::ALT
+                    || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT))
+                && self
+                    .startup_player_properties_dialog
+                    .as_ref()
+                    .and_then(|pending| pending.controller.portrait_selector())
+                    .is_some_and(|selector| !selector.is_location_popup_open());
+            let exact_tab = gui_key == Some(KeyCode::Tab)
+                && (c4_modifiers.is_empty() || c4_modifiers == ModifiersState::SHIFT);
+            let alt_control_binding = c4_modifiers == ModifiersState::ALT
+                && gui_key.is_some_and(|gui_key| {
+                    self.startup_player_properties_dialog
+                        .as_ref()
+                        .and_then(|pending| pending.controller.portrait_selector())
+                        .is_some_and(|selector| {
+                            !selector.is_location_popup_open()
+                                && match (selector.focus(), gui_key) {
+                                    (
+                                        clonk_frontend::startup_portraitsel::PortraitSelControl::Location,
+                                        KeyCode::Down | KeyCode::Space,
+                                    ) => true,
+                                    (
+                                        clonk_frontend::startup_portraitsel::PortraitSelControl::Grid,
+                                        KeyCode::Enter,
+                                    ) => selector.selected_index().is_some(),
+                                    _ => false,
+                                }
+                        })
+                });
             let actions = if state == ElementState::Pressed
+                && c4_modifiers.is_empty()
                 && matches!(key, VirtualKeyCode::Back | VirtualKeyCode::Delete)
             {
                 if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
                     pending.controller.delete_name_char();
                 }
                 Vec::new()
-            } else if let Some(gui_key) = map_key_code(key) {
+            } else if portrait_ok_hotkey {
+                self.startup_player_properties_dialog
+                    .as_mut()
+                    .map(|pending| pending.controller.handle_key_down(KeyCode::Enter))
+                    .unwrap_or_default()
+            } else if exact_tab {
                 self.startup_player_properties_dialog
                     .as_mut()
                     .map(|pending| match state {
+                        ElementState::Pressed => {
+                            pending.controller.handle_key_down_with_tab_direction(
+                                KeyCode::Tab,
+                                c4_modifiers == ModifiersState::SHIFT,
+                            )
+                        }
+                        ElementState::Released => pending.controller.handle_key_up(KeyCode::Tab),
+                    })
+                    .unwrap_or_default()
+            } else if c4_modifiers.is_empty() || alt_control_binding {
+                self.startup_player_properties_dialog
+                    .as_mut()
+                    .zip(gui_key)
+                    .map(|(pending, gui_key)| match state {
                         ElementState::Pressed => pending.controller.handle_key_down(gui_key),
                         ElementState::Released => pending.controller.handle_key_up(gui_key),
                     })
@@ -4979,14 +5058,18 @@ impl GameApp {
                                 ..
                             } => {
                                 self.handle_gamepad_event_with_axis_alias(event, axis_alias)?;
-                                suppress_base_select_alias = true;
+                                // C4GUI's AnyLowButton binding owns every
+                                // semantic alias from this physical input.
+                                owner = ClusterOwner::Suppressed;
                             }
                             GamepadEvent::GuiButton {
                                 class: GuiButtonClass::High,
                                 ..
                             } => {
                                 self.handle_gamepad_event_with_axis_alias(event, axis_alias)?;
-                                suppress_base_cancel_alias = true;
+                                // C4GUI's AnyHighButton binding likewise owns
+                                // Select's MenuToggle alias and every remap.
+                                owner = ClusterOwner::Suppressed;
                             }
                             GamepadEvent::Action {
                                 action: GamepadActionType::Select,
@@ -5602,16 +5685,20 @@ impl GameApp {
                     self.process_options_advanced_actions(actions)?;
                     self.mark_menu_dirty();
                 } else if self.startup_player_properties_dialog.is_some() {
-                    let key = match class {
-                        GuiButtonClass::Low => KeyCode::Enter,
-                        GuiButtonClass::High => KeyCode::Escape,
-                    };
                     let actions = self
                         .startup_player_properties_dialog
                         .as_mut()
-                        .map(|pending| match state {
-                            ElementState::Pressed => pending.controller.handle_key_down(key),
-                            ElementState::Released => pending.controller.handle_key_up(key),
+                        .map(|pending| match (class, state) {
+                            (GuiButtonClass::Low, ElementState::Pressed) => {
+                                pending.controller.handle_gamepad_low_down()
+                            }
+                            (GuiButtonClass::Low, ElementState::Released) => {
+                                pending.controller.handle_gamepad_low_up()
+                            }
+                            (GuiButtonClass::High, ElementState::Pressed) => {
+                                pending.controller.handle_gamepad_high_down()
+                            }
+                            (GuiButtonClass::High, ElementState::Released) => Vec::new(),
                         })
                         .unwrap_or_default();
                     self.process_startup_player_properties_actions(actions);
@@ -5898,8 +5985,8 @@ impl GameApp {
                 .startup_player_properties_dialog
                 .as_mut()
                 .map(|pending| match state {
-                    ElementState::Pressed => pending.controller.handle_key_down(key),
-                    ElementState::Released => pending.controller.handle_key_up(key),
+                    ElementState::Pressed => pending.controller.handle_gamepad_direction(key),
+                    ElementState::Released => Vec::new(),
                 })
                 .unwrap_or_default();
             self.process_startup_player_properties_actions(actions);
@@ -6196,19 +6283,21 @@ impl GameApp {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
-            let key = match action {
-                GamepadActionType::Select => Some(KeyCode::Enter),
-                GamepadActionType::Cancel => Some(KeyCode::Escape),
-                GamepadActionType::MenuToggle => None,
-            };
-            let actions = key
-                .and_then(|key| {
-                    self.startup_player_properties_dialog
-                        .as_mut()
-                        .map(|pending| match state {
-                            ElementState::Pressed => pending.controller.handle_key_down(key),
-                            ElementState::Released => pending.controller.handle_key_up(key),
-                        })
+            let actions = self
+                .startup_player_properties_dialog
+                .as_mut()
+                .map(|pending| match (action, state) {
+                    (GamepadActionType::Select, ElementState::Pressed) => {
+                        pending.controller.handle_gamepad_low_down()
+                    }
+                    (GamepadActionType::Select, ElementState::Released) => {
+                        pending.controller.handle_gamepad_low_up()
+                    }
+                    (GamepadActionType::Cancel, ElementState::Pressed) => {
+                        pending.controller.handle_gamepad_high_down()
+                    }
+                    (GamepadActionType::Cancel, ElementState::Released)
+                    | (GamepadActionType::MenuToggle, _) => Vec::new(),
                 })
                 .unwrap_or_default();
             self.process_startup_player_properties_actions(actions);
@@ -8548,6 +8637,20 @@ impl GameApp {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
+            if button_state == ElementState::Pressed {
+                let point = self
+                    .startup_player_properties_dialog
+                    .as_ref()
+                    .and_then(|pending| pending.controller.pointer_position());
+                let actions = point
+                    .and_then(|point| {
+                        self.startup_player_properties_dialog
+                            .as_mut()
+                            .map(|pending| pending.controller.handle_pointer_right_down(point))
+                    })
+                    .unwrap_or_default();
+                self.process_startup_player_properties_actions(actions);
+            }
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -10089,6 +10192,9 @@ impl GameApp {
                     self.startup_player_properties_dialog
                         .as_mut()
                         .map(|pending| match button_state {
+                            ElementState::Pressed if left_double_click => {
+                                pending.controller.handle_pointer_double_click(point)
+                            }
                             ElementState::Pressed => pending.controller.handle_pointer_down(point),
                             ElementState::Released => pending.controller.handle_pointer_up(point),
                         })
@@ -11019,6 +11125,9 @@ impl GameApp {
                 .startup_player_properties_dialog
                 .as_mut()
                 .map(|pending| match phase {
+                    TouchPhase::Started if left_double_click => {
+                        pending.controller.handle_pointer_double_click(position)
+                    }
                     TouchPhase::Started => pending.controller.handle_pointer_down(position),
                     TouchPhase::Moved => pending.controller.handle_pointer_move(position),
                     TouchPhase::Ended => pending.controller.handle_pointer_up(position),

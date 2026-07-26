@@ -1501,6 +1501,8 @@ impl GameApp {
             advertised_game_reference: None,
             startup_player_dialog: None,
             startup_player_properties_dialog: None,
+            startup_user_portraits_written: false,
+            startup_last_portrait_folder_index: None,
             startup_player_files,
             startup_player_models,
             startup_crew_files: Vec::new(),
