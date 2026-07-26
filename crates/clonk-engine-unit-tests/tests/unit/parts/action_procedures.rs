@@ -172,6 +172,155 @@
     }
 
     #[test]
+    fn float_physical_preserves_hazard_bullet_velocity_above_synthetic_limit() {
+        // Hazard's SHT1 Travel action uses DFA_FLOAT with Float=100000. C++
+        // clamps xdir/ydir only to FIXED100(Float), then sets Mobile
+        // (oracle-src-pinned src/C4Object.cpp:5291-5310); it has no global
+        // 12 px/frame cap after the procedure. The raw velocity is a
+        // representative Pistol Fire1 launch at 76 degrees.
+        let script =
+            format!("{PROCEDURE_MOVEMENT_SCRIPT}\nfunc Traveling() {{ return true; }}\n");
+        let mut definition =
+            Definition::from_script("SHT1", "Shot", &script).expect("script compiles");
+        definition.configure_actions(
+            Some("Travel".to_string()),
+            HashMap::from([(
+                "Travel".to_string(),
+                ActionSpec::default()
+                    .with_procedure("FLOAT")
+                    .with_delay(1)
+                    .with_length(1)
+                    .with_next("Travel")
+                    .with_start_call("Traveling"),
+            )]),
+        );
+        definition.set_physical(PhysicalInfo {
+            float: 100_000,
+            ..PhysicalInfo::default()
+        });
+        definition.set_incomplete_activity(true);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let launch_velocity = FixedVec2::new(
+            C4Fixed::from_raw(1_592_524),
+            C4Fixed::from_raw(-393_216),
+        );
+        let bullet = engine
+            .spawn_object(SpawnConfig::new("SHT1").with_category(CATEGORY_OBJECT))
+            .expect("bullet spawns");
+        let bullet_idx = engine.find_object_index(bullet).expect("bullet exists");
+        engine.objects[bullet_idx].set_fixed_velocity(launch_velocity);
+        assert_eq!(
+            engine.objects[bullet_idx].fixed_velocity, launch_velocity,
+            "script launch keeps raw C4Fixed velocity before ExecAction"
+        );
+        assert_eq!(engine.objects[bullet_idx].state.action.name, "Travel");
+
+        engine
+            .apply_physics_at_index(bullet_idx)
+            .expect("DFA_FLOAT executes");
+
+        assert_eq!(
+            engine.objects[bullet_idx].fixed_velocity, launch_velocity,
+            "DFA_FLOAT must not steepen the bullet by clamping only its horizontal speed"
+        );
+
+        engine
+            .tick_without_snapshot()
+            .expect("the complete object frame executes");
+        let bullet_idx = engine.find_object_index(bullet).expect("bullet remains live");
+        assert_eq!(
+            engine.objects[bullet_idx].fixed_velocity, launch_velocity,
+            "callback outcome folds must preserve the same native DFA_FLOAT velocity"
+        );
+    }
+
+    #[test]
+    fn float_callback_uses_same_outcome_physical_before_terminal_clamp() {
+        // SetPhysical mutates the live C++ object before the following
+        // SetXDir/SetYDir calls return from the callback
+        // (oracle-src-pinned src/C4Script.cpp:557-601). DFA_FLOAT then owns
+        // the only speed bounds (src/C4Object.cpp:5291-5310).
+        let script = format!(
+            r#"{PROCEDURE_MOVEMENT_SCRIPT}
+global func Step(state, frame, random) {{
+    if (frame == 1) {{
+        SetPhysical("Float", 100000, 2);
+        SetXDir(243, this(), 10);
+        SetYDir(-60, this(), 10);
+    }}
+    return 0;
+}}
+
+func ArmBullet() {{
+    SetPhysical("Float", 100000, 2);
+    SetXDir(243, this(), 10);
+    SetYDir(-60, this(), 10);
+}}
+"#
+        );
+        let mut definition =
+            Definition::from_script("SHT1", "Shot", &script).expect("script compiles");
+        definition.configure_actions(
+            Some("Travel".to_string()),
+            HashMap::from([(
+                "Travel".to_string(),
+                ActionSpec::default().with_procedure("FLOAT"),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let bullet = engine
+            .spawn_object(SpawnConfig::new("SHT1").with_category(CATEGORY_OBJECT))
+            .expect("bullet spawns");
+        let bullet_idx = engine.find_object_index(bullet).expect("bullet exists");
+
+        engine
+            .call_object_function(bullet_idx, "ArmBullet", Vec::new())
+            .expect("bullet callback executes");
+
+        assert_eq!(
+            engine.objects[bullet_idx]
+                .state
+                .temporary_physical
+                .map(|physical| physical.float),
+            Some(100_000)
+        );
+        assert_eq!(
+            (
+                engine.objects[bullet_idx].fixed_velocity.x.val(),
+                engine.objects[bullet_idx].fixed_velocity.y.val(),
+            ),
+            (1_592_524, -393_216),
+            "the fold must resolve Float after applying the callback's physical update"
+        );
+
+        let stepped_bullet = engine
+            .spawn_object(SpawnConfig::new("SHT1").with_category(CATEGORY_OBJECT))
+            .expect("Step-driven bullet spawns");
+        engine
+            .tick_without_snapshot()
+            .expect("the definition Step callback executes");
+        let stepped_idx = engine
+            .find_object_index(stepped_bullet)
+            .expect("Step-driven bullet exists");
+        assert_eq!(
+            (
+                engine.objects[stepped_idx].fixed_velocity.x.val(),
+                engine.objects[stepped_idx].fixed_velocity.y.val(),
+            ),
+            (1_592_524, -393_216),
+            "the Step fold must also resolve Float after its physical update"
+        );
+    }
+
+    #[test]
     fn swim_procedure_reduces_gravity_and_blocks_wind() {
         let mut definition =
             Definition::from_script("Swimmer", "Swimmer", PROCEDURE_MOVEMENT_SCRIPT)

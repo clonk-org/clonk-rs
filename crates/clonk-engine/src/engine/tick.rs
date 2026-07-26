@@ -1179,16 +1179,7 @@ impl Engine {
                         self.messages.apply_command(command);
                     }
                 }
-                let (
-                    object_id,
-                    previous_owner,
-                    previous_crew,
-                    new_owner,
-                    new_crew,
-                    previous_status,
-                    new_status,
-                    container_change,
-                ) = {
+                let (object_id, previous_owner, previous_crew, previous_status, container_change) = {
                     let object = &mut self.objects[idx];
                     let previous_owner = object.state.owner;
                     let previous_crew = object.state.crew_member;
@@ -1211,13 +1202,24 @@ impl Engine {
                     }
                     let mut applied = object.apply_effect_commands(&effects);
                     effect_events.append(&mut applied);
-                    if !matches!(
-                        action_library.procedure_for_entry(
-                            &object.state.action.name,
-                            object.state.action.act_map_index,
-                        ),
-                        ActionProcedure::Flight
-                    ) {
+                    (
+                        object.id,
+                        previous_owner,
+                        previous_crew,
+                        previous_status,
+                        container_change,
+                    )
+                };
+                let physical_float = self.object_physical_without_fair_fill(idx).float;
+                let (new_owner, new_crew, new_status) = {
+                    let object = &mut self.objects[idx];
+                    let procedure = action_library.procedure_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    );
+                    let native_float =
+                        matches!(procedure, ActionProcedure::Float) && physical_float != 0;
+                    if !matches!(procedure, ActionProcedure::Flight) && !native_float {
                         object.clamp_velocity(&self.physics);
                     }
                     if destroy {
@@ -1230,14 +1232,9 @@ impl Engine {
                         object.enqueue_commands(commands);
                     }
                     (
-                        object.id,
-                        previous_owner,
-                        previous_crew,
                         object.state.owner,
                         object.state.crew_member,
-                        previous_status,
                         object.state.status,
-                        container_change,
                     )
                 };
                 self.update_inactive_list_for_status_change(object_id, previous_status, new_status);
@@ -2904,7 +2901,11 @@ impl Engine {
                 let mut applied = object.apply_effect_commands(&object_effects);
                 effect_events.append(&mut applied);
             }
+        }
 
+        let physical_float = self.object_physical_without_fair_fill(index).float;
+        {
+            let object = &mut self.objects[index];
             // Exact AssignRemoval callbacks have already stopped effects
             // synchronously and emit no-callback removals. Fold those before
             // the status write so mark_destroyed cannot stop them twice.
@@ -2914,15 +2915,10 @@ impl Engine {
                 effect_events.extend(object.mark_destroyed());
             }
 
-            if clamp_velocity
-                && !matches!(
-                    action_library.procedure_for_entry(
-                        &object.state.action.name,
-                        object.state.action.act_map_index,
-                    ),
-                    ActionProcedure::Flight
-                )
-            {
+            let procedure = action_library
+                .procedure_for_entry(&object.state.action.name, object.state.action.act_map_index);
+            let native_float = matches!(procedure, ActionProcedure::Float) && physical_float != 0;
+            if clamp_velocity && !matches!(procedure, ActionProcedure::Flight) && !native_float {
                 object.clamp_velocity(&self.physics);
             }
         }
