@@ -1426,6 +1426,40 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn l021_network_group_loading_reports_the_shared_initgame_milestones() {
+        // Network clients and hosts enter the same InitGame first/second-part
+        // milestones after their respective 7 checkpoint
+        // (src/C4Game.cpp:456-457,2551-2721).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// scenario script\n");
+        let group = Group::open(&scenario_dir).expect("open network scenario group");
+        let definitions =
+            Group::open(dir.path().join("Defs.c4d")).expect("open network definitions");
+        let mut reported = Vec::new();
+
+        Scenario::load_network_from_group_with_languages_and_seed_and_packs_and_progress(
+            &group,
+            &[definitions],
+            &[],
+            &[],
+            &["US"],
+            0,
+            &LanguagePacks::default(),
+            |progress, log| reported.push((progress, log)),
+        )
+        .expect("network scenario loads with progress reporting");
+
+        assert_eq!(
+            reported
+                .iter()
+                .map(|(progress, _)| *progress)
+                .collect::<Vec<_>>(),
+            [4, 8, 40, 56, 57, 58, 60, 88, 89, 90, 91, 92, 93]
+        );
+        assert!(reported.iter().all(|(_, log)| !log.trim().is_empty()));
+    }
+
+    #[test]
     fn missing_defcore_id_skips_only_parent_and_still_loads_its_child() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
@@ -2729,4 +2763,3 @@ global func Step(state, frame, random)
             "FairCrewStrength=1000 is selected live without overwriting Info"
         );
     }
-

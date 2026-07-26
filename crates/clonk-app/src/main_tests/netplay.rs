@@ -875,8 +875,20 @@
             app.pending_network_join_data.is_none(),
             "the full pending JoinData packet is consumed after installation"
         );
-        app.poll_loading()
-            .expect("activate the installed client scenario");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app
+            .loading_state
+            .as_ref()
+            .is_some_and(|loading| !loading.finished)
+        {
+            app.poll_loading()
+                .expect("activate the installed client scenario");
+            assert!(
+                Instant::now() < deadline,
+                "client scenario worker did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert!(app.host_join_snapshot.is_none());
 
         let count = |id: &str| {
@@ -8107,6 +8119,16 @@
         )));
         let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(manager);
+        let (_sender, receiver) = mpsc::channel();
+        app.loading_state = Some(ScenarioLoadingState::new(
+            FrontendScenario::fallback(),
+            app.assets
+                .loader_resources()
+                .expect("startup loader resources"),
+            HashMap::new(),
+            Vec::new(),
+            receiver,
+        ));
 
         app.finish_scenario_loading_failure(
             "Unable to activate synchronized scenario".to_string(),
@@ -8119,6 +8141,10 @@
         assert!(app.network.is_none());
         assert!(app.network_mode.is_none());
         assert!(app.network_lobby.is_none());
+        assert!(
+            app.loading_state.is_none(),
+            "the failed load ticket must not suppress a later client start"
+        );
         assert_startup_error_log(&app, "Unable to activate synchronized scenario");
     }
 
@@ -15283,6 +15309,7 @@
                 network_runtime_join: false,
                 restore_player_infos: Vec::new(),
                 runtime_join_players: Vec::new(),
+                pending_client_runtime_join: None,
                 initial_game_data: None,
                 random_seed: 0,
                 use_fair_crew: false,
@@ -17691,6 +17718,7 @@
                 network_runtime_join: true,
                 restore_player_infos: vec![first, second, departed],
                 runtime_join_players: sources,
+                pending_client_runtime_join: None,
                 initial_game_data: None,
                 random_seed: 0,
                 use_fair_crew: false,

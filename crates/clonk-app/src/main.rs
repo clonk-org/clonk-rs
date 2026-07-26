@@ -6251,6 +6251,21 @@ impl GameApp {
         if let Some((scenario, result, prepared_go)) = completion {
             match result {
                 Ok(data) => {
+                    if let Some(pending) = self
+                        .loading_state
+                        .as_mut()
+                        .and_then(|loading| loading.prepared_go.as_mut())
+                    {
+                        let (save_game, network_runtime_join) =
+                            data.lobby_metadata().map_or((false, false), |metadata| {
+                                (
+                                    metadata.head().is_save_game(),
+                                    metadata.head().allows_network_runtime_join(),
+                                )
+                            });
+                        pending.save_game = save_game;
+                        pending.network_runtime_join = network_runtime_join;
+                    }
                     let activation = self.activate_loaded_scenario(scenario.clone(), &data);
                     if activation.is_ok() {
                         self.classic_record_stream_activation_pending = false;

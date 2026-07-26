@@ -2061,11 +2061,15 @@ impl GameApp {
             // worker starts; the lobby later retains only its background.
             self.cancel_underlying_interaction();
             self.replace_startup_view(StartupView::NetworkGame);
-            if let Some(loader) = self
+            if let Some(mut loader) = self
                 .staged_network_host_scenario
                 .as_mut()
                 .and_then(|staged| staged.loader_screen.take())
             {
+                // OpenScenario sets 4 before InitNetworkHost and the loader
+                // reads that retained game progress on its first draw
+                // (src/C4Game.cpp:124-270,421-440).
+                loader.update(LoaderUpdate::SetProgress(4));
                 self.loader_screen = Some(loader);
                 self.loader_error = None;
             }
@@ -2219,6 +2223,7 @@ impl GameApp {
         self.client_combined_scenario_path = None;
         self.client_combined_preload_file.clear();
         self.network_material_resource_groups = None;
+        self.loading_state = None;
         self.active_scenario = None;
         self.active_definition_load = None;
         self.active_description_definition_modules.clear();

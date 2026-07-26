@@ -838,6 +838,108 @@
     }
 
     #[test]
+    fn child_section_map_player_extend_marks_the_scenario_count_sensitive() {
+        // C4Game preloads only the main landscape, then section activation
+        // overlays that section's C4S and initializes its landscape with the
+        // frozen StartupPlayerCount (src/C4Game.cpp:2642-2649,4084-4223;
+        // src/C4Landscape.cpp:531-543; src/C4MapCreatorS2.cpp:633-644).
+        let dir = tempdir().expect("tempdir");
+        let definition = dir.path().join("Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&definition).expect("definition dir");
+        std::fs::write(
+            definition.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+        write_test_definition_graphics(&definition);
+
+        let scenario_dir = dir.path().join("Sections.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Section extend\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\n\
+             MapPlayerExtend=0\nMaterial=Earth\n",
+        )
+        .expect("write main core");
+        let section_dir = scenario_dir.join("SectArena.c4g");
+        std::fs::create_dir_all(&section_dir).expect("section dir");
+        std::fs::write(
+            section_dir.join("Scenario.txt"),
+            "[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\n\
+             MapPlayerExtend=1\nMaterial=Earth\n",
+        )
+        .expect("write section core");
+        std::fs::write(
+            section_dir.join("Landscape.txt"),
+            "map Arena { seed=1; mat=Earth; tex=Smooth; sub=0; };",
+        )
+        .expect("write section landscape");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write earth");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with_languages_and_seed_and_startup_player_count(
+            &scenario_dir,
+            &resolver,
+            &["US"],
+            0,
+            1,
+        )
+        .expect("scenario loads");
+        assert!(
+            scenario.uses_map_player_extend(),
+            "a child section must invalidate a count-one lobby preload"
+        );
+        let three_player =
+            Scenario::load_from_path_with_languages_and_seed_and_startup_player_count(
+                &scenario_dir,
+                &resolver,
+                &["US"],
+                0,
+                3,
+            )
+            .expect("three-player scenario loads");
+        let mut one_player_engine = Engine::with_seed(0);
+        scenario
+            .apply(&mut one_player_engine)
+            .expect("one-player scenario applies");
+        assert!(one_player_engine
+            .load_scenario_section("Arena", 0, Vec::new())
+            .expect("one-player section activates"));
+        let mut three_player_engine = Engine::with_seed(0);
+        three_player
+            .apply(&mut three_player_engine)
+            .expect("three-player scenario applies");
+        assert!(three_player_engine
+            .load_scenario_section("Arena", 0, Vec::new())
+            .expect("three-player section activates"));
+
+        assert_eq!(
+            (
+                one_player_engine
+                    .landscape()
+                    .expect("one-player landscape")
+                    .width(),
+                three_player_engine
+                    .landscape()
+                    .expect("three-player landscape")
+                    .width(),
+            ),
+            (100, 300)
+        );
+    }
+
+    #[test]
     fn dynamic_landscape_uses_the_explicit_startup_player_count() {
         // InitLocal freezes the admitted startup-player count before
         // C4Landscape::CreateMap reads it for MapPlayerExtend (pristine

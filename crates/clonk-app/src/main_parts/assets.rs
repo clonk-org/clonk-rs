@@ -776,6 +776,9 @@ pub(crate) struct PreparedGoLoadingState {
     /// Joined SavePlayerInfos rows in client-packet/player order. Runtime
     /// recreation consumes this only after the combined scenario is loaded.
     pub(crate) runtime_join_players: Vec<clonk_engine::RuntimeJoinPlayerSource>,
+    /// Narrow client-only inputs retained until the loaded Scenario core
+    /// selects the ordinary or NetworkRuntimeJoin restore branch.
+    pub(crate) pending_client_runtime_join: Option<PendingClientRuntimeJoinLoading>,
     pub(crate) initial_game_data: Option<clonk_engine::InitialNetworkGameData>,
     pub(crate) random_seed: u64,
     pub(crate) use_fair_crew: bool,
@@ -792,6 +795,12 @@ pub(crate) struct PreparedGoLoadingState {
     /// Separately retained `Game.DefinitionFilenames`. Final C4GameRes types
     /// select the groups InitDefs opens but do not rewrite this save identity.
     pub(crate) definition_modules: Option<Vec<String>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingClientRuntimeJoinLoading {
+    pub(crate) local_client_id: i32,
+    pub(crate) packet_restore_player_infos: clonk_network::PlayerInfoListSnapshot,
 }
 
 #[derive(Debug)]
@@ -860,9 +869,10 @@ impl ScenarioLoadingState {
         }
     }
 
-    pub(crate) fn from_loaded(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_network_receiver(
         scenario: FrontendScenario,
-        data: Scenario,
+        receiver: Receiver<ScenarioLoadingEvent>,
         status: clonk_network::NetworkStatus,
         restore_player_infos: Vec<clonk_engine::ControlPlayerInfoEntry>,
         initial_game_data: Option<clonk_engine::InitialNetworkGameData>,
@@ -876,15 +886,6 @@ impl ScenarioLoadingState {
         team_configuration: TeamConfiguration,
         team_registry: Vec<clonk_engine::TeamInfo>,
     ) -> Self {
-        let (save_game, network_runtime_join) =
-            data.lobby_metadata().map_or((false, false), |metadata| {
-                (
-                    metadata.head().is_save_game(),
-                    metadata.head().allows_network_runtime_join(),
-                )
-            });
-        let (sender, receiver) = mpsc::channel();
-        let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
         Self {
             scenario,
             refreshed_resources: None,
@@ -900,10 +901,11 @@ impl ScenarioLoadingState {
             prepared_go: Some(PreparedGoLoadingState {
                 status,
                 local_reached: false,
-                save_game,
-                network_runtime_join,
+                save_game: false,
+                network_runtime_join: false,
                 restore_player_infos,
                 runtime_join_players: Vec::new(),
+                pending_client_runtime_join: None,
                 initial_game_data,
                 random_seed,
                 use_fair_crew,

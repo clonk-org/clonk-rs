@@ -972,6 +972,8 @@ impl GameApp {
             .path
             .clone()
             .ok_or_else(|| format!("Scenario `{}` is missing a filesystem path", scenario.title))?;
+        self.finalize_client_network_scenario_loading(scenario_data, &path)
+            .map_err(ScenarioActivationError::Recoverable)?;
         let effective_definition_paths = scenario_data
             .definition_resource_paths()
             .iter()

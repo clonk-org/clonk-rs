@@ -7609,6 +7609,17 @@
         app.activate_prepared_network_host(scenario.clone(), SocketAddr::from(([127, 0, 0, 1], 0)));
         assert!(app.network.is_none(), "preparation must precede bind");
         assert!(app.startup_network_connection.is_some());
+        // OpenScenario publishes 4 before InitNetworkHost begins, so the
+        // loader installed around host preparation must retain that value
+        // (src/C4Game.cpp:124-270,421-440).
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .expect("prepared host loader")
+                .state()
+                .progress(),
+            4
+        );
 
         for _ in 0..3_000 {
             app.poll_startup_network_connection()
@@ -7770,6 +7781,24 @@
         assert!(app.loading_state.is_some());
         assert!(app.context_menu.is_none());
         assert_eq!(app.context_menu_lobby_option, None);
+        // Init returns from InitNetworkHost/DoLobby at 7 before beginning
+        // InitGame's script and definition phases
+        // (src/C4Game.cpp:438-457,3872-3913).
+        assert_eq!(
+            app.loading_state
+                .as_ref()
+                .expect("prepared host loading state")
+                .last_progress,
+            7
+        );
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .expect("prepared host loader after lobby")
+                .state()
+                .progress(),
+            7
+        );
         assert!(app
             .network_start_wait
             .as_ref()
@@ -7801,8 +7830,36 @@
         // starts network control after every waited-for client has reached Go
         // (src/C4Network2.cpp:2017-2077,2091-2110). The initialized game must
         // therefore remain behind the loading screen until that exact commit.
-        app.poll_loading()
-            .expect("initialize the retained prepared scenario");
+        let loading_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.poll_loading()
+                .expect("initialize the retained prepared scenario");
+            if app
+                .loading_state
+                .as_ref()
+                .and_then(|loading| loading.prepared_go.as_ref())
+                .is_some_and(|pending| pending.local_reached)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < loading_deadline,
+                "prepared host InitGame worker did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .expect("prepared host loader through Go wait")
+                .state()
+                .progress(),
+            97
+        );
+        assert!(app.loading_state.as_ref().is_some_and(|loading| loading
+            .log
+            .iter()
+            .any(|line| line == "Definition selection resolved")));
         assert_eq!(
                 app.engine.random_seed(),
                 prepared_random_seed,
