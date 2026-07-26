@@ -18,6 +18,7 @@ mod dev_feedback_replay;
 mod dragon_rock_audio;
 mod effect_negotiation;
 mod eke_flamethrower_particles;
+mod eke_missile_schedule;
 mod eke_pistol;
 mod eke_uzi_action_sound;
 mod elevator_motion_oracle;
