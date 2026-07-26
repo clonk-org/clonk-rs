@@ -412,9 +412,8 @@ impl<'a> GameOptionButtonResources<'a> {
             icons_extended.height()
         );
         ensure!(
-            (button_highlight.width(), button_highlight.height())
-                == (HIGHLIGHT_WIDTH, HIGHLIGHT_HEIGHT),
-            "GUIButtonHighlight.png must be the exact 16x16 classic facet: got {}x{}",
+            button_highlight.width() > 0 && button_highlight.height() > 0,
+            "GUIButtonHighlight.png must be a non-empty full-size classic facet: got {}x{}",
             button_highlight.width(),
             button_highlight.height()
         );
@@ -438,11 +437,8 @@ impl<'a> GameOptionButtonResources<'a> {
             self.icons_extended.height()
         );
         ensure!(
-            (
-                self.button_highlight.width(),
-                self.button_highlight.height()
-            ) == (HIGHLIGHT_WIDTH, HIGHLIGHT_HEIGHT),
-            "GUIButtonHighlight.png must be the exact 16x16 classic facet: got {}x{}",
+            self.button_highlight.width() > 0 && self.button_highlight.height() > 0,
+            "GUIButtonHighlight.png must be a non-empty full-size classic facet: got {}x{}",
             self.button_highlight.width(),
             self.button_highlight.height()
         );
@@ -2238,6 +2234,22 @@ mod tests {
             }
         }
         ImageData::new(ICON_SHEET_WIDTH, ICON_SHEET_HEIGHT, pixels)
+    }
+
+    #[test]
+    fn full_size_scenario_button_highlight_is_valid() {
+        let icons = icon_sheet();
+        let highlight = ImageData::new(30, 30, vec![0xff; 30 * 30 * 4]);
+        let font = ClonkFont::new(12);
+
+        // C4GUI::Resource::Load passes C4FCT_Full for GUIButtonHighlight, so
+        // C4FacetExSurface::Load retains the complete override dimensions
+        // (src/C4Gui.cpp:1093; src/C4FacetEx.cpp:137-161).
+        let resources = GameOptionButtonResources::new(&icons, &highlight, &font)
+            .expect("MarsClonk's 30x30 highlight is a valid full-size facet");
+        resources
+            .validate()
+            .expect("the full-size facet remains valid at render time");
     }
 
     #[test]

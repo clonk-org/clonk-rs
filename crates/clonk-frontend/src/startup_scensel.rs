@@ -1722,11 +1722,8 @@ pub fn validate_scensel_button_assets(
         button_down.height()
     );
     ensure!(
-        (
-            assets.button_highlight.width(),
-            assets.button_highlight.height()
-        ) == (16, 16),
-        "GUIButtonHighlight.png must be the exact 16x16 classic facet: got {}x{}",
+        assets.button_highlight.width() > 0 && assets.button_highlight.height() > 0,
+        "GUIButtonHighlight.png must be a non-empty full-size classic facet: got {}x{}",
         assets.button_highlight.width(),
         assets.button_highlight.height()
     );
@@ -3037,6 +3034,19 @@ mod tests {
     }
 
     #[test]
+    fn full_size_button_highlight_override_is_valid() {
+        let mut assets = test_assets();
+        let button_down = crate::test_support::load_graphics_png("GUIButtonDown.png");
+        assets.button_highlight = ImageData::new(30, 30, vec![0xff; 30 * 30 * 4]);
+
+        // C4GUI::Resource::Load passes C4FCT_Full for GUIButtonHighlight, so
+        // C4FacetExSurface::Load retains the complete override dimensions
+        // (src/C4Gui.cpp:1093; src/C4FacetEx.cpp:137-161).
+        validate_scensel_button_assets(&assets, &button_down)
+            .expect("a 30x30 highlight override is a valid full-size facet");
+    }
+
+    #[test]
     fn dynamic_button_resources_fail_closed_on_nonclassic_facets() {
         let mut assets = test_assets();
         let button_down = crate::test_support::load_graphics_png("GUIButtonDown.png");
@@ -3051,9 +3061,9 @@ mod tests {
         assert!(error.to_string().contains("GUIButton.png"));
 
         let mut assets = test_assets();
-        assets.button_highlight = ImageData::new(32, 32, vec![0; 32 * 32 * 4]);
+        assets.button_highlight = ImageData::new(0, 0, Vec::new());
         let error = validate_scensel_button_assets(&assets, &button_down)
-            .expect_err("a substitute highlight must be rejected");
+            .expect_err("an empty highlight must be rejected");
         assert!(error.to_string().contains("GUIButtonHighlight.png"));
     }
 

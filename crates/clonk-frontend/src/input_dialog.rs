@@ -320,11 +320,8 @@ impl<'a> InputDialogResources<'a> {
             self.icons_extended.height()
         );
         ensure!(
-            (
-                self.button_highlight.width(),
-                self.button_highlight.height()
-            ) == (16, 16),
-            "GUIButtonHighlight.png must be the exact 16x16 classic facet, got {}x{}",
+            self.button_highlight.width() > 0 && self.button_highlight.height() > 0,
+            "GUIButtonHighlight.png must be a non-empty full-size classic facet, got {}x{}",
             self.button_highlight.width(),
             self.button_highlight.height()
         );
@@ -2343,6 +2340,29 @@ mod tests {
             load_graphics_png("GUIButtonDown.png"),
             load_graphics_png("GUIButtonHighlight.png"),
         )
+    }
+
+    #[test]
+    fn full_size_scenario_button_highlight_is_valid() {
+        let fonts = endeavour_font_set();
+        let (caption, button, button_down, _) = skin_assets();
+        let icons = load_graphics_png("GUIIcons.png");
+        let icons_extended = load_graphics_png("GUIIcons2.png");
+        let highlight = ImageData::new(30, 30, vec![0xff; 30 * 30 * 4]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight));
+
+        // C4GUI::Resource::Load passes C4FCT_Full for GUIButtonHighlight, so
+        // C4FacetExSurface::Load retains the complete override dimensions
+        // (src/C4Gui.cpp:1093; src/C4FacetEx.cpp:137-161).
+        InputDialogResources::new(
+            skin,
+            &fonts,
+            &fonts.text,
+            &icons,
+            &icons_extended,
+            &highlight,
+        )
+        .expect("MarsClonk's 30x30 highlight is a valid full-size facet");
     }
 
     #[test]

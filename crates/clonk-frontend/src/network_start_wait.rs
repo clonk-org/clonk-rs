@@ -36,8 +36,6 @@ const ICON_LABEL_SPACING: i32 = 2;
 const STANDARD_ICON_CELL: u32 = 40;
 const STANDARD_ICON_SHEET_WIDTH: u32 = 240;
 const STANDARD_ICON_SHEET_HEIGHT: u32 = 360;
-const BUTTON_HIGHLIGHT_WIDTH: u32 = 16;
-const BUTTON_HIGHLIGHT_HEIGHT: u32 = 16;
 
 const CLOSE_ICON_PHASE: u16 = 34;
 const KICK_ICON_PHASE: u16 = 16;
@@ -194,13 +192,8 @@ impl<'a> NetworkStartWaitResources<'a> {
             self.icons.height()
         );
         ensure!(
-            (
-                self.button_highlight.width(),
-                self.button_highlight.height()
-            ) == (BUTTON_HIGHLIGHT_WIDTH, BUTTON_HIGHLIGHT_HEIGHT),
-            "GUIButtonHighlight.png must be the exact {}x{} classic facet, got {}x{}",
-            BUTTON_HIGHLIGHT_WIDTH,
-            BUTTON_HIGHLIGHT_HEIGHT,
+            self.button_highlight.width() > 0 && self.button_highlight.height() > 0,
+            "GUIButtonHighlight.png must be a non-empty full-size classic facet, got {}x{}",
             self.button_highlight.width(),
             self.button_highlight.height()
         );
@@ -953,7 +946,7 @@ fn intersect_surface_clip(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::endeavour_font_set;
+    use crate::test_support::{endeavour_font_set, load_graphics_png};
 
     fn center(rect: IntRect) -> GuiPoint {
         GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
@@ -961,6 +954,23 @@ mod tests {
 
     fn client(id: i32, name: &str, status: NetworkStartWaitClientStatus) -> NetworkStartWaitClient {
         NetworkStartWaitClient::new(id, name, status)
+    }
+
+    #[test]
+    fn full_size_scenario_button_highlight_is_valid() {
+        let fonts = endeavour_font_set();
+        let caption = load_graphics_png("GUICaption.png");
+        let button = load_graphics_png("GUIButton.png");
+        let button_down = load_graphics_png("GUIButtonDown.png");
+        let icons = load_graphics_png("GUIIcons.png");
+        let highlight = ImageData::new(30, 30, vec![0xff; 30 * 30 * 4]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight));
+
+        // C4GUI::Resource::Load passes C4FCT_Full for GUIButtonHighlight, so
+        // C4FacetExSurface::Load retains the complete override dimensions
+        // (src/C4Gui.cpp:1093; src/C4FacetEx.cpp:137-161).
+        NetworkStartWaitResources::new(skin, &fonts, &icons, &highlight)
+            .expect("MarsClonk's 30x30 highlight is a valid full-size facet");
     }
 
     #[test]

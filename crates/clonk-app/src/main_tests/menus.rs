@@ -3613,6 +3613,77 @@
     }
 
     #[test]
+    fn real_mars_full_size_highlight_reaches_host_gui_resources() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated Mars GUI user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(320, 200, &paths);
+        let scenario =
+            resolve_next_mission_scenario(&app.scenario_catalog, "ClonkMars.c4f/01_Fossae.c4s")
+                .expect("Mars Fossae is present in the real scenario catalog");
+        let setup = build_scenario_loader(
+            &scenario,
+            &app.scenario_seed_definition_load(),
+            &paths,
+            app.assets.as_ref(),
+        )
+        .expect("resolve the real Mars scenario loader and GUI refresh");
+        let highlight = setup
+            .refreshed_gui_sheet_overrides
+            .iter()
+            .find(|sheet| sheet.stem == "GUIButtonHighlight")
+            .cloned()
+            .expect("Mars parent Graphics.c4g wins GUIButtonHighlight");
+
+        // C4GUI::Resource::Load keeps the winning C4FCT_Full dimensions and
+        // C4Facet::DrawX stretches that complete source for every consumer
+        // (src/C4Gui.cpp:1093; src/C4FacetEx.cpp:137-161;
+        // src/C4Facet.cpp:296-304).
+        assert!(
+            highlight.source.contains("ClonkMars.c4f/Graphics.c4g"),
+            "unexpected Mars highlight source: {}",
+            highlight.source
+        );
+        assert_eq!(
+            (highlight.image.width(), highlight.image.height()),
+            (30, 30)
+        );
+        app.install_active_gui_sheet_overrides(std::slice::from_ref(&highlight));
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUIButtonHighlight.png")
+                .map(|image| (image.width(), image.height())),
+            Some((30, 30))
+        );
+        app.assets
+            .network_start_wait_resources()
+            .expect("host start-wait accepts the full Mars facet");
+        app.assets
+            .game_lobby_resources()
+            .expect("host lobby accepts the full Mars facet");
+        app.assets
+            .game_option_resources()
+            .expect("game options accept the full Mars facet");
+        app.assets
+            .input_dialog_resources()
+            .expect("input dialogs accept the full Mars facet");
+        let scensel = app
+            .assets
+            .scensel_assets()
+            .expect("scenario selector assets remain complete");
+        let button_down = app
+            .assets
+            .dialog_image("GUIButtonDown.png")
+            .expect("active down-button plank");
+        clonk_frontend::startup_scensel::validate_scensel_button_assets(
+            &scensel,
+            &button_down,
+        )
+        .expect("scenario buttons accept the full Mars facet");
+    }
+
+    #[test]
     fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
         let check = |mut app: GameApp, label: &str| {
             app.scoreboard_initial_reconcile_pending = true;
