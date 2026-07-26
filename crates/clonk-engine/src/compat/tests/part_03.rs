@@ -36,6 +36,7 @@
                     FLAG_BOTTOM | FLAG_LEFT | FLAG_X_REL | FLAG_WIDTH_REL
                 );
             }
+            MessageCommand::Append { .. } => panic!("CustomMessage cannot append"),
             MessageCommand::PendingSpeech(_) => panic!("CustomMessage cannot defer speech"),
         }
     }
@@ -61,6 +62,7 @@
             assert_eq!(outcome.messages.len(), 1);
             match &outcome.messages[0] {
                 MessageCommand::Add(spec) => assert!(spec.portrait.is_none()),
+                MessageCommand::Append { .. } => panic!("CustomMessage cannot append"),
                 MessageCommand::PendingSpeech(_) => panic!("CustomMessage cannot defer speech"),
             }
         }
@@ -1262,6 +1264,7 @@ public func CheckGoals()
                 assert_eq!(spec.player, Some(1));
                 assert_eq!(spec.text, "Hi there");
             }
+            MessageCommand::Append { .. } => panic!("plain PlayerMessage cannot append"),
             MessageCommand::PendingSpeech(_) => panic!("plain PlayerMessage cannot defer speech"),
         }
     }
@@ -1323,6 +1326,7 @@ public func CheckGoals()
                 assert_eq!(spec.flags & FLAG_MULTIPLE, FLAG_MULTIPLE);
                 assert_eq!(spec.text, "Queued");
             }
+            MessageCommand::Append { .. } => panic!("AddMessage cannot append"),
             MessageCommand::PendingSpeech(_) => panic!("AddMessage cannot defer speech"),
         }
     }
@@ -1339,6 +1343,7 @@ public func CheckGoals()
                 assert!(spec.player.is_none());
                 assert_eq!(spec.text, "Warning");
             }
+            MessageCommand::Append { .. } => panic!("plain PlrMessage cannot append"),
             MessageCommand::PendingSpeech(_) => panic!("plain PlrMessage cannot defer speech"),
         }
     }
@@ -2962,4 +2967,3 @@ public func RejectConstruction(x, y, builder)
         });
         result.expect("script-profiler builtins execute");
     }
-

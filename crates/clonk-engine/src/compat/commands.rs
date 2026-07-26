@@ -1190,7 +1190,7 @@ fn preview_command_failure_feedback(
     }
 
     let failure_reason = feedback.reason;
-    let fail_message = (failure_reason == Some(CommandFailureReason::CannotBuild))
+    let mut fail_message = (failure_reason == Some(CommandFailureReason::CannotBuild))
         .then(|| {
             HOST_CONTEXT.with(|cell| {
                 let borrow = cell.borrow();
@@ -1279,7 +1279,10 @@ fn preview_command_failure_feedback(
                 if !handled && failure_reason.is_none() {
                     // Even when presentation is deferred, constructing the
                     // message runs target GetCustomComponents synchronously.
-                    let _ = get_needed_mat_str(&[object_reference_value(target)])?;
+                    fail_message = match get_needed_mat_str(&[object_reference_value(target)])? {
+                        Value::String(text) => Some(text.into_string()),
+                        _ => None,
+                    };
                 }
             }
         }
@@ -1305,19 +1308,22 @@ fn preview_command_failure_feedback(
             }
         }
         if let Some(text) = fail_message {
-            context.register_message(MessageCommand::Add(MessageSpec {
-                kind: MessageKind::Target,
-                text,
-                target: Some(actor),
-                player: None,
-                offset: Vector2::ZERO,
-                color: 0xffff_ffff,
-                flags: FLAG_MULTIPLE,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            }));
+            context.register_message(MessageCommand::Append {
+                spec: MessageSpec {
+                    kind: MessageKind::Target,
+                    text,
+                    target: Some(actor),
+                    player: None,
+                    offset: Vector2::ZERO,
+                    color: 0xffff_ffff,
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    frame_decoration: None,
+                    portrait: None,
+                },
+                no_duplicates: true,
+            });
         }
     });
     Ok(())

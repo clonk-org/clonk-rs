@@ -3480,6 +3480,136 @@ protected func ControlCommand() { own_control_calls++; return 1; }
     }
 
     #[test]
+    fn failed_build_command_does_not_duplicate_live_needed_material_message(
+    ) -> Result<(), EngineError> {
+        // C4Object::Build first creates the target message. If its retained
+        // Build command later fails, C4Command::Fail uses Append with
+        // fNoDuplicates=true, so C4GameMessage::Append keeps the existing
+        // identical text instead of drawing it twice (C4Object.cpp:1733-1747;
+        // C4Command.cpp:2185-2194,2229-2235; C4GameMessage.cpp:73-83,315-328).
+        let mut builder = Definition::from_script("BLDR", "Builder", "#strict")?;
+        builder.set_crew_member(true);
+        builder.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        });
+        builder.configure_actions(
+            Some("Walk".to_owned()),
+            HashMap::from([
+                (
+                    "Walk".to_owned(),
+                    ActionSpec::default().with_procedure("walk"),
+                ),
+                (
+                    "Build".to_owned(),
+                    ActionSpec::default().with_procedure("build"),
+                ),
+            ]),
+        );
+
+        let mut site = Definition::from_script("SITE", "Site", "#strict")?;
+        site.set_constructable(true);
+        site.set_category(CATEGORY_STRUCTURE);
+        site.set_components(vec![DefinitionComponent {
+            id: "WOOD".to_owned(),
+            count: 1,
+        }]);
+
+        let mut engine = Engine::with_seed(71);
+        engine.register_definition(builder)?;
+        engine.register_definition(site)?;
+        engine.register_definition(Definition::from_script("WOOD", "Wood", "#strict")?)?;
+        engine.set_construction_needs_material(true);
+
+        let site_id = engine.spawn_object(
+            SpawnConfig::new("SITE")
+                .with_construction(1_000)
+                .with_ordered_components(vec![("WOOD".to_owned(), 0)]),
+        )?;
+        let mut action = ActionState::new("Build");
+        action.target = Some(site_id);
+        let builder_id = engine.spawn_object(
+            SpawnConfig::new("BLDR")
+                .with_action(action)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_controller(4),
+        )?;
+        let builder_index = engine
+            .find_object_index(builder_id)
+            .expect("builder exists");
+        engine.objects[builder_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(site_id))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Build queues");
+
+        let first = engine.tick()?;
+        assert_eq!(first.hud.messages.len(), 1);
+        assert_eq!(
+            first.hud.messages[0].lines,
+            vec!["Site", "needs", "1x Wood"]
+        );
+        let first_message_id = first.hud.messages[0].id;
+        assert_eq!(first.hud.messages[0].player, Some(4));
+        assert_eq!(
+            first
+                .object(builder_id)
+                .expect("builder remains")
+                .command_stack
+                .command_names(),
+            vec!["Acquire", "Build"]
+        );
+
+        let builder_index = engine
+            .find_object_index(builder_id)
+            .expect("builder remains");
+        assert_eq!(
+            engine.objects[builder_index].commands.front_command_name(),
+            Some("Acquire")
+        );
+        engine.objects[builder_index].commands.clear_front();
+        assert!(
+            engine.objects[builder_index]
+                .commands
+                .fail_front_if(CommandId::Build),
+            "retained Build command is forced through its native failure tail"
+        );
+
+        let failed = engine.tick()?;
+        assert_eq!(
+            failed.hud.messages.len(),
+            1,
+            "the failed Build retains exactly the original HUD message"
+        );
+        let material_messages = failed
+            .hud
+            .messages
+            .iter()
+            .filter(|message| {
+                message.kind == MessageKind::Target
+                    && message.target == Some(builder_id)
+                    && message.lines == vec!["Site", "needs", "1x Wood"]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            material_messages.len(),
+            1,
+            "C++ appends with duplicate suppression instead of rendering a second message"
+        );
+        assert_eq!(material_messages[0].id, first_message_id);
+        assert_eq!(
+            material_messages[0].player,
+            Some(4),
+            "Append retains the original C4GameMessage metadata"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn build_procedure_noncrew_reports_material_without_acquire() -> Result<(), EngineError> {
         let script = r#"
         global func Initialize(state, random) {

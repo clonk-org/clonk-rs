@@ -1386,18 +1386,21 @@ impl Engine {
             return Ok(());
         }
         if let Some(text) = fail_message {
-            self.messages.add_message(MessageSpec {
-                kind: message::MessageKind::Target,
-                text,
-                target: Some(actor_id),
-                player: None,
-                offset: Vector2::ZERO,
-                color: 0xffff_ffff,
-                flags: message::FLAG_MULTIPLE,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
+            self.messages.apply_command(MessageCommand::Append {
+                spec: MessageSpec {
+                    kind: message::MessageKind::Target,
+                    text,
+                    target: Some(actor_id),
+                    player: None,
+                    offset: Vector2::ZERO,
+                    color: 0xffff_ffff,
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    frame_decoration: None,
+                    portrait: None,
+                },
+                no_duplicates: true,
             });
         }
         self.objects[actor_index].state.command_direction = CommandDirection::Stop;

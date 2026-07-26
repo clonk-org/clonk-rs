@@ -2638,6 +2638,7 @@ func Announce()
                 assert!(spec.target.is_none());
                 assert!(spec.player.is_none());
             }
+            MessageCommand::Append { .. } => panic!("plain Message cannot append"),
             MessageCommand::PendingSpeech(_) => panic!("plain Message cannot defer speech"),
         }
     }
@@ -2775,6 +2776,9 @@ func Announce()
                     assert_eq!(spec.kind, expected_kind);
                     assert_eq!(spec.target, expected_target);
                     assert_eq!(spec.player, expected_player);
+                }
+                MessageCommand::Append { .. } => {
+                    panic!("CustomMessage cannot append")
                 }
                 MessageCommand::PendingSpeech(_) => {
                     panic!("CustomMessage cannot defer speech")
@@ -2962,7 +2966,7 @@ func Announce()
                     tutorial_facets.each_ref().map(|(_, facet)| Some(facet))
                 );
             }
+            MessageCommand::Append { .. } => panic!("CustomMessage cannot append"),
             MessageCommand::PendingSpeech(_) => panic!("CustomMessage cannot defer speech"),
         }
     }
-

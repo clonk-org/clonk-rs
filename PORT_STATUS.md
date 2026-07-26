@@ -178,6 +178,14 @@ live comparison.
 
 ## Open
 
+- Open gap (found 2026-07-25, not closed): script `AddMessage` still emits a
+  fresh `C4GM_Multiple` record (`compat/menus_messages.rs`) instead of calling
+  `C4GameMessageList::Append(..., fNoDuplicates=false)` like C++
+  (`C4Script.cpp:2435-2441`). The target-Build failure path now has the exact
+  append/de-duplicate behavior needed for construction feedback, but converting
+  global `AddMessage` also requires preserving C++'s distinct `ANY_OWNER` (-2)
+  and `NO_OWNER` (-1) message owners; the current `Option<i32>` representation
+  maps both to `None` and can select the wrong first append candidate.
 - Open gap (found 2026-07-25, not closed): a DFA_FLIGHT object can land one
   frame later than C++. Reproduce with EkeReloaded `TheStippelAge/Invasion`
   under `LC_PIN_SEED=777` and a `#appendto ST5B` per-frame `Log` of
