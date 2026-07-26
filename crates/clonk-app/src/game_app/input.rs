@@ -4102,7 +4102,8 @@ impl GameApp {
                                 | VirtualKeyCode::Return
                                 | VirtualKeyCode::NumpadEnter
                                 | VirtualKeyCode::Escape
-                                | VirtualKeyCode::Tab,
+                                | VirtualKeyCode::Tab
+                                | VirtualKeyCode::Space,
                             ) => true,
                             (_, VirtualKeyCode::Delete) if !self.keyboard_modifiers.alt() => true,
                             (_, VirtualKeyCode::Left | VirtualKeyCode::Right) if ctrl || shift => {
