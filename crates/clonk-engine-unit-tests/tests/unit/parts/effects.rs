@@ -1789,6 +1789,112 @@ func Helper() { return 17; }
     }
 
     #[test]
+    fn scheduled_eval_uses_command_target_definition_scope() {
+        // Helpers.c's global FxIntScheduleTimer runs eval() with the scheduled
+        // object as `this` (planet/System.c4g/Helpers.c:110-132). FnEval then
+        // selects cthr->Obj->Def->Script for DirectExec, so both the target's
+        // named locals and its own functions resolve there (C4Script.cpp:
+        // 4501-4513; C4AulExec.cpp:1658-1707).
+        let definition_script = r#"#strict 2
+local power, result;
+
+func Arm()
+{
+    power = 50;
+    result = 0;
+    var effect = AddEffect("IntSchedule", this(), 1, 1, this());
+    EffectVar(0, this(), effect) = "Explode(power)";
+    return true;
+}
+
+func Explode(value) { result = value; return true; }
+func Read() { return result; }
+"#;
+        let global_script = r#"#strict 2
+global func FxIntScheduleTimer(target, number, time)
+{
+    eval(EffectVar(0, target, number));
+    return -1;
+}
+"#;
+        let mut definition =
+            Definition::from_script("FXEV", "Scheduled eval target", definition_script)
+                .expect("definition compiles");
+        definition.set_c4_callback_convention(true);
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/Helpers.c".to_string(),
+                global_script.to_string(),
+            )]),
+            1
+        );
+        let id = engine
+            .spawn_object(SpawnConfig::new("FXEV"))
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+        engine
+            .call_object_function(idx, "Arm", Vec::new())
+            .expect("schedule arms");
+
+        engine.tick_without_snapshot().expect("scheduled eval runs");
+
+        let idx = engine.find_object_index(id).expect("target remains");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Read", Vec::new())
+                .expect("result reads"),
+            Value::Int(50),
+            "eval resolves the target definition's local and function"
+        );
+        assert!(
+            engine.objects[idx]
+                .state
+                .effects
+                .iter()
+                .all(|effect| effect.priority == 0),
+            "the successful one-shot schedule removes its timer"
+        );
+    }
+
+    #[test]
+    fn explicit_global_eval_uses_scenario_script_scope() {
+        // AB_CALLGLOBAL dispatches with null destination Obj/Def, so FnEval
+        // selects Game.Script and DirectExec resolves scenario-local functions
+        // there (C4AulExec.cpp:1216-1297; C4Script.cpp:4501-4513).
+        let definition_script = r#"#strict 3
+func Probe() { return global->eval("ScenarioHelper()"); }
+"#;
+        let scenario_script = r#"#strict 3
+func ScenarioHelper() { return 73; }
+"#;
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(
+                Definition::from_script("GEVL", "Global eval caller", definition_script)
+                    .expect("definition compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .install_scenario_script_with_convention("Scenario", scenario_script, true)
+            .expect("scenario script installs");
+        let id = engine
+            .spawn_object(SpawnConfig::new("GEVL"))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Probe", Vec::new())
+                .expect("global eval resolves through Game.Script"),
+            Value::Int(73)
+        );
+    }
+
+    #[test]
     fn object_effect_uses_and_persists_foreign_command_target_locals() {
         // Every object-effect callback executes with pCommandTarget as its
         // C4Aul `this` (C4Effect.cpp:345). That object owns the live Local[]

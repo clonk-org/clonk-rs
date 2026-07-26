@@ -172,6 +172,20 @@ pub type DirectCallFunctionProbe = std::rc::Rc<dyn Fn(&str) -> bool>;
 /// its object/definition context and therefore supplies this small hook.
 pub type GlobalCallContextHook = Arc<dyn Fn(bool) + Send + Sync>;
 
+/// Embedding-engine implementation of C++ `FnEval` receiver selection and
+/// DirectExec. It receives the expression, shared object-local cells, `this`,
+/// caller strictness and current VM depth; `None` preserves the standalone
+/// VM fallback when no engine host context is active.
+pub type EvalDirectExecHook = std::rc::Rc<
+    dyn Fn(
+        &str,
+        &crate::vm::LocalCells,
+        Value,
+        Option<u8>,
+        usize,
+    ) -> Option<Result<Value, RuntimeError>>,
+>;
+
 /// The engine-global named-variable table (`static` declarations;
 /// C4AulScriptEngine::GlobalNamed): one shared table across every script
 /// host. Values live in cells so lvalues (x = .., x++, ...) write through.
@@ -1059,6 +1073,8 @@ pub struct Engine {
     direct_call_function_probe: Option<DirectCallFunctionProbe>,
     /// Embedding-engine context switch for AB_CALLGLOBAL's null Obj/Def.
     global_call_context_hook: Option<GlobalCallContextHook>,
+    /// Embedding-engine receiver selection and DirectExec for FnEval.
+    eval_direct_exec_hook: Option<EvalDirectExecHook>,
     /// The shared `static` table; `None` keeps the legacy per-host
     /// fallback (fixtures without an engine).
     globals_named: Option<GlobalVariables>,
@@ -1130,6 +1146,7 @@ impl Engine {
             reference_parameter_probe: None,
             direct_call_function_probe: None,
             global_call_context_hook: None,
+            eval_direct_exec_hook: None,
             globals_named: None,
             globals_numbered: Some(new_global_slots()),
             globals_consts: None,
@@ -1916,6 +1933,10 @@ impl Engine {
         self.global_call_context_hook = Some(hook);
     }
 
+    pub fn register_eval_direct_exec_hook(&mut self, hook: EvalDirectExecHook) {
+        self.eval_direct_exec_hook = Some(hook);
+    }
+
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, ScriptError> {
         let vm = Vm::new(
             &self.functions,
@@ -1939,6 +1960,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -1980,6 +2002,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2028,6 +2051,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2079,6 +2103,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2138,6 +2163,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2183,6 +2209,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2227,6 +2254,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2272,6 +2300,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2316,6 +2345,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2367,6 +2397,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2409,6 +2440,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2448,6 +2480,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2557,6 +2590,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2692,6 +2726,7 @@ impl Engine {
         .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
@@ -2700,6 +2735,51 @@ impl Engine {
         .with_this(this);
         vm.direct_exec_with_cells_in_context(source, cells, strict_level, context, diagnostics)
             .map_err(ScriptError::from)
+    }
+
+    /// Exact receiver-side entry for FnEval. The embedding engine first
+    /// selects the active object's definition script, active definition, or
+    /// Game.Script, then this method creates DirectExec's temporary child
+    /// against the caller's shared object-local cells.
+    #[doc(hidden)]
+    pub fn eval_direct_exec_with_cells_and_this_at_strict(
+        &self,
+        source: &str,
+        cells: &crate::vm::LocalCells,
+        this: Value,
+        strict_level: Option<u8>,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
+        .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
+        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
+        .with_this(this);
+        vm.eval_direct_exec_with_cells(source, cells, strict_level, depth)
     }
 
     /// The destination host script's own parsed strict level. Included and

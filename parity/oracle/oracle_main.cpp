@@ -16,6 +16,8 @@
 //     is `#ifdef DEBUGREC` and we do not define DEBUGREC).
 //   * `C4ScriptKiller.h` is the production GetKiller/SetKiller decision helper
 //     called by `C4Script.cpp`; the oracle exercises that exact code.
+//   * `FnEval` and DirectExec's temporary Def/LocalNamed/parent setup are
+//     mechanically extracted from `C4Script.cpp` and `C4AulExec.cpp`.
 //   * `C4LandscapePath.h` is the production coarse-cell traversal used by
 //     `C4Landscape::_PathFree`; the oracle feeds it real PixCnt-style inputs.
 //   * `C4ActionDirection.h` is the production raw-xdir direction decision used
@@ -1143,6 +1145,245 @@ static void printScriptKillerCases()
            other.LastEnergyLossCausePlayer, getNoContext, setNoContext ? 1 : 0);
 }
 
+// --- FnEval -> DirectExec receiver and temporary scope -----------------------
+// `gen_golden.sh` lifts FnEval in full (C4Script.cpp:4501-4513) and the
+// decisive DirectExec child-scope block (C4AulExec.cpp:1674-1683). These
+// minimal surrounding types make receiver choice, object Def/LocalNamed copy,
+// parent registration, eval arguments, and strictness observable without
+// transcribing either production decision.
+enum class EvalScriptStrict : uint8_t
+{
+    NONSTRICT = 0,
+    STRICT1 = 1,
+    STRICT2 = 2,
+    STRICT3 = 3,
+    MAXSTRICT = STRICT3,
+};
+
+using EvalValue = int32_t;
+
+struct EvalScriptEngine
+{
+};
+
+struct EvalLocalNamed
+{
+    int32_t Identity{};
+};
+
+struct EvalDefinition;
+struct EvalObject;
+
+struct EvalScript
+{
+    EvalScriptStrict Strict{EvalScriptStrict::MAXSTRICT};
+    EvalDefinition *Def{};
+    EvalLocalNamed LocalNamed{};
+    EvalScriptEngine *Engine{};
+    EvalScript *Parent{};
+    int32_t Identity{};
+    std::string_view ExpectedSource;
+    bool LastCalled{};
+    bool LastScopeValid{};
+    EvalScriptStrict LastStrict{EvalScriptStrict::MAXSTRICT};
+
+    void Reg2List(EvalScriptEngine *engine, EvalScript *parent)
+    {
+        Engine = engine;
+        Parent = parent;
+    }
+
+    EvalValue DirectExec(
+        EvalObject *pObj,
+        const char *szScript,
+        const char *szContext,
+        bool fPassErrors,
+        EvalScriptStrict strict);
+};
+
+struct EvalDefinition
+{
+    EvalScript Script;
+};
+
+struct EvalObject
+{
+    EvalDefinition *Def{};
+};
+
+EvalValue EvalScript::DirectExec(
+    EvalObject *pObj,
+    const char *szScript,
+    const char *szContext,
+    bool fPassErrors,
+    EvalScriptStrict strict)
+{
+    EvalScript temporary;
+    EvalScript *pScript = &temporary;
+
+#include "script_direct_exec_scope.inc"
+
+    LastCalled = true;
+    LastStrict = strict;
+    const bool objectScopeValid = pObj
+        ? this == &pObj->Def->Script
+            && pScript->Def == pObj->Def
+            && pScript->LocalNamed.Identity == pObj->Def->Script.LocalNamed.Identity
+        : pScript->Def == nullptr && pScript->LocalNamed.Identity == 0;
+    LastScopeValid =
+        objectScopeValid
+        && pScript->Engine == Engine
+        && pScript->Parent == this
+        && std::string_view{szScript ? szScript : ""} == ExpectedSource
+        && std::string_view{szContext ? szContext : ""} == "eval"
+        && fPassErrors;
+    return LastScopeValid ? Identity : -Identity;
+}
+
+struct EvalFunction
+{
+    EvalScript *pOrgScript{};
+};
+
+struct EvalContext
+{
+    EvalContext *Caller{};
+    EvalFunction *Func{};
+    EvalObject *Obj{};
+    EvalDefinition *Def{};
+};
+
+struct EvalString
+{
+    const char *Data{};
+};
+
+static const char *EvalStringPar(EvalString *string)
+{
+    return string && string->Data ? string->Data : "";
+}
+
+struct EvalGame
+{
+    EvalScript Script;
+};
+
+static EvalGame EvalGameOracle;
+
+#define C4Value EvalValue
+#define C4AulContext EvalContext
+#define C4String EvalString
+#define C4AulScriptStrict EvalScriptStrict
+#define FnStringPar EvalStringPar
+#define FnEval EvalFnOracle
+#define Game EvalGameOracle
+#include "script_fn_eval.inc"
+#undef Game
+#undef FnEval
+#undef FnStringPar
+#undef C4AulScriptStrict
+#undef C4String
+#undef C4AulContext
+#undef C4Value
+
+static void printEvalDirectExecContextCases()
+{
+    struct Case
+    {
+        const char *Name;
+        bool HasObject;
+        bool HasDefinition;
+        EvalScriptStrict CallerStrict;
+        const char *Source;
+        int32_t ExpectedReceiver;
+    };
+    const Case cases[] = {
+        {
+            "object_definition",
+            true,
+            true,
+            EvalScriptStrict::STRICT2,
+            "Explode(power)",
+            1,
+        },
+        {
+            "definition_only",
+            false,
+            true,
+            EvalScriptStrict::STRICT1,
+            "DefinitionHelper()",
+            2,
+        },
+        {
+            "game_script",
+            false,
+            false,
+            EvalScriptStrict::STRICT3,
+            "ScenarioHelper()",
+            3,
+        },
+    };
+
+    printf("\"eval_direct_exec_context\":[");
+    for (std::size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index)
+    {
+        EvalScriptEngine engine;
+        EvalDefinition objectDefinition;
+        objectDefinition.Script.Engine = &engine;
+        objectDefinition.Script.Identity = 51;
+        objectDefinition.Script.LocalNamed.Identity = 501;
+        objectDefinition.Script.ExpectedSource = "Explode(power)";
+        EvalObject object{&objectDefinition};
+
+        EvalDefinition definition;
+        definition.Script.Engine = &engine;
+        definition.Script.Identity = 62;
+        definition.Script.LocalNamed.Identity = 602;
+        definition.Script.ExpectedSource = "DefinitionHelper()";
+
+        EvalGameOracle = EvalGame{};
+        EvalGameOracle.Script.Engine = &engine;
+        EvalGameOracle.Script.Identity = 73;
+        EvalGameOracle.Script.LocalNamed.Identity = 703;
+        EvalGameOracle.Script.ExpectedSource = "ScenarioHelper()";
+
+        EvalScript callerOrigin;
+        callerOrigin.Strict = cases[index].CallerStrict;
+        EvalFunction callerFunction{&callerOrigin};
+        EvalContext caller;
+        caller.Func = &callerFunction;
+        EvalContext context;
+        context.Caller = &caller;
+        context.Obj = cases[index].HasObject ? &object : nullptr;
+        context.Def = cases[index].HasDefinition ? &definition : nullptr;
+        EvalString source{cases[index].Source};
+
+        const EvalValue result = EvalFnOracle(&context, &source);
+        EvalScript *called = objectDefinition.Script.LastCalled
+            ? &objectDefinition.Script
+            : definition.Script.LastCalled ? &definition.Script : &EvalGameOracle.Script;
+        const int32_t receiver = called == &objectDefinition.Script
+            ? 1
+            : called == &definition.Script ? 2 : 3;
+
+        if (index) printf(",");
+        printf(
+            "{\"name\":\"%s\",\"has_object\":%d,\"has_definition\":%d,"
+            "\"caller_strict\":%u,\"expected_receiver\":%d,\"receiver\":%d,"
+            "\"scope_valid\":%d,\"direct_strict\":%u,\"result\":%d}",
+            cases[index].Name,
+            cases[index].HasObject ? 1 : 0,
+            cases[index].HasDefinition ? 1 : 0,
+            static_cast<unsigned int>(cases[index].CallerStrict),
+            cases[index].ExpectedReceiver,
+            receiver,
+            called->LastScopeValid ? 1 : 0,
+            static_cast<unsigned int>(called->LastStrict),
+            result);
+    }
+    printf("]");
+}
+
 static void printLandscapePathCases()
 {
     struct PathCase { const char *name; int32_t pixelX, pixelY, density; };
@@ -2093,6 +2334,11 @@ int main()
     // 10. GetKiller/SetKiller host semantics. C4Script.cpp delegates these
     //     decisions to the production helper included above.
     printScriptKillerCases();
+    printf(",\n");
+
+    // 10b. FnEval's exact Obj -> Def -> Game.Script receiver selection and
+    //      DirectExec's exact temporary Def/LocalNamed/parent setup.
+    printEvalDirectExecContextCases();
     printf(",\n");
 
     // 11. C4Landscape::_PathFree coarse-cell occupancy. The edge-water case

@@ -1271,6 +1271,7 @@ fn install_host_dispatch_hooks(script: &mut ScriptEngine) {
     script.register_reference_parameter_probe(std::rc::Rc::new(arrow_reference_parameter_probe));
     script.register_direct_call_function_probe(std::rc::Rc::new(arrow_direct_call_function_probe));
     script.register_global_call_context_hook(std::sync::Arc::new(global_call_context_hook));
+    script.register_eval_direct_exec_hook(std::rc::Rc::new(eval_direct_exec_hook));
     script.register_local_cell_hook(std::rc::Rc::new(foreign_local_cell_hook));
 }
 

@@ -14,7 +14,8 @@ use crate::ast::{
 };
 use crate::debugger::DebuggerHooks;
 use crate::engine::{
-    GlobalCallContextHook, HostFunction, HostReferenceFunction, RegisteredHostFunction,
+    EvalDirectExecHook, GlobalCallContextHook, HostFunction, HostReferenceFunction,
+    RegisteredHostFunction,
 };
 use crate::error::{RuntimeCallFrame, RuntimeError};
 use crate::value::{
@@ -2989,6 +2990,8 @@ pub struct Vm<'a> {
     direct_call_function_probe: Option<&'a crate::engine::DirectCallFunctionProbe>,
     /// Embedding-engine context switch for AB_CALLGLOBAL's null Obj/Def.
     global_call_context_hook: Option<&'a GlobalCallContextHook>,
+    /// Embedding-engine receiver selection and DirectExec for FnEval.
+    eval_direct_exec_hook: Option<&'a EvalDirectExecHook>,
     /// References returned from a global callee may outlive its temporary
     /// null Obj/Def context. Lazy host-backed references must recreate it.
     retain_global_call_context_for_host_paths: bool,
@@ -3043,6 +3046,7 @@ impl<'a> Vm<'a> {
             reference_parameter_probe: None,
             direct_call_function_probe: None,
             global_call_context_hook: None,
+            eval_direct_exec_hook: None,
             retain_global_call_context_for_host_paths: false,
             globals_named: None,
             globals_numbered: None,
@@ -3173,6 +3177,11 @@ impl<'a> Vm<'a> {
         hook: Option<&'a GlobalCallContextHook>,
     ) -> Self {
         self.global_call_context_hook = hook;
+        self
+    }
+
+    pub fn with_eval_direct_exec_hook(mut self, hook: Option<&'a EvalDirectExecHook>) -> Self {
+        self.eval_direct_exec_hook = hook;
         self
     }
 
@@ -3729,6 +3738,41 @@ impl<'a> Vm<'a> {
         Ok(value)
     }
 
+    /// FnEval's DirectExec entry. Unlike host-initiated DirectExec, an eval
+    /// runtime error is profiled when its enclosing native frame unwinds, so
+    /// this temporary frame must not record the same interval a second time.
+    pub(crate) fn eval_direct_exec_with_cells(
+        &self,
+        source: &str,
+        cells: &LocalCells,
+        strict_level: Option<u8>,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        start_direct_exec_profile();
+        let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
+            .parse_direct_exec_expression()
+        else {
+            return Ok(Value::Nil);
+        };
+        let mut diagnostic = ScriptDiagnosticGuard::enter_direct(
+            self.eval_direct_exec_diagnostic_frame(self.definition_context),
+            false,
+        );
+        let mut env = Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
+        env.temporary_script = true;
+        let has_object = matches!(&self.this_value, Value::Object(id) if *id != 0);
+        env.definition_context = has_object;
+        if has_object {
+            for var_decl in self.var_decls {
+                let cell = env.object_state.named_local_cell(&var_decl.name);
+                env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
+            }
+        }
+        let value = self.evaluate(&expr, &mut env, depth)?;
+        diagnostic.returned(&value);
+        Ok(value)
+    }
+
     fn direct_exec_diagnostic_frame(&self, context: &str) -> DirectExecDiagnosticFrame {
         DirectExecDiagnosticFrame::new(
             format!("{context} in {}", self.script_name),
@@ -3960,6 +4004,7 @@ impl<'a> Vm<'a> {
             reference_parameter_probe: self.reference_parameter_probe,
             direct_call_function_probe: self.direct_call_function_probe,
             global_call_context_hook: self.global_call_context_hook,
+            eval_direct_exec_hook: self.eval_direct_exec_hook,
             retain_global_call_context_for_host_paths: true,
             globals_named: self.globals_named,
             globals_numbered: self.globals_numbered,
@@ -5366,6 +5411,20 @@ impl<'a> Vm<'a> {
                                     // 1693-1699).
                                     _ => return Ok(Value::Nil),
                                 };
+                            let cells = LocalCells {
+                                state: env.object_state.clone(),
+                            };
+                            if let Some(result) = self.eval_direct_exec_hook.and_then(|hook| {
+                                hook(
+                                    &code,
+                                    &cells,
+                                    self.this_value.clone(),
+                                    env.strict_level,
+                                    depth + 1,
+                                )
+                            }) {
+                                return result;
+                            }
                             start_direct_exec_profile();
                             let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(
                                 &code,
@@ -7149,6 +7208,13 @@ impl<'a> Vm<'a> {
                     Some(Value::String(code)) => code,
                     _ => return Ok(value(Value::Nil)),
                 };
+                let cells = LocalCells::default();
+                if let Some(result) = self
+                    .eval_direct_exec_hook
+                    .and_then(|hook| hook(&code, &cells, Value::Nil, env.strict_level, depth + 1))
+                {
+                    return result.map(|value| ReturnValue::Value(TrackedValue::runtime(value)));
+                }
                 start_direct_exec_profile();
                 let Ok(expr) =
                     crate::parser::Parser::with_strict_level_c4_string(&code, env.strict_level)

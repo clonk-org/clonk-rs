@@ -4,11 +4,12 @@
 # Produces parity/golden/parity_golden.json from the REAL engine determinism
 # primitives (src/Fixed.h, src/Fixed.cpp SineTable, src/C4Random.h), the
 # production script-host helper (src/C4ScriptKiller.h), coarse landscape
-# traversal (src/C4LandscapePath.h), action-direction decisions
+# traversal (src/C4LandscapePath.h), FnEval/DirectExec context selection
+# (src/C4Script.cpp, src/C4AulExec.cpp), action-direction decisions
 # (src/C4ActionDirection.h), and active solid-mask bitmap sampling
-# (src/C4SolidMaskBitmap.h), complete C4Object::DigOutMaterialCast and
-# landscape BlastFree methods, and the bottom/top/side-flight
-# C4Object::ContactAction arms. The Rust side
+# (src/C4SolidMaskBitmap.h), complete C4Object::DigOutMaterialCast and landscape
+# BlastFree methods, and the bottom/top/side-flight C4Object::ContactAction
+# arms. The Rust side
 # (crates/clonk-engine/src/parity_differential.rs) diffs against the committed
 # JSON, so this script only needs to run when the C++ primitives or oracle
 # coverage change.
@@ -86,6 +87,26 @@ awk '
   p && /^}$/ { found = 1; exit }
   END { if (!found) exit 1 }
 ' "$src/C4Game.cpp" > "$gen/shake_objects.inc"
+
+# FnEval's complete production body selects DirectExec's receiver from the
+# active C4Aul context: object definition, definition, then Game.Script.
+awk '
+  /^static C4Value FnEval\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Script.cpp" > "$gen/script_fn_eval.inc"
+
+# DirectExec's temporary child gets an object's current Def and LocalNamed
+# table, then registers under the selected receiver. Lift that decisive setup
+# block verbatim; the focused oracle supplies only the surrounding objects.
+awk '
+  /^C4Value C4AulScript::DirectExec\(/ { in_direct_exec = 1 }
+  in_direct_exec && /^[[:space:]]*if \(pObj\)$/ { p = 1 }
+  p { print }
+  p && /^[[:space:]]*pScript->Reg2List\(Engine, this\);$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4AulExec.cpp" > "$gen/script_direct_exec_scope.inc"
 
 # Network game startup must place the synchronized C4GameParameters lists,
 # not a client's local Scenario.txt lists. Lift the complete production

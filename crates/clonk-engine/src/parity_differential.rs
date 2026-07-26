@@ -7,11 +7,12 @@
 //! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
 //! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
-//! `src/C4SolidMaskBitmap.h`, plus complete `C4Object::DigOutMaterialCast`,
-//! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
-//! `BlastFreePix`, `BlastFree`, `ExecuteScan`, and `DoScan` bodies and the
-//! `C4SGame::ConvertGoals`, `C4Game::InitRules`/`InitGoals`, and
-//! bottom/top/side-flight `C4Object::ContactAction` arms) by
+//! `src/C4SolidMaskBitmap.h`, plus complete `FnEval`, DirectExec's temporary
+//! context setup, `C4Object::DigOutMaterialCast`, `C4Game::ShakeObjects`,
+//! `C4Object::Fling`, `C4Landscape::ClearPix`, `BlastFreePix`, `BlastFree`,
+//! `ExecuteScan`, and `DoScan` bodies and the `C4SGame::ConvertGoals`,
+//! `C4Game::InitRules`/`InitGoals`, and bottom/top/side-flight
+//! `C4Object::ContactAction` arms) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
@@ -2465,6 +2466,135 @@ func Trigger(object pOther) {
             i(section, "get_no_context"),
             i64::from(OWNER_NONE),
         );
+    }
+
+    // 10b. FnEval -> DirectExec context selection (C4Script.cpp:4501-4513;
+    // C4AulExec.cpp:1674-1683). The C++ oracle executes both mechanically
+    // extracted production blocks. Rust drives the same three contexts through
+    // real C4Script: the object sentinel requires both its named local and its
+    // definition-owned function, while DefinitionCall supplies Def without Obj
+    // and global->eval clears both so Game.Script owns the expression.
+    {
+        let object_script = r#"#strict 2
+local power;
+func Probe()
+{
+    power = 50;
+    return eval("Explode(power)");
+}
+func Explode(value) { return value + 1; }
+"#;
+        let definition_script = r#"#strict
+func DefinitionProbe() { return eval("DefinitionHelper()"); }
+func DefinitionHelper() { return 62; }
+"#;
+        let definition_caller_script = r#"#strict
+func Probe() { return DefinitionCall(DEFV, "DefinitionProbe"); }
+"#;
+        let global_caller_script = r#"#strict 3
+func Probe() { return global->eval("ScenarioHelper()"); }
+"#;
+        let scenario_script = r#"#strict 3
+func ScenarioHelper() { return 73; }
+"#;
+
+        let mut engine = Engine::with_seed(29);
+        for (id, name, script) in [
+            ("OBJV", "Eval object receiver", object_script),
+            ("DEFV", "Eval definition receiver", definition_script),
+            ("CALL", "Eval definition caller", definition_caller_script),
+            ("GEVL", "Eval game caller", global_caller_script),
+        ] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, script)
+                        .unwrap_or_else(|error| panic!("{name} compiles: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("{name} registers: {error}"));
+        }
+        engine
+            .install_scenario_script_with_convention("Scenario", scenario_script, true)
+            .expect("eval differential scenario script installs");
+        let object = engine
+            .spawn_object(SpawnConfig::new("OBJV"))
+            .expect("eval differential object receiver spawns");
+        let definition_caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("eval differential definition caller spawns");
+        let global_caller = engine
+            .spawn_object(SpawnConfig::new("GEVL"))
+            .expect("eval differential game caller spawns");
+
+        let call_probe = |engine: &mut Engine, id| {
+            let index = engine
+                .find_object_index(id)
+                .expect("eval differential caller remains");
+            match engine
+                .call_object_function(index, "Probe", Vec::new())
+                .expect("eval differential probe runs")
+            {
+                ScriptValue::Int(value) => i64::from(value),
+                value => panic!("eval differential probe returned {value:?}"),
+            }
+        };
+        let rust_results = HashMap::from([
+            (
+                "object_definition",
+                (1_i64, 1_i64, 2_i64, 1_i64, call_probe(&mut engine, object)),
+            ),
+            (
+                "definition_only",
+                (
+                    0_i64,
+                    1_i64,
+                    1_i64,
+                    2_i64,
+                    call_probe(&mut engine, definition_caller),
+                ),
+            ),
+            (
+                "game_script",
+                (
+                    0_i64,
+                    0_i64,
+                    3_i64,
+                    3_i64,
+                    call_probe(&mut engine, global_caller),
+                ),
+            ),
+        ]);
+
+        for (index, case) in golden["eval_direct_exec_context"]
+            .as_array()
+            .expect("eval_direct_exec_context is a C++ oracle array")
+            .iter()
+            .enumerate()
+        {
+            let name = case["name"]
+                .as_str()
+                .expect("eval_direct_exec_context case has a name");
+            let &(has_object, has_definition, caller_strict, receiver, result) = rust_results
+                .get(name)
+                .unwrap_or_else(|| panic!("unknown eval_direct_exec_context case `{name}`"));
+            for (field, rust) in [
+                ("has_object", has_object),
+                ("has_definition", has_definition),
+                ("caller_strict", caller_strict),
+                ("expected_receiver", receiver),
+                ("receiver", receiver),
+                ("scope_valid", 1),
+                ("direct_strict", caller_strict),
+                ("result", result),
+            ] {
+                expect_eq(
+                    "eval_direct_exec_context",
+                    index,
+                    field,
+                    i(case, field),
+                    rust,
+                );
+            }
+        }
     }
 
     // 11. C4Landscape::_PathFree (C4Landscape.cpp:890-915): PixCnt scans the

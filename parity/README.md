@@ -30,6 +30,7 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `script_value_hash` | `src/C4Value.cpp` `hashCombine` / `std::hash<C4Value>` | map-key lookup for nested script values |
 | `script_value_convert` | `src/C4Value.cpp:488-598` `C4ScriptCnvMap` + `ConvertTo` | type-coercion rules for `getInt`/`getStr`/… and parameter marshaling |
 | `script_killer` | `src/C4ScriptKiller.h`, called by `src/C4Script.cpp:1333-1347` | GetKiller/SetKiller fallback target, player validation, direct assignment, foreign/arrow targeting |
+| `eval_direct_exec_context` | complete `FnEval` + `C4AulScript::DirectExec` scope setup (`src/C4Script.cpp:4501-4513`; `src/C4AulExec.cpp:1674-1683`) | object-definition, definition-only, and `Game.Script` receiver selection; object `LocalNamed`, temporary Def, parent, and caller strictness |
 | `landscape_path` | `src/C4LandscapePath.h`, called by `src/C4Landscape.cpp:890-915` | 17×15 PixCnt traversal and authoritative pixel-plane occupancy at cell edges |
 | `action_direction` | `src/C4ActionDirection.h`, called by `C4Object::ExecAction`/`SetDir` | raw-C4Fixed facing, TurnAction fixed-position resync, and stale pre-transition phase ordering |
 | `action_swim_direction` | `src/C4ActionDirection.h`, called by DFA_SWIM/`SetDir` | SwimAccel facing changes, TurnAction two-axis fixed-position resync, and stale Swim phase ordering |
@@ -107,6 +108,17 @@ live shadow-diff — see "Phase 2" below.
   without copying the decision logic or linking the full game executable. The
   Rust checker drives its registered host functions through real C4Script calls,
   including explicit foreign and arrow targets plus a context-free call.
+- `eval_direct_exec_context` mechanically extracts the complete production
+  `FnEval` body and DirectExec's exact object Def/`LocalNamed`/parent setup.
+  Minimal surrounding C++ contexts make each receiver and temporary child
+  observable. The Rust checker drives the same three paths through the real
+  C4Script VM: its object case can return 51 only by resolving both the live
+  named local `power` and the target definition's `Explode` function; the
+  other cases enter definition-only DirectExec through `DefinitionCall` and
+  `Game.Script` through `global->eval`. The focused C++ scaffold validates
+  receiver/setup/strict/source forwarding but does not run C++ `ParseFn` or
+  expression execution; full scheduled-expression parity still requires a
+  native scenario differential.
 - `landscape_path` calls the production `C4LandscapePath.h` traversal used by
   `_PathFree`. Its edge-water input is the minimized Goldrush frame-143 live
   divergence; Rust runs the same density plane through a real `PixelGrid`.
