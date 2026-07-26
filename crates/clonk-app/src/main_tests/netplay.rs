@@ -3615,6 +3615,81 @@
     }
 
     #[test]
+    fn client_host_timeout_during_final_init_aborts_startup() {
+        // Losing the host clears C4Network2, which releases FinalInit's wait
+        // but makes its final isEnabled() check fail. Game::Init then aborts
+        // back to startup (src/C4Network2.cpp:558-616,1809-1817;
+        // src/C4Game.cpp:459-466).
+        let mut app = new_real_classic_menu_app(640, 480);
+        let (network, events) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Oracle Host"),
+            message_client(7, b"Client"),
+        ]);
+        app.startup_view = StartupView::NetworkLobby;
+        app.last_startup_dialog = StartupDialog::NetworkGame;
+        app.mode = AppMode::Loading;
+        let (_sender, receiver) = mpsc::channel();
+        let mut loading = ScenarioLoadingState::from_network_receiver(
+            FrontendScenario::fallback(),
+            receiver,
+            clonk_network::NetworkStatus {
+                state: clonk_network::NETWORK_STATE_GO,
+                control_mode: 0,
+                target_tick: 0,
+            },
+            Vec::new(),
+            None,
+            0,
+            false,
+            0,
+            false,
+            true,
+            true,
+            clonk_engine::GameParameterRuleGoalLists::new(Vec::new(), Vec::new()),
+            TeamConfiguration::default(),
+            Vec::new(),
+        );
+        loading
+            .prepared_go
+            .as_mut()
+            .expect("prepared Go loading state")
+            .local_reached = true;
+        app.loading_state = Some(loading);
+        app.show_reached_network_start_wait()
+            .expect("show client start wait");
+        events
+            .send(NetworkEvent::PeerDisconnected {
+                client_id: 0,
+                reason: Some("connection Ping timeout".to_string()),
+            })
+            .expect("queue host timeout");
+
+        app.process_network_events()
+            .expect("host timeout aborts client startup");
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_dialog.is_some());
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.network_start_wait.is_none());
+        let engine_results = app.engine.snapshot().round_results;
+        assert_eq!(
+            engine_results.network_result,
+            Some(clonk_engine::RoundResultsNetworkResult::NetworkError)
+        );
+        assert_eq!(
+            engine_results.network_result_message,
+            b"Network: host Oracle Host disconnected!"
+        );
+        assert_eq!(app.snapshot.round_results, engine_results);
+        assert_startup_error_log(&app, "Error on final network init.");
+    }
+
+    #[test]
     fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
         let mut app = new_menu_app(640, 480);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));

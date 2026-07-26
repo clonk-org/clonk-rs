@@ -4303,6 +4303,18 @@ impl GameApp {
                         if let Some(local_client_id) = local_client_id {
                             let host_lost_in_lobby = self.mode == AppMode::Menu
                                 && self.startup_view == StartupView::NetworkLobby;
+                            let host_lost_during_final_init = self.mode == AppMode::Loading
+                                && (self
+                                    .loading_state
+                                    .as_ref()
+                                    .and_then(|loading| loading.prepared_go.as_ref())
+                                    .is_some_and(|prepared| prepared.local_reached)
+                                    || self.message_dialogs.iter().any(|dialog| {
+                                        matches!(
+                                            dialog.continuation,
+                                            MessageDialogContinuation::NetworkClientStartWait
+                                        )
+                                    }));
                             let host_name = self
                                 .control_clients
                                 .state(0)
@@ -4332,14 +4344,27 @@ impl GameApp {
                             if host_lost_in_lobby {
                                 // Clear makes an active DoLobby return false,
                                 // aborting C4Game::Init back through the
-                                // remembered startup dialog. Only an already
-                                // running round continues under local control
-                                // (C4Network2.cpp:477-515,1809-1833;
-                                // C4Game.cpp:405-411).
+                                // remembered startup dialog (C4Network2.cpp:
+                                // 477-515,1809-1833; C4Game.cpp:405-411).
                                 self.finish_startup_network_failure(
                                     StartupNetworkPurpose::Join,
                                     message,
                                 )?;
+                                break;
+                            }
+                            if host_lost_during_final_init {
+                                // Clear releases FinalInit's wait, whose final
+                                // isEnabled() check then fails. Dismiss its
+                                // modal before unwinding the failed Game::Init
+                                // through the appropriate startup lineage
+                                // (C4Network2.cpp:558-616,1809-1833;
+                                // C4Game.cpp:459-466).
+                                self.dismiss_network_client_start_wait();
+                                let final_init_error = self.runtime_resource_text(
+                                    "IDS_ERR_NETWORKFINALINIT",
+                                    "Error on final network init.",
+                                );
+                                self.finish_scenario_loading_failure(final_init_error, true)?;
                                 break;
                             }
                             self.change_network_control_to_local(local_client_id);
