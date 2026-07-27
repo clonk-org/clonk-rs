@@ -1904,7 +1904,7 @@ mod tests {
             .contains("Permission to use, copy, modify"));
         assert!(ABOUT_LICENSES[0]
             .text
-            .contains("Copyright (c) 2025-2026, Clonk Rust contributors"));
+            .contains("Copyright (c) 2026, Clonk Rust contributors"));
         assert!(!ABOUT_LICENSES[0].text.contains("NonCommercial"));
         // The port ships no trademark notice on any license page.
         assert!(ABOUT_LICENSES
