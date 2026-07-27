@@ -1,0 +1,270 @@
+name: Release
+
+# Tags, builds and publishes a release when a `chore: release <version>` commit
+# lands on main — normally by merging the pull request that `release-prepare.yml`
+# opened.
+#
+# Tagging, building and publishing are three jobs in ONE workflow rather than
+# separate workflows joined by a tag push, because GitHub does not trigger
+# workflows from events created with the built-in GITHUB_TOKEN: a tag pushed
+# here would never fire an `on: push: tags` workflow.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tag:
+    name: Tag and draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      release: ${{ steps.resolve.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether this commit releases
+        id: resolve
+        env:
+          # Via env, never interpolated into the script: a commit subject is
+          # attacker-influencable text.
+          HEAD_SUBJECT: ${{ github.event.head_commit.message }}
+          DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          subject=${HEAD_SUBJECT%%$'\n'*}
+          if [[ "$DISPATCHED" != "true" && "$subject" != "chore: release "* ]]; then
+            echo "not a release commit: $subject"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("Cargo.toml").read_text(encoding="utf-8")
+          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
+          print(re.search(r'^version = "([^"]+)"$', section.group(1), re.M).group(1))
+          PY
+          )
+
+          # Idempotent: re-running on the same commit must not double-release.
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "v${version} already tagged; nothing to do"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create the tag and a draft release
+        if: steps.resolve.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin "v${VERSION}"
+
+          # Release notes: this version's CHANGELOG.md section, without heading.
+          python3 - "$VERSION" > release-notes.md <<'PY'
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          lines = Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+          start = next(
+              (i for i, line in enumerate(lines) if line.startswith(f"## [{version}]")),
+              None,
+          )
+          if start is None:
+              print(f"Release v{version}.")
+          else:
+              end = next(
+                  (i for i in range(start + 1, len(lines)) if lines[i].startswith("## [")),
+                  len(lines),
+              )
+              print("\n".join(lines[start + 1 : end]).strip())
+          PY
+
+          gh release create "v${VERSION}" \
+            --title "Clonk Rust ${VERSION}" \
+            --notes-file release-notes.md \
+            --draft
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: tag
+    if: needs.tag.outputs.release == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux and windows
+            runner: ubuntu-latest
+            artifact: desktop-linux-windows
+          - name: macos
+            runner: macos-latest
+            artifact: desktop-macos
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ needs.tag.outputs.version }}
+          # Packaging copies the tracked game data, so the submodule is required.
+          # This works only while clonk-rs-content is public.
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-${{ matrix.artifact }}
+          cache-on-failure: true
+
+      - name: Install Linux and Windows build dependencies
+        if: matrix.runner == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config \
+            mingw-w64 \
+            nsis
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: Install macOS cross target
+        if: matrix.runner == 'macos-latest'
+        run: rustup target add x86_64-apple-darwin
+
+      # Built natively first and then invoked directly. Running
+      # `cargo run -p xtask` with CARGO_BUILD_TARGET set would build the tool
+      # *for the target* and fail to execute it.
+      - name: Build the packaging tool
+        run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
+
+      - name: Package Linux
+        if: matrix.runner == 'ubuntu-latest'
+        run: ./target/release/xtask-engine-tools package
+
+      - name: Package Windows installer
+        if: matrix.runner == 'ubuntu-latest'
+        env:
+          CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
+          LIBZ_SYS_STATIC: '1'
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
+          # does not exist in its published crate, so its bundled libpng only
+          # finds zlib.h where the host happens to ship one. mingw does not.
+          # Resolved dynamically rather than pinned to a libz-sys version.
+          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
+          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
+            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
+            exit 1
+          fi
+          export CFLAGS_x86_64_pc_windows_gnu="-I$zlib_dir"
+          ./target/release/xtask-engine-tools package --no-archive
+
+          makensis -NOCD \
+            -DVERSION="$VERSION" \
+            -DPAYLOAD="$PWD/target/dist/clonk-rust" \
+            -DOUTFILE="$PWD/target/dist/clonk-rust-$VERSION-x86_64-windows-setup.exe" \
+            scripts/windows-installer.nsi
+
+      - name: Package macOS
+        if: matrix.runner == 'macos-latest'
+        run: |
+          ./target/release/xtask-engine-tools package
+          CARGO_BUILD_TARGET=x86_64-apple-darwin ./target/release/xtask-engine-tools package
+
+      - name: Check the artifacts look real
+        run: |
+          shopt -s nullglob
+          assets=(target/dist/clonk-rust-*.zip target/dist/clonk-rust-*.dmg target/dist/clonk-rust-*.exe)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "packaging produced no assets" >&2
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            size=$(wc -c < "$asset")
+            # The payload is ~240 MB of game data; anything tiny means the
+            # packaging silently produced an empty container.
+            if [[ "$size" -lt 100000000 ]]; then
+              echo "$asset is only $size bytes" >&2
+              exit 1
+            fi
+            echo "ok $(basename "$asset") $size bytes"
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/dist/clonk-rust-*.zip
+            target/dist/clonk-rust-*.dmg
+            target/dist/clonk-rust-*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs: [tag, build]
+    if: needs.tag.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          cd assets
+          sha256sum clonk-rust-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "v${VERSION}" clonk-rust-* SHA256SUMS.txt --clobber
+          gh release edit "v${VERSION}" --draft=false --latest

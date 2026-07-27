@@ -1,0 +1,126 @@
+name: Release prepare
+
+# Opens a release pull request: works out the next version from Conventional
+# Commit subjects, bumps the single workspace version, refreshes the lockfile
+# and prepends a CHANGELOG.md section.
+#
+# Needs no game content, so it runs while `content/` access is irrelevant to it.
+#
+# Merging the resulting pull request is what publishes: `release.yml` tags,
+# builds and releases from the `chore: release <version>` commit on main.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version (MAJOR.MINOR.PATCH). Leave blank to infer from commits.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-prepare
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Open release pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # git-cliff derives the bump from every commit since the last v* tag,
+          # so the full history and all tags must be present.
+          fetch-depth: 0
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-prepare
+          cache-on-failure: true
+
+      # prepare-release.sh `cargo install`s git-cliff into target/release-tools,
+      # which rust-cache does not preserve. Without this every release pays a
+      # multi-minute compile of a tool that never changes.
+      - name: Cache git-cliff
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/release-tools
+          key: git-cliff-${{ runner.os }}-${{ hashFiles('scripts/prepare-release.sh') }}
+
+      - name: Prepare the release
+        id: prepare
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          # Quoted expansion, and the input reaches the script as an argument
+          # rather than being interpolated into the command line.
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            scripts/prepare-release.sh "$REQUESTED_VERSION"
+          else
+            scripts/prepare-release.sh
+          fi
+          version=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("Cargo.toml").read_text(encoding="utf-8")
+          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
+          print(re.search(r'^version = "([^"]+)"$', section.group(1), re.M).group(1))
+          PY
+          )
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # A pull request opened with GITHUB_TOKEN does not trigger other
+      # workflows, so `dependency-guard.yml` will not run on it. Run its checks
+      # here or a release could merge with a broken build.
+      - name: Check workspace libraries and binaries
+        run: cargo check --workspace --locked
+
+      - name: Verify packaging invariants
+        run: cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          branch="release/v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -- Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore: release ${VERSION}"
+          git push --force-with-lease origin "$branch"
+          # The title must keep the `chore: release` prefix: a squash merge uses
+          # it as the commit subject, and release.yml keys off exactly that.
+          gh pr create \
+            --title "chore: release ${VERSION}" \
+            --body "Automated release preparation for v${VERSION}.
+
+          Merging this publishes v${VERSION}: \`release.yml\` tags the merge commit, builds the platform assets and publishes the GitHub Release.
+
+          Review before merging — the full test suite cannot run in CI." \
+            --base main \
+            --head "$branch"
