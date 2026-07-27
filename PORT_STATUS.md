@@ -291,6 +291,24 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **The new-player dialog seeds its name from the localized rank ladder**
+  (`GameApp::new_player_default_name`, `crates/clonk-app/src/game_app/startup.rs`;
+  C++ `C4PlayerInfoCore::Default`, oracle-src-pinned src/C4InfoCore.cpp:69).
+  Approved 2026-07-27. C++ hardcodes the German `"Neuling"` and prefills it in
+  the new-player dialog for English players too, so the very first screen a new
+  player sees is German. `"Neuling"` is rank 0 of `IDS_RANKS_PLAYER`, whose
+  shipped English ladder starts `"Novice"` (LanguageUS.txt:1280), so the port
+  reads the seed from the localized ladder instead. A DE language pack still
+  yields exactly `"Neuling"`, so German players are unaffected.
+  Presentation only — `Player.txt` still round-trips byte-identically with C++
+  in both directions. The omit-if-equal serialization default
+  (`live_c4_player.rs`, `push_c4_string(..., "Name", ..., "Neuling", 30)`), the
+  missing-`Name=` read fallback (`player_file.rs`, `default_player_name`) and
+  the netplay fallback (`configured_client_players.rs`) all remain `"Neuling"`,
+  so a profile written by either engine is read identically by the other.
+  Pinned by `new_player_dialog_seeds_the_name_from_the_localized_first_player_rank`
+  and `new_player_dialog_still_seeds_neuling_from_the_german_rank_ladder`.
+
 - **PreSend is sized from the delivery-time envelope, not the mean**
   (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;
   C++ `C4GameControlNetwork::CalcPerformance`, oracle-src-pinned
