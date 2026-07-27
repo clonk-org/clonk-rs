@@ -37,6 +37,7 @@ mod resource_transfer_backend;
 mod resync;
 mod search;
 mod session;
+mod sim;
 mod statistics;
 mod stats;
 mod status;
@@ -236,6 +237,10 @@ pub use session::{
     HostCommand, HostConfig, HostError, HostEvent, HostHandle, HostJoinSnapshot, HostUdpBinding,
     HostedResourceFile, RuntimeLobbyClientTelemetry, RuntimeNetworkClientState,
     RuntimeNetworkConnection, BROADCAST_CLIENT_ID,
+};
+pub use sim::{
+    mean, percentile, replay_lockstep, run_control_delivery, ControlDeliveryConfig, InFlight, Link,
+    LinkConditions, LinkReport, LockstepPlayout, Lookahead, SimRng, CONTROL_PERIOD, STEP,
 };
 pub use statistics::{
     ConnectionRateStatistics, ConnectionStatisticsKey, ConnectionStatisticsRecorder,
