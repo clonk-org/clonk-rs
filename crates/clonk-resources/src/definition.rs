@@ -5529,7 +5529,11 @@ Entrance=1,2,,4
             }
             checked += expected.len();
         }
-        assert_eq!(checked, 85, "recursive shipped portrait census changed");
+        // 85 before Queron 3 and the Metal & Magic packs it depends on were
+        // vendored; those add 34 more. The per-directory assertion above is the
+        // real check — this census only guards against the walk silently
+        // covering less content than it should.
+        assert_eq!(checked, 119, "recursive shipped portrait census changed");
     }
 
     #[test]
