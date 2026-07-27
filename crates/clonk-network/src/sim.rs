@@ -63,7 +63,14 @@ pub struct InFlight {
     pub deliver_at: Duration,
     pub to_host: bool,
     pub payload: Vec<u8>,
+    /// Competing bulk traffic. It occupies the link exactly like real traffic
+    /// but is never handed to an endpoint.
+    pub filler: bool,
 }
+
+/// Size of one competing-flow datagram, matching the engine's own
+/// `MAX_DATAGRAM_SIZE` so bulk transfer is modelled at its real granularity.
+pub const CROSS_TRAFFIC_DATAGRAM_BYTES: usize = 512;
 
 /// The impairments applied to a simulated link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +85,36 @@ pub struct LinkConditions {
     /// overflows, a radio fades — and a burst is exactly the case a redundant
     /// copy sent in the same breath as the original cannot survive.
     pub burst_ms: u64,
+    /// Host-to-client capacity in bits per second. Zero is unmetered.
+    ///
+    /// Below roughly a megabit this dominates everything else: a 512-byte
+    /// datagram is 122 ms of pure serialization on a 33.6 kbit/s link, and on a
+    /// narrow link the per-datagram IP/UDP/PPP overhead (~35 B) means packet
+    /// *rate* costs more than payload.
+    pub downlink_bps: u64,
+    /// Client-to-host capacity in bits per second. Zero is unmetered. This is
+    /// the direction that starves first on a real consumer link.
+    pub uplink_bps: u64,
+    /// Drop-tail queue depth in bytes, per direction. Zero is unbounded.
+    ///
+    /// This is the bufferbloat knob, and it is the one that reproduces
+    /// multi-second hotel-wifi lag spikes. A 64 kB buffer in front of a
+    /// 33.6 kbit/s link is ~15 s of standing queue; an unbounded queue grows
+    /// latency without ever dropping, which is exactly the failure a
+    /// loss-and-delay-only model cannot show.
+    pub queue_bytes: u64,
+    /// Offered load from a competing bulk flow on the host-to-client direction,
+    /// in bits per second. Zero disables it.
+    ///
+    /// Bufferbloat is a *contention* phenomenon: with nothing else on the link
+    /// the queue never fills and a profile silently understates the real
+    /// problem. That is the flaw in every shipping preset (Unity's network
+    /// simulator, Apple's Network Link Conditioner) that models only delay and
+    /// loss. In this engine the competing flow is usually a resource transfer —
+    /// 100 KiB chunks with no rate limit — or another device on the same wifi.
+    pub cross_traffic_down_bps: u64,
+    /// The same competing load on the client-to-host direction.
+    pub cross_traffic_up_bps: u64,
 }
 
 impl Default for LinkConditions {
@@ -87,6 +124,11 @@ impl Default for LinkConditions {
             jitter_ms: 10,
             loss_permille: 10,
             burst_ms: 0,
+            downlink_bps: 0,
+            uplink_bps: 0,
+            queue_bytes: 0,
+            cross_traffic_down_bps: 0,
+            cross_traffic_up_bps: 0,
         }
     }
 }
@@ -99,12 +141,57 @@ impl LinkConditions {
             jitter_ms: 0,
             loss_permille: 0,
             burst_ms: 0,
+            downlink_bps: 0,
+            uplink_bps: 0,
+            queue_bytes: 0,
+            cross_traffic_down_bps: 0,
+            cross_traffic_up_bps: 0,
         }
     }
 
     pub fn one_way(&self) -> Duration {
         Duration::from_millis(self.rtt_ms / 2)
     }
+
+    fn rate_bps(&self, to_host: bool) -> u64 {
+        if to_host {
+            self.uplink_bps
+        } else {
+            self.downlink_bps
+        }
+    }
+
+    fn cross_traffic_bps(&self, to_host: bool) -> u64 {
+        if to_host {
+            self.cross_traffic_up_bps
+        } else {
+            self.cross_traffic_down_bps
+        }
+    }
+}
+
+/// Time to clock `bytes` onto a link of `bps` bits per second.
+///
+/// Integer nanoseconds throughout: the rig's whole value is that a seed
+/// reproduces byte-for-byte, and float rounding would vary that across targets.
+fn serialization_time(bytes: usize, bps: u64) -> Duration {
+    if bps == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = (bytes as u128)
+        .saturating_mul(8)
+        .saturating_mul(1_000_000_000)
+        / u128::from(bps);
+    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
+/// Bytes still waiting to be clocked out at `now`, given a transmission cursor.
+fn standing_queue_bytes(busy_until: Duration, now: Duration, bps: u64) -> u64 {
+    let backlog = busy_until.saturating_sub(now);
+    u64::try_from(
+        u128::from(backlog.as_nanos() as u64).saturating_mul(u128::from(bps)) / 8 / 1_000_000_000,
+    )
+    .unwrap_or(u64::MAX)
 }
 
 /// A simulated link carrying datagrams between two endpoints.
@@ -117,6 +204,19 @@ pub struct Link {
     queue: Vec<InFlight>,
     dropped: usize,
     sent: usize,
+    /// When the client-to-host direction finishes clocking out everything
+    /// already accepted. The backlog behind it *is* the standing queue.
+    uplink_busy_until: Duration,
+    /// The same cursor for host-to-client.
+    downlink_busy_until: Duration,
+    /// Datagrams refused because the drop-tail queue was full, counting the
+    /// competing flow as well as the game's own traffic.
+    queue_drops: usize,
+    /// Fractional bulk-flow debt, in bit-nanoseconds, so an offered load that is
+    /// not a whole number of datagrams per step stays exact and reproducible.
+    cross_owed: [u128; 2],
+    filler_sent: usize,
+    filler_dropped: usize,
 }
 
 impl Link {
@@ -129,7 +229,63 @@ impl Link {
             queue: Vec::new(),
             dropped: 0,
             sent: 0,
+            uplink_busy_until: Duration::ZERO,
+            downlink_busy_until: Duration::ZERO,
+            queue_drops: 0,
+            cross_owed: [0; 2],
+            filler_sent: 0,
+            filler_dropped: 0,
         }
+    }
+
+    pub fn filler_sent(&self) -> usize {
+        self.filler_sent
+    }
+
+    pub fn filler_dropped(&self) -> usize {
+        self.filler_dropped
+    }
+
+    /// Offers the competing bulk flow its share of `elapsed`.
+    ///
+    /// Modelled as a greedy sender: it hands the link whole datagrams as fast as
+    /// its offered rate allows and does not back off, which is what an
+    /// unthrottled resource transfer does.
+    pub fn pump_cross_traffic(&mut self, now: Duration, elapsed: Duration) {
+        for to_host in [false, true] {
+            let bps = self.conditions.cross_traffic_bps(to_host);
+            if bps == 0 {
+                continue;
+            }
+            let slot = usize::from(to_host);
+            self.cross_owed[slot] += u128::from(bps) * elapsed.as_nanos();
+            let per_datagram = (CROSS_TRAFFIC_DATAGRAM_BYTES as u128) * 8 * 1_000_000_000;
+            while self.cross_owed[slot] >= per_datagram {
+                self.cross_owed[slot] -= per_datagram;
+                self.admit(now, to_host, vec![0u8; CROSS_TRAFFIC_DATAGRAM_BYTES], true);
+            }
+        }
+    }
+
+    /// Of [`Link::dropped`], how many were refused by a full queue rather than
+    /// lost on the wire. Congestion and radio loss want different responses, so
+    /// the rig reports them apart.
+    pub fn queue_drops(&self) -> usize {
+        self.queue_drops
+    }
+
+    /// Bytes currently waiting to be clocked out in one direction.
+    pub fn standing_queue(&self, now: Duration, to_host: bool) -> u64 {
+        let bps = self.conditions.rate_bps(to_host);
+        if bps == 0 {
+            return 0;
+        }
+        let cursor = if to_host {
+            self.uplink_busy_until
+        } else {
+            self.downlink_busy_until
+        };
+        standing_queue_bytes(cursor, now, bps)
     }
 
     pub fn conditions(&self) -> LinkConditions {
@@ -172,13 +328,59 @@ impl Link {
         self.rng.below(1000) < self.conditions.loss_permille
     }
 
-    /// One-way delay is half the round trip, plus a uniform jitter draw.
+    /// Admits a datagram to the link.
+    ///
+    /// Three effects compose, in the order a real link applies them: the wire
+    /// may simply lose it; a full drop-tail queue may refuse it; otherwise it
+    /// waits behind whatever is already queued, is clocked out at the link rate,
+    /// and only then propagates. Delivery is therefore
+    /// `transmit_end + one_way + jitter`, and an unmetered link collapses to the
+    /// original `now + one_way + jitter`.
     pub fn enqueue(&mut self, now: Duration, to_host: bool, payload: Vec<u8>) {
-        self.sent += 1;
+        self.admit(now, to_host, payload, false);
+    }
+
+    fn admit(&mut self, now: Duration, to_host: bool, payload: Vec<u8>, filler: bool) {
+        if filler {
+            self.filler_sent += 1;
+        } else {
+            self.sent += 1;
+        }
         if self.drops(now) {
-            self.dropped += 1;
+            if filler {
+                self.filler_dropped += 1;
+            } else {
+                self.dropped += 1;
+            }
             return;
         }
+
+        let bps = self.conditions.rate_bps(to_host);
+        let queue_bytes = self.conditions.queue_bytes;
+        let transmit_end = if bps == 0 {
+            now
+        } else {
+            let cursor = if to_host {
+                &mut self.uplink_busy_until
+            } else {
+                &mut self.downlink_busy_until
+            };
+            if queue_bytes > 0 && standing_queue_bytes(*cursor, now, bps) >= queue_bytes {
+                // Drop-tail. A bounded buffer sheds the newest arrival rather
+                // than growing latency without limit.
+                if filler {
+                    self.filler_dropped += 1;
+                } else {
+                    self.dropped += 1;
+                }
+                self.queue_drops += 1;
+                return;
+            }
+            let start = (*cursor).max(now);
+            *cursor = start + serialization_time(payload.len(), bps);
+            *cursor
+        };
+
         let jitter = if self.conditions.jitter_ms == 0 {
             0
         } else {
@@ -186,9 +388,10 @@ impl Link {
         };
         let delay = Duration::from_millis(self.conditions.rtt_ms / 2 + jitter);
         self.queue.push(InFlight {
-            deliver_at: now + delay,
+            deliver_at: transmit_end + delay,
             to_host,
             payload,
+            filler,
         });
     }
 
@@ -388,6 +591,12 @@ pub struct LinkReport {
     pub never_arrived: usize,
     pub datagrams_sent: usize,
     pub datagrams_dropped: usize,
+    /// Datagrams refused by a full drop-tail queue, counting the competing flow.
+    /// Congestion loss and radio loss want different responses, so they are
+    /// reported apart rather than folded into one number.
+    pub queue_drops: usize,
+    /// Competing bulk-flow datagrams offered to the link.
+    pub filler_sent: usize,
     pub playout: LockstepPlayout,
 }
 
@@ -415,7 +624,17 @@ impl LinkReport {
         mean(&self.latencies)
     }
 
+    pub fn max_latency(&self) -> Duration {
+        self.latencies.iter().max().copied().unwrap_or_default()
+    }
+
     /// Fraction of the session spent blocked on a late control packet.
+    ///
+    /// Measured against the session's *nominal* length, so it exceeds 1.0 when
+    /// the schedule collapses outright — a contended dial-up link reports
+    /// several thousand percent, meaning the run took many times longer than the
+    /// ticks it executed should have. That is informative rather than a bug, but
+    /// do not read such a value as a percentage of anything.
     pub fn frozen_time_fraction(&self) -> f64 {
         let wall_clock = CONTROL_PERIOD * self.ticks as u32;
         if wall_clock.is_zero() {
@@ -503,7 +722,14 @@ pub fn run_control_delivery(config: &ControlDeliveryConfig) -> LinkReport {
             next_control_at += CONTROL_PERIOD;
         }
 
+        link.pump_cross_traffic(now, STEP);
+
         for item in link.due(now) {
+            if item.filler {
+                // Competing traffic occupies the link but belongs to nobody in
+                // this session; handing it to an endpoint would be noise.
+                continue;
+            }
             let step: ReliableUdpStep = if item.to_host {
                 host.receive_at(client_addr, &item.payload, now)
             } else {
@@ -553,6 +779,8 @@ pub fn run_control_delivery(config: &ControlDeliveryConfig) -> LinkReport {
         never_arrived: sent_at.len(),
         datagrams_sent: link.sent(),
         datagrams_dropped: link.dropped(),
+        queue_drops: link.queue_drops(),
+        filler_sent: link.filler_sent(),
         playout,
     }
 }
@@ -596,6 +824,7 @@ mod tests {
                 jitter_ms: 40,
                 loss_permille: 30,
                 burst_ms: 0,
+                ..LinkConditions::perfect()
             },
             ticks: 120,
             seed: 0x1234_5678,
@@ -624,6 +853,7 @@ mod tests {
                 jitter_ms: 40,
                 loss_permille: 100,
                 burst_ms: 0,
+                ..LinkConditions::perfect()
             },
             ticks: 200,
             seed: 1,
@@ -650,6 +880,7 @@ mod tests {
                 jitter_ms: 40,
                 loss_permille: 50,
                 burst_ms: 0,
+                ..LinkConditions::perfect()
             },
             ticks: 200,
             ..ControlDeliveryConfig::default()
@@ -677,6 +908,7 @@ mod tests {
                 jitter_ms: 10,
                 loss_permille: 100,
                 burst_ms: 60,
+                ..LinkConditions::perfect()
             },
             ticks: 300,
             duplicates: 1,
@@ -698,6 +930,242 @@ mod tests {
             "drop *rate* must be a property of the link, not of how many copies \
              are sent: {one_rate:.3} with 1 copy vs {three_rate:.3} with 3"
         );
+    }
+
+    /// 33.6 kbit/s V.34 uplink = 4 200 B/s, so a 420-byte datagram occupies the
+    /// link for exactly 100 ms.
+    fn dialup_downlink() -> LinkConditions {
+        LinkConditions {
+            rtt_ms: 0,
+            jitter_ms: 0,
+            loss_permille: 0,
+            burst_ms: 0,
+            downlink_bps: 33_600,
+            ..LinkConditions::perfect()
+        }
+    }
+
+    #[test]
+    fn a_narrow_link_serializes_a_datagram_at_its_bit_rate() {
+        let mut link = Link::new(dialup_downlink(), 1);
+        link.enqueue(Duration::ZERO, false, vec![0u8; 420]);
+
+        assert!(
+            link.due(Duration::from_millis(99)).is_empty(),
+            "420 B at 4 200 B/s takes 100 ms to clock out"
+        );
+        assert_eq!(link.due(Duration::from_millis(100)).len(), 1);
+    }
+
+    #[test]
+    fn datagrams_queue_behind_each_other_on_a_busy_link() {
+        // The second datagram cannot start transmitting until the first has
+        // finished, so it lands at 200 ms rather than 100 ms.
+        let mut link = Link::new(dialup_downlink(), 1);
+        link.enqueue(Duration::ZERO, false, vec![0u8; 420]);
+        link.enqueue(Duration::ZERO, false, vec![0u8; 420]);
+
+        assert_eq!(link.due(Duration::from_millis(100)).len(), 1);
+        assert!(link.due(Duration::from_millis(199)).is_empty());
+        assert_eq!(link.due(Duration::from_millis(200)).len(), 1);
+    }
+
+    #[test]
+    fn a_finite_queue_tail_drops_once_the_standing_queue_is_full() {
+        // Bufferbloat with a bound: 4 200 B of queue is one second of link at
+        // dial-up rates. Everything beyond that is dropped, not buffered.
+        let conditions = LinkConditions {
+            queue_bytes: 4_200,
+            ..dialup_downlink()
+        };
+        let mut link = Link::new(conditions, 1);
+        for _ in 0..20 {
+            link.enqueue(Duration::ZERO, false, vec![0u8; 420]);
+        }
+
+        assert_eq!(link.sent(), 20);
+        assert!(
+            link.dropped() > 0,
+            "a bounded queue must tail-drop once it is full"
+        );
+        assert!(
+            link.dropped() < 20,
+            "it must still admit the datagrams that fit"
+        );
+    }
+
+    #[test]
+    fn an_unbounded_queue_bloats_instead_of_dropping() {
+        // The failure mode this profile exists to reproduce: no loss at all,
+        // but latency climbing without limit as the queue grows.
+        let mut link = Link::new(dialup_downlink(), 1);
+        for _ in 0..20 {
+            link.enqueue(Duration::ZERO, false, vec![0u8; 420]);
+        }
+
+        assert_eq!(link.dropped(), 0, "an unbounded queue never drops");
+        assert!(
+            link.due(Duration::from_millis(1_999)).len() < 20,
+            "the last datagram must still be waiting after ~2 s of bloat"
+        );
+        assert_eq!(
+            link.due(Duration::from_millis(2_000)).len(),
+            1,
+            "20 x 100 ms of serialization means the last one lands at 2 s"
+        );
+    }
+
+    #[test]
+    fn uplink_and_downlink_are_independent() {
+        // Asymmetric links are the norm, and the potato's uplink is what starves
+        // first. Saturating one direction must not delay the other.
+        let conditions = LinkConditions {
+            downlink_bps: 33_600,
+            uplink_bps: 0,
+            ..dialup_downlink()
+        };
+        let mut link = Link::new(conditions, 1);
+        link.enqueue(Duration::ZERO, false, vec![0u8; 4_200]);
+        link.enqueue(Duration::ZERO, true, vec![0u8; 4_200]);
+
+        let immediate = link.due(Duration::ZERO);
+        assert_eq!(
+            immediate.len(),
+            1,
+            "the unmetered uplink datagram should not wait behind the downlink"
+        );
+        assert!(immediate[0].to_host, "and it should be the uplink one");
+    }
+
+    /// The plan's `dialup` profile: 53.3 k down / 33.6 k up, 200 ms base RTT.
+    fn dialup() -> LinkConditions {
+        LinkConditions {
+            rtt_ms: 200,
+            jitter_ms: 30,
+            loss_permille: 0,
+            burst_ms: 0,
+            downlink_bps: 53_300,
+            uplink_bps: 33_600,
+            queue_bytes: 0,
+            cross_traffic_down_bps: 0,
+            cross_traffic_up_bps: 0,
+        }
+    }
+
+    #[test]
+    fn a_competing_bulk_flow_inflates_control_latency_on_a_narrow_link() {
+        // This is the whole point of the bandwidth model. Control alone is one
+        // small datagram per 55 ms and fits on dial-up; a resource transfer
+        // sharing the link is what buries it. Nothing here is lost — the link
+        // has zero loss — yet control still arrives late.
+        let quiet = run_control_delivery(&ControlDeliveryConfig {
+            conditions: dialup(),
+            ticks: 200,
+            ..ControlDeliveryConfig::default()
+        });
+        let contended = run_control_delivery(&ControlDeliveryConfig {
+            conditions: LinkConditions {
+                // A bulk flow offering twice the downlink capacity.
+                cross_traffic_down_bps: 106_600,
+                ..dialup()
+            },
+            ticks: 200,
+            ..ControlDeliveryConfig::default()
+        });
+
+        assert_eq!(contended.datagrams_dropped, 0, "no loss is configured");
+        assert!(
+            contended.mean_latency() > quiet.mean_latency() * 3,
+            "a saturating bulk flow must inflate control latency: quiet {:?} vs contended {:?}",
+            quiet.mean_latency(),
+            contended.mean_latency()
+        );
+        // The signature of bufferbloat, as opposed to a merely slow link, is
+        // that delay *grows*: the standing queue keeps building, so the worst
+        // sample sits far above the average. A queue filling at a constant rate
+        // approaches max/mean = 2; a flat link sits near 1. A fixed-delay model
+        // cannot produce this shape no matter how the delay is tuned.
+        let spread = |report: &LinkReport| {
+            report.max_latency().as_secs_f64() / report.mean_latency().as_secs_f64().max(1e-9)
+        };
+        assert!(
+            spread(&contended) > 1.5,
+            "queueing delay should grow through the run: mean {:?}, max {:?}",
+            contended.mean_latency(),
+            contended.max_latency()
+        );
+        assert!(
+            spread(&quiet) < 1.5,
+            "the uncontended control arm must stay flat: mean {:?}, max {:?}",
+            quiet.mean_latency(),
+            quiet.max_latency()
+        );
+    }
+
+    #[test]
+    fn a_bounded_queue_caps_bloat_by_dropping_instead() {
+        // The same contention against a 4 200 B (one second) drop-tail buffer.
+        // Latency stops growing without limit; the cost moves to loss.
+        let unbounded = run_control_delivery(&ControlDeliveryConfig {
+            conditions: LinkConditions {
+                cross_traffic_down_bps: 106_600,
+                ..dialup()
+            },
+            ticks: 200,
+            ..ControlDeliveryConfig::default()
+        });
+        let bounded = run_control_delivery(&ControlDeliveryConfig {
+            conditions: LinkConditions {
+                cross_traffic_down_bps: 106_600,
+                queue_bytes: 4_200,
+                ..dialup()
+            },
+            ticks: 200,
+            ..ControlDeliveryConfig::default()
+        });
+
+        assert_eq!(
+            unbounded.queue_drops, 0,
+            "an unbounded buffer never drops, it only bloats"
+        );
+        assert!(
+            bounded.queue_drops > 0,
+            "a bounded buffer shows congestion as loss"
+        );
+        assert!(
+            bounded.max_latency() < unbounded.max_latency(),
+            "and it caps the worst-case delay: bounded {:?} vs unbounded {:?}",
+            bounded.max_latency(),
+            unbounded.max_latency()
+        );
+    }
+
+    #[test]
+    fn an_unmetered_link_is_unchanged_by_the_bandwidth_model() {
+        // The recorded PORT_STATUS measurements must keep reproducing, so a
+        // profile that sets no rate must behave exactly as before.
+        let config = ControlDeliveryConfig {
+            conditions: LinkConditions {
+                rtt_ms: 80,
+                jitter_ms: 20,
+                loss_permille: 10,
+                burst_ms: 0,
+                ..LinkConditions::perfect()
+            },
+            ticks: 200,
+            duplicates: 2,
+            catch_up: true,
+            lookahead: Lookahead::CppMean {
+                average_us: 0,
+                target_fps: 38,
+            },
+            ..ControlDeliveryConfig::default()
+        };
+        let report = run_control_delivery(&config);
+
+        assert_eq!(report.conditions.downlink_bps, 0, "unmetered by default");
+        assert_eq!(report.conditions.queue_bytes, 0, "unbounded by default");
+        assert!(report.controls_arrived() > 0);
     }
 
     #[test]
@@ -724,6 +1192,7 @@ mod tests {
             jitter_ms: 40,
             loss_permille: 30,
             burst_ms: 0,
+            ..LinkConditions::perfect()
         };
         let cpp = run_control_delivery(&ControlDeliveryConfig {
             conditions: jittery,

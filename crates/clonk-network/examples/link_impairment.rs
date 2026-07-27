@@ -28,11 +28,18 @@ fn env_u64(key: &str, default: u64) -> u64 {
 }
 
 fn main() {
+    // `LC_DOWN_BPS`/`LC_UP_BPS` default to 0, meaning unmetered, so a run that
+    // sets neither reproduces the pre-bandwidth measurements exactly.
     let conditions = LinkConditions {
         rtt_ms: env_u64("LC_RTT_MS", 60),
         jitter_ms: env_u64("LC_JITTER_MS", 10),
         loss_permille: env_u64("LC_LOSS_PERMILLE", 10) as u32,
         burst_ms: env_u64("LC_BURST_MS", 0),
+        downlink_bps: env_u64("LC_DOWN_BPS", 0),
+        uplink_bps: env_u64("LC_UP_BPS", 0),
+        queue_bytes: env_u64("LC_QUEUE_BYTES", 0),
+        cross_traffic_down_bps: env_u64("LC_CROSS_DOWN_BPS", 0),
+        cross_traffic_up_bps: env_u64("LC_CROSS_UP_BPS", 0),
     };
 
     // PreSend horizon. `LC_PRESEND=cpp` replays C4GameControlNetwork's
@@ -85,14 +92,31 @@ fn print_report(report: &LinkReport) {
             burst => format!(" (bursts of ~{burst}ms)"),
         }
     );
+    if conditions.downlink_bps != 0 || conditions.uplink_bps != 0 {
+        println!(
+            "capacity         {} down / {} up bps{}",
+            conditions.downlink_bps,
+            conditions.uplink_bps,
+            match conditions.queue_bytes {
+                0 => " (unbounded queue)".to_string(),
+                bytes => format!(" ({bytes} B drop-tail queue)"),
+            }
+        );
+    }
+    if conditions.cross_traffic_down_bps != 0 || conditions.cross_traffic_up_bps != 0 {
+        println!(
+            "cross traffic    {} down / {} up bps ({} datagrams offered)",
+            conditions.cross_traffic_down_bps, conditions.cross_traffic_up_bps, report.filler_sent
+        );
+    }
     println!("seed             {:#x}", report.seed);
     println!("control period   {CONTROL_PERIOD:?}");
     println!("controls sent    {}", report.ticks);
     println!("controls arrived {}", report.controls_arrived());
     println!("never arrived    {}", report.never_arrived);
     println!(
-        "datagrams        {} sent, {} dropped",
-        report.datagrams_sent, report.datagrams_dropped
+        "datagrams        {} sent, {} dropped ({} of them by a full queue)",
+        report.datagrams_sent, report.datagrams_dropped, report.queue_drops
     );
     println!("mean             {:?}", report.mean_latency());
     println!("p50              {:?}", percentile(&sorted, 0.50));
