@@ -186,6 +186,78 @@ fn harpoonrace_live_signup_rejects_an_invalid_seed_after_signup_off_prepare() {
 }
 
 #[test]
+fn harpoonrace_save_game_keeps_its_retained_landscape_for_a_league_seed() {
+    // Saved games restore their serialized landscape instead of regenerating
+    // it from the league Start seed (src/C4Game.cpp:2455-2462,2642-2672).
+    let repository = repository_root();
+    let content = repository.join("content");
+    let planet = repository.join("planet");
+    let source_scenario =
+        content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
+    let isolated = tempfile::tempdir().expect("isolated savegame source");
+    let isolated_content = isolated.path().join("content");
+    let isolated_scenario = isolated_content.join("HarpoonRace.c4s");
+    fs::create_dir_all(&isolated_scenario).expect("create isolated savegame");
+    for entry in fs::read_dir(&source_scenario).expect("read HarpoonRace source") {
+        let entry = entry.expect("read HarpoonRace source entry");
+        assert!(
+            entry.file_type().expect("read source entry kind").is_file(),
+            "the HarpoonRace fixture copy expects only direct files"
+        );
+        fs::copy(entry.path(), isolated_scenario.join(entry.file_name()))
+            .expect("copy isolated HarpoonRace entry");
+    }
+    let scenario_core_path = isolated_scenario.join("Scenario.txt");
+    let scenario_core =
+        fs::read_to_string(&scenario_core_path).expect("read isolated Scenario core");
+    let savegame_core = scenario_core.replacen("[Head]", "[Head]\nSaveGame=1", 1);
+    assert_ne!(
+        savegame_core, scenario_core,
+        "the fixture must expose a Head section"
+    );
+    fs::write(&scenario_core_path, savegame_core).expect("mark isolated scenario as a savegame");
+    let install_roots = vec![isolated_content, repository, content.clone(), planet];
+    let league = PreparedLeagueHostConfig {
+        endpoint: "https://league.invalid/".to_owned(),
+        transport: clonk_network::LeagueHttpTransportConfig::default(),
+        update_period_secs: 120,
+        league_server_signup: false,
+    };
+    let (mut prepared, _network) = prepare_harpoonrace_host_from_paths(
+        1_784_903_471,
+        Some(&league),
+        &isolated_scenario,
+        &content,
+        &install_roots,
+    );
+
+    prepared
+        .apply_league_start_response(&clonk_network::LeagueStartResponse {
+            seed: Some(1_784_903_470),
+            ..clonk_network::LeagueStartResponse::default()
+        })
+        .expect("the Start seed must not regenerate a saved landscape");
+
+    assert_eq!(
+        prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
+            .random_seed,
+        1_784_903_470
+    );
+    let scenario = prepared
+        .claim_scenario()
+        .expect("claim retained savegame scenario");
+    assert!(
+        !scenario.generated_landscape_requires_seed_retry(),
+        "the valid serialized landscape must remain retained"
+    );
+}
+
+#[test]
 fn harpoonrace_league_reloads_the_retained_map_for_a_valid_assigned_seed() {
     // The Start seed is installed before native creates the landscape
     // (oracle src/C4Network2.cpp:2430-2432; src/C4Game.cpp:2660-2672).
@@ -606,6 +678,97 @@ fn prepared_clones_share_one_claim_of_the_loaded_scenario() {
             .claim_scenario()
             .expect_err("all prepared clones share one launch scenario"),
         PreparedHostUseError::ScenarioAlreadyClaimed
+    );
+}
+
+#[test]
+fn prepared_scenario_load_ticket_preserves_the_single_claim() {
+    // C4Game owns one opened scenario across the lobby and InitGame; moving
+    // the post-lobby work to a loader worker must not create a second launch
+    // claim (src/C4Game.h:107; src/C4Game.cpp:421-457).
+    let fixture = minimal_install(None);
+    let prepared = prepare(&fixture, &[]).expect("prepare the host scenario once");
+    let retained = prepared.clone();
+
+    let ticket = retained
+        .claim_scenario_load()
+        .expect("claim the one post-lobby scenario load");
+    assert_eq!(
+        ticket
+            .retained()
+            .initial_network_scenario_metadata()
+            .unwrap()
+            .max_players,
+        2
+    );
+    assert_eq!(
+        prepared
+            .claim_scenario()
+            .expect_err("the load ticket consumes the shared scenario claim"),
+        PreparedHostUseError::ScenarioAlreadyClaimed
+    );
+}
+
+#[test]
+fn map_player_extend_ticket_reloads_with_the_post_lobby_player_count() {
+    // Preload deliberately leaves MapPlayerExtend landscape creation to the
+    // foreground InitGame pass, after StartupPlayerCount has been recomputed
+    // from the final roster (src/C4Game.cpp:2455-2462,2642-2649).
+    let fixture = minimal_install(None);
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        format!(
+            "{}\n[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\n\
+             MapZoom=5\nMapPlayerExtend=1\nMaterial=Earth\n",
+            fixture.scenario_text
+        ),
+    )
+    .expect("write MapPlayerExtend scenario");
+    let materials = fixture.install_roots[0].join("Material.c4g");
+    fs::write(materials.join("TexMap.txt"), b"1=Earth-Smooth\n").expect("write texture map");
+    fs::write(
+        materials.join("Earth.c4m"),
+        b"[Material]\nName=Earth\nDensity=100\n",
+    )
+    .expect("write material");
+
+    let prepared = prepare(&fixture, &[]).expect("prepare the host scenario");
+    let random_seed = u64::from(
+        prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
+            .random_seed as u32,
+    );
+    let ticket = prepared
+        .claim_scenario_load()
+        .expect("claim the post-lobby load");
+    assert!(ticket.retained().uses_map_player_extend());
+    let mut preloaded = clonk_engine::Engine::with_seed(random_seed);
+    ticket
+        .retained()
+        .apply(&mut preloaded)
+        .expect("apply preparation-time scenario");
+
+    let loaded = ticket
+        .load_with_progress(random_seed, 3, |_, _| {})
+        .expect("reload with the final roster");
+    let mut post_lobby = clonk_engine::Engine::with_seed(random_seed);
+    loaded
+        .apply(&mut post_lobby)
+        .expect("apply post-lobby scenario");
+
+    assert_eq!(
+        (
+            preloaded.landscape().expect("preloaded landscape").width(),
+            post_lobby
+                .landscape()
+                .expect("post-lobby landscape")
+                .width(),
+        ),
+        (100, 300)
     );
 }
 

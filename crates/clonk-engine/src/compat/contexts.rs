@@ -413,6 +413,78 @@ pub(crate) fn global_call_context_hook(enter: bool) {
     });
 }
 
+/// FnEval selects its DirectExec receiver from the ACTIVE C4Aul context:
+/// object definition, definition, then Game.Script (C4Script.cpp:4501-4513).
+/// DirectExec creates a new frame whose Def is the object's current Def or
+/// null without an object (C4AulExec.cpp:1658-1706).
+pub(crate) fn eval_direct_exec_hook(
+    source: &str,
+    cells: &clonk_script::LocalCells,
+    this: Value,
+    strict_level: Option<u8>,
+    depth: usize,
+) -> Option<Result<Value, RuntimeError>> {
+    let (script, direct_object, direct_definition) = HOST_CONTEXT.with(|cell| {
+        let context = cell.borrow();
+        let context = context.as_ref()?;
+        if let Some(target) = object_id_from_value(&this) {
+            return context
+                .object_effective_definition_id(target)
+                .and_then(|definition| {
+                    context
+                        .world
+                        .definition_script(&definition)
+                        .cloned()
+                        .map(|script| (script, Some(target), Some(DefinitionId::from(definition))))
+                });
+        }
+        match &context.script_definition_context {
+            Some(Some(definition)) => context
+                .world
+                .definition_script(definition)
+                .cloned()
+                .map(|script| (script, None, None)),
+            Some(None) | None => context
+                .world
+                .scenario_script()
+                .cloned()
+                .map(|script| (script, None, None)),
+        }
+    })?;
+    let (previous_script_object, previous_script_definition, previous_definition) = HOST_CONTEXT
+        .with(|cell| {
+            let mut context = cell.borrow_mut();
+            let context = context.as_mut()?;
+            let previous_script_object = context.script_object_context.take();
+            context.script_object_context = direct_object;
+            let previous_script_definition = context
+                .script_definition_context
+                .replace(direct_definition.clone());
+            let previous_definition = context.definition_context.take();
+            context.definition_context = direct_definition;
+            Some((
+                previous_script_object,
+                previous_script_definition,
+                previous_definition,
+            ))
+        })?;
+    let result = script.eval_direct_exec_with_cells_and_this_at_strict(
+        source,
+        cells,
+        this,
+        strict_level,
+        depth,
+    );
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.script_object_context = previous_script_object;
+            context.script_definition_context = previous_script_definition;
+            context.definition_context = previous_definition;
+        }
+    });
+    Some(result)
+}
+
 /// `obj->Method(args)` / `obj->~Method(args)` — the AB_CALL/AB_CALLFS
 /// direct object call (C4AulExec.cpp:1216-1305), forwarded by the VM as
 /// [target, name, failsafe, args...]. Resolution is FindSameNameFunc on the
@@ -516,6 +588,17 @@ pub(crate) fn arrow_reference_parameter_probe(name: &str, slot: usize) -> bool {
         cell.borrow()
             .as_ref()
             .is_some_and(|context| context.world.function_takes_reference_at(name, slot))
+    })
+}
+
+/// C4AulParse resolves a direct-call name through the whole engine function
+/// map before deciding whether to emit AB_CALLFS. The target object is
+/// deliberately irrelevant to this lookup (C4AulParse.cpp:3215-3231).
+pub(crate) fn arrow_direct_call_function_probe(name: &str) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_none_or(|context| context.world.script_function_known(name))
     })
 }
 
@@ -2650,13 +2733,14 @@ fn call_world_object_reference_with(
             ),
         }
     });
-    let (previous_script_object, previous_script_definition) = with_host_context_mut((None, None), |context| {
-        let definition = context.object_effective_definition_id(target);
-        (
-            context.script_object_context.replace(target),
-            context.script_definition_context.replace(definition),
-        )
-    });
+    let (previous_script_object, previous_script_definition) =
+        with_host_context_mut((None, None), |context| {
+            let definition = context.object_effective_definition_id(target);
+            (
+                context.script_object_context.replace(target),
+                context.script_definition_context.replace(definition),
+            )
+        });
     let this = object_reference_value(target);
     let call = if preserve_caller {
         script.call_reference_with_cells_and_this_preserving_caller(function, args, &cells, this)
@@ -2902,13 +2986,14 @@ fn call_world_object_function_with_options(
     });
     // The HOST_CONTEXT borrow is released here: the nested VM's host
     // functions re-borrow it against the swapped-in scope.
-    let (previous_script_object, previous_script_definition) = with_host_context_mut((None, None), |context| {
-        let definition = context.object_effective_definition_id(target);
-        (
-            context.script_object_context.replace(target),
-            context.script_definition_context.replace(definition),
-        )
-    });
+    let (previous_script_object, previous_script_definition) =
+        with_host_context_mut((None, None), |context| {
+            let definition = context.object_effective_definition_id(target);
+            (
+                context.script_object_context.replace(target),
+                context.script_definition_context.replace(definition),
+            )
+        });
     let this = object_reference_value(target);
     let unchanged_finals = || args.to_vec();
     let call = if ref_args {

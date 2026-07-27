@@ -50,6 +50,7 @@ fn object_target_routes_through_the_method_dispatch_hook() {
 #[test]
 fn failsafe_arrow_passes_the_failsafe_flag() {
     let source = r#"
+        global func Maybe() {}
         global func Probe(target) { return target->~Maybe(); }
     "#;
     let log: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -89,6 +90,62 @@ fn falsy_target_is_an_error_even_for_failsafe_calls() {
             .expect_err("falsy target throws");
         assert!(error.to_string().contains("target is zero"), "got: {error}");
     }
+}
+
+#[test]
+fn globally_unresolved_failsafe_arrow_discards_a_zero_target_after_evaluating_operands() {
+    // C4AulParse.cpp:3215-3231: a globally unresolved failsafe arrow call
+    // evaluates and discards its arguments and target, then pushes nil without
+    // emitting AB_CALLFS. The runtime zero-target check is therefore bypassed.
+    let source = r#"
+        #strict
+        static target_calls, argument_calls, continued;
+
+        func ZeroTarget() { target_calls++; return 0; }
+        func SideEffectArg() { argument_calls++; return 42; }
+        func Probe() {
+            target_calls = argument_calls = continued = 0;
+            var result = ZeroTarget()->~GloballyMissing(SideEffectArg());
+            continued++;
+            return [result, target_calls, argument_calls, continued];
+        }
+    "#;
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("strict-1 script compiles"));
+
+    assert_eq!(
+        engine
+            .call("Probe", &[])
+            .expect("globally missing failsafe call continues"),
+        Value::Array(vec![
+            Value::Nil,
+            Value::Int(1),
+            Value::Int(1),
+            Value::Int(1),
+        ])
+    );
+}
+
+#[test]
+fn engine_wide_known_failsafe_name_preserves_zero_target_validation() {
+    // C4AulParse.cpp:3215 and C4AulExec.cpp:1224-1226: a same-named
+    // function anywhere in the engine makes the parser emit AB_CALLFS, whose
+    // runtime zero-target guard still runs before target-specific lookup.
+    let source = r#"
+        global func Probe(target) { return target->~KnownElsewhere(); }
+    "#;
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    engine.register_method_dispatch(Arc::new(|_: &[Value]| Ok(Value::Nil)));
+    engine.register_direct_call_function_probe(Rc::new(|name| name == "KnownElsewhere"));
+
+    let error = engine
+        .call("Probe", &[Value::Nil])
+        .expect_err("an engine-wide known name retains AB_CALLFS");
+    assert!(
+        error.to_string().contains("Object call: target is zero!"),
+        "got: {error}"
+    );
 }
 
 #[test]

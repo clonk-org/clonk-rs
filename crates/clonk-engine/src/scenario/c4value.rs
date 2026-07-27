@@ -31,7 +31,10 @@ impl SerializedC4Value {
     /// Mirror C4Value::DenumeratePointer and serialized-string lookup
     /// (C4Value.cpp:686-713,783-798). Serialized identities become live VM
     /// values only after the accepted object-number and string tables exist.
-    pub(in crate::scenario) fn resolve(self, resolution: &SerializedC4ValueResolution<'_>) -> clonk_script::Value {
+    pub(in crate::scenario) fn resolve(
+        self,
+        resolution: &SerializedC4ValueResolution<'_>,
+    ) -> clonk_script::Value {
         self.resolve_strings(resolution.string_registrations)
             .denumerate_objects(resolution.object_numbers)
     }
@@ -228,7 +231,10 @@ fn serialized_any_fallback(number: i32) -> clonk_script::Value {
 /// `<size>;<typed-value>,...`; trailing default values may be omitted. The
 /// pre-size legacy form stores its first raw integer in slot zero and always
 /// restores the ten C4MaxVariable slots.
-pub(in crate::scenario) fn parse_local_slots(value: &str, line: usize) -> Result<Vec<SerializedC4Value>, ScenarioError> {
+pub(in crate::scenario) fn parse_local_slots(
+    value: &str,
+    line: usize,
+) -> Result<Vec<SerializedC4Value>, ScenarioError> {
     const C4_MAX_VARIABLE: usize = 10;
     const C4_VALUE_LIST_MAX_SIZE: usize = 1_000_000;
 
@@ -367,7 +373,11 @@ pub(in crate::scenario) fn split_outside_delimiter(text: &str, delimiter: char) 
 /// `splitn`, but separators nested in the C4Value/transform bracket pairs do
 /// not count. The unsplit tail is needed for C4Command::Text (RCT_All), which
 /// may itself contain commas.
-pub(in crate::scenario) fn split_outside_delimiter_limit(text: &str, delimiter: char, limit: usize) -> Vec<&str> {
+pub(in crate::scenario) fn split_outside_delimiter_limit(
+    text: &str,
+    delimiter: char,
+    limit: usize,
+) -> Vec<&str> {
     if limit <= 1 {
         return vec![text];
     }
@@ -534,7 +544,11 @@ pub(in crate::scenario) fn parse_serialized_c4value(
 
 /// Comma-separated int array (StdCompiler mkArrayAdapt serialization,
 /// e.g. `VertexX=2,-14,14`).
-pub(in crate::scenario) fn parse_i32_list(value: &str, line: usize, key: &str) -> Result<Vec<i32>, ScenarioError> {
+pub(in crate::scenario) fn parse_i32_list(
+    value: &str,
+    line: usize,
+    key: &str,
+) -> Result<Vec<i32>, ScenarioError> {
     value
         .split(',')
         .map(str::trim)
@@ -810,7 +824,10 @@ pub(in crate::scenario) fn open_group_path(path: &Path) -> Result<Group, GroupEr
 /// Opens `spec` strictly below `root`, one immediate group component at a
 /// time. C4Group entry lookup is ASCII-case-insensitive even while crossing
 /// packed child groups; host `Path::join` alone cannot model either property.
-pub(in crate::scenario) fn resolve_rooted_definition_group(root: &Path, spec: &str) -> Result<Group, ScenarioError> {
+pub(in crate::scenario) fn resolve_rooted_definition_group(
+    root: &Path,
+    spec: &str,
+) -> Result<Group, ScenarioError> {
     let normalized = spec.replace('\\', "/");
     let normalized_path = legacy_definition_path(&normalized);
     let candidate = root.join(&normalized_path);
@@ -864,7 +881,9 @@ fn legacy_path_from_bytes(bytes: Vec<u8>) -> PathBuf {
     clonk_resources::path_from_legacy_bytes(&bytes)
 }
 
-pub(in crate::scenario) fn folder_local_definition_groups(scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+pub(in crate::scenario) fn folder_local_definition_groups(
+    scenario: &Group,
+) -> Result<Vec<Group>, ScenarioError> {
     let mut folder_paths = scenario
         .root()
         .ancestors()

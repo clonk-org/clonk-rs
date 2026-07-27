@@ -1,3 +1,0 @@
-# The ClonkMars and Eke Reloaded packs moved into the content submodule, which
-# carries its own `binary` attributes for them.
-/licenses/RUST_THIRD_PARTY_LICENSES.txt -text -whitespace

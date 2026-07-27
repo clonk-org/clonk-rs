@@ -1,8 +1,7 @@
 use super::*;
 
 #[test]
-fn late_definition_registration_invalidates_the_shared_command_table() -> Result<(), EngineError>
-{
+fn late_definition_registration_invalidates_the_shared_command_table() -> Result<(), EngineError> {
     let mut engine = Engine::new();
     engine.register_definition(Definition::from_script("BASE", "Base", "")?)?;
 
@@ -14,7 +13,7 @@ fn late_definition_registration_invalidates_the_shared_command_table() -> Result
     chopper.configure_actions(
         None,
         HashMap::from([(
-                "ChopWood".to_string(),
+            "ChopWood".to_string(),
             ActionSpec::default().with_procedure("CHOP"),
         )]),
     );
@@ -41,8 +40,8 @@ fn definition_and_script_boundaries_invalidate_shared_host_tables() -> Result<()
     assert!(!Rc::ptr_eq(&first, &after_definition));
 
     engine.install_global_scripts(&[(
-            "System.c4g".to_string(),
-            "global func SharedHostCacheProbe() { return 1; }".to_string(),
+        "System.c4g".to_string(),
+        "global func SharedHostCacheProbe() { return 1; }".to_string(),
     )]);
     let after_script = engine.host_definition_tables();
     assert!(!Rc::ptr_eq(&after_definition, &after_script));

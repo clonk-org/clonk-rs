@@ -136,7 +136,10 @@ impl Engine {
         self.invalidate_host_definition_tables();
     }
 
-    pub(crate) fn global_menu_callback_script(&self, function: &str) -> Option<(String, Arc<ScriptEngine>)> {
+    pub(crate) fn global_menu_callback_script(
+        &self,
+        function: &str,
+    ) -> Option<(String, Arc<ScriptEngine>)> {
         self.script_link_sources.iter().find_map(|source| {
             let (name, script) = match source {
                 ScriptLinkSource::Script { name, script, .. } => (name.clone(), Arc::clone(script)),
@@ -1715,5 +1718,4 @@ impl Engine {
 
         !was_full && after >= FULL_CON
     }
-
 }

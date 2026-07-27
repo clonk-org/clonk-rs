@@ -20,7 +20,7 @@ fn pixel_landscape(width: u32, height: u32, pixels: Vec<u8>) -> Landscape {
 fn script_get_path(engine: &mut Engine, from: Vector2, to: Vector2) -> Value {
     engine
         .call_engine_global_function(
-                "GetPath",
+            "GetPath",
             &[
                 Value::Int(from.x),
                 Value::Int(from.y),
@@ -78,8 +78,8 @@ fn run_obstructed_move_to(engine: &mut Engine, object_id: ObjectId, target: Vect
             CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(target.x))
                 .with_ty(Some(target.y))
-                    // C4CMD_MoveTo_NoPosAdjust keeps the test coordinate
-                    // fixed across the command's evaluation-only Execute.
+                // C4CMD_MoveTo_NoPosAdjust keeps the test coordinate
+                // fixed across the command's evaluation-only Execute.
                 .with_data(CommandData::Integer(1)),
         )
         .expect("MoveTo queues");
@@ -93,9 +93,9 @@ fn run_obstructed_move_to(engine: &mut Engine, object_id: ObjectId, target: Vect
 
 #[test]
 fn get_path_reuses_last_move_to_pathfinder_level_like_cpp() {
-        // Both exits require more than the level-1 MAX_CRAWL=800. Level 5
-        // reaches one with only six rays, isolating the persistent Level
-        // knob from the fixed MAX_RAY cap (C4PathFinder.cpp:213-217).
+    // Both exits require more than the level-1 MAX_CRAWL=800. Level 5
+    // reaches one with only six rays, isolating the persistent Level
+    // knob from the fixed MAX_RAY cap (C4PathFinder.cpp:213-217).
     const WIDTH: u32 = 100;
     const HEIGHT: u32 = 2_000;
     let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
@@ -124,7 +124,7 @@ fn get_path_reuses_last_move_to_pathfinder_level_like_cpp() {
     assert_eq!(
         script_get_path(&mut engine, from, to),
         Value::Nil,
-            "a fresh game uses C4PathFinder's default level 1"
+        "a fresh game uses C4PathFinder's default level 1"
     );
 
     run_obstructed_move_to(&mut engine, mover, to);
@@ -137,7 +137,7 @@ fn get_path_reuses_last_move_to_pathfinder_level_like_cpp() {
     assert!(points.len() > 2);
     assert!(
         points.iter().any(|(_, y, _)| *y < 100 || *y > 1_900),
-            "the level-5 route must reach a wall exit"
+        "the level-5 route must reach a wall exit"
     );
 }
 
@@ -198,30 +198,30 @@ fn get_path_reuses_last_move_to_transfer_zone_toggle_like_cpp() {
             .filter(|(_, _, target)| *target == Some(zone_owner.as_u64()))
             .count(),
         1,
-            "fresh C4PathFinder state has transfer zones enabled"
+        "fresh C4PathFinder state has transfer zones enabled"
     );
 
     run_obstructed_move_to(&mut engine, no_zone_mover, to);
     assert_eq!(
         script_get_path(&mut engine, from, to),
         Value::Nil,
-            "NoTransferZones persists after a failed MoveTo pathfind"
+        "NoTransferZones persists after a failed MoveTo pathfind"
     );
 
     run_obstructed_move_to(&mut engine, zone_owner, to);
     assert_eq!(
         script_get_path(&mut engine, from, to),
         fresh,
-            "the next MoveTo pathfind re-enables zones for GetPath"
+        "the next MoveTo pathfind re-enables zones for GetPath"
     );
 }
 
 #[test]
 fn execute_command_updates_get_path_settings_within_the_same_script_call() {
-        // FnExecuteCommand runs C4Command::MoveTo synchronously. The
-        // following GetPath therefore sees the disabled global-zone knob
-        // before the outer script call returns and its copied host state is
-        // folded back into Engine (C4Script.cpp:922-929,5040).
+    // FnExecuteCommand runs C4Command::MoveTo synchronously. The
+    // following GetPath therefore sees the disabled global-zone knob
+    // before the outer script call returns and its copied host state is
+    // folded back into Engine (C4Script.cpp:922-929,5040).
     const WIDTH: u32 = 100;
     const HEIGHT: u32 = 100;
     let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
@@ -235,9 +235,9 @@ fn execute_command_updates_get_path_settings_within_the_same_script_call() {
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
     let mut definition = Definition::from_script(
-            "PFSY",
-            "Synchronous no-zone mover",
-            r#"
+        "PFSY",
+        "Synchronous no-zone mover",
+        r#"
                 #strict 2
                 func Probe()
                 {
@@ -279,7 +279,7 @@ fn execute_command_updates_get_path_settings_within_the_same_script_call() {
     assert_eq!(
         value,
         Value::Nil,
-            "same-call GetPath observes ExecuteCommand's disabled-zone write"
+        "same-call GetPath observes ExecuteCommand's disabled-zone write"
     );
     let graph = engine.snapshot().pathfinder_debug;
     assert_eq!(graph.rays[0].start, Vector2::new(11, 49));
@@ -293,9 +293,9 @@ fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() 
     engine
         .register_definition(
             Definition::from_script(
-                    "GATE",
-                    "Transfer gate",
-                    r#"
+                "GATE",
+                "Transfer gate",
+                r#"
                         #strict 2
                         protected func ControlTransfer(object actor, tx, int ty)
                         {
@@ -351,7 +351,7 @@ fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() 
     );
     assert!(
         engine.transfer_zones.get(gate).is_some(),
-            "the synthetic tombstone retains its zone for the direct-call seam"
+        "the synthetic tombstone retains its zone for the direct-call seam"
     );
 
     engine
@@ -361,7 +361,7 @@ fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() 
     let actor_index = engine.find_object_index(actor).expect("actor remains");
     assert_eq!(
         engine.objects[actor_index].state.rotation, 73,
-            "the cached SFn executes even though C4Object::Call would reject Status zero"
+        "the cached SFn executes even though C4Object::Call would reject Status zero"
     );
     let commands = engine.objects[actor_index].commands.command_views();
     let [replacement] = commands.as_slice() else {
@@ -374,7 +374,7 @@ fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() 
     assert_eq!(replacement.ty, Some(9));
     assert!(
         !replacement.finished,
-            "false resolves only the detached emitting instance"
+        "false resolves only the detached emitting instance"
     );
 }
 
@@ -384,9 +384,9 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
     engine
         .register_definition(
             Definition::from_script(
-                    "ZTRG",
-                    "Restored transfer gate",
-                    r#"
+                "ZTRG",
+                "Restored transfer gate",
+                r#"
                         #strict 2
                         local answer;
                         protected func ControlTransfer(object actor, tx, int ty)
@@ -428,8 +428,7 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
         },
     ]);
     let encoded = serde_json::to_value(queued).expect("queued event serializes");
-    let restored: QueuedCommand =
-        serde_json::from_value(encoded).expect("queued event restores");
+    let restored: QueuedCommand = serde_json::from_value(encoded).expect("queued event restores");
     let [event] = restored.events.as_slice() else {
         panic!("one restored event expected");
     };
@@ -455,7 +454,7 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
     assert_eq!(replacement.ty, Some(9));
     assert!(
         !replacement.finished,
-            "the restored event resolves the original instance before its callback"
+        "the restored event resolves the original instance before its callback"
     );
 
     let actor_index = engine.find_object_index(actor).expect("actor remains");
@@ -493,8 +492,7 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
         },
     ]);
     let encoded = serde_json::to_value(legacy).expect("legacy event serializes");
-    let restored: QueuedCommand =
-        serde_json::from_value(encoded).expect("legacy event restores");
+    let restored: QueuedCommand = serde_json::from_value(encoded).expect("legacy event restores");
     let [legacy_event] = restored.events.as_slice() else {
         panic!("one restored legacy event expected");
     };
@@ -513,18 +511,18 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
     assert_eq!(
         engine.objects[gate_index].state.status,
         ObjectStatus::Deleted,
-            "the restored direct callback bypasses the ordinary object-call Status gate"
+        "the restored direct callback bypasses the ordinary object-call Status gate"
     );
     assert!(
         !replacement.finished,
-            "legacy CallObjectFunction binds its completion target before the callback"
+        "legacy CallObjectFunction binds its completion target before the callback"
     );
     assert_eq!(
         engine.objects[actor_index]
             .commands
             .take_successful_finishes(),
         vec![CommandId::Transfer],
-            "the restored callback consumes native's low bool word"
+        "the restored callback consumes native's low bool word"
     );
 }
 
@@ -534,9 +532,9 @@ fn transfer_direct_callback_uses_the_c4_bool_low_word() {
     engine
         .register_definition(
             Definition::from_script(
-                    "GBOL",
-                    "Raw-bool transfer gate",
-                    r#"
+                "GBOL",
+                "Raw-bool transfer gate",
+                r#"
                         #strict 2
                         local answer;
                         protected func ControlTransfer(object actor, tx, int ty)
@@ -555,9 +553,9 @@ fn transfer_direct_callback_uses_the_c4_bool_low_word() {
         )
         .expect("actor definition registers");
 
-        // C4VBool stores a machine word but C4Value::getBool reads its signed
-        // 32-bit payload. On a 64-bit host this value is truthy to Rust's
-        // generic Value::as_bool while its native C4 bool word is zero.
+    // C4VBool stores a machine word but C4Value::getBool reads its signed
+    // 32-bit payload. On a 64-bit host this value is truthy to Rust's
+    // generic Value::as_bool while its native C4 bool word is zero.
     let raw = 1usize.checked_shl(32).unwrap_or(0);
     let gate = engine
         .spawn_object(
@@ -575,7 +573,7 @@ fn transfer_direct_callback_uses_the_c4_bool_low_word() {
         !engine
             .call_control_transfer(gate_index, actor, Value::Nil, 0)
             .expect("direct callback executes"),
-            "ControlTransfer uses C4Value::getBool rather than generic truthiness"
+        "ControlTransfer uses C4Value::getBool rather than generic truthiness"
     );
 }
 
@@ -585,9 +583,9 @@ fn activate_entrance_uses_full_c4_value_truthiness() {
     engine
         .register_definition(
             Definition::from_script(
-                    "EBOL",
-                    "Raw-bool entrance",
-                    r#"
+                "EBOL",
+                "Raw-bool entrance",
+                r#"
                         #strict 2
                         local answer;
                         protected func ActivateEntrance(object actor)
@@ -625,7 +623,7 @@ fn activate_entrance_uses_full_c4_value_truthiness() {
             .activate_object_entrance(entrance, caller)
             .expect("entrance callback executes"),
         raw != 0,
-            "C4Object::ActivateEntrance uses C4Value::operator bool, not getBool"
+        "C4Object::ActivateEntrance uses C4Value::operator bool, not getBool"
     );
 }
 
@@ -635,9 +633,9 @@ fn restored_legacy_entrance_result_does_not_fail_callback_replacement() {
     engine
         .register_definition(
             Definition::from_script(
-                    "ZENT",
-                    "Restored entrance",
-                    r#"
+                "ZENT",
+                "Restored entrance",
+                r#"
                         #strict 2
                         protected func ActivateEntrance(object actor)
                         {
@@ -698,7 +696,7 @@ fn restored_legacy_entrance_result_does_not_fail_callback_replacement() {
     assert_eq!(replacement.view.name, "Exit");
     assert_eq!(
         replacement.failures, 0,
-            "the false result fails only the detached original Exit"
+        "the false result fails only the detached original Exit"
     );
 }
 
@@ -708,9 +706,9 @@ fn script_execute_command_runs_direct_transfer_before_returning() {
     engine
         .register_definition(
             Definition::from_script(
-                    "GAT2",
-                    "Synchronous transfer gate",
-                    r#"
+                "GAT2",
+                "Synchronous transfer gate",
+                r#"
                         #strict 2
                         local seen_tx, seen_ty;
                         protected func ControlTransfer(object actor, tx, int ty)
@@ -729,9 +727,9 @@ fn script_execute_command_runs_direct_transfer_before_returning() {
     engine
         .register_definition(
             Definition::from_script(
-                    "ACR2",
-                    "Synchronous transfer actor",
-                    r#"
+                "ACR2",
+                "Synchronous transfer actor",
+                r#"
                         #strict 2
                         public func Probe(object gate)
                         {
@@ -777,13 +775,13 @@ fn script_execute_command_runs_direct_transfer_before_returning() {
             Value::Int(777),
             Value::Int(9),
         ]),
-            "the next VM instruction observes the direct callback and its replacement command"
+        "the next VM instruction observes the direct callback and its replacement command"
     );
     let gate_index = engine.find_object_index(gate).expect("gate remains");
     assert_eq!(
         engine.objects[gate_index].state.local_vars.get("seen_tx"),
         Some(&Value::C4Id("GOLD".to_string())),
-            "the direct callback receives the exact tagged Tx"
+        "the direct callback receives the exact tagged Tx"
     );
     assert_eq!(
         engine.objects[gate_index].state.local_vars.get("seen_ty"),
@@ -805,9 +803,9 @@ fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
     fn setup() -> (Engine, ObjectId, ObjectId) {
         let mut engine = Engine::with_seed(1);
         let mut container = Definition::from_script(
-                "XCTR",
-                "Exit callback container",
-                r#"
+            "XCTR",
+            "Exit callback container",
+            r#"
                     #strict 2
                     protected func Ejection(object item)
                     {
@@ -822,9 +820,9 @@ fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
             .register_definition(container)
             .expect("container definition registers");
         let mut actor = Definition::from_script(
-                "XACT",
-                "Exit callback actor",
-                r#"
+            "XACT",
+            "Exit callback actor",
+            r#"
                     #strict 2
                     local exit_order, after_exit_order, after_exit_command, after_exit_rotation;
                     public func NoteExit(int step)
@@ -930,10 +928,10 @@ fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
 
 #[test]
 fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer() {
-        // AssignRemoval reaches Game.ClearPointers synchronously. A GetPath
-        // later in the same VM call, then native commands later in the same
-        // engine frame, must all observe the zone's immediate deletion
-        // (C4Object.cpp:300-313; C4TransferZone.cpp:68-76).
+    // AssignRemoval reaches Game.ClearPointers synchronously. A GetPath
+    // later in the same VM call, then native commands later in the same
+    // engine frame, must all observe the zone's immediate deletion
+    // (C4Object.cpp:300-313; C4TransferZone.cpp:68-76).
     const WIDTH: u32 = 100;
     const HEIGHT: u32 = 100;
     let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
@@ -948,14 +946,13 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
 
     engine
         .register_definition(
-            Definition::from_script("GATE", "Transfer gate", "")
-                .expect("gate definition compiles"),
+            Definition::from_script("GATE", "Transfer gate", "").expect("gate definition compiles"),
         )
         .expect("gate definition registers");
     let mut mover_definition = Definition::from_script(
-            "PFMR",
-            "Pathfinder mover",
-            r#"
+        "PFMR",
+        "Pathfinder mover",
+        r#"
                 #strict 2
                 func RemoveGate(gate)
                 {
@@ -992,7 +989,7 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
         .expect("transfer zone registers");
     assert!(
         engine.find_path(from, to, 1, true).is_some(),
-            "the live gate is the only route through the full-height wall"
+        "the live gate is the only route through the full-height wall"
     );
     run_obstructed_move_to(&mut engine, path_actor, to);
     let path_index = engine
@@ -1005,7 +1002,7 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
             .command_names()
             .iter()
             .any(|name| name == "Transfer"),
-            "the live-zone control must generate a Transfer leg"
+        "the live-zone control must generate a Transfer leg"
     );
     engine.objects[path_index].commands.clear();
 
@@ -1031,7 +1028,7 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
     assert_eq!(
         same_call_path,
         Value::Nil,
-            "GetPath later in the removal call must not see the dead gate's zone"
+        "GetPath later in the removal call must not see the dead gate's zone"
     );
     assert_eq!(engine.frame(), 0, "no end-of-frame sweep has run");
     let gate_index = engine
@@ -1044,7 +1041,7 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
     );
     assert!(
         engine.transfer_zones.get(gate).is_none(),
-            "the authoritative zone table clears before frame cleanup"
+        "the authoritative zone table clears before frame cleanup"
     );
     assert!(engine.find_path(from, to, 1, true).is_none());
 
@@ -1059,7 +1056,7 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
             .command_names()
             .iter()
             .all(|name| name != "Transfer"),
-            "same-frame MoveTo must not enqueue a route through the removed zone"
+        "same-frame MoveTo must not enqueue a route through the removed zone"
     );
 
     let transfer_index = engine
@@ -1075,7 +1072,7 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
     assert_eq!(transfer_view.name, "Transfer");
     assert_eq!(
         transfer_view.target, None,
-            "ClearPointers nulls the removed Transfer target synchronously"
+        "ClearPointers nulls the removed Transfer target synchronously"
     );
     engine
         .execute_object_command_now(transfer_actor)
@@ -1088,7 +1085,7 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
             .commands
             .snapshot()
             .is_empty(),
-            "Transfer targeting the removed owner fails on its next same-frame execution"
+        "Transfer targeting the removed owner fails on its next same-frame execution"
     );
 }
 
@@ -1107,14 +1104,13 @@ fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
     engine
         .register_definition(
-            Definition::from_script("GATE", "Transfer gate", "")
-                .expect("gate definition compiles"),
+            Definition::from_script("GATE", "Transfer gate", "").expect("gate definition compiles"),
         )
         .expect("gate definition registers");
     let mut effect_definition = Definition::from_script(
-            "FXRM",
-            "Effect remover",
-            r#"
+        "FXRM",
+        "Effect remover",
+        r#"
                 #strict 2
                 func Arm(initiator)
                 {
@@ -1169,7 +1165,7 @@ fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
     assert_ne!(
         script_get_path(&mut engine, from, to),
         Value::Nil,
-            "the effect callback's host GetPath can use the live zone"
+        "the effect callback's host GetPath can use the live zone"
     );
 
     let actor_index = engine.find_object_index(actor).expect("actor exists");
@@ -1204,20 +1200,20 @@ fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
     assert_eq!(engine.frame(), 0, "no frame cleanup has run");
     assert_eq!(
         engine.objects[actor_index].state.rotation, 23,
-            "the next effect callback sees the clear in its threaded host world"
+        "the next effect callback sees the clear in its threaded host world"
     );
     assert!(
         engine.find_path(from, to, 1, true).is_none(),
-            "the effect batch folds the clear into the authoritative table"
+        "the effect batch folds the clear into the authoritative table"
     );
 }
 
 #[test]
 fn effect_batch_threads_callback_final_contents_order() {
-        // C++ runs both timers against one live object graph. The first
-        // timer moves a StaticBack pistol into BOX and immediately rotates
-        // it to Contents.First; the second timer must observe that raw link
-        // order before the deferred Rust batch folds authoritatively.
+    // C++ runs both timers against one live object graph. The first
+    // timer moves a StaticBack pistol into BOX and immediately rotates
+    // it to Contents.First; the second timer must observe that raw link
+    // order before the deferred Rust batch folds authoritatively.
     let mut engine = Engine::with_seed(17);
     for id in ["BOX_", "HOLD", "ROCK", "GOLD", "PSTL"] {
         engine
@@ -1227,9 +1223,9 @@ fn effect_batch_threads_callback_final_contents_order() {
             .expect("definition registers");
     }
     let mut actor_definition = Definition::from_script(
-            "FXCO",
-            "Contents-order observer",
-            r#"
+        "FXCO",
+        "Contents-order observer",
+        r#"
                 #strict 3
                 local box;
 
@@ -1330,13 +1326,13 @@ fn effect_batch_threads_callback_final_contents_order() {
 
     assert_eq!(
         engine.objects[actor_index].state.rotation, 17,
-            "the second timer sees PSTL at Contents.First"
+        "the second timer sees PSTL at Contents.First"
     );
     let box_index = engine.find_object_index(box_id).expect("box remains");
     assert_eq!(
         engine.objects[box_index].state.contents,
         vec![pistol, rock, gold],
-            "the same callback-final list folds to the authoritative box"
+        "the same callback-final list folds to the authoritative box"
     );
     assert_eq!(
         engine
@@ -1350,7 +1346,7 @@ fn effect_batch_threads_callback_final_contents_order() {
 #[test]
 fn effect_batch_threads_dig_contents_shape_and_layer() {
     let library = clonk_resources::MaterialLibrary::parse(
-            r#"
+        r#"
             [Material Earth]
             Name=Earth
             Density=80
@@ -1376,9 +1372,9 @@ fn effect_batch_threads_dig_contents_shape_and_layer() {
         )
         .expect("gem definition registers");
     let mut digger = Definition::from_script(
-            "FXDG",
-            "Effect digger",
-            r#"
+        "FXDG",
+        "Effect digger",
+        r#"
                 #strict 3
                 func Arm()
                 {
@@ -1453,12 +1449,12 @@ fn effect_batch_threads_dig_contents_shape_and_layer() {
     assert_eq!(
         gems[0].state.position,
         Vector2::new(10, 30),
-            "the second callback uses the first callback's shape and position"
+        "the second callback uses the first callback's shape and position"
     );
     assert_eq!(
         gems[0].state.layer,
         Some(layer),
-            "the second callback uses the first callback's layer"
+        "the second callback uses the first callback's layer"
     );
 }
 
@@ -1477,14 +1473,13 @@ fn construction_zone_clear_is_visible_to_immediate_initialize() {
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
     engine
         .register_definition(
-            Definition::from_script("GATE", "Transfer gate", "")
-                .expect("gate definition compiles"),
+            Definition::from_script("GATE", "Transfer gate", "").expect("gate definition compiles"),
         )
         .expect("gate definition registers");
     let mut lifecycle_definition = Definition::from_script(
-            "PFLC",
-            "Lifecycle remover",
-            r#"
+        "PFLC",
+        "Lifecycle remover",
+        r#"
                 #strict 2
                 func Construction()
                 {
@@ -1535,7 +1530,7 @@ fn construction_zone_clear_is_visible_to_immediate_initialize() {
     assert_eq!(engine.frame(), 0, "no frame cleanup has run");
     assert_eq!(
         engine.objects[actor_index].state.rotation, 23,
-            "Initialize sees Construction's synchronous zone clear"
+        "Initialize sees Construction's synchronous zone clear"
     );
     assert!(engine.transfer_zones.get(gate).is_none());
 }

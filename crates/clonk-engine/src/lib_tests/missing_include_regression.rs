@@ -73,11 +73,7 @@ fn definition_link_warns_once_and_disables_missing_actmap_and_timer_callbacks() 
         hooks.set_on_call(move |name, _| {
             if matches!(
                 name,
-                    "MissingStart"
-                    | "MissingPhase"
-                    | "MissingEnd"
-                    | "MissingAbort"
-                    | "MissingTimer"
+                "MissingStart" | "MissingPhase" | "MissingEnd" | "MissingAbort" | "MissingTimer"
             ) {
                 calls.lock().unwrap().push(name.to_string());
             }
@@ -92,9 +88,9 @@ fn definition_link_warns_once_and_disables_missing_actmap_and_timer_callbacks() 
         .with_end_call("MissingEnd")
         .with_abort_call("MissingAbort");
     let mut definition = Definition::from_script(
-            "CBLK",
-            "Callback linker",
-            "#strict\npublic func ExerciseSetAction() { return SetAction(\"Probe\"); }\n",
+        "CBLK",
+        "Callback linker",
+        "#strict\npublic func ExerciseSetAction() { return SetAction(\"Probe\"); }\n",
     )
     .expect("missing-callback fixture compiles");
     definition.set_c4_callback_convention(true);
@@ -110,11 +106,11 @@ fn definition_link_warns_once_and_disables_missing_actmap_and_timer_callbacks() 
         .expect("callback definition registers");
     engine.resolve_appends();
     let expected = [
-            "Error getting Action Probe: StartCall function 'MissingStart'",
-            "Error getting Action Probe: PhaseCall function 'MissingPhase'",
-            "Error getting Action Probe: EndCall function 'MissingEnd'",
-            "Error getting Action Probe: AbortCall function 'MissingAbort'",
-            "Error getting TimerCall function 'MissingTimer'",
+        "Error getting Action Probe: StartCall function 'MissingStart'",
+        "Error getting Action Probe: PhaseCall function 'MissingPhase'",
+        "Error getting Action Probe: EndCall function 'MissingEnd'",
+        "Error getting Action Probe: AbortCall function 'MissingAbort'",
+        "Error getting TimerCall function 'MissingTimer'",
     ];
     let valid_source = r#"#strict
 public func ExerciseSetAction() { return SetAction("Probe"); }
@@ -142,10 +138,10 @@ private func MissingTimer() { return 1; }
         .expect("callback fixture spawns");
     let index = engine.find_object_index(object).expect("fixture exists");
 
-        // Make every name dynamically resolvable without touching the base
-        // script or relinking. C++ must keep using its five cached nulls.
-    let injected = clonk_script::Script::compile_c4_string(valid_source)
-        .expect("injected callbacks compile");
+    // Make every name dynamically resolvable without touching the base
+    // script or relinking. C++ must keep using its five cached nulls.
+    let injected =
+        clonk_script::Script::compile_c4_string(valid_source).expect("injected callbacks compile");
     Arc::make_mut(
         &mut engine
             .definitions
@@ -171,7 +167,7 @@ private func MissingTimer() { return 1; }
             .invoke_action_callback(
                 index,
                 ActionCallbackKind::End,
-                    "Probe",
+                "Probe",
                 Some(0),
                 None,
                 None,
@@ -186,7 +182,7 @@ private func MissingTimer() { return 1; }
     assert_eq!(
         capture_warnings(|| engine.relink_scripts().expect("unchanged relink succeeds")),
         expected,
-            "each missing physical slot warns once again on the next link",
+        "each missing physical slot warns once again on the next link",
     );
 
     assert!(
@@ -196,14 +192,14 @@ private func MissingTimer() { return 1; }
                 .expect("valid callback script reload succeeds"));
         })
         .is_empty(),
-            "private callbacks satisfy AA_PRIVATE link lookup",
+        "private callbacks satisfy AA_PRIVATE link lookup",
     );
 
-        // Delete all callback names from the live lookup table without a
-        // relink. The retained bodies must still run, including compat's
-        // synchronous SetAction path.
+    // Delete all callback names from the live lookup table without a
+    // relink. The retained bodies must still run, including compat's
+    // synchronous SetAction path.
     let driver_only = clonk_script::Script::compile_c4_string(
-            "#strict\npublic func ExerciseSetAction() { return SetAction(\"Probe\"); }\n",
+        "#strict\npublic func ExerciseSetAction() { return SetAction(\"Probe\"); }\n",
     )
     .expect("driver-only replacement compiles");
     Arc::make_mut(
@@ -231,7 +227,7 @@ private func MissingTimer() { return 1; }
         .invoke_action_callback(
             index,
             ActionCallbackKind::End,
-                "Probe",
+            "Probe",
             Some(0),
             None,
             None,
@@ -242,11 +238,11 @@ private func MissingTimer() { return 1; }
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         [
-                "MissingStart",
-                "MissingAbort",
-                "MissingPhase",
-                "MissingTimer",
-                "MissingEnd",
+            "MissingStart",
+            "MissingAbort",
+            "MissingPhase",
+            "MissingTimer",
+            "MissingEnd",
         ],
     );
 }
@@ -257,9 +253,9 @@ fn missing_include_warns_and_known_siblings_still_merge() {
     engine
         .register_definition(
             Definition::from_script(
-                    "KNWN",
-                    "Known parent",
-                    "public func ParentValue() { return 7; }",
+                "KNWN",
+                "Known parent",
+                "public func ParentValue() { return 7; }",
             )
             .expect("known parent compiles"),
         )
@@ -267,9 +263,9 @@ fn missing_include_warns_and_known_siblings_still_merge() {
     engine
         .register_definition(
             Definition::from_script(
-                    "CHLD",
-                    "Child",
-                    "#include KNWN\n#include MISS\npublic func OwnValue() { return 42; }",
+                "CHLD",
+                "Child",
+                "#include KNWN\n#include MISS\npublic func OwnValue() { return 42; }",
             )
             .expect("child compiles"),
         )
@@ -305,14 +301,14 @@ fn appendto_nowarn_suppresses_only_its_missing_target_warning() {
     let mut quiet = Engine::new();
     register(
         &mut quiet,
-            "APPA",
-            "#appendto MISS nowarn\npublic func Quiet() { return 1; }",
+        "APPA",
+        "#appendto MISS nowarn\npublic func Quiet() { return 1; }",
     );
     register(&mut quiet, "TARG", "public func Own() { return 1; }");
     register(
         &mut quiet,
-            "APPC",
-            "#appendto TARG nowarn\npublic func Present() { return 1; }",
+        "APPC",
+        "#appendto TARG nowarn\npublic func Present() { return 1; }",
     );
     let quiet_messages = capture_warnings(|| quiet.resolve_appends());
     assert!(quiet_messages.is_empty());
@@ -321,8 +317,8 @@ fn appendto_nowarn_suppresses_only_its_missing_target_warning() {
     let mut loud = Engine::new();
     register(
         &mut loud,
-            "APPB",
-            "#appendto LOST\npublic func Loud() { return 1; }",
+        "APPB",
+        "#appendto LOST\npublic func Loud() { return 1; }",
     );
     let loud_messages = capture_warnings(|| loud.resolve_appends());
     assert_eq!(loud_messages, ["script to #appendto not found"]);
@@ -334,8 +330,8 @@ fn circular_includes_follow_definition_load_order_and_warn_once() {
         let mut engine = Engine::new();
         for id in order {
             let source = match id {
-                    "CYCA" => "#include CYCB\npublic func AOnly() { return 1; }",
-                    "CYCB" => "#include CYCA\npublic func BOnly() { return 2; }",
+                "CYCA" => "#include CYCB\npublic func AOnly() { return 1; }",
+                "CYCB" => "#include CYCA\npublic func BOnly() { return 2; }",
                 _ => unreachable!(),
             };
             register(&mut engine, id, source);
@@ -348,7 +344,7 @@ fn circular_includes_follow_definition_load_order_and_warn_once() {
         assert_eq!(
             messages,
             ["Circular include chain detected - ignoring all includes!"],
-                "registration order: {order:?}",
+            "registration order: {order:?}",
         );
 
         let first_function = if order[0] == "CYCA" { "AOnly" } else { "BOnly" };
@@ -358,7 +354,7 @@ fn circular_includes_follow_definition_load_order_and_warn_once() {
         assert!(engine.definition_script_has_function(order[1], second_function));
         assert!(
             !engine.definition_script_has_function(order[1], first_function),
-                "the later definition must skip its edge back to the DFS root"
+            "the later definition must skip its edge back to the DFS root"
         );
     }
 }
@@ -368,8 +364,8 @@ fn control_description_uses_effective_function_and_preserves_empty_first_segment
     let mut engine = Engine::new();
     register(
         &mut engine,
-            "CDPA",
-            "public func ControlSpecial() { [Parent caption|Image=CDPA] return 1; }",
+        "CDPA",
+        "public func ControlSpecial() { [Parent caption|Image=CDPA] return 1; }",
     );
     register(
         &mut engine,
@@ -387,7 +383,7 @@ fn control_description_uses_effective_function_and_preserves_empty_first_segment
     assert_eq!(
         engine.definition_control_description("CDCH", "ControlUp"),
         Some(String::new()),
-            "a raw descriptor beginning with a separator suppresses name fallback"
+        "a raw descriptor beginning with a separator suppresses name fallback"
     );
     assert_eq!(
         engine.definition_control_description("CDCH", "ControlDown"),
@@ -400,23 +396,23 @@ fn longer_cycle_marks_the_root_resolved_for_later_backedges() {
     let mut engine = Engine::new();
     register(
         &mut engine,
-            "CYCA",
-            "#include CYCD\n#include CYCB\npublic func AOnly() { return 1; }",
+        "CYCA",
+        "#include CYCD\n#include CYCB\npublic func AOnly() { return 1; }",
     );
     register(
         &mut engine,
-            "CYCB",
-            "#include CYCC\npublic func BOnly() { return 2; }",
+        "CYCB",
+        "#include CYCC\npublic func BOnly() { return 2; }",
     );
     register(
         &mut engine,
-            "CYCC",
-            "#include CYCA\npublic func COnly() { return 3; }",
+        "CYCC",
+        "#include CYCA\npublic func COnly() { return 3; }",
     );
     register(
         &mut engine,
-            "CYCD",
-            "#include CYCA\npublic func DOnly() { return 4; }",
+        "CYCD",
+        "#include CYCA\npublic func DOnly() { return 4; }",
     );
 
     let messages = capture_warnings(|| {
@@ -439,7 +435,7 @@ fn longer_cycle_marks_the_root_resolved_for_later_backedges() {
     for function in ["AOnly", "BOnly", "COnly", "DOnly"] {
         assert!(
             engine.definition_script_has_function("CYCD", function),
-                "the later backedge sees the root's partially resolved function set"
+            "the later backedge sees the root's partially resolved function set"
         );
     }
 }

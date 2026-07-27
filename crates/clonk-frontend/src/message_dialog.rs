@@ -1574,6 +1574,7 @@ struct MessageSegment {
 pub struct BreakMessageOptions {
     pub zoom: f32,
     pub max_lines: usize,
+    pub markup: bool,
 }
 
 impl Default for BreakMessageOptions {
@@ -1581,6 +1582,7 @@ impl Default for BreakMessageOptions {
         Self {
             zoom: 1.0,
             max_lines: 0,
+            markup: true,
         }
     }
 }
@@ -1618,6 +1620,7 @@ pub(crate) fn break_hud_message_max_lines(
         text,
         max_width as f32,
         max_lines,
+        true,
         |character| {
             if character >= ' ' {
                 font.character_advance(character) as f32
@@ -1665,6 +1668,7 @@ fn break_message_impl(
         text,
         max_width as f32,
         options.max_lines,
+        options.markup,
         |character| {
             if character >= ' ' {
                 let advance = font.message_character_advance(character);
@@ -1737,6 +1741,7 @@ fn break_native_message_impl(
         text,
         max_width_units as f32,
         options.max_lines,
+        options.markup,
         |character| {
             if character < ' ' {
                 return 0.0;
@@ -1756,6 +1761,7 @@ fn break_message_in_units(
     text: &str,
     max_width: f32,
     max_lines: usize,
+    markup: bool,
     mut character_width: impl FnMut(char) -> f32,
     mut image_width: impl FnMut(&str) -> f32,
 ) -> String {
@@ -1763,7 +1769,7 @@ fn break_message_in_units(
     let mut rest = text;
     while !rest.is_empty() {
         let source_start = text.len() - rest.len();
-        if let Some(advance) = skip_markup_tag(rest) {
+        if let Some(advance) = markup.then(|| skip_markup_tag(rest)).flatten() {
             tokens.push(MessageToken::Text {
                 raw: rest[..advance].to_string(),
                 width: 0.0,
@@ -1774,7 +1780,7 @@ fn break_message_in_units(
             rest = &rest[advance..];
             continue;
         }
-        if let Some((tag, advance)) = inline_image_token(rest) {
+        if let Some((tag, advance)) = markup.then(|| inline_image_token(rest)).flatten() {
             tokens.push(MessageToken::Text {
                 raw: rest[..advance].to_string(),
                 width: image_width(tag),
@@ -1787,7 +1793,7 @@ fn break_message_in_units(
         }
         let character = rest.chars().next().expect("non-empty message");
         rest = &rest[character.len_utf8()..];
-        if character == '\n' || character == '|' {
+        if character == '\n' || (markup && character == '|') {
             tokens.push(MessageToken::HardBreak {
                 delimiter: character,
                 source_end: source_start + character.len_utf8(),
@@ -1915,11 +1921,15 @@ fn break_message_in_units(
         }
         match segment.break_after {
             Some(MessageBreak::Automatic) => {
-                let current_line = output.rsplit('\n').next().unwrap_or(&output);
-                let (closing, reopening) = active_markup_fragments(current_line);
-                output.push_str(&closing);
-                output.push('\n');
-                output.push_str(&reopening);
+                if markup {
+                    let current_line = output.rsplit('\n').next().unwrap_or(&output);
+                    let (closing, reopening) = active_markup_fragments(current_line);
+                    output.push_str(&closing);
+                    output.push('\n');
+                    output.push_str(&reopening);
+                } else {
+                    output.push('\n');
+                }
             }
             Some(MessageBreak::Manual(delimiter)) => output.push(delimiter),
             None => {}

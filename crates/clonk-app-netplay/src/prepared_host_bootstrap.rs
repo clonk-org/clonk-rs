@@ -343,6 +343,9 @@ struct PreparedLeagueGeneratedLandscapeLoader {
     graphics_groups: Vec<Group>,
     languages: Vec<String>,
     language_packs: LanguagePacks,
+    /// Saved games preserve their serialized landscape when a league Start
+    /// response supplies a different seed.
+    reload_generated_landscape_for_league_start: bool,
 }
 
 impl PreparedLeagueGeneratedLandscapeLoader {
@@ -356,6 +359,66 @@ impl PreparedLeagueGeneratedLandscapeLoader {
             u64::from(random_seed),
             &self.language_packs,
         )
+    }
+
+    fn load_with_progress<F>(
+        &self,
+        random_seed: u64,
+        startup_player_count: i32,
+        report_progress: F,
+    ) -> Result<Scenario, ScenarioError>
+    where
+        F: FnMut(i32, &'static str),
+    {
+        Scenario::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
+            &self.scenario_group,
+            &self.definition_groups,
+            &self.material_groups,
+            &self.graphics_groups,
+            &self.languages,
+            random_seed,
+            &self.language_packs,
+            startup_player_count,
+            report_progress,
+        )
+    }
+}
+
+/// One-shot ownership of the already-opened host scenario and its exact
+/// post-publication reload inputs. Keeping the lifetime attached preserves
+/// temporary synchronized groups until the worker finishes.
+pub struct PreparedHostScenarioLoad {
+    retained: Scenario,
+    loader: Option<PreparedLeagueGeneratedLandscapeLoader>,
+    _lifetime: Arc<PreparedHostLifetime>,
+}
+
+impl PreparedHostScenarioLoad {
+    pub fn retained(&self) -> &Scenario {
+        &self.retained
+    }
+
+    pub fn into_retained(self) -> Scenario {
+        self.retained
+    }
+
+    pub fn load_with_progress<F>(
+        self,
+        random_seed: u64,
+        startup_player_count: i32,
+        report_progress: F,
+    ) -> Result<Scenario, ScenarioError>
+    where
+        F: FnMut(i32, &'static str),
+    {
+        let Self {
+            retained,
+            loader,
+            _lifetime,
+        } = self;
+        loader.map_or(Ok(retained), |loader| {
+            loader.load_with_progress(random_seed, startup_player_count, report_progress)
+        })
     }
 }
 
@@ -444,6 +507,22 @@ impl PreparedHostBootstrap {
             .ok_or(PreparedHostUseError::ScenarioAlreadyClaimed)
     }
 
+    /// Claims the same single scenario launch token together with the frozen
+    /// post-publication inputs needed by post-lobby InitGame.
+    pub fn claim_scenario_load(&self) -> Result<PreparedHostScenarioLoad, PreparedHostUseError> {
+        let retained = self
+            .lifetime
+            .scenario
+            .lock()
+            .take()
+            .ok_or(PreparedHostUseError::ScenarioAlreadyClaimed)?;
+        Ok(PreparedHostScenarioLoad {
+            retained,
+            loader: self.league_generated_landscape_loader.clone(),
+            _lifetime: Arc::clone(&self.lifetime),
+        })
+    }
+
     pub fn admission(&self) -> PreparedHostAdmission {
         self.admission
     }
@@ -487,11 +566,24 @@ impl PreparedHostBootstrap {
             .parameters
             .random_seed;
         let random_seed = response.seed.unwrap_or(current_seed) as u32;
-        let league_scenario = self
+        let reload_generated_landscape = self
             .league_generated_landscape_loader
             .as_ref()
-            .map(|loader| loader.load(random_seed))
-            .transpose()?;
+            .is_some_and(|loader| loader.reload_generated_landscape_for_league_start)
+            && self
+                .lifetime
+                .scenario
+                .lock()
+                .as_ref()
+                .is_some_and(Scenario::generated_landscape_seed_retry_applies);
+        let league_scenario = if reload_generated_landscape {
+            self.league_generated_landscape_loader
+                .as_ref()
+                .map(|loader| loader.load(random_seed))
+                .transpose()?
+        } else {
+            None
+        };
         if league_scenario
             .as_ref()
             .is_some_and(Scenario::generated_landscape_requires_seed_retry)
@@ -1666,21 +1758,19 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             },
         );
     }
-    // Internet signup may be enabled from the live lobby even when this host
-    // was initially prepared without league-server signup. Retain the exact
-    // post-publication loader for every fresh affected scenario so any later
-    // Start seed is validated and installed before launch.
-    let retain_league_generated_landscape_loader =
-        !is_save_game && scenario.generated_landscape_seed_retry_applies();
-    let league_generated_landscape_loader =
-        retain_league_generated_landscape_loader.then(|| PreparedLeagueGeneratedLandscapeLoader {
-            scenario_group: published_scenario_group,
-            definition_groups: definition_groups.clone(),
-            material_groups: material_resource_groups.clone(),
-            graphics_groups: graphics_groups.clone(),
-            languages: spec.languages.to_vec(),
-            language_packs: spec.language_packs.clone(),
-        });
+    // Retain the exact post-publication loader through the lobby. C++ runs
+    // the shared InitGame phases only after DoLobby unless a lobby preload
+    // completed them first (src/C4Game.cpp:438-457,2004-2042).
+    let league_generated_landscape_loader = Some(PreparedLeagueGeneratedLandscapeLoader {
+        scenario_group: published_scenario_group,
+        definition_groups: definition_groups.clone(),
+        material_groups: material_resource_groups.clone(),
+        graphics_groups: graphics_groups.clone(),
+        languages: spec.languages.to_vec(),
+        language_packs: spec.language_packs.clone(),
+        reload_generated_landscape_for_league_start: !is_save_game
+            && scenario.generated_landscape_seed_retry_applies(),
+    });
     let mut published_index = 0;
     let published_local_players = local_players
         .iter()

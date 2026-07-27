@@ -1537,6 +1537,7 @@ pub(crate) struct HostDefinitionTables {
     standard_crew_names: Option<String>,
     definition_crew_names: Rc<HashMap<String, String>>,
     reference_parameter_slots: Rc<HashMap<String, u32>>,
+    direct_call_function_names: Rc<HashSet<String>>,
 }
 
 impl HostDefinitionTables {
@@ -1563,6 +1564,10 @@ impl HostDefinitionTables {
             rank_names: Rc::new(rank_names),
             rank_bases: Rc::new(rank_bases),
             reference_parameter_slots: Rc::new(reference_parameter_slots(
+                &scripts,
+                &linked_script_hosts,
+            )),
+            direct_call_function_names: Rc::new(direct_call_function_names(
                 &scripts,
                 &linked_script_hosts,
             )),
@@ -1603,6 +1608,28 @@ fn reference_parameter_slots(
         collect(script);
     }
     slots
+}
+
+/// Fold C4AulScriptEngine's GetFirstFunc namespace once per linked definition
+/// graph. Direct fail-safe calls consult this on every execution, so walking
+/// every definition from the VM would make common `obj->~Callback()` paths
+/// linear in the number of loaded definitions.
+fn direct_call_function_names(
+    scripts: &HashMap<DefinitionId, Arc<ScriptEngine>>,
+    linked_script_hosts: &[(String, Arc<ScriptEngine>)],
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut collect = |script: &ScriptEngine| {
+        names.extend(script.functions().keys().cloned());
+        names.extend(script.host_function_names());
+    };
+    for script in scripts.values() {
+        collect(script);
+    }
+    for (_, script) in linked_script_hosts {
+        collect(script);
+    }
+    names
 }
 
 // Not `derive(Debug)`: `ScriptEngine` (in `definition_scripts`) has no Debug.
@@ -1911,6 +1938,8 @@ pub struct HostWorldContext {
     /// Engine-wide `&`-parameter slots per function name (C4AulParse's
     /// `anyfunctakesref` chain, folded once when the tables are installed).
     reference_parameter_slots: Rc<HashMap<String, u32>>,
+    /// Engine-wide GetFirstFunc names used to lower direct fail-safe calls.
+    direct_call_function_names: Rc<HashSet<String>>,
     /// Retained System.c4g hosts. Their global functions live in the shared
     /// engine table, but `Func->LinkedTo` still resolves local functions on
     /// the declaring System script (for example an OrderFunc comparator).
@@ -2041,6 +2070,7 @@ impl Default for HostWorldContext {
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             reference_parameter_slots: Rc::new(HashMap::new()),
+            direct_call_function_names: Rc::new(HashSet::new()),
             linked_script_hosts: Rc::new(Vec::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
@@ -2151,6 +2181,7 @@ impl HostWorldContext {
         self.definition_rank_bases = Rc::clone(&tables.rank_bases);
         self.definition_scripts = Rc::clone(&tables.scripts);
         self.reference_parameter_slots = Rc::clone(&tables.reference_parameter_slots);
+        self.direct_call_function_names = Rc::clone(&tables.direct_call_function_names);
         self.linked_script_hosts = Rc::clone(&tables.linked_script_hosts);
         self.standard_crew_names = tables.standard_crew_names.clone();
         self.definition_crew_names = Rc::clone(&tables.definition_crew_names);
@@ -2411,6 +2442,7 @@ impl HostWorldContext {
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             reference_parameter_slots: Rc::new(HashMap::new()),
+            direct_call_function_names: Rc::new(HashSet::new()),
             linked_script_hosts: Rc::new(Vec::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
@@ -2889,6 +2921,10 @@ impl HostWorldContext {
         mut self,
         scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
     ) -> Self {
+        self.direct_call_function_names = Rc::new(direct_call_function_names(
+            &scripts,
+            self.linked_script_hosts.as_ref(),
+        ));
         self.definition_scripts = Rc::new(scripts);
         self
     }
@@ -2898,6 +2934,10 @@ impl HostWorldContext {
         mut self,
         scripts: Vec<(String, Arc<ScriptEngine>)>,
     ) -> Self {
+        self.direct_call_function_names = Rc::new(direct_call_function_names(
+            self.definition_scripts.as_ref(),
+            &scripts,
+        ));
         self.linked_script_hosts = Rc::new(scripts);
         self
     }
@@ -3019,10 +3059,8 @@ impl HostWorldContext {
     /// `name` — the global-function-map lookup of `GetFirstFunc`
     /// (C4Aul.cpp:545-552).
     pub(crate) fn script_function_known(&self, name: &str) -> bool {
-        self.definition_scripts
-            .values()
-            .chain(self.linked_script_hosts.iter().map(|(_, script)| script))
-            .any(|script| {
+        self.direct_call_function_names.contains(name)
+            || self.scenario_script.as_ref().is_some_and(|script| {
                 script.has_function(name)
                     || script.has_global_function(name)
                     || script.has_host_function(name)
@@ -3960,8 +3998,19 @@ impl HostWorldContext {
         let mut cache = self.sectors.borrow_mut();
         if cache.is_none() {
             let store = self.object_store.borrow();
+            // `C4LSectors::Add` receives the live forward master list, so each
+            // sector's own list carries master-list order (C4Sector.cpp:88-101;
+            // C4ObjectList.cpp:138-205). Objects the master list does not carry
+            // (contained/inactive) keep their storage order behind it.
+            let mut seen = HashSet::with_capacity(store.order.len());
+            let ordered = self
+                .master_order
+                .iter()
+                .chain(store.order.iter())
+                .filter(|id| seen.insert(**id))
+                .filter_map(|id| store.objects.get(id));
             *cache = Some(Rc::new(build_host_sector_map(
-                store.order.iter().filter_map(|id| store.objects.get(id)),
+                ordered,
                 &self.definitions,
                 width,
                 height,

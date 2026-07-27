@@ -2870,9 +2870,22 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     scenario_group
                 .add_file(
                     "Scenario.txt",
-                    b"[Head]\nTitle=Preloaded client\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=MissingLocal.c4d\n".to_vec(),
+                    b"[Head]\nTitle=Preloaded client\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=MissingLocal.c4d\n\n[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\nMapPlayerExtend=1\nMaterial=Earth\n".to_vec(),
                 )
                 .expect("add client scenario core");
+    let mut materials = clonk_resources::MutableGroup::new("Material.c4g");
+    materials
+        .add_file("TexMap.txt", b"1=Earth-Smooth\n".to_vec())
+        .expect("add client texture map");
+    materials
+        .add_file(
+            "Earth.c4m",
+            b"[Material]\nName=Earth\nDensity=100\n".to_vec(),
+        )
+        .expect("add client material");
+    scenario_group
+        .add_child("Material.c4g", materials)
+        .expect("add client material group");
     fs::write(
         &scenario_path,
         scenario_group.pack().expect("pack client scenario"),
@@ -2937,6 +2950,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         .initial_join_snapshot
         .expect("default host publishes JoinData");
     snapshot.parameters.random_seed = 41;
+    snapshot.parameters.startup_player_count = 1;
     snapshot.parameters.scenario = resource(
         clonk_network::HostResourceType::Scenario,
         70,
@@ -2955,8 +2969,19 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         .push(clonk_engine::ClientCoreControlData {
             client_id: 7,
             name: clonk_engine::LegacyCString::from_bytes(b"Observer".to_vec()).unwrap(),
-            observer: true,
             ..Default::default()
+        });
+    snapshot.parameters.player_infos.last_player_id = 3;
+    snapshot
+        .parameters
+        .player_infos
+        .clients
+        .push(clonk_network::ClientPlayerInfosSnapshot {
+            client_id: 7,
+            flags: 0,
+            players: (1..=3)
+                .map(|id| set_control_test_player(id, 0, 0))
+                .collect(),
         });
     snapshot.parameters.clients.local_client_id = Some(7);
     let mut reference_status = host_config.initial_status;
@@ -3082,14 +3107,34 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         app.loading_state.is_some(),
         "pending GO resumes immediately"
     );
+    assert_eq!(
+        app.loading_state
+            .as_ref()
+            .expect("preloaded client loading state")
+            .last_progress,
+        10,
+        "C++ skips the already-preloaded first part and resumes at GraphicsResource::Init"
+    );
     assert!(app
         .lobby_preload_artifact
         .as_ref()
         .and_then(|artifact| artifact.client.as_ref())
         .is_some_and(|client| client.scenario.is_none()));
 
-    app.poll_loading()
-        .expect("activate the preloaded client scenario");
+    while app.engine.landscape().is_none() {
+        app.poll_loading()
+            .expect("activate the preloaded client scenario");
+        assert!(
+            Instant::now() < deadline,
+            "post-lobby MapPlayerExtend load did not finish"
+        );
+        thread::yield_now();
+    }
+    assert_eq!(
+        app.engine.landscape().map(clonk_engine::Landscape::width),
+        Some(300),
+        "C++ defers MapPlayerExtend until the final three-player lobby roster is frozen"
+    );
     assert!(Arc::ptr_eq(
         &expected_hud,
         &app.active_game_graphics
@@ -3302,6 +3347,17 @@ fn l021_client_go_combines_scenario_once_and_defers_100_until_final_init() {
         .send(NetworkEvent::StatusRequested(go))
         .expect("queue GO request");
     app.process_network_events().expect("apply start request");
+    // A client publishes 6 before RetrieveScenario blocks; the modal
+    // transfer percentage below remains a separate progress domain
+    // (src/C4Game.cpp:2558-2568).
+    assert_eq!(
+        app.loader_screen
+            .as_ref()
+            .expect("client loader while retrieving scenario")
+            .state()
+            .progress(),
+        6
+    );
     assert_eq!(
         app.blocking_resource_wait
             .as_ref()
@@ -3417,15 +3473,56 @@ fn l021_client_go_combines_scenario_once_and_defers_100_until_final_init() {
         MessageDialogContinuation::BlockingResourceWait { .. }
     )));
     assert!(matches!(app.mode, AppMode::Loading));
-    app.poll_loading().expect("finish client InitGame phase");
+    // RetrieveScenario and GameRes retrieval finish at 7 before the shared
+    // InitScriptEngine/InitGame phases begin
+    // (src/C4Game.cpp:2575-2598).
+    assert_eq!(
+        app.loading_state
+            .as_ref()
+            .expect("client loading state after resource retrieval")
+            .last_progress,
+        7
+    );
+    assert_eq!(
+        app.loader_screen
+            .as_ref()
+            .expect("client loader after resource retrieval")
+            .state()
+            .progress(),
+        7
+    );
+    let loading_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        app.poll_loading().expect("poll client InitGame phase");
+        if app.message_dialogs.iter().any(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::NetworkClientStartWait
+            )
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < loading_deadline,
+            "client InitGame worker did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert!(matches!(app.mode, AppMode::Loading));
-    assert!(
+    assert_eq!(
         app.loader_screen
             .as_ref()
             .expect("client loader retained through GO wait")
             .state()
-            .progress()
-            < 100
+            .progress(),
+        97
+    );
+    assert!(
+        app.loading_state.as_ref().is_some_and(|loading| loading
+            .log
+            .iter()
+            .any(|line| line == "Definition selection resolved")),
+        "the authoritative network worker must publish its shared InitGame phases"
     );
     assert!(app.network_start_wait.is_none());
     let client_wait = app

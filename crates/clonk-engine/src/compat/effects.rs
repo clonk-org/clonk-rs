@@ -1213,7 +1213,6 @@ pub(crate) fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
     let new_value = args.get(3).map(value_to_effect_var);
 
     let context_value = with_host_context_mut(Ok(None), |context| {
-
         // The VM's retained-lvalue bridge supplies a private fourth write
         // value after resolving the public three-parameter native. Re-entering
         // a foreign object's ScriptEngine would correctly normalize a public
@@ -1918,26 +1917,29 @@ pub(crate) fn blast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
 
     // Resolve both values before any blast callback. FnBlastObjects passes
     // cthr->Obj as pByObj, and C4Game immediately replaces it with pLayer.
-    let (caused_by, by_object) = try_with_host_context("BlastObjects requires an active engine context", |context| {
-        let caller = context.script_object_context;
-        let caused_by = if caused_by_plus_one != 0 {
-            caused_by_plus_one.wrapping_sub(1)
-        } else {
-            caller
-                .and_then(|caller| {
-                    context
-                        .object_scope(caller)
-                        .map(ObjectScopeContext::controller)
-                        .or_else(|| {
-                            context
-                                .get_world_object(caller)
-                                .map(|object| object.controller())
-                        })
-                })
-                .unwrap_or(OWNER_NONE)
-        };
-        Ok::<_, RuntimeError>((caused_by, caller))
-    })?;
+    let (caused_by, by_object) = try_with_host_context(
+        "BlastObjects requires an active engine context",
+        |context| {
+            let caller = context.script_object_context;
+            let caused_by = if caused_by_plus_one != 0 {
+                caused_by_plus_one.wrapping_sub(1)
+            } else {
+                caller
+                    .and_then(|caller| {
+                        context
+                            .object_scope(caller)
+                            .map(ObjectScopeContext::controller)
+                            .or_else(|| {
+                                context
+                                    .get_world_object(caller)
+                                    .map(|object| object.controller())
+                            })
+                    })
+                    .unwrap_or(OWNER_NONE)
+            };
+            Ok::<_, RuntimeError>((caused_by, caller))
+        },
+    )?;
 
     native_blast_objects(x, y, level, in_object, caused_by, by_object)?;
     Ok(Value::Nil)
@@ -2158,33 +2160,34 @@ pub(crate) fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
     let caused_by_plus_one =
         parse_optional_i32(args.get(2), "BlastObject", "caused by")?.unwrap_or(0);
 
-    let target_and_cause = try_with_host_context("BlastObject requires an active engine context", |context| {
-        // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
-        // (C4Script.cpp:2283) — resolved in the caller's scope.
-        let caused_by = if caused_by_plus_one != 0 {
-            caused_by_plus_one.wrapping_sub(1)
-        } else {
-            context
-                .script_object_context
-                .and_then(|caller| {
-                    context
-                        .object_scope(caller)
-                        .map(ObjectScopeContext::controller)
-                        .or_else(|| {
-                            context
-                                .get_world_object(caller)
-                                .map(|object| object.controller())
-                        })
-                })
-                .unwrap_or(OWNER_NONE)
-        };
-        // `if (!pObj) if (!(pObj = cthr->Obj)) return false` (C4Script.cpp:2284).
-        Ok::<_, RuntimeError>(
-            target_id
-                .or(context.script_object_context)
-                .map(|target| (target, caused_by)),
-        )
-    })?;
+    let target_and_cause =
+        try_with_host_context("BlastObject requires an active engine context", |context| {
+            // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
+            // (C4Script.cpp:2283) — resolved in the caller's scope.
+            let caused_by = if caused_by_plus_one != 0 {
+                caused_by_plus_one.wrapping_sub(1)
+            } else {
+                context
+                    .script_object_context
+                    .and_then(|caller| {
+                        context
+                            .object_scope(caller)
+                            .map(ObjectScopeContext::controller)
+                            .or_else(|| {
+                                context
+                                    .get_world_object(caller)
+                                    .map(|object| object.controller())
+                            })
+                    })
+                    .unwrap_or(OWNER_NONE)
+            };
+            // `if (!pObj) if (!(pObj = cthr->Obj)) return false` (C4Script.cpp:2284).
+            Ok::<_, RuntimeError>(
+                target_id
+                    .or(context.script_object_context)
+                    .map(|target| (target, caused_by)),
+            )
+        })?;
     let Some((target, caused_by)) = target_and_cause else {
         return Ok(Value::Bool(false));
     };
@@ -2202,12 +2205,13 @@ pub(crate) fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
 /// call, while C4Game::BlastObjects intentionally does not. An already-decoded
 /// `OWNER_NONE` must not be reinterpreted as encoded-zero caller fallback.
 fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<bool, RuntimeError> {
-    let alive = try_with_host_context_mut("BlastObject requires an active engine context", |context| {
-        if !context.ensure_object_scope(target) {
-            return Ok(None);
-        }
-        Ok(context.object_scope(target).map(ObjectScopeContext::alive))
-    })?;
+    let alive =
+        try_with_host_context_mut("BlastObject requires an active engine context", |context| {
+            if !context.ensure_object_scope(target) {
+                return Ok(None);
+            }
+            Ok(context.object_scope(target).map(ObjectScopeContext::alive))
+        })?;
     let Some(alive) = alive else {
         return Ok(false);
     };
@@ -3208,50 +3212,52 @@ pub(crate) fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    try_with_host_context_mut("CreateParticle requires an active engine context", |context| {
+    try_with_host_context_mut(
+        "CreateParticle requires an active engine context",
+        |context| {
+            let base_position = context
+                .object_context()
+                .map(|object| object.effective_position())
+                .unwrap_or(Vector2::ZERO);
 
-        let base_position = context
-            .object_context()
-            .map(|object| object.effective_position())
-            .unwrap_or(Vector2::ZERO);
+            let world_x = base_position.x.saturating_add(x);
+            let world_y = base_position.y.saturating_add(y);
 
-        let world_x = base_position.x.saturating_add(x);
-        let world_y = base_position.y.saturating_add(y);
-
-        let layer = if let Some(target) = target_object {
-            if !context.object_status_present(target) {
-                return Ok(Value::Bool(false));
-            }
-            if context.get_world_object(target).is_none() {
-                return Ok(Value::Bool(false));
-            }
-            if back {
-                ParticleLayer::ObjectBack(target)
+            let layer = if let Some(target) = target_object {
+                if !context.object_status_present(target) {
+                    return Ok(Value::Bool(false));
+                }
+                if context.get_world_object(target).is_none() {
+                    return Ok(Value::Bool(false));
+                }
+                if back {
+                    ParticleLayer::ObjectBack(target)
+                } else {
+                    ParticleLayer::ObjectFront(target)
+                }
             } else {
-                ParticleLayer::ObjectFront(target)
+                ParticleLayer::Global
+            };
+
+            // GetDef failure → false (C4Script.cpp:4874)
+            if context.particle_def_known(&definition) == Some(false) {
+                return Ok(Value::Bool(false));
             }
-        } else {
-            ParticleLayer::Global
-        };
 
-        // GetDef failure → false (C4Script.cpp:4874)
-        if context.particle_def_known(&definition) == Some(false) {
-            return Ok(Value::Bool(false));
-        }
+            let config = ParticleConfig {
+                definition_id: definition,
+                position: FloatVector2::new(world_x as f32, world_y as f32),
+                velocity: FloatVector2::new(x_dir as f32 / 10.0, y_dir as f32 / 10.0),
+                life: life_raw.max(0),
+                parameter_a: parameter_a as f32 / 10.0,
+                parameter_b: life_raw,
+                layer,
+            };
 
-        let config = ParticleConfig {
-            definition_id: definition,
-            position: FloatVector2::new(world_x as f32, world_y as f32),
-            velocity: FloatVector2::new(x_dir as f32 / 10.0, y_dir as f32 / 10.0),
-            life: life_raw.max(0),
-            parameter_a: parameter_a as f32 / 10.0,
-            parameter_b: life_raw,
-            layer,
-        };
-
-        context.register_particle(ParticleCommand::Create(config));
-        Ok(Value::Bool(true))
-    })
+            context.register_particle(ParticleCommand::Create(config));
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 /// FnCastAParticles (C4Script.cpp:4881-4898), shared by CastParticles and
@@ -3371,19 +3377,22 @@ pub(crate) fn push_particles(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .unwrap_or(0);
 
-    try_with_host_context_mut("PushParticles requires an active engine context", |context| {
-        if let Some(name) = &definition {
-            if context.particle_def_known(name) == Some(false) {
-                return Ok(Value::Bool(false));
+    try_with_host_context_mut(
+        "PushParticles requires an active engine context",
+        |context| {
+            if let Some(name) = &definition {
+                if context.particle_def_known(name) == Some(false) {
+                    return Ok(Value::Bool(false));
+                }
             }
-        }
-        context.register_particle(ParticleCommand::Push {
-            definition_id: definition,
-            dxdir: ax as f32 / 10.0,
-            dydir: ay as f32 / 10.0,
-        });
-        Ok(Value::Bool(true))
-    })
+            context.register_particle(ParticleCommand::Push {
+                definition_id: definition,
+                dxdir: ax as f32 / 10.0,
+                dydir: ay as f32 / 10.0,
+            });
+            Ok(Value::Bool(true))
+        },
+    )
 }
 
 pub(crate) fn clear_particles(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -3417,7 +3426,6 @@ pub(crate) fn clear_particles(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context_mut(Ok(Value::Bool(false)), |context| {
-
         // a named def that is not loaded → false (C4Script.cpp:4932)
         if let Some(name) = &definition {
             if context.particle_def_known(name) == Some(false) {

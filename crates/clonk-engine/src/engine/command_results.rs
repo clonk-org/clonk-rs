@@ -1179,7 +1179,10 @@ impl Engine {
         Ok(())
     }
 
-    pub(crate) fn finish_object_command_execution(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+    pub(crate) fn finish_object_command_execution(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<(), EngineError> {
         let successful_finishes = self
             .find_object_index(object_id)
             .map(|index| self.objects[index].commands.take_successful_finishes())
@@ -1383,18 +1386,21 @@ impl Engine {
             return Ok(());
         }
         if let Some(text) = fail_message {
-            self.messages.add_message(MessageSpec {
-                kind: message::MessageKind::Target,
-                text,
-                target: Some(actor_id),
-                player: None,
-                offset: Vector2::ZERO,
-                color: 0xffff_ffff,
-                flags: message::FLAG_MULTIPLE,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
+            self.messages.apply_command(MessageCommand::Append {
+                spec: MessageSpec {
+                    kind: message::MessageKind::Target,
+                    text,
+                    target: Some(actor_id),
+                    player: None,
+                    offset: Vector2::ZERO,
+                    color: 0xffff_ffff,
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    frame_decoration: None,
+                    portrait: None,
+                },
+                no_duplicates: true,
             });
         }
         self.objects[actor_index].state.command_direction = CommandDirection::Stop;
@@ -1908,7 +1914,10 @@ impl Engine {
 
     /// Synchronous `FirstRef->Set0(); Game.ClearPointers(this)` tail of
     /// AssignRemoval (C4Object.cpp:302-304; C4Game.cpp:1018-1031).
-    pub(crate) fn clear_object_references_for_removal(&mut self, target: ObjectId) -> Result<(), EngineError> {
+    pub(crate) fn clear_object_references_for_removal(
+        &mut self,
+        target: ObjectId,
+    ) -> Result<(), EngineError> {
         if let Some(position) = self
             .find_object_index(target)
             .map(|index| self.objects[index].state.position)
@@ -2051,5 +2060,4 @@ impl Engine {
     pub(crate) fn apply_global_effect_commands(&mut self, commands: &[EffectCommand]) {
         apply_effect_commands_to_stack(&mut self.global_effects, commands);
     }
-
 }

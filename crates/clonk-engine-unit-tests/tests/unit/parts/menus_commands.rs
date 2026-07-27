@@ -5407,6 +5407,122 @@ protected func BuildNeedsMaterial()
     }
 
     #[test]
+    fn synchronous_failed_build_appends_generated_material_message() {
+        // FnExecuteCommand reaches C4Command::Fail synchronously. An ordinary
+        // Build failure assigns GetNeededMatStr to failMessage and appends it
+        // to the existing target message (C4Script.cpp:835-838;
+        // C4Command.cpp:2185-2194,2229-2235).
+        let script = r#"#strict 3
+public func SeedMessage() { return Message("Working", this()); }
+public func RunNow() { return ExecuteCommand(); }
+"#;
+        let mut builder =
+            Definition::from_script("BLDR", "Builder", script).expect("builder compiles");
+        builder.set_crew_member(true);
+        builder.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        });
+        let mut site = Definition::from_script("SITE", "Site", "#strict").expect("site compiles");
+        site.set_constructable(true);
+        site.set_components(vec![DefinitionComponent {
+            id: "WOOD".to_owned(),
+            count: 1,
+        }]);
+
+        let mut engine = Engine::with_seed(72);
+        engine
+            .register_definition(builder)
+            .expect("builder registers");
+        engine.register_definition(site).expect("site registers");
+        engine
+            .register_definition(
+                Definition::from_script("WOOD", "Wood", "#strict").expect("wood compiles"),
+            )
+            .expect("wood registers");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("SITE")
+                    .with_construction(1_000)
+                    .with_ordered_components(vec![("WOOD".to_owned(), 0)]),
+            )
+            .expect("site spawns");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_controller(4),
+            )
+            .expect("builder spawns");
+        let actor_index = engine.find_object_index(actor).expect("builder exists");
+        engine.refresh_object_ocf(actor_index);
+        assert_eq!(
+            engine
+                .call_object_function(actor_index, "SeedMessage", Vec::new())
+                .expect("seed message succeeds"),
+            Value::Bool(true)
+        );
+        let seeded = engine.snapshot();
+        assert_eq!(seeded.hud.messages.len(), 1);
+        let seeded_id = seeded.hud.messages[0].id;
+        assert_eq!(seeded.hud.messages[0].lines, vec!["Working"]);
+
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(target))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Build queues");
+        assert!(engine.objects[actor_index]
+            .commands
+            .fail_front_if(CommandId::Build));
+        assert_eq!(
+            engine
+                .call_object_function(actor_index, "RunNow", Vec::new())
+                .expect("synchronous Build failure runs"),
+            Value::Bool(true)
+        );
+
+        let failed = engine.snapshot();
+        assert_eq!(
+            failed.hud.messages.len(),
+            1,
+            "C++ reuses the existing target message"
+        );
+        assert_eq!(failed.hud.messages[0].id, seeded_id);
+        assert_eq!(
+            failed.hud.messages[0].lines,
+            vec!["Working", "Site", "needs", "1x Wood"]
+        );
+
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(target))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("second Build queues");
+        assert!(engine.objects[actor_index]
+            .commands
+            .fail_front_if(CommandId::Build));
+        assert_eq!(
+            engine
+                .call_object_function(actor_index, "RunNow", Vec::new())
+                .expect("second synchronous Build failure runs"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine.snapshot().hud.messages,
+            failed.hud.messages,
+            "C4GameMessage::Append suppresses the repeated material text"
+        );
+    }
+
+    #[test]
     fn completed_builders_queue_only_one_energy_command_in_same_tick() {
         let mut builder =
             Definition::from_script("BLDR", "Builder", "#strict").expect("builder compiles");

@@ -1,11 +1,6 @@
 use super::*;
 
-fn command(
-    name: &[u8],
-    argument: &[u8],
-    player: i32,
-    by_client: i32,
-) -> CustomCommandControlData {
+fn command(name: &[u8], argument: &[u8], player: i32, by_client: i32) -> CustomCommandControlData {
     CustomCommandControlData {
         command: LegacyCString::from_bytes(name.to_vec()).expect("name is NUL-free"),
         argument: LegacyCString::from_bytes(argument.to_vec()).expect("argument is NUL-free"),
@@ -30,8 +25,8 @@ fn probe_engine() -> Engine {
     let mut engine = Engine::new();
     assert_eq!(
         engine.install_global_scripts(&[(
-                "CustomCommandProbe.c".to_string(),
-                "static CustomCommandProbe;\n\
+            "CustomCommandProbe.c".to_string(),
+            "static CustomCommandProbe;\n\
                  global func Capture(value) { CustomCommandProbe = value; return true; }"
                 .to_string(),
         )]),
@@ -51,11 +46,7 @@ fn probe(engine: &Engine) -> Value {
     value
 }
 
-fn execute(
-    engine: &mut Engine,
-    control: &CustomCommandControlData,
-    game_running: bool,
-) -> bool {
+fn execute(engine: &mut Engine, control: &CustomCommandControlData, game_running: bool) -> bool {
     engine
         .execute_custom_command_control(control, game_running)
         .expect("custom-command execution is not a fatal engine error")
@@ -75,7 +66,7 @@ fn custom_command_registry_is_first_wins_and_enters_join_data() {
     assert_eq!(
         already_disabled.message_board_commands(),
         &[InitialNetworkMessageBoardCommand::speed()],
-            "C++ removes /speed only when DebugMode was active"
+        "C++ removes /speed only when DebugMode was active"
     );
 
     let mut engine = Engine::new();
@@ -84,13 +75,13 @@ fn custom_command_registry_is_first_wins_and_enters_join_data() {
         &[InitialNetworkMessageBoardCommand::speed()]
     );
     assert!(engine.add_message_board_command(registered(
-            "probe",
-            "Capture(1)",
+        "probe",
+        "Capture(1)",
         MessageBoardCommandRestriction::Plain,
     )));
     assert!(!engine.add_message_board_command(registered(
-            "probe",
-            "Capture(2)",
+        "probe",
+        "Capture(2)",
         MessageBoardCommandRestriction::Identifier,
     )));
 
@@ -144,8 +135,8 @@ fn add_msg_board_cmd_validates_the_caller_and_drives_custom_command_execution() 
     assert_eq!(
         engine
             .direct_exec_script_control_global(
-                    "AddMsgBoardCmd(\"direct-identifier\", \"Capture(12)\", C4MSGCMDR_Identifier)",
-                    "internal script",
+                "AddMsgBoardCmd(\"direct-identifier\", \"Capture(12)\", C4MSGCMDR_Identifier)",
+                "internal script",
                 Some(3),
             )
             .expect("Identifier-restricted DirectExec registration succeeds"),
@@ -162,8 +153,8 @@ fn add_msg_board_cmd_validates_the_caller_and_drives_custom_command_execution() 
 
     engine
         .load_scenario_script_with_convention(
-                "AddMsgBoardCmd.c",
-                r#"#strict 2
+            "AddMsgBoardCmd.c",
+            r#"#strict 2
 func RegisterCommands()
 {
     var unset;
@@ -199,7 +190,7 @@ func RegisterFromEval()
     assert_eq!(
         call_script(&mut engine, "RegisterFromEval"),
         Value::Bool(false),
-            "the unnamed eval frame may not install a Plain command"
+        "the unnamed eval frame may not install a Plain command"
     );
     assert!(engine
         .message_board_commands()
@@ -218,7 +209,7 @@ func RegisterFromEval()
     assert_eq!(
         probe(&engine),
         Value::Int(73),
-            "the registered template executes through CID_CustomCommand"
+        "the registered template executes through CID_CustomCommand"
     );
 }
 
@@ -233,8 +224,8 @@ fn custom_command_checks_player_running_and_exact_registration_before_execution(
         .expect("player remains registered")
         .set_at_client(PlayerAtClient::HOST);
     assert!(engine.add_message_board_command(registered(
-            "who",
-            "Capture(\"%player%/%player%\")",
+        "who",
+        "Capture(\"%player%/%player%\")",
         MessageBoardCommandRestriction::Escaped,
     )));
 
@@ -262,8 +253,8 @@ fn custom_command_checks_player_running_and_exact_registration_before_execution(
 fn custom_command_numeric_format_matches_from_chars_prefix_rules() {
     let mut engine = probe_engine();
     assert!(engine.add_message_board_command(registered(
-            "number",
-            "Capture(%d)",
+        "number",
+        "Capture(%d)",
         MessageBoardCommandRestriction::Identifier,
     )));
 
@@ -279,19 +270,19 @@ fn custom_command_numeric_format_matches_from_chars_prefix_rules() {
     ] {
         assert!(
             execute(&mut engine, &command(b"number", argument, -1, 55), true,),
-                "argument {argument:?}"
+            "argument {argument:?}"
         );
         assert_eq!(
             probe(&engine),
             Value::Int(expected),
-                "argument {argument:?}"
+            "argument {argument:?}"
         );
     }
     assert_eq!(Engine::custom_command_integer(b"-2147483648tail"), i32::MIN);
 
     assert!(engine.add_message_board_command(registered(
-            "percent",
-            "Capture(\"%d/%%\")",
+        "percent",
+        "Capture(\"%d/%%\")",
         MessageBoardCommandRestriction::Plain,
     )));
     assert!(execute(
@@ -319,7 +310,7 @@ fn custom_command_numeric_format_matches_from_chars_prefix_rules() {
         assert_eq!(
             probe(&engine),
             Value::String("17/%".to_string().into()),
-                "invalid fmt template {script:?} must not reach DirectExec"
+            "invalid fmt template {script:?} must not reach DirectExec"
         );
     }
 }
@@ -329,18 +320,18 @@ fn custom_command_string_restrictions_match_cpp_escaping_and_prefix_filter() {
     let mut engine = probe_engine();
     for entry in [
         registered(
-                "escaped",
-                "Capture(\"%s\")",
+            "escaped",
+            "Capture(\"%s\")",
             MessageBoardCommandRestriction::Escaped,
         ),
         registered(
-                "plain",
-                "Capture(%s)",
+            "plain",
+            "Capture(%s)",
             MessageBoardCommandRestriction::Plain,
         ),
         registered(
-                "identifier",
-                "Capture(\"%s\")",
+            "identifier",
+            "Capture(\"%s\")",
             MessageBoardCommandRestriction::Identifier,
         ),
     ] {
@@ -377,7 +368,7 @@ fn custom_command_string_restrictions_match_cpp_escaping_and_prefix_filter() {
     let legacy_name = clonk_script::c4_string_from_bytes(&[0xff]);
     assert!(engine.add_message_board_command(registered(
         &legacy_name,
-            "Capture(73)",
+        "Capture(73)",
         MessageBoardCommandRestriction::Plain,
     )));
     assert!(execute(&mut engine, &command(&[0xff], b"", -1, 4), true,));

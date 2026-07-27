@@ -3537,7 +3537,10 @@ impl Object {
     /// per-object monotonic number (max existing + 1, C4Effect.cpp:76-78).
     /// A carried nonzero number matching an existing effect is an UPDATE
     /// (EffectVar writes fold back through the add command).
-    pub(crate) fn insert_effect(&mut self, mut effect: EffectState) -> (EffectState, Option<EffectState>) {
+    pub(crate) fn insert_effect(
+        &mut self,
+        mut effect: EffectState,
+    ) -> (EffectState, Option<EffectState>) {
         if effect.timer < 0 {
             effect.timer = 0;
         }
@@ -3656,7 +3659,11 @@ impl Object {
         }
     }
 
-    pub(crate) fn record_action_event(&mut self, previous: ActionState, kind: ActionTransitionKind) {
+    pub(crate) fn record_action_event(
+        &mut self,
+        previous: ActionState,
+        kind: ActionTransitionKind,
+    ) {
         self.pending_action_events.push_back(ActionTransitionEvent {
             previous_action: previous,
             kind,
@@ -4089,7 +4096,9 @@ pub(crate) fn log_runtime_call_frames(definition: &str, frames: &[clonk_script::
     }
 }
 
-pub(crate) fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>, EngineError> {
+pub(crate) fn tolerate_script_error<T>(
+    result: Result<T, EngineError>,
+) -> Result<Option<T>, EngineError> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(EngineError::Script {
@@ -5027,4 +5036,3 @@ pub struct DefinitionLineMetadata {
     #[serde(default)]
     pub line_intersect: i32,
 }
-

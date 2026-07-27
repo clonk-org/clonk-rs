@@ -10,7 +10,7 @@ fn l049_scenario_value_gain_uses_cpp_integer_truthiness() {
         assert_eq!(
             engine.scenario_value_gain_enabled(),
             expected,
-                "ValueGain={value_gain}"
+            "ValueGain={value_gain}"
         );
     }
 }

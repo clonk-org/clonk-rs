@@ -53,7 +53,6 @@ const CAPTION_WIDTH: u32 = 192;
 const CAPTION_HEIGHT: u32 = 23;
 const BUTTON_TEXTURE_WIDTH: u32 = 128;
 const BUTTON_TEXTURE_HEIGHT: u32 = 32;
-const HIGHLIGHT_EXTENT: u32 = 16;
 const CHECKBOX_WIDTH: u32 = 128;
 const CHECKBOX_HEIGHT: u32 = 32;
 const SCROLL_WIDTH: u32 = 32;
@@ -905,6 +904,26 @@ pub struct LobbyLogLine {
     pub color: [u8; 4],
 }
 
+/// Raise a GUI text color to the native lightness floor used for labels on
+/// black backgrounds (`C4GUI::MakeColorReadableOnBlack`, C4Gui.cpp:71-89).
+pub fn make_color_readable_on_black(color: u32) -> [u8; 4] {
+    let red = (color >> 16) & 0xff;
+    let green = (color >> 8) & 0xff;
+    let blue = color & 0xff;
+    let lightness = red * 50 + green * 87 + blue * 27;
+    let increment = if lightness < 16_575 {
+        (16_575 - lightness) / 164
+    } else {
+        0
+    };
+    [
+        (red + increment).min(255) as u8,
+        (green + increment).min(255) as u8,
+        (blue + increment).min(255) as u8,
+        0xff,
+    ]
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LobbyCountdownState {
     #[default]
@@ -1555,12 +1574,12 @@ impl<'a> LobbyResources<'a> {
             EXTENDED_ICON_WIDTH,
             EXTENDED_ICON_HEIGHT,
         )?;
-        validate_exact(
-            "GUIButtonHighlight.png",
-            &self.button_highlight,
-            HIGHLIGHT_EXTENT,
-            HIGHLIGHT_EXTENT,
-        )?;
+        ensure!(
+            self.button_highlight.width() > 0 && self.button_highlight.height() > 0,
+            "GUIButtonHighlight.png must be a non-empty full-size classic facet: got {}x{}",
+            self.button_highlight.width(),
+            self.button_highlight.height()
+        );
         validate_exact(
             "GUICheckBox.png",
             self.checkbox,
@@ -4056,7 +4075,7 @@ impl GameLobby {
             LobbyCountdownPacket::Abort if previous.is_any() => {
                 let line = LobbyLogLine {
                     text: self.labels.start_aborted.clone(),
-                    color: [255, 31, 31, 255],
+                    color: make_color_readable_on_black(0x00ff_1f1f),
                 };
                 self.logs.push(line.clone());
                 self.chat_follow_bottom = true;
@@ -4075,7 +4094,7 @@ impl GameLobby {
                 };
                 let line = LobbyLogLine {
                     text,
-                    color: [255, 31, 31, 255],
+                    color: make_color_readable_on_black(0x00ff_1f1f),
                 };
                 self.logs.push(line.clone());
                 self.chat_follow_bottom = true;
@@ -6654,7 +6673,7 @@ fn gui_rect(rect: IntRect) -> GuiRect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::endeavour_font_set;
+    use crate::test_support::{endeavour_font_set, load_graphics_png};
 
     fn client(id: i32, local: bool) -> LobbyRosterRow {
         LobbyRosterRow::Client(LobbyClientRow {
@@ -8344,9 +8363,13 @@ mod tests {
             ]
         );
         let actions = lobby.apply_countdown_packet(LobbyCountdownPacket::Seconds(9));
+        // Lobby countdown logs enter MainDlg::OnLog, whose AddTextLine call
+        // enables readable-on-black conversion (src/C4GameLobby.cpp:738-753;
+        // src/C4GuiLabels.cpp:293-299).
         assert!(matches!(
             actions.last(),
-            Some(LobbyAction::AppendLog(LobbyLogLine { text, .. })) if text == "9..."
+            Some(LobbyAction::AppendLog(LobbyLogLine { text, color }))
+                if text == "9..." && *color == [255, 32, 32, 255]
         ));
         let _ = lobby.apply_countdown_packet(LobbyCountdownPacket::Abort);
         assert_eq!(
@@ -8373,6 +8396,38 @@ mod tests {
         let error = validate_exact("GUIIcons.png", &substitute, 240, 360)
             .expect_err("generic icon sheet must fail");
         assert!(error.to_string().contains("exact 240x360"));
+    }
+
+    #[test]
+    fn full_size_scenario_button_highlight_is_valid() {
+        let fonts = endeavour_font_set();
+        let caption = load_graphics_png("GUICaption.png");
+        let button = load_graphics_png("GUIButton.png");
+        let button_down = load_graphics_png("GUIButtonDown.png");
+        let icons = load_graphics_png("GUIIcons.png");
+        let icons_extended = load_graphics_png("GUIIcons2.png");
+        let checkbox = load_graphics_png("GUICheckbox.png");
+        let scroll = load_graphics_png("GUIScroll.png");
+        let context = load_graphics_png("GUIContext.png");
+        let highlight = ImageData::new(30, 30, vec![0xff; 30 * 30 * 4]);
+
+        // C4GUI::Resource::Load passes C4FCT_Full for GUIButtonHighlight, so
+        // C4FacetExSurface::Load retains the complete override dimensions
+        // (src/C4Gui.cpp:1093; src/C4FacetEx.cpp:137-161).
+        LobbyResources::new(
+            &fonts,
+            &fonts.text,
+            &caption,
+            &button,
+            &button_down,
+            &icons,
+            &icons_extended,
+            &highlight,
+            &checkbox,
+            &scroll,
+            &context,
+        )
+        .expect("MarsClonk's 30x30 highlight is a valid full-size facet");
     }
 
     #[test]

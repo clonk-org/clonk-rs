@@ -4,11 +4,11 @@ use std::collections::HashMap;
 
 #[test]
 fn synchronize_control_applies_clearance_only_when_requested() {
-        // C4ControlSynchronize executes Game.Synchronize first and calls
-        // Game.SyncClearance only when SyncClear is set. The latter alone
-        // collapses fixed coordinates to integer object state (pristine
-        // 9ffa0a5d src/C4Control.cpp:537-550;
-        // src/C4Game.cpp:3679-3715; src/C4Object.cpp:3803-3815).
+    // C4ControlSynchronize executes Game.Synchronize first and calls
+    // Game.SyncClearance only when SyncClear is set. The latter alone
+    // collapses fixed coordinates to integer object state (pristine
+    // 9ffa0a5d src/C4Control.cpp:537-550;
+    // src/C4Game.cpp:3679-3715; src/C4Object.cpp:3803-3815).
     let mut engine = Engine::with_seed(0);
     engine
         .register_definition(
@@ -141,14 +141,13 @@ fn synchronize_control_checkpoints_live_player_and_crew_time_but_not_replays() {
 
 #[test]
 fn free_stabilize_probe_clears_previous_contact_latch() {
-        // C4Object::Stabilize rotates the shape upright and calls
-        // ContactCheck; ContactCheck stores Shape.ContactCNAT even when it is
-        // zero (C4Movement.cpp:493-516,166-182).
+    // C4Object::Stabilize rotates the shape upright and calls
+    // ContactCheck; ContactCheck stores Shape.ContactCNAT even when it is
+    // zero (C4Movement.cpp:493-516,166-182).
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(100, 100));
 
-    let mut definition =
-        Definition::from_script("TILT", "Tilt", "").expect("definition compiles");
+    let mut definition = Definition::from_script("TILT", "Tilt", "").expect("definition compiles");
     definition.set_rotateable(1);
     definition.set_shape_vertices(vec![ObjectVertex {
         x: 0,
@@ -180,9 +179,9 @@ fn free_stabilize_probe_clears_previous_contact_latch() {
 
 #[test]
 fn command_snapshot_keeps_definition_command_policies() {
-        // Commands read these policies from cObj->Def at execution, so the
-        // Rust frame snapshot must preserve the raw engine definition values
-        // rather than infer them from crew OCF.
+    // Commands read these policies from cObj->Def at execution, so the
+    // Rust frame snapshot must preserve the raw engine definition values
+    // rather than infer them from crew OCF.
     let mut engine = Engine::with_seed(0);
     let mut definition =
         Definition::from_script("ROUT", "Router", "").expect("definition compiles");
@@ -192,7 +191,7 @@ fn command_snapshot_keeps_definition_command_policies() {
     definition.configure_actions(
         Some("Route".to_owned()),
         HashMap::from([(
-                "Route".to_owned(),
+            "Route".to_owned(),
             ActionSpec::default().with_disabled(true),
         )]),
     );
@@ -237,9 +236,9 @@ fn lazy_host_world_call_object_materializes_only_on_world_access() {
         )
         .expect("filler registers");
     let mut caller = Definition::from_script(
-            "LAZY",
-            "Lazy caller",
-            r#"#strict
+        "LAZY",
+        "Lazy caller",
+        r#"#strict
 local self_calls, world_count, wall_seen;
 protected func SelfOnly()
 {
@@ -281,17 +280,17 @@ protected func QueryWorld()
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
         1,
-            "callback setup copies only the executing object"
+        "callback setup copies only the executing object"
     );
     assert_eq!(
         SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(Cell::get),
         1,
-            "the callback and its seeded host-world object share one actor-state snapshot"
+        "the callback and its seeded host-world object share one actor-state snapshot"
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
         0,
-            "an object-local callback never clones the landscape"
+        "an object-local callback never clones the landscape"
     );
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -305,12 +304,12 @@ protected func QueryWorld()
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
         engine.objects.len(),
-            "enumeration fills one complete object view exactly once"
+        "enumeration fills one complete object view exactly once"
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
         1,
-            "terrain is cloned on its first actual query"
+        "terrain is cloned on its first actual query"
     );
     assert_eq!(
         engine.objects[caller_index]
@@ -318,7 +317,7 @@ protected func QueryWorld()
             .local_vars
             .get("wall_seen"),
         Some(&Value::Bool(true)),
-            "the lazy landscape preserves object-relative GBackSolid behavior"
+        "the lazy landscape preserves object-relative GBackSolid behavior"
     );
 }
 
@@ -331,16 +330,16 @@ fn lazy_host_world_action_callback_seeds_only_caller() {
         )
         .expect("filler registers");
     let mut actor = Definition::from_script(
-            "ACTR",
-            "Action caller",
-            "#strict\nlocal phase_calls; protected func OnPhase() { phase_calls++; return(0); }",
+        "ACTR",
+        "Action caller",
+        "#strict\nlocal phase_calls; protected func OnPhase() { phase_calls++; return(0); }",
     )
     .expect("actor compiles");
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         Some("Swim".to_owned()),
         HashMap::from([(
-                "Swim".to_owned(),
+            "Swim".to_owned(),
             ActionSpec::default().with_phase_call("OnPhase"),
         )]),
     );
@@ -363,7 +362,7 @@ fn lazy_host_world_action_callback_seeds_only_caller() {
         .invoke_action_callback(
             actor_index,
             ActionCallbackKind::Phase,
-                "Swim",
+            "Swim",
             action_index,
             None,
             None,
@@ -374,12 +373,12 @@ fn lazy_host_world_action_callback_seeds_only_caller() {
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
         1,
-            "a self-only PhaseCall copies no unrelated object"
+        "a self-only PhaseCall copies no unrelated object"
     );
     assert_eq!(
         SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(Cell::get),
         1,
-            "ordinary action callbacks reuse their actor-state snapshot in the host world"
+        "ordinary action callbacks reuse their actor-state snapshot in the host world"
     );
     assert_eq!(HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get), 0,);
     assert_eq!(
@@ -393,10 +392,10 @@ fn lazy_host_world_action_callback_seeds_only_caller() {
 
 #[test]
 fn legacy_find_object_rejects_nonmatches_without_full_state_materialization() {
-        // C4Game::FindObject walks Game.Objects from First -> Next and tests
-        // scalar C4Object fields in place (C4Game.cpp:1337-1424). The first
-        // matching object must therefore stay master-order authoritative,
-        // without copying every rejected object's full script state.
+    // C4Game::FindObject walks Game.Objects from First -> Next and tests
+    // scalar C4Object fields in place (C4Game.cpp:1337-1424). The first
+    // matching object must therefore stay master-order authoritative,
+    // without copying every rejected object's full script state.
     let mut engine = Engine::with_seed(0);
     for definition in [
         Definition::from_script("TARG", "Target", "#strict\n").expect("target compiles"),
@@ -407,9 +406,9 @@ fn legacy_find_object_rejects_nonmatches_without_full_state_materialization() {
             .expect("definition registers");
     }
     let mut searcher = Definition::from_script(
-            "SRCH",
-            "Searcher",
-            "#strict\n\
+        "SRCH",
+        "Searcher",
+        "#strict\n\
              protected func FindTarget() { return(FindObject(TARG)); }\n\
              protected func FindOwned() { return(FindObjectOwner(TARG, 3)); }\n",
     )
@@ -451,13 +450,13 @@ fn legacy_find_object_rejects_nonmatches_without_full_state_materialization() {
             .call_object_function(searcher_index, "FindTarget", Vec::new())
             .expect("FindObject succeeds"),
         object_reference_value(newer_target),
-            "the newer target is first in C++ forward master-list order"
+        "the newer target is first in C++ forward master-list order"
     );
     assert_ne!(newer_target, older_target);
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
         1,
-            "only the already-required executing-object snapshot is materialized"
+        "only the already-required executing-object snapshot is materialized"
     );
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -466,12 +465,12 @@ fn legacy_find_object_rejects_nonmatches_without_full_state_materialization() {
             .call_object_function(searcher_index, "FindOwned", Vec::new())
             .expect("FindObjectOwner succeeds"),
         object_reference_value(older_target),
-            "the owner predicate skips the newer target without disturbing order"
+        "the owner predicate skips the newer target without disturbing order"
     );
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
         1,
-            "FindObjectOwner also rejects candidates through scalar fields"
+        "FindObjectOwner also rejects candidates through scalar fields"
     );
 }
 
@@ -490,9 +489,9 @@ fn lazy_host_world_global_effect_without_world_access_copies_nothing() {
         });
     }
     let mut definition = Definition::from_script(
-            "GFXL",
-            "Global lazy effect",
-            "#strict\nfunc FxLazyTimer(object target, int number, int time) { return(0); }",
+        "GFXL",
+        "Global lazy effect",
+        "#strict\nfunc FxLazyTimer(object target, int number, int time) { return(0); }",
     )
     .expect("effect definition compiles");
     definition.set_c4_callback_convention(true);
@@ -524,7 +523,7 @@ fn lazy_host_world_global_effect_without_world_access_copies_nothing() {
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
         0,
-            "a nil-target global callback copies no object"
+        "a nil-target global callback copies no object"
     );
     assert_eq!(HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get), 0,);
 }
@@ -551,9 +550,9 @@ fn lazy_host_world_contact_materialization_is_deferred_until_query() {
         )
         .expect("filler registers");
     let mut swimmer = Definition::from_script(
-            "SWIM",
-            "Contact swimmer",
-            r#"#strict
+        "SWIM",
+        "Contact swimmer",
+        r#"#strict
 local contact_calls, world_count, wall_seen;
 protected func ContactRight()
 {
@@ -609,12 +608,12 @@ protected func ContactRight()
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
         0,
-            "free movement must not snapshot the world merely because ContactCalls=1"
+        "free movement must not snapshot the world merely because ContactCalls=1"
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
         0,
-            "free movement must not clone terrain merely because ContactCalls=1"
+        "free movement must not clone terrain merely because ContactCalls=1"
     );
 
     engine
@@ -622,8 +621,8 @@ protected func ContactRight()
         .as_mut()
         .expect("landscape exists")
         .grid_write_byte(54, 50, 1);
-        // Cross one free pixel first so DoMotion mutably reborrows the
-        // non-mover slices before the same movement reaches ContactRight.
+    // Cross one free pixel first so DoMotion mutably reborrows the
+    // non-mover slices before the same movement reaches ContactRight.
     engine.objects[swimmer_index].set_fixed_velocity(FixedVec2::from_ints(2, 0));
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
     HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
@@ -638,12 +637,12 @@ protected func ContactRight()
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
         engine.objects.len(),
-            "the first real Contact* call materializes one complete world"
+        "the first real Contact* call materializes one complete world"
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
         1,
-            "Contact* clones terrain only when GBackSolid first queries it"
+        "Contact* clones terrain only when GBackSolid first queries it"
     );
     assert_eq!(
         engine.objects[swimmer_index]
@@ -651,7 +650,7 @@ protected func ContactRight()
             .local_vars
             .get("contact_calls"),
         Some(&Value::Int(1)),
-            "the deferred world preserves Contact* callback execution"
+        "the deferred world preserves Contact* callback execution"
     );
     assert_eq!(
         engine.objects[swimmer_index]
@@ -659,7 +658,7 @@ protected func ContactRight()
             .local_vars
             .get("world_count"),
         Some(&Value::Int(engine.objects.len() as i32 - 1)),
-            "ObjectCount sees every other live object (C++ excludes the caller)"
+        "ObjectCount sees every other live object (C++ excludes the caller)"
     );
     assert_eq!(
         engine.objects[swimmer_index]
@@ -667,7 +666,7 @@ protected func ContactRight()
             .local_vars
             .get("wall_seen"),
         Some(&Value::Bool(true)),
-            "the deferred callback sees the contact-time landscape"
+        "the deferred callback sees the contact-time landscape"
     );
 }
 
@@ -678,8 +677,8 @@ fn rejected_step_latches_contact_for_next_move_to_jump() {
         Landscape::with_default_material(200, vec![200; 200], None).expect("contact landscape");
     landscape.set_world_height(200);
     let mut pixels = vec![0; 200 * 200];
-        // The current left vertex is free at (96,103), but the candidate
-        // one-pixel-left step reaches this solid pixel at (95,103).
+    // The current left vertex is free at (96,103), but the candidate
+    // one-pixel-left step reaches this solid pixel at (95,103).
     pixels[103 * 200 + 95] = 1;
     landscape.set_pixel_grid(PixelGrid::new(
         200,
@@ -695,11 +694,11 @@ fn rejected_step_latches_contact_for_next_move_to_jump() {
         Definition::from_script("WALK", "Walker", "").expect("walker compiles");
     let mut actions = HashMap::new();
     actions.insert(
-            "Walk".to_owned(),
+        "Walk".to_owned(),
         ActionSpec::default().with_procedure("Walk"),
     );
     actions.insert(
-            "Jump".to_owned(),
+        "Jump".to_owned(),
         ActionSpec::default().with_procedure("Flight"),
     );
     walker_definition.configure_actions(Some("Walk".to_owned()), actions);
@@ -732,7 +731,7 @@ fn rejected_step_latches_contact_for_next_move_to_jump() {
     assert_ne!(
         engine.objects[walker_index].state.ocf & ocf::CREW_MEMBER,
         0,
-            "the fixture participates in C4Command JumpControl"
+        "the fixture participates in C4Command JumpControl"
     );
     let solid_mask_indices = engine.active_solid_mask_indices();
     let definition_id = engine.objects[walker_index].definition_id.clone();
@@ -755,7 +754,7 @@ fn rejected_step_latches_contact_for_next_move_to_jump() {
     assert_eq!(
         engine.live_command_snapshot(walker_index).contact & CNAT_LEFT,
         CNAT_LEFT,
-            "the rejected candidate step latches C4Object::t_contact"
+        "the rejected candidate step latches C4Object::t_contact"
     );
 
     engine.objects[walker_index]
@@ -764,7 +763,7 @@ fn rejected_step_latches_contact_for_next_move_to_jump() {
             CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(60))
                 .with_ty(Some(93))
-                    // C4CMD_MoveTo_NoPosAdjust keeps the low-side target.
+                // C4CMD_MoveTo_NoPosAdjust keeps the low-side target.
                 .with_data(CommandData::Integer(1)),
         )
         .expect("MoveTo command queues");
@@ -783,7 +782,7 @@ fn rejected_step_latches_contact_for_next_move_to_jump() {
             .first()
             .map(String::as_str),
         Some("Jump"),
-            "JumpControl reacts to the rejected step's latched CNAT_Left on the next command frame"
+        "JumpControl reacts to the rejected step's latched CNAT_Left on the next command frame"
     );
 }
 
@@ -813,7 +812,11 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
         .object_sector_ids_in_rect(DefinitionRect::new(0, 0, 100, 100))
         .expect("a landscape-backed context has a sector map");
 
-    assert_eq!(found.len(), 8, "every spawned object is inside the query rect");
+    assert_eq!(
+        found.len(),
+        8,
+        "every spawned object is inside the query rect"
+    );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
         0,
@@ -823,20 +826,25 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
 
 #[test]
 fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
-    // FREEZE, not a new behavior claim. `C4LSectors` keeps its own physical
-    // per-sector list order and refreshes only a rank oracle on SortByCategory
-    // (oracle-src-pinned src/C4Sector.cpp:107-160), so a map rebuilt from the
-    // current object set and a map mutated incrementally can legitimately
-    // disagree. FindObject ordering is determinism-critical, so pin the exact
-    // sequences the callback-local rebuild produces today. Any change to how
-    // host contexts obtain their sector map must leave every assertion here
-    // untouched.
+    // FREEZE. `C4LSectors` keeps its own physical per-sector list order and
+    // refreshes only a rank oracle on SortByCategory (oracle-src-pinned
+    // src/C4Sector.cpp:107-160), so a map rebuilt from the current object set
+    // and a map mutated incrementally can legitimately disagree. FindObject
+    // ordering is determinism-critical, so pin the exact sequences the
+    // callback-local rebuild produces.
+    //
+    // The frozen sequences are per-sector NEWEST-FIRST, because
+    // `C4LSectors::Add` receives the live forward master list and
+    // `C4ObjectList::Add(stMain)` links a new object ahead of the first
+    // same-category/same-id entry (C4Sector.cpp:88-101;
+    // C4ObjectList.cpp:155-163). Verified against the pinned oracle on
+    // EkeReloaded's Invasion: for one shared sector C++ reported
+    // `721 722 719 720`, and an earlier ascending-order rebuild here reported
+    // `721 719 722 720`.
     let mut engine = Engine::with_seed(0);
     for id in ["SCTA", "SCTB"] {
         engine
-            .register_definition(
-                Definition::from_script(id, id, "").expect("definition compiles"),
-            )
+            .register_definition(Definition::from_script(id, id, "").expect("definition compiles"))
             .expect("definition registers");
     }
     engine.set_landscape(Landscape::flat(400, 200));
@@ -854,13 +862,33 @@ fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
         spawned.push(object);
     }
 
+    // The 15px spacing groups these 24 objects into eight sectors; each
+    // sector's own list is newest-first, so every group runs backwards.
+    // Entries are spawn indices.
+    const SECTOR_GROUPS: [&[usize]; 8] = [
+        &[2, 1, 0],
+        &[6, 5, 4, 3],
+        &[9, 8, 7],
+        &[12, 11, 10],
+        &[16, 15, 14, 13],
+        &[19, 18, 17],
+        &[22, 21, 20],
+        &[23],
+    ];
+    let expect = |groups: &[&[usize]]| -> Vec<ObjectId> {
+        groups
+            .iter()
+            .flat_map(|group| group.iter().map(|&index| spawned[index]))
+            .collect()
+    };
+
     let context = engine.host_world_context();
     let whole = context
         .object_sector_ids_in_rect(DefinitionRect::new(0, 0, 400, 200))
         .expect("a landscape-backed context has a sector map");
     assert_eq!(
         whole,
-        spawned,
+        expect(&SECTOR_GROUPS),
         "a full-extent query returns every object in master-list order"
     );
 
@@ -873,9 +901,9 @@ fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
     let window = context
         .object_sector_ids_in_rect(DefinitionRect::new(100, 0, 120, 200))
         .expect("sector map present");
-    let expected_window: Vec<_> = spawned.iter().copied().skip(7).take(10).collect();
     assert_eq!(
-        window, expected_window,
+        window,
+        expect(&SECTOR_GROUPS[2..5]),
         "a partial rect preserves master-list order within the covered sectors"
     );
 
@@ -886,7 +914,7 @@ fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
         .expect("sector map present");
     assert_eq!(
         lists.iter().flatten().copied().collect::<Vec<_>>(),
-        spawned,
+        expect(&SECTOR_GROUPS),
         "per-sector lists flatten back to master-list order"
     );
     assert!(

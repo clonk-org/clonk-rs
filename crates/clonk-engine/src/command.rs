@@ -29,16 +29,15 @@ const DIG_OUT_POSITION_RANGE: i32 = 15;
 const DIG_DIRECTION_RANGE: i32 = 1;
 const PUSH_TO_RANGE: i32 = 10;
 
-
-mod snapshot;
-mod model;
 mod geometry;
 mod machine;
+mod model;
+mod snapshot;
 
-pub use snapshot::*;
-pub use model::*;
 pub(crate) use geometry::*;
 pub use machine::*;
+pub use model::*;
+pub use snapshot::*;
 
 #[cfg(test)]
 mod tests {
@@ -62,8 +61,3 @@ mod tests {
     include!("command/tests/part_06.rs");
     include!("command/tests/part_07.rs");
 }
-
-
-
-
-

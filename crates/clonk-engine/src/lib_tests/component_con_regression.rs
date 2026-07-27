@@ -2,10 +2,10 @@ use super::*;
 
 #[test]
 fn initial_component_gain_scales_the_raw_definition_count_once() {
-        // ComponentConGain reads the raw Def->Component count and applies
-        // Con exactly once (C4Object.cpp:519-526). This is observable when
-        // Construction changes a freshly initialized zero-count entry before
-        // NewObject's partial initial DoCon.
+    // ComponentConGain reads the raw Def->Component count and applies
+    // Con exactly once (C4Object.cpp:519-526). This is observable when
+    // Construction changes a freshly initialized zero-count entry before
+    // NewObject's partial initial DoCon.
     let mut engine = Engine::new();
     let mut definition =
         Definition::from_script("PART", "Partial", "#strict\n").expect("definition compiles");
@@ -32,7 +32,7 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
             .object_snapshot(object)
             .and_then(|snapshot| snapshot.components.get("NEGA").copied()),
         Some(-3),
-            "initial ComponentConCutoff keeps min(-3, 0)"
+        "initial ComponentConCutoff keeps min(-3, 0)"
     );
 
     engine.do_initial_con(index, FULL_CON / 2);
@@ -48,7 +48,7 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
             .object_snapshot(object)
             .and_then(|snapshot| snapshot.components.get("NEGA").copied()),
         Some(-1),
-            "growth uses max(-3, trunc(-3 * 50%))"
+        "growth uses max(-3, trunc(-3 * 50%))"
     );
 
     let partial = engine
@@ -61,7 +61,7 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
     assert_eq!(
         partial.components.get("NEGA"),
         Some(&-1),
-            "fresh partial Con includes the initial ComponentConGain"
+        "fresh partial Con includes the initial ComponentConGain"
     );
 
     let below_first_step = engine
@@ -74,7 +74,7 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
     assert_eq!(
         below_first_step.components.get("NEGA"),
         Some(&-3),
-            "initial DoCon does not refresh components below its first one-percent step"
+        "initial DoCon does not refresh components below its first one-percent step"
     );
 }
 

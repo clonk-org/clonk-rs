@@ -96,11 +96,14 @@ impl Engine {
             initialized,
         } = config;
         if let Some(sequence) = solid_mask_instance_sequence {
-            self.solid_mask_staging.next_solid_mask_instance_sequence = self.solid_mask_staging.next_solid_mask_instance_sequence.max(
-                sequence
-                    .checked_add(1)
-                    .expect("C4SolidMask instance sequence overflow"),
-            );
+            self.solid_mask_staging.next_solid_mask_instance_sequence = self
+                .solid_mask_staging
+                .next_solid_mask_instance_sequence
+                .max(
+                    sequence
+                        .checked_add(1)
+                        .expect("C4SolidMask instance sequence overflow"),
+                );
         }
 
         let (
@@ -1378,7 +1381,7 @@ impl Engine {
     /// Apply every held same-call `Enter` whose container has materialized,
     /// repeating until no further link resolves so a chain of freshly created
     /// containers binds in one pass.
-    fn apply_materialized_deferred_enters(
+    pub(crate) fn apply_materialized_deferred_enters(
         &mut self,
         deferred_enters: &mut Vec<(ObjectId, ObjectId)>,
     ) -> Result<(), EngineError> {

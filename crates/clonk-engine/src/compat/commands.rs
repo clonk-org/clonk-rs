@@ -132,13 +132,11 @@ pub(crate) fn parse_command_request(
 /// Presence check for ordered command previews: once a same-call scope
 /// exists, its removal state supersedes the immutable frame snapshot.
 fn preview_object_is_present(target: ObjectId) -> bool {
-    with_host_context(false, |context| {
-        match context.object_scope(target) {
-            Some(scope) => !scope.destroy && scope.status() != ObjectStatus::Deleted,
-            None => context
-                .get_world_object(target)
-                .is_some_and(|object| object.is_present()),
-        }
+    with_host_context(false, |context| match context.object_scope(target) {
+        Some(scope) => !scope.destroy && scope.status() != ObjectStatus::Deleted,
+        None => context
+            .get_world_object(target)
+            .is_some_and(|object| object.is_present()),
     })
 }
 
@@ -952,27 +950,28 @@ pub(crate) fn process_preview_blast_reactions(
     controller: Option<i32>,
     counts: &HashMap<crate::MaterialId, i32>,
 ) -> Result<(), RuntimeError> {
-    let materials = try_with_host_context("BlastFree requires an active engine context", |context| {
-        Ok::<_, RuntimeError>(
-            context
-                .world
-                .materials()
-                .map(|materials| {
-                    materials
-                        .iter()
-                        .map(|material| {
-                            (
-                                material.id(),
-                                material.blast_to_object_name().map(str::to_string),
-                                material.blast_to_object_ratio(),
-                                material.blast_to_pxs_ratio(),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-        )
-    })?;
+    let materials =
+        try_with_host_context("BlastFree requires an active engine context", |context| {
+            Ok::<_, RuntimeError>(
+                context
+                    .world
+                    .materials()
+                    .map(|materials| {
+                        materials
+                            .iter()
+                            .map(|material| {
+                                (
+                                    material.id(),
+                                    material.blast_to_object_name().map(str::to_string),
+                                    material.blast_to_object_ratio(),
+                                    material.blast_to_pxs_ratio(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            )
+        })?;
 
     for (material, definition, object_ratio, pxs_ratio) in materials {
         let count = counts.get(&material).copied().unwrap_or(0);
@@ -1044,29 +1043,30 @@ pub(crate) fn process_preview_dig_reactions(
     let Some(target) = by_object else {
         return Ok(());
     };
-    let (frame, materials) = try_with_host_context_mut("DigFree requires an active engine context", |context| {
-        if !context.add_dig_material_counts(target, counts) {
-            return Ok((context.world.frame, Vec::new()));
-        }
-        let materials = context
-            .world
-            .materials()
-            .map(|materials| {
-                materials
-                    .iter()
-                    .map(|material| {
-                        (
-                            material.id(),
-                            material.dig_to_object_name().map(str::to_string),
-                            material.dig_to_object_ratio(),
-                            material.dig_to_object_on_request_only(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        Ok::<_, RuntimeError>((context.world.frame, materials))
-    })?;
+    let (frame, materials) =
+        try_with_host_context_mut("DigFree requires an active engine context", |context| {
+            if !context.add_dig_material_counts(target, counts) {
+                return Ok((context.world.frame, Vec::new()));
+            }
+            let materials = context
+                .world
+                .materials()
+                .map(|materials| {
+                    materials
+                        .iter()
+                        .map(|material| {
+                            (
+                                material.id(),
+                                material.dig_to_object_name().map(str::to_string),
+                                material.dig_to_object_ratio(),
+                                material.dig_to_object_on_request_only(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Ok::<_, RuntimeError>((context.world.frame, materials))
+        })?;
     if frame % 5 != 0 {
         return Ok(());
     }
@@ -1190,7 +1190,7 @@ fn preview_command_failure_feedback(
     }
 
     let failure_reason = feedback.reason;
-    let fail_message = (failure_reason == Some(CommandFailureReason::CannotBuild))
+    let mut fail_message = (failure_reason == Some(CommandFailureReason::CannotBuild))
         .then(|| {
             HOST_CONTEXT.with(|cell| {
                 let borrow = cell.borrow();
@@ -1279,7 +1279,10 @@ fn preview_command_failure_feedback(
                 if !handled && failure_reason.is_none() {
                     // Even when presentation is deferred, constructing the
                     // message runs target GetCustomComponents synchronously.
-                    let _ = get_needed_mat_str(&[object_reference_value(target)])?;
+                    fail_message = match get_needed_mat_str(&[object_reference_value(target)])? {
+                        Value::String(text) => Some(text.into_string()),
+                        _ => None,
+                    };
                 }
             }
         }
@@ -1305,19 +1308,22 @@ fn preview_command_failure_feedback(
             }
         }
         if let Some(text) = fail_message {
-            context.register_message(MessageCommand::Add(MessageSpec {
-                kind: MessageKind::Target,
-                text,
-                target: Some(actor),
-                player: None,
-                offset: Vector2::ZERO,
-                color: 0xffff_ffff,
-                flags: FLAG_MULTIPLE,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            }));
+            context.register_message(MessageCommand::Append {
+                spec: MessageSpec {
+                    kind: MessageKind::Target,
+                    text,
+                    target: Some(actor),
+                    player: None,
+                    offset: Vector2::ZERO,
+                    color: 0xffff_ffff,
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    frame_decoration: None,
+                    portrait: None,
+                },
+                no_duplicates: true,
+            });
         }
     });
     Ok(())
@@ -4851,15 +4857,18 @@ pub(crate) fn append_command(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let request = parse_command_request(command_id, args, CommandArgLayout::Add, "AppendCommand")?;
 
-    try_with_host_context_mut("AppendCommand requires an active engine context", |context| {
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
-        };
+    try_with_host_context_mut(
+        "AppendCommand requires an active engine context",
+        |context| {
+            let object = match context.object_context_mut() {
+                Some(object) => object,
+                None => return Ok(Value::Bool(false)),
+            };
 
-        let success = object.push_command_back(request);
-        Ok(Value::Bool(success))
-    })
+            let success = object.push_command_back(request);
+            Ok(Value::Bool(success))
+        },
+    )
 }
 
 pub(crate) fn parse_command_target(value: &Value) -> Result<Option<i32>, RuntimeError> {

@@ -12,11 +12,11 @@ fn network_set_pre_send_returns_normally_and_retains_ordered_requests() {
     let mut engine = network_engine();
     engine
         .load_scenario_script_with_convention(
-                "SetPreSend.c",
+            "SetPreSend.c",
             concat!(
-                    "#strict\nfunc Probe() { return [",
-                    "SetPreSend(-1), SetPreSend(0), ",
-                    "SetPreSend(76, \"Client A?i*\"), SetPreSend(55, \"Host*\")]; }\n",
+                "#strict\nfunc Probe() { return [",
+                "SetPreSend(-1), SetPreSend(0), ",
+                "SetPreSend(76, \"Client A?i*\"), SetPreSend(55, \"Host*\")]; }\n",
             ),
             true,
         )
@@ -57,8 +57,8 @@ fn offline_set_pre_send_is_not_misclassified_as_a_script_failure() {
     let mut engine = Engine::new();
     engine
         .load_scenario_script_with_convention(
-                "SetPreSend.c",
-                "#strict\nfunc Probe() { SetPreSend(0); SetPreSend(-1); return 1; }\n",
+            "SetPreSend.c",
+            "#strict\nfunc Probe() { SetPreSend(0); SetPreSend(-1); return 1; }\n",
             true,
         )
         .expect("SetPreSend is registered during script linking");
@@ -81,9 +81,9 @@ fn fail_safe_initialize_keeps_the_local_pacing_request() {
     engine
         .register_definition(
             Definition::from_script(
-                    "PRES",
-                    "PreSend probe",
-                    "#strict\nfunc Initialize() { SetPreSend(30); }\n",
+                "PRES",
+                "PreSend probe",
+                "#strict\nfunc Initialize() { SetPreSend(30); }\n",
             )
             .expect("definition compiles"),
         )
@@ -107,17 +107,17 @@ fn nested_creation_keeps_the_local_pacing_request() {
     engine
         .register_definition(
             Definition::from_script(
-                    "PRES",
-                    "Nested PreSend probe",
-                    "#strict\nfunc Construction() { SetPreSend(30); }\n",
+                "PRES",
+                "Nested PreSend probe",
+                "#strict\nfunc Construction() { SetPreSend(30); }\n",
             )
             .expect("definition compiles"),
         )
         .expect("definition registers");
     engine
         .load_scenario_script_with_convention(
-                "NestedSetPreSend.c",
-                "#strict\nfunc Probe() { CreateObject(PRES); return 1; }\n",
+            "NestedSetPreSend.c",
+            "#strict\nfunc Probe() { CreateObject(PRES); return 1; }\n",
             true,
         )
         .expect("scenario script compiles");
@@ -140,9 +140,9 @@ fn initialize_def_keeps_the_local_pacing_request() {
     engine
         .register_definition(
             Definition::from_script(
-                    "PDEF",
-                    "InitializeDef PreSend probe",
-                    "#strict\nfunc InitializeDef() { SetPreSend(30); }\n",
+                "PDEF",
+                "InitializeDef PreSend probe",
+                "#strict\nfunc InitializeDef() { SetPreSend(30); }\n",
             )
             .expect("definition compiles"),
         )

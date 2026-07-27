@@ -503,6 +503,44 @@ mod tests {
         assert!(!coord.clients[&1].pending.contains_key(&12));
     }
 
+    /// The invariant that makes `CNM_Async` determinism-safe: once the host has
+    /// packed a tick without a straggler, that straggler's control for the tick
+    /// must be discarded, never applied later. Executing it on a subsequent
+    /// tick would put the late client's simulation ahead of everyone else's.
+    #[test]
+    fn control_arriving_after_its_tick_was_forced_is_stale_and_never_executes() {
+        let mut coord = ControlCoordinator::new(100);
+        coord.register_client(1).unwrap();
+        coord.register_client(2).unwrap();
+
+        // Only client 1 makes the deadline; the host forces the tick.
+        coord.ingest(packet(1, 0, b"prompt")).unwrap();
+        let forced = coord.force_current_tick();
+        assert_eq!(forced.len(), 1);
+        assert_eq!(forced[0].tick(), 0);
+        assert_eq!(forced[0].packets().len(), 1, "the slow client is omitted");
+        assert_eq!(coord.current_tick(), 1);
+
+        // Client 2's control for tick 0 finally arrives.
+        let late = coord.ingest(packet(2, 0, b"late")).unwrap();
+        assert_eq!(late.status, InsertStatus::Stale);
+        assert!(late.ready.is_empty(), "a stale packet publishes nothing");
+
+        // It must not be retained and re-emitted against any later tick.
+        assert!(!coord.clients[&2].pending.contains_key(&0));
+        coord.ingest(packet(1, 1, b"next")).unwrap();
+        let ready = coord.ingest(packet(2, 1, b"next")).unwrap().ready;
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].tick(), 1);
+        for control in ready[0].packets() {
+            assert!(
+                control.payload().starts_with(b"next"),
+                "tick 1 must carry only tick 1's control, got {:?}",
+                control.payload()
+            );
+        }
+    }
+
     #[test]
     fn forcing_empty_tick_advances_without_registered_clients() {
         let mut coord = ControlCoordinator::new(100);

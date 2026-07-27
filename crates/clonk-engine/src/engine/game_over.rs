@@ -481,7 +481,24 @@ impl Engine {
         }
 
         let mut created = Vec::with_capacity(spawns.len());
-        for spawn in spawns {
+        // C4Object::Enter binds two objects that already exist, because
+        // FnCreateObject hands back a live C4Object (C4Object.cpp:1560-1620;
+        // C4Script.cpp FnCreateObject). One scenario-script call may therefore
+        // create its content before the container it enters, as Eke Reloaded's
+        // CaptureTheFlag InitializeClonk does. Materialize in creation order
+        // and hold such a link until the queued container exists, exactly like
+        // process_spawn_queue.
+        let mut pending: VecDeque<SpawnConfig> = spawns.into_iter().collect();
+        let mut deferred_enters: Vec<(ObjectId, ObjectId)> = Vec::new();
+        while let Some(mut spawn) = pending.pop_front() {
+            if let (Some(object_id), Some(container)) = (spawn.id, spawn.container) {
+                if self.find_object_index(container).is_none()
+                    && pending.iter().any(|queued| queued.id == Some(container))
+                {
+                    spawn.container = None;
+                    deferred_enters.push((object_id, container));
+                }
+            }
             match self.spawn_object(spawn) {
                 Ok(id) => created.push(id),
                 // CreateObject resolves the id with C4Id2Def and yields
@@ -493,6 +510,7 @@ impl Engine {
                 }
                 Err(error) => return Err(error),
             }
+            self.apply_materialized_deferred_enters(&mut deferred_enters)?;
         }
         // Transfer zones fold AFTER the spawns: C4Game::NewObject adds the
         // object to Game.Objects BEFORE its creation callbacks fire
@@ -517,5 +535,4 @@ impl Engine {
         }
         Ok(created)
     }
-
 }

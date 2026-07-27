@@ -14,7 +14,8 @@ use crate::ast::{
 };
 use crate::debugger::DebuggerHooks;
 use crate::engine::{
-    GlobalCallContextHook, HostFunction, HostReferenceFunction, RegisteredHostFunction,
+    EvalDirectExecHook, GlobalCallContextHook, HostFunction, HostReferenceFunction,
+    RegisteredHostFunction,
 };
 use crate::error::{RuntimeCallFrame, RuntimeError};
 use crate::value::{
@@ -2984,8 +2985,13 @@ pub struct Vm<'a> {
     /// Engine-wide `&`-parameter lookup for callees this host cannot resolve
     /// (crate::engine::ReferenceParameterProbe).
     reference_parameter_probe: Option<&'a crate::engine::ReferenceParameterProbe>,
+    /// Whole-engine name lookup used by C4AulParse before emitting a direct
+    /// AB_CALL/AB_CALLFS (crate::engine::DirectCallFunctionProbe).
+    direct_call_function_probe: Option<&'a crate::engine::DirectCallFunctionProbe>,
     /// Embedding-engine context switch for AB_CALLGLOBAL's null Obj/Def.
     global_call_context_hook: Option<&'a GlobalCallContextHook>,
+    /// Embedding-engine receiver selection and DirectExec for FnEval.
+    eval_direct_exec_hook: Option<&'a EvalDirectExecHook>,
     /// References returned from a global callee may outlive its temporary
     /// null Obj/Def context. Lazy host-backed references must recreate it.
     retain_global_call_context_for_host_paths: bool,
@@ -3038,7 +3044,9 @@ impl<'a> Vm<'a> {
             method_reference_dispatch: None,
             method_ref_args_dispatch: None,
             reference_parameter_probe: None,
+            direct_call_function_probe: None,
             global_call_context_hook: None,
+            eval_direct_exec_hook: None,
             retain_global_call_context_for_host_paths: false,
             globals_named: None,
             globals_numbered: None,
@@ -3156,11 +3164,24 @@ impl<'a> Vm<'a> {
         self
     }
 
+    pub fn with_direct_call_function_probe(
+        mut self,
+        probe: Option<&'a crate::engine::DirectCallFunctionProbe>,
+    ) -> Self {
+        self.direct_call_function_probe = probe;
+        self
+    }
+
     pub fn with_global_call_context_hook(
         mut self,
         hook: Option<&'a GlobalCallContextHook>,
     ) -> Self {
         self.global_call_context_hook = hook;
+        self
+    }
+
+    pub fn with_eval_direct_exec_hook(mut self, hook: Option<&'a EvalDirectExecHook>) -> Self {
+        self.eval_direct_exec_hook = hook;
         self
     }
 
@@ -3717,6 +3738,41 @@ impl<'a> Vm<'a> {
         Ok(value)
     }
 
+    /// FnEval's DirectExec entry. Unlike host-initiated DirectExec, an eval
+    /// runtime error is profiled when its enclosing native frame unwinds, so
+    /// this temporary frame must not record the same interval a second time.
+    pub(crate) fn eval_direct_exec_with_cells(
+        &self,
+        source: &str,
+        cells: &LocalCells,
+        strict_level: Option<u8>,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        start_direct_exec_profile();
+        let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
+            .parse_direct_exec_expression()
+        else {
+            return Ok(Value::Nil);
+        };
+        let mut diagnostic = ScriptDiagnosticGuard::enter_direct(
+            self.eval_direct_exec_diagnostic_frame(self.definition_context),
+            false,
+        );
+        let mut env = Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
+        env.temporary_script = true;
+        let has_object = matches!(&self.this_value, Value::Object(id) if *id != 0);
+        env.definition_context = has_object;
+        if has_object {
+            for var_decl in self.var_decls {
+                let cell = env.object_state.named_local_cell(&var_decl.name);
+                env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
+            }
+        }
+        let value = self.evaluate(&expr, &mut env, depth)?;
+        diagnostic.returned(&value);
+        Ok(value)
+    }
+
     fn direct_exec_diagnostic_frame(&self, context: &str) -> DirectExecDiagnosticFrame {
         DirectExecDiagnosticFrame::new(
             format!("{context} in {}", self.script_name),
@@ -3946,7 +4002,9 @@ impl<'a> Vm<'a> {
             method_reference_dispatch: self.method_reference_dispatch,
             method_ref_args_dispatch: self.method_ref_args_dispatch,
             reference_parameter_probe: self.reference_parameter_probe,
+            direct_call_function_probe: self.direct_call_function_probe,
             global_call_context_hook: self.global_call_context_hook,
+            eval_direct_exec_hook: self.eval_direct_exec_hook,
             retain_global_call_context_for_host_paths: true,
             globals_named: self.globals_named,
             globals_numbered: self.globals_numbered,
@@ -5353,6 +5411,20 @@ impl<'a> Vm<'a> {
                                     // 1693-1699).
                                     _ => return Ok(Value::Nil),
                                 };
+                            let cells = LocalCells {
+                                state: env.object_state.clone(),
+                            };
+                            if let Some(result) = self.eval_direct_exec_hook.and_then(|hook| {
+                                hook(
+                                    &code,
+                                    &cells,
+                                    self.this_value.clone(),
+                                    env.strict_level,
+                                    depth + 1,
+                                )
+                            }) {
+                                return result;
+                            }
                             start_direct_exec_profile();
                             let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(
                                 &code,
@@ -6912,6 +6984,18 @@ impl<'a> Vm<'a> {
         )
     }
 
+    fn direct_call_function_known(&self, name: &str) -> bool {
+        self.functions.contains_key(name)
+            || self
+                .global_functions
+                .is_some_and(|functions| functions.contains_key(name))
+            || self.has_host_function(name)
+            || Self::is_global_vm_builtin(name)
+            || self
+                .direct_call_function_probe
+                .map_or_else(|| self.method_dispatch.is_some(), |probe| probe(name))
+    }
+
     fn global_call_may_return_reference(&self, name: &str) -> bool {
         self.engine_global_script_function(name)
             .map(|function| function.returns_reference)
@@ -7124,6 +7208,13 @@ impl<'a> Vm<'a> {
                     Some(Value::String(code)) => code,
                     _ => return Ok(value(Value::Nil)),
                 };
+                let cells = LocalCells::default();
+                if let Some(result) = self
+                    .eval_direct_exec_hook
+                    .and_then(|hook| hook(&code, &cells, Value::Nil, env.strict_level, depth + 1))
+                {
+                    return result.map(|value| ReturnValue::Value(TrackedValue::runtime(value)));
+                }
                 start_direct_exec_profile();
                 let Ok(expr) =
                     crate::parser::Parser::with_strict_level_c4_string(&code, env.strict_level)
@@ -7316,6 +7407,16 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<Value, RuntimeError> {
+        if failsafe && !self.direct_call_function_known(name) {
+            // GetFirstFunc failed during C++ parsing, so no AB_CALLFS exists:
+            // Parse_Params(0) still evaluates every explicit argument after
+            // the already-evaluated target, then the target slot becomes nil
+            // (C4AulParse.cpp:3215-3231). A forwarded `...` supplies no slots
+            // to this zero-parameter pseudo-call.
+            self.evaluate_discarded_call_args(args, env, depth + 1)?;
+            return Ok(Value::Nil);
+        }
+
         // Effect-callback state maps carry the object id ("id" key): an
         // arrow call on one targets THAT object, matching the host-fn
         // object-reference convention (C++ pTarget is C4VObj —
@@ -7608,6 +7709,30 @@ impl<'a> Vm<'a> {
         #[cfg(test)]
         record_call_arg_heap_spill(evaluated_args.spilled());
         Ok(evaluated_args)
+    }
+
+    /// `Parse_Params(0, nullptr)` for a globally unresolved fail-safe call.
+    /// With no candidate function, C++ deliberately leaves each operand's
+    /// reference bytecode intact, holds every slot until all expressions have
+    /// run, and then drops the complete zero-parameter frame
+    /// (C4AulParse.cpp:2311-2344).
+    fn evaluate_discarded_call_args(
+        &self,
+        args: &[Expr],
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        let mut evaluated = Vec::with_capacity(args.len());
+        let mut value_stack = ValueStackReservation::empty();
+        for arg in args {
+            let value = {
+                let _pin_creation = LegacyPathPinCreationGuard::enter();
+                self.evaluate_reference_or_value(arg, env, depth)?
+            };
+            evaluated.push(value);
+            value_stack.grow(1)?;
+        }
+        Ok(())
     }
 
     /// `Callee(args, ...)`: after the explicit arguments, forward every

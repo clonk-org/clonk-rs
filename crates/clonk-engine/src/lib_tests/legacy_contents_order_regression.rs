@@ -76,8 +76,8 @@ fn compiled_contents_keep_saved_order_and_cpp_duplicate_repair() {
     let parent_index = engine.find_object_index(parent).expect("container exists");
     assert_eq!(engine.objects[parent_index].state.contents, [second, first]);
 
-        // C4GameObjects::Load removes the earlier link when it encounters a
-        // duplicate, leaving the final occurrence in its saved position.
+    // C4GameObjects::Load removes the earlier link when it encounters a
+    // duplicate, leaving the final occurrence in its saved position.
     engine.restore_legacy_contents_order(&[(parent, vec![second, first, second])]);
     assert_eq!(engine.objects[parent_index].state.contents, [first, second]);
 }
@@ -140,9 +140,9 @@ fn loaded_mass_cache_survives_subpercent_docon_until_update_mass() {
 fn effective_object_mass_has_no_nesting_depth_cutoff() {
     let mut engine = Engine::new();
     let mut mass = Definition::from_script(
-            "MASS",
-            "Mass",
-            "#strict\npublic func TryEnter(target) { return Enter(target); }\n",
+        "MASS",
+        "Mass",
+        "#strict\npublic func TryEnter(target) { return Enter(target); }\n",
     )
     .expect("mass definition compiles");
     mass.set_mass(10);
@@ -205,7 +205,7 @@ fn effective_object_mass_has_no_nesting_depth_cutoff() {
         engine
             .call_object_function(
                 root_index,
-                    "TryEnter",
+                "TryEnter",
                 vec![Value::Object(deepest.as_u64())],
             )
             .expect("cycle attempt returns normally"),
@@ -259,12 +259,12 @@ fn inactive_contents_count_while_deleted_holes_do_not_like_cpp() {
     assert_ne!(
         engine.objects[carrier_index].state.ocf & ocf::COLLECTION,
         0,
-            "ObjectCount sees one retained entry, not the deleted list hole"
+        "ObjectCount sees one retained entry, not the deleted list hole"
     );
     assert_eq!(
         engine.effective_object_mass(carrier_index),
         125,
-            "MassCount includes inactive contents and skips Status==0"
+        "MassCount includes inactive contents and skips Status==0"
     );
 }
 

@@ -70,3 +70,62 @@ fn enter_binds_a_container_created_after_its_content() {
         "the container's contents list must hold the entered object"
     );
 }
+
+const SCENARIO_SCRIPT: &str = r#"#strict
+protected func Initialize()
+{
+    // Eke Reloaded's CaptureTheFlag::InitializeClonk shape (content
+    // EkeReloaded.c4d/GoalsAndRules.c4d/CaptureTheFlag.c4d/Script.c:72-82):
+    // the entering object is created first, its container second, and Enter
+    // binds them afterwards.
+    var content = CreateObject(CNTT, 10, 10, -1);
+    var container = CreateObject(BOXX, 20, 20, -1);
+    Enter(container, content);
+    return 1;
+}
+"#;
+
+/// The same C++ rule holds when the create-then-`Enter` call arrives from the
+/// scenario script instead of an object callback: `FnCreateObject` hands back
+/// a live `C4Object` either way, so `Enter` binds two existing objects
+/// (`src/C4Script.cpp` FnCreateObject; `src/C4Object.cpp:1560-1620`). The Rust
+/// host stages both creations into one `ScenarioBatch`, so `apply_scenario_batch`
+/// has to hold the link until the container queued behind its content
+/// materializes — as the spawn-queue applier already does. Without that, the
+/// container lookup fails and the whole batch aborts, dropping every later
+/// effect of the call.
+#[test]
+fn scenario_script_enter_binds_a_container_created_after_its_content() {
+    let mut engine = Engine::new();
+    for (id, name) in [("CNTT", "Contained object"), ("BOXX", "Container")] {
+        engine
+            .register_definition(
+                Definition::from_script(id, name, "#strict\n").expect("fixture script compiles"),
+            )
+            .expect("fixture definition registers");
+    }
+    engine
+        .install_scenario_script_with_convention("Script.c", SCENARIO_SCRIPT, true)
+        .expect("the create-then-enter scenario Initialize completes like C++");
+
+    let snapshot = engine.snapshot();
+    let container = snapshot
+        .objects
+        .iter()
+        .find(|object| object.definition_id == "BOXX")
+        .expect("the container materializes");
+    let content = snapshot
+        .objects
+        .iter()
+        .find(|object| object.definition_id == "CNTT")
+        .expect("the contained object materializes");
+    assert_eq!(
+        content.container,
+        Some(container.id),
+        "Enter must bind the content to the container created after it"
+    );
+    assert!(
+        container.contents.contains(&content.id),
+        "the container's contents list must hold the entered object"
+    );
+}

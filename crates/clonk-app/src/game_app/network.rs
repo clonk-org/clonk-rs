@@ -2663,7 +2663,10 @@ impl GameApp {
                     && client.random_seed == u64::from(join_data.parameters.random_seed as u32)
             })
             .and_then(|client| client.scenario.take());
-        if let Some(scenario_data) = preloaded_scenario {
+        let preloaded_first_part = preloaded_scenario.is_some();
+        if let Some(scenario_data) =
+            preloaded_scenario.filter(|scenario| !scenario.uses_map_player_extend())
+        {
             return self.install_prepared_client_network_scenario(
                 status,
                 join_data,
@@ -2671,6 +2674,7 @@ impl GameApp {
                 scenario_data,
                 None,
                 definition_groups,
+                true,
             );
         }
         let resolver_paths = cached_app_paths().ok();
@@ -2689,24 +2693,90 @@ impl GameApp {
             .map(classic_language_packs)
             .unwrap_or_default();
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
-        let scenario_data = Scenario::load_network_from_path_with_languages_and_seed_and_packs(
-            &combined_path,
-            &definition_groups,
-            &material_groups,
-            &graphics_groups,
-            &languages,
-            random_seed,
-            &language_packs,
+        let initial_game_source = read_optional_initial_network_game_source(&scenario_group)
+            .map_err(|error| {
+                format!(
+                    "network scenario {} has an unreadable Game.txt: {error}",
+                    combined_path.display()
+                )
+            })?;
+        let initial_game_state = initial_game_source
+            .as_deref()
+            .map(clonk_engine::parse_initial_network_game_data)
+            .unwrap_or_else(|| clonk_engine::InitialNetworkGameData {
+                control_tick: join_data.start_control_tick,
+                ..clonk_engine::InitialNetworkGameData::default()
+            });
+        let startup_player_count = startup_player_count_for_init(
+            initial_game_state.frame,
+            Some(join_data.parameters.startup_player_count),
+            Some(
+                i32::try_from(self.control_player_infos.nonremoved_player_count())
+                    .unwrap_or(i32::MAX),
+            ),
         )
-        .map_err(|error| error.to_string())?;
-        self.install_prepared_client_network_scenario(
+        .unwrap_or(join_data.parameters.startup_player_count);
+        let worker_path = combined_path.clone();
+        let worker_definition_groups = definition_groups.clone();
+        let worker_material_groups = material_groups.clone();
+        let scenario_title = legacy_presentation_text(join_data.parameters.title.as_bytes());
+        let spawn_failure_title = scenario_title.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.begin_client_network_scenario_loading(
             status,
             join_data,
             combined_path,
-            scenario_data,
+            receiver,
             Some(material_groups),
             definition_groups,
-        )
+            preloaded_first_part,
+        )?;
+        let spawn_failure_sender = sender.clone();
+        thread::Builder::new()
+            .name("NetworkScenarioLoad".to_string())
+            .spawn(move || {
+                let mut reporter = ScenarioLoadingReporter::new(sender);
+                let result =
+                    Scenario::load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
+                        &worker_path,
+                        &worker_definition_groups,
+                        &worker_material_groups,
+                        &graphics_groups,
+                        &languages,
+                        random_seed,
+                        &language_packs,
+                        startup_player_count,
+                        |progress, line| {
+                            let visible = if preloaded_first_part {
+                                progress >= 88
+                            } else {
+                                progress >= 8
+                            };
+                            if visible {
+                                reporter.report(progress, line);
+                            }
+                        },
+                    )
+                    .map_err(|error| error.to_string())
+                    .and_then(|scenario| {
+                        validate_client_network_scenario(&scenario)?;
+                        scenario
+                            .validate_initial_network_game_data(&initial_game_state)
+                            .map_err(|error| format!("invalid network Game.txt: {error}"))?;
+                        Ok(scenario)
+                    })
+                    .map_err(|error| format!("Failed to load {scenario_title}: {error}"));
+                reporter.send(ScenarioLoadingEvent::Finished(result));
+            })
+            .map(|_| ())
+            .or_else(|error| {
+                let message = format!("Failed to launch {spawn_failure_title} loader: {error}");
+                spawn_failure_sender
+                    .send(ScenarioLoadingEvent::Finished(Err(message)))
+                    .map_err(|send_error| {
+                        format!("failed to report network loader launch failure: {send_error}")
+                    })
+            })
     }
 
     fn install_prepared_client_network_scenario(
@@ -2717,8 +2787,32 @@ impl GameApp {
         scenario_data: Scenario,
         material_groups: Option<Vec<Group>>,
         definition_groups: Vec<Group>,
+        preloaded_first_part: bool,
     ) -> Result<(), String> {
         validate_client_network_scenario(&scenario_data)?;
+        let (sender, receiver) = mpsc::channel();
+        let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(scenario_data)));
+        self.begin_client_network_scenario_loading(
+            status,
+            join_data,
+            combined_path,
+            receiver,
+            material_groups,
+            definition_groups,
+            preloaded_first_part,
+        )
+    }
+
+    fn begin_client_network_scenario_loading(
+        &mut self,
+        status: clonk_network::NetworkStatus,
+        join_data: clonk_network::JoinDataEnvelope,
+        combined_path: PathBuf,
+        receiver: Receiver<ScenarioLoadingEvent>,
+        material_groups: Option<Vec<Group>>,
+        definition_groups: Vec<Group>,
+        preloaded_first_part: bool,
+    ) -> Result<(), String> {
         let scenario_group = Group::open(&combined_path).map_err(|error| {
             format!(
                 "failed to open combined scenario {} for runtime data: {error}",
@@ -2747,49 +2841,6 @@ impl GameApp {
         initial_game_state
             .validate_runtime_application()
             .map_err(|error| format!("invalid network Game.txt: {error}"))?;
-        scenario_data
-            .validate_initial_network_game_data(&initial_game_state)
-            .map_err(|error| format!("invalid network Game.txt: {error}"))?;
-        let network_runtime_join = scenario_data
-            .lobby_metadata()
-            .is_some_and(|metadata| metadata.head().allows_network_runtime_join());
-        // HandleJoinData has copied Game.Parameters already. For a runtime
-        // join, C4Game::InitPlayers deliberately keeps the freshly saved
-        // restore list local and loads it from the combined scenario instead
-        // of replacing Parameters.RestorePlayerInfos.
-        let resolver_paths = cached_app_paths().ok();
-        let languages = startup_language_sequence(resolver_paths.as_deref());
-        let language_packs = resolver_paths
-            .as_deref()
-            .map(classic_language_packs)
-            .unwrap_or_default();
-        let restore_player_infos = client_network_restore_player_infos(
-            network_runtime_join,
-            &scenario_group,
-            &join_data.parameters.restore_player_infos,
-            &languages,
-            &language_packs,
-        );
-        let local_client_id = join_data.client_id;
-        let runtime_join_players = if network_runtime_join {
-            restore_player_infos
-                .clients
-                .iter()
-                .flat_map(|client| {
-                    client
-                        .players
-                        .iter()
-                        .filter(|info| info.is_joined())
-                        .map(move |info| clonk_engine::RuntimeJoinPlayerSource {
-                            client_id: client.client_id,
-                            info: info.clone(),
-                            load_unnamed_portraits: client.client_id == local_client_id,
-                        })
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
         if let Some(material_groups) = material_groups {
             self.network_material_resource_groups = Some(material_groups);
         }
@@ -2849,9 +2900,9 @@ impl GameApp {
             None => None,
         };
         let team_registry = runtime_teams_from_join_snapshot(&join_data.parameters.teams);
-        let mut loading_state = ScenarioLoadingState::from_loaded(
+        let mut loading_state = ScenarioLoadingState::from_network_receiver(
             scenario,
-            scenario_data,
+            receiver,
             status,
             // Keep Game.Parameters.RestorePlayerInfos distinct from the
             // dynamic-local SavePlayerInfos consumed exclusively by the
@@ -2871,8 +2922,11 @@ impl GameApp {
         loading_state
             .prepared_go
             .as_mut()
-            .expect("from_loaded always stages the Go boundary")
-            .runtime_join_players = runtime_join_players;
+            .expect("client loading retains its Go boundary")
+            .pending_client_runtime_join = Some(PendingClientRuntimeJoinLoading {
+            local_client_id: join_data.client_id,
+            packet_restore_player_infos: join_data.parameters.restore_player_infos.clone(),
+        });
         if let Some(refresh) = refresh {
             loading_state.refreshed_resources = refresh.resources;
             loading_state.refreshed_tooltip_font = refresh.tooltip_font;
@@ -2882,12 +2936,111 @@ impl GameApp {
             loading_state.refresh_requested = true;
         }
         self.loading_state = Some(loading_state);
+        if preloaded_first_part {
+            // Successful client preloading makes InitGameFirstPart return
+            // before its RetrieveScenario 6/7 branch. InitGame then resumes
+            // after GraphicsResource::Init at 10
+            // (src/C4Game.cpp:2414-2452,2551-2556).
+            self.apply_scenario_loader_frame(10, None);
+        } else {
+            // RetrieveScenario and synchronized GameRes retrieval have
+            // completed; C++ publishes 7 before InitScriptEngine
+            // (src/C4Game.cpp:2575-2598).
+            self.apply_scenario_loader_frame(7, None);
+        }
         retain_client_league_server_name(
             self.network_mode.as_mut(),
             &join_data.parameters.league_address,
         );
         self.pending_network_join_data = None;
         self.mode = AppMode::Loading;
+        Ok(())
+    }
+
+    pub(crate) fn finalize_client_network_scenario_loading(
+        &mut self,
+        scenario_data: &Scenario,
+        combined_path: &Path,
+    ) -> Result<(), String> {
+        if !matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+            return Ok(());
+        }
+        validate_client_network_scenario(scenario_data)?;
+        if let Some(initial_game_state) = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .and_then(|prepared| prepared.initial_game_data.as_ref())
+        {
+            scenario_data
+                .validate_initial_network_game_data(initial_game_state)
+                .map_err(|error| format!("invalid network Game.txt: {error}"))?;
+        }
+        let Some(runtime_join) = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .and_then(|prepared| prepared.pending_client_runtime_join.clone())
+        else {
+            return Ok(());
+        };
+        let scenario_group = Group::open(combined_path).map_err(|error| {
+            format!(
+                "failed to open combined scenario {} for runtime data: {error}",
+                combined_path.display()
+            )
+        })?;
+        let network_runtime_join = scenario_data
+            .lobby_metadata()
+            .is_some_and(|metadata| metadata.head().allows_network_runtime_join());
+        // HandleJoinData has copied Game.Parameters already. Runtime joins
+        // instead consume the combined scenario's freshly saved local list
+        // after loading identifies that exclusive branch
+        // (src/C4Game.cpp:2805-2850).
+        let resolver_paths = cached_app_paths().ok();
+        let languages = startup_language_sequence(resolver_paths.as_deref());
+        let language_packs = resolver_paths
+            .as_deref()
+            .map(classic_language_packs)
+            .unwrap_or_default();
+        let restore_player_infos = client_network_restore_player_infos(
+            network_runtime_join,
+            &scenario_group,
+            &runtime_join.packet_restore_player_infos,
+            &languages,
+            &language_packs,
+        );
+        let runtime_join_players = if network_runtime_join {
+            restore_player_infos
+                .clients
+                .iter()
+                .flat_map(|client| {
+                    client
+                        .players
+                        .iter()
+                        .filter(|info| info.is_joined())
+                        .map(|info| clonk_engine::RuntimeJoinPlayerSource {
+                            client_id: client.client_id,
+                            info: info.clone(),
+                            load_unnamed_portraits: client.client_id
+                                == runtime_join.local_client_id,
+                        })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if let Some(prepared) = self
+            .loading_state
+            .as_mut()
+            .and_then(|loading| loading.prepared_go.as_mut())
+        {
+            prepared.network_runtime_join = network_runtime_join;
+            prepared.restore_player_infos =
+                player_info_list_entries(&restore_player_infos).collect();
+            prepared.runtime_join_players = runtime_join_players;
+            prepared.pending_client_runtime_join = None;
+        }
         Ok(())
     }
 
@@ -3855,10 +4008,25 @@ impl GameApp {
                             // is the reach condition and control stays stopped.
                             self.network_control_running = false;
                             if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                                let first_part_preloaded = self.lobby_preload_task.is_some()
+                                    || self
+                                        .lobby_preload_artifact
+                                        .as_ref()
+                                        .and_then(|artifact| artifact.client.as_ref())
+                                        .is_some_and(|client| client.scenario.is_some());
                                 if let Some(requested) =
                                     self.client_start_barrier.status_requested(status)
                                 {
                                     self.pending_client_start_status = Some(requested);
+                                    // InitGameFirstPart publishes 6 before
+                                    // RetrieveScenario may block on either
+                                    // synchronized scenario resource
+                                    // (src/C4Game.cpp:2558-2568).
+                                    if !first_part_preloaded {
+                                        if let Some(loader) = self.loader_screen.as_mut() {
+                                            loader.update(LoaderUpdate::SetProgress(6));
+                                        }
+                                    }
                                 }
                                 self.prepare_client_network_scenario_if_ready()?;
                                 if self.network.is_none() {
@@ -4135,6 +4303,18 @@ impl GameApp {
                         if let Some(local_client_id) = local_client_id {
                             let host_lost_in_lobby = self.mode == AppMode::Menu
                                 && self.startup_view == StartupView::NetworkLobby;
+                            let host_lost_during_final_init = self.mode == AppMode::Loading
+                                && (self
+                                    .loading_state
+                                    .as_ref()
+                                    .and_then(|loading| loading.prepared_go.as_ref())
+                                    .is_some_and(|prepared| prepared.local_reached)
+                                    || self.message_dialogs.iter().any(|dialog| {
+                                        matches!(
+                                            dialog.continuation,
+                                            MessageDialogContinuation::NetworkClientStartWait
+                                        )
+                                    }));
                             let host_name = self
                                 .control_clients
                                 .state(0)
@@ -4164,14 +4344,27 @@ impl GameApp {
                             if host_lost_in_lobby {
                                 // Clear makes an active DoLobby return false,
                                 // aborting C4Game::Init back through the
-                                // remembered startup dialog. Only an already
-                                // running round continues under local control
-                                // (C4Network2.cpp:477-515,1809-1833;
-                                // C4Game.cpp:405-411).
+                                // remembered startup dialog (C4Network2.cpp:
+                                // 477-515,1809-1833; C4Game.cpp:405-411).
                                 self.finish_startup_network_failure(
                                     StartupNetworkPurpose::Join,
                                     message,
                                 )?;
+                                break;
+                            }
+                            if host_lost_during_final_init {
+                                // Clear releases FinalInit's wait, whose final
+                                // isEnabled() check then fails. Dismiss its
+                                // modal before unwinding the failed Game::Init
+                                // through the appropriate startup lineage
+                                // (C4Network2.cpp:558-616,1809-1833;
+                                // C4Game.cpp:459-466).
+                                self.dismiss_network_client_start_wait();
+                                let final_init_error = self.runtime_resource_text(
+                                    "IDS_ERR_NETWORKFINALINIT",
+                                    "Error on final network init.",
+                                );
+                                self.finish_scenario_loading_failure(final_init_error, true)?;
                                 break;
                             }
                             self.change_network_control_to_local(local_client_id);
@@ -4972,6 +5165,7 @@ impl GameApp {
             let Some((
                 restore_player_infos,
                 random_seed,
+                serialized_startup_player_count,
                 use_fair_crew,
                 fair_crew_strength,
                 fair_crew_forced,
@@ -4989,6 +5183,7 @@ impl GameApp {
                         player_info_list_entries(&snapshot.parameters.restore_player_infos)
                             .collect::<Vec<_>>(),
                         u64::from(snapshot.parameters.random_seed as u32),
+                        snapshot.parameters.startup_player_count,
                         snapshot.parameters.use_fair_crew,
                         snapshot.parameters.fair_crew_strength,
                         snapshot.parameters.fair_crew_forced,
@@ -5013,14 +5208,31 @@ impl GameApp {
             let Some(scenario) = self.network_start_scenario() else {
                 return Ok(());
             };
-            let scenario_data = match prepared.claim_scenario() {
-                Ok(scenario) => scenario,
+            let scenario_load = match prepared.claim_scenario_load() {
+                Ok(load) => load,
                 Err(error) => {
                     self.status_text = format!("Unable to start prepared host: {error}");
                     return Ok(());
                 }
             };
-            let initial_game_data = Some(prepared.initial_game_data().clone());
+            let initial_game_data = prepared.initial_game_data().clone();
+            let startup_player_count = startup_player_count_for_init(
+                initial_game_data.frame,
+                Some(serialized_startup_player_count),
+                Some(
+                    i32::try_from(self.control_player_infos.nonremoved_player_count())
+                        .unwrap_or(i32::MAX),
+                ),
+            )
+            .unwrap_or(serialized_startup_player_count);
+            let host_first_part_preloaded =
+                self.lobby_preload_artifact
+                    .as_ref()
+                    .is_some_and(|artifact| {
+                        artifact.catalog_host.is_none() && artifact.client.is_none()
+                    });
+            let use_lobby_preload =
+                host_first_part_preloaded && !scenario_load.retained().uses_map_player_extend();
             let target_tick =
                 i32::try_from(self.local_control_submission_tick()).unwrap_or(i32::MAX);
             let status = clonk_network::NetworkStatus {
@@ -5055,12 +5267,57 @@ impl GameApp {
             }
             self.fade_out_game_music();
             self.status_text.clear();
-            let mut loading = ScenarioLoadingState::from_loaded(
+            let (sender, receiver) = mpsc::channel();
+            if use_lobby_preload {
+                let mut reporter = ScenarioLoadingReporter::new(sender);
+                reporter.report(10, "Graphics resources initialized");
+                reporter.send(ScenarioLoadingEvent::Finished(Ok(
+                    scenario_load.into_retained()
+                )));
+            } else {
+                let scenario_title = scenario.title.clone();
+                let spawn_failure_sender = sender.clone();
+                let spawn_failure_title = scenario_title.clone();
+                if let Err(error) = thread::Builder::new()
+                    .name("NetworkScenarioLoad".to_string())
+                    .spawn(move || {
+                        let mut reporter = ScenarioLoadingReporter::new(sender);
+                        if host_first_part_preloaded {
+                            reporter.report(10, "Graphics resources initialized");
+                        }
+                        let result = scenario_load
+                            .load_with_progress(
+                                random_seed,
+                                startup_player_count,
+                                |progress, line| {
+                                    // OpenScenario's 4 belongs before the
+                                    // lobby. A completed preload already ran
+                                    // the first part, but MapPlayerExtend
+                                    // resumes at the landscape.
+                                    let visible = if host_first_part_preloaded {
+                                        progress >= 88
+                                    } else {
+                                        progress >= 8
+                                    };
+                                    if visible {
+                                        reporter.report(progress, line);
+                                    }
+                                },
+                            )
+                            .map_err(|error| format!("Failed to load {scenario_title}: {error}"));
+                        reporter.send(ScenarioLoadingEvent::Finished(result));
+                    })
+                {
+                    let message = format!("Failed to launch {spawn_failure_title} loader: {error}");
+                    let _ = spawn_failure_sender.send(ScenarioLoadingEvent::Finished(Err(message)));
+                }
+            }
+            let mut loading = ScenarioLoadingState::from_network_receiver(
                 scenario,
-                scenario_data,
+                receiver,
                 status,
                 restore_player_infos,
-                initial_game_data,
+                Some(initial_game_data),
                 random_seed,
                 use_fair_crew,
                 fair_crew_strength,
@@ -5074,7 +5331,7 @@ impl GameApp {
             loading
                 .prepared_go
                 .as_mut()
-                .expect("from_loaded always stages the Go boundary")
+                .expect("network loading always stages the Go boundary")
                 .definition_modules = Some(prepared.definition_modules().to_vec());
             self.install_prepared_host_material_resources(&prepared);
             if let Some(staged) = self.staged_network_host_scenario.take() {
@@ -5086,6 +5343,9 @@ impl GameApp {
                 loading.refresh_requested = true;
             }
             self.loading_state = Some(loading);
+            // InitNetworkHost returns from DoLobby at 7, immediately before
+            // InitGame begins its staged work (src/C4Game.cpp:438-457).
+            self.apply_scenario_loader_frame(7, None);
             self.begin_network_start_wait(status);
             self.host_lobby_countdown = None;
             self.pending_local_lobby_countdown_echoes.clear();

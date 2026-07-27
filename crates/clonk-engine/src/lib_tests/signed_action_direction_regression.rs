@@ -13,7 +13,7 @@ fn exec_action_set_dir_respects_signed_directions_gate() -> Result<(), EngineErr
         definition.configure_actions(
             None,
             HashMap::from([(
-                    "Walk".to_string(),
+                "Walk".to_string(),
                 ActionSpec::default()
                     .with_procedure("WALK")
                     .with_directions(raw_directions),
@@ -33,7 +33,7 @@ fn exec_action_set_dir_respects_signed_directions_gate() -> Result<(), EngineErr
 
         assert_eq!(
             engine.objects[index].state.direction, expected,
-                "Directions={raw_directions}"
+            "Directions={raw_directions}"
         );
     }
     Ok(())

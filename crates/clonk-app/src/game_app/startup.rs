@@ -2061,11 +2061,15 @@ impl GameApp {
             // worker starts; the lobby later retains only its background.
             self.cancel_underlying_interaction();
             self.replace_startup_view(StartupView::NetworkGame);
-            if let Some(loader) = self
+            if let Some(mut loader) = self
                 .staged_network_host_scenario
                 .as_mut()
                 .and_then(|staged| staged.loader_screen.take())
             {
+                // OpenScenario sets 4 before InitNetworkHost and the loader
+                // reads that retained game progress on its first draw
+                // (src/C4Game.cpp:124-270,421-440).
+                loader.update(LoaderUpdate::SetProgress(4));
                 self.loader_screen = Some(loader);
                 self.loader_error = None;
             }
@@ -2219,6 +2223,7 @@ impl GameApp {
         self.client_combined_scenario_path = None;
         self.client_combined_preload_file.clear();
         self.network_material_resource_groups = None;
+        self.loading_state = None;
         self.active_scenario = None;
         self.active_definition_load = None;
         self.active_description_definition_modules.clear();
@@ -3184,12 +3189,23 @@ impl GameApp {
                     self.open_startup_player_portrait_selector();
                 }
                 PlayerPropertiesAction::PortraitLocationChanged { index, path } => {
+                    self.reload_startup_player_portrait_location(index, &path);
+                }
+                PlayerPropertiesAction::PortraitSelectorClosed { location_index } => {
+                    self.startup_last_portrait_folder_index = Some(location_index);
                     if let Some(paths) = self.app_paths.as_ref() {
-                        if let Err(error) = persist_startup_portrait_location(paths, index) {
+                        if let Err(error) = persist_startup_portrait_location(paths, location_index)
+                        {
                             tracing::warn!(%error, "failed to persist portrait location");
                         }
                     }
-                    self.reload_startup_player_portrait_location(index, &path);
+                }
+                PlayerPropertiesAction::PortraitSelectionRequired => {
+                    let message = self.runtime_resource_text(
+                        "IDS_ERR_PLEASESELECTAFILEFIRST",
+                        "Please select a file first!",
+                    );
+                    self.show_startup_portrait_error(message);
                 }
                 PlayerPropertiesAction::ApplyPicture(commit) => {
                     self.apply_startup_player_portrait_selection(commit);
@@ -3199,7 +3215,7 @@ impl GameApp {
         }
     }
 
-    fn reload_startup_player_portrait_location(&mut self, index: usize, path: &Path) {
+    pub(crate) fn reload_startup_player_portrait_location(&mut self, index: usize, path: &Path) {
         match clonk_frontend::startup_portraitsel::portrait_files_in_location(path) {
             Ok(entries) => {
                 if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
@@ -3209,6 +3225,7 @@ impl GameApp {
                 }
             }
             Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "failed to scan portrait location");
                 if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
                     pending.controller.fail_portrait_location_entries(
                         index,
@@ -3218,6 +3235,22 @@ impl GameApp {
             }
         }
         self.mark_menu_dirty();
+    }
+
+    fn show_startup_portrait_error(&mut self, message: String) {
+        let caption = self.runtime_resource_text("IDS_DLG_ERROR", "Error");
+        self.status_text.clear();
+        if let Err(dialog_error) = self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+                message.clone(),
+                caption,
+                clonk_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        ) {
+            tracing::error!(%dialog_error, "failed to show portrait-selector error dialog");
+            self.status_text = message;
+        }
     }
 
     pub(crate) fn apply_startup_player_portrait_selection(
@@ -3239,11 +3272,15 @@ impl GameApp {
                 } else {
                     let image = match load_startup_portrait_image(&path) {
                         Ok(image) => image,
-                        Err(error) => {
-                            if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
-                                pending.controller.set_portrait_selector_error(error);
-                            }
-                            self.mark_menu_dirty();
+                        Err(detail) => {
+                            let message = format_resource_string_with_opaque_arguments(
+                                self.runtime_resource_text(
+                                    "IDS_PRC_NOGFXFILE",
+                                    "Error at graphics file %s: %s",
+                                ),
+                                &[&path.display().to_string(), &detail],
+                            );
+                            self.show_startup_portrait_error(message);
                             return;
                         }
                     };
@@ -5324,7 +5361,7 @@ impl GameApp {
                 &mut surface,
                 width * 39 / 40,
                 height / 18 + logo_height,
-                "Version 4.9.11.0 [362] ",
+                &format!("Version {}", clonk_core::version::PORT_VERSION),
                 [255, 255, 255, 255],
                 clonk_graphics::clonk_font::TextAlign::Right,
                 true,

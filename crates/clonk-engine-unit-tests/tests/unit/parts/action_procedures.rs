@@ -172,6 +172,155 @@
     }
 
     #[test]
+    fn float_physical_preserves_hazard_bullet_velocity_above_synthetic_limit() {
+        // Hazard's SHT1 Travel action uses DFA_FLOAT with Float=100000. C++
+        // clamps xdir/ydir only to FIXED100(Float), then sets Mobile
+        // (oracle-src-pinned src/C4Object.cpp:5291-5310); it has no global
+        // 12 px/frame cap after the procedure. The raw velocity is a
+        // representative Pistol Fire1 launch at 76 degrees.
+        let script =
+            format!("{PROCEDURE_MOVEMENT_SCRIPT}\nfunc Traveling() {{ return true; }}\n");
+        let mut definition =
+            Definition::from_script("SHT1", "Shot", &script).expect("script compiles");
+        definition.configure_actions(
+            Some("Travel".to_string()),
+            HashMap::from([(
+                "Travel".to_string(),
+                ActionSpec::default()
+                    .with_procedure("FLOAT")
+                    .with_delay(1)
+                    .with_length(1)
+                    .with_next("Travel")
+                    .with_start_call("Traveling"),
+            )]),
+        );
+        definition.set_physical(PhysicalInfo {
+            float: 100_000,
+            ..PhysicalInfo::default()
+        });
+        definition.set_incomplete_activity(true);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let launch_velocity = FixedVec2::new(
+            C4Fixed::from_raw(1_592_524),
+            C4Fixed::from_raw(-393_216),
+        );
+        let bullet = engine
+            .spawn_object(SpawnConfig::new("SHT1").with_category(CATEGORY_OBJECT))
+            .expect("bullet spawns");
+        let bullet_idx = engine.find_object_index(bullet).expect("bullet exists");
+        engine.objects[bullet_idx].set_fixed_velocity(launch_velocity);
+        assert_eq!(
+            engine.objects[bullet_idx].fixed_velocity, launch_velocity,
+            "script launch keeps raw C4Fixed velocity before ExecAction"
+        );
+        assert_eq!(engine.objects[bullet_idx].state.action.name, "Travel");
+
+        engine
+            .apply_physics_at_index(bullet_idx)
+            .expect("DFA_FLOAT executes");
+
+        assert_eq!(
+            engine.objects[bullet_idx].fixed_velocity, launch_velocity,
+            "DFA_FLOAT must not steepen the bullet by clamping only its horizontal speed"
+        );
+
+        engine
+            .tick_without_snapshot()
+            .expect("the complete object frame executes");
+        let bullet_idx = engine.find_object_index(bullet).expect("bullet remains live");
+        assert_eq!(
+            engine.objects[bullet_idx].fixed_velocity, launch_velocity,
+            "callback outcome folds must preserve the same native DFA_FLOAT velocity"
+        );
+    }
+
+    #[test]
+    fn float_callback_uses_same_outcome_physical_before_terminal_clamp() {
+        // SetPhysical mutates the live C++ object before the following
+        // SetXDir/SetYDir calls return from the callback
+        // (oracle-src-pinned src/C4Script.cpp:557-601). DFA_FLOAT then owns
+        // the only speed bounds (src/C4Object.cpp:5291-5310).
+        let script = format!(
+            r#"{PROCEDURE_MOVEMENT_SCRIPT}
+global func Step(state, frame, random) {{
+    if (frame == 1) {{
+        SetPhysical("Float", 100000, 2);
+        SetXDir(243, this(), 10);
+        SetYDir(-60, this(), 10);
+    }}
+    return 0;
+}}
+
+func ArmBullet() {{
+    SetPhysical("Float", 100000, 2);
+    SetXDir(243, this(), 10);
+    SetYDir(-60, this(), 10);
+}}
+"#
+        );
+        let mut definition =
+            Definition::from_script("SHT1", "Shot", &script).expect("script compiles");
+        definition.configure_actions(
+            Some("Travel".to_string()),
+            HashMap::from([(
+                "Travel".to_string(),
+                ActionSpec::default().with_procedure("FLOAT"),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let bullet = engine
+            .spawn_object(SpawnConfig::new("SHT1").with_category(CATEGORY_OBJECT))
+            .expect("bullet spawns");
+        let bullet_idx = engine.find_object_index(bullet).expect("bullet exists");
+
+        engine
+            .call_object_function(bullet_idx, "ArmBullet", Vec::new())
+            .expect("bullet callback executes");
+
+        assert_eq!(
+            engine.objects[bullet_idx]
+                .state
+                .temporary_physical
+                .map(|physical| physical.float),
+            Some(100_000)
+        );
+        assert_eq!(
+            (
+                engine.objects[bullet_idx].fixed_velocity.x.val(),
+                engine.objects[bullet_idx].fixed_velocity.y.val(),
+            ),
+            (1_592_524, -393_216),
+            "the fold must resolve Float after applying the callback's physical update"
+        );
+
+        let stepped_bullet = engine
+            .spawn_object(SpawnConfig::new("SHT1").with_category(CATEGORY_OBJECT))
+            .expect("Step-driven bullet spawns");
+        engine
+            .tick_without_snapshot()
+            .expect("the definition Step callback executes");
+        let stepped_idx = engine
+            .find_object_index(stepped_bullet)
+            .expect("Step-driven bullet exists");
+        assert_eq!(
+            (
+                engine.objects[stepped_idx].fixed_velocity.x.val(),
+                engine.objects[stepped_idx].fixed_velocity.y.val(),
+            ),
+            (1_592_524, -393_216),
+            "the Step fold must also resolve Float after its physical update"
+        );
+    }
+
+    #[test]
     fn swim_procedure_reduces_gravity_and_blocks_wind() {
         let mut definition =
             Definition::from_script("Swimmer", "Swimmer", PROCEDURE_MOVEMENT_SCRIPT)
@@ -3475,6 +3624,136 @@ protected func ControlCommand() { own_control_calls++; return 1; }
         assert_eq!(
             snapshot.hud.messages[0].lines,
             vec!["Structure", "needs", "1x Wood"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_build_command_does_not_duplicate_live_needed_material_message(
+    ) -> Result<(), EngineError> {
+        // C4Object::Build first creates the target message. If its retained
+        // Build command later fails, C4Command::Fail uses Append with
+        // fNoDuplicates=true, so C4GameMessage::Append keeps the existing
+        // identical text instead of drawing it twice (C4Object.cpp:1733-1747;
+        // C4Command.cpp:2185-2194,2229-2235; C4GameMessage.cpp:73-83,315-328).
+        let mut builder = Definition::from_script("BLDR", "Builder", "#strict")?;
+        builder.set_crew_member(true);
+        builder.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        });
+        builder.configure_actions(
+            Some("Walk".to_owned()),
+            HashMap::from([
+                (
+                    "Walk".to_owned(),
+                    ActionSpec::default().with_procedure("walk"),
+                ),
+                (
+                    "Build".to_owned(),
+                    ActionSpec::default().with_procedure("build"),
+                ),
+            ]),
+        );
+
+        let mut site = Definition::from_script("SITE", "Site", "#strict")?;
+        site.set_constructable(true);
+        site.set_category(CATEGORY_STRUCTURE);
+        site.set_components(vec![DefinitionComponent {
+            id: "WOOD".to_owned(),
+            count: 1,
+        }]);
+
+        let mut engine = Engine::with_seed(71);
+        engine.register_definition(builder)?;
+        engine.register_definition(site)?;
+        engine.register_definition(Definition::from_script("WOOD", "Wood", "#strict")?)?;
+        engine.set_construction_needs_material(true);
+
+        let site_id = engine.spawn_object(
+            SpawnConfig::new("SITE")
+                .with_construction(1_000)
+                .with_ordered_components(vec![("WOOD".to_owned(), 0)]),
+        )?;
+        let mut action = ActionState::new("Build");
+        action.target = Some(site_id);
+        let builder_id = engine.spawn_object(
+            SpawnConfig::new("BLDR")
+                .with_action(action)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_controller(4),
+        )?;
+        let builder_index = engine
+            .find_object_index(builder_id)
+            .expect("builder exists");
+        engine.objects[builder_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(site_id))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Build queues");
+
+        let first = engine.tick()?;
+        assert_eq!(first.hud.messages.len(), 1);
+        assert_eq!(
+            first.hud.messages[0].lines,
+            vec!["Site", "needs", "1x Wood"]
+        );
+        let first_message_id = first.hud.messages[0].id;
+        assert_eq!(first.hud.messages[0].player, Some(4));
+        assert_eq!(
+            first
+                .object(builder_id)
+                .expect("builder remains")
+                .command_stack
+                .command_names(),
+            vec!["Acquire", "Build"]
+        );
+
+        let builder_index = engine
+            .find_object_index(builder_id)
+            .expect("builder remains");
+        assert_eq!(
+            engine.objects[builder_index].commands.front_command_name(),
+            Some("Acquire")
+        );
+        engine.objects[builder_index].commands.clear_front();
+        assert!(
+            engine.objects[builder_index]
+                .commands
+                .fail_front_if(CommandId::Build),
+            "retained Build command is forced through its native failure tail"
+        );
+
+        let failed = engine.tick()?;
+        assert_eq!(
+            failed.hud.messages.len(),
+            1,
+            "the failed Build retains exactly the original HUD message"
+        );
+        let material_messages = failed
+            .hud
+            .messages
+            .iter()
+            .filter(|message| {
+                message.kind == MessageKind::Target
+                    && message.target == Some(builder_id)
+                    && message.lines == vec!["Site", "needs", "1x Wood"]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            material_messages.len(),
+            1,
+            "C++ appends with duplicate suppression instead of rendering a second message"
+        );
+        assert_eq!(material_messages[0].id, first_message_id);
+        assert_eq!(
+            material_messages[0].player,
+            Some(4),
+            "Append retains the original C4GameMessage metadata"
         );
         Ok(())
     }

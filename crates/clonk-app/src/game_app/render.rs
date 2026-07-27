@@ -1283,6 +1283,15 @@ impl GameApp {
                         .monitor_gamma = monitor_gamma.clone();
                 }
                 self.advance_startup_player_portrait_thumbnail();
+                if self
+                    .startup_player_properties_dialog
+                    .as_mut()
+                    .is_some_and(|pending| pending.controller.tick_portrait_selector_scrollbar())
+                {
+                    // C4GUI::ScrollBar repeats held arrows from DrawElement,
+                    // so advance once per presentation rather than per update.
+                    self.mark_menu_dirty();
+                }
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
                 if self.startup_view == StartupView::NetworkLobby
@@ -1690,20 +1699,46 @@ impl GameApp {
                     self.commit_pending_native_base(frame);
                     self.begin_native_text_capture(true);
                 }
-                if let (Some(pending), Some(properties_assets), Some(fonts), Some(book)) = (
-                    self.startup_player_properties_dialog.as_ref(),
-                    self.assets.plrprop_assets(),
-                    self.assets.clonk_fonts.as_deref(),
-                    self.assets.options_book_fonts.as_deref(),
+                let startup_assets = Arc::clone(&self.assets);
+                let portrait_selector_open = self
+                    .startup_player_properties_dialog
+                    .as_ref()
+                    .is_some_and(|pending| pending.controller.portrait_selector().is_some());
+                let portrait_location_popup_open = self
+                    .startup_player_properties_dialog
+                    .as_ref()
+                    .and_then(|pending| pending.controller.portrait_selector())
+                    .is_some_and(|selector| selector.is_location_popup_open());
+                if let (Some(properties_assets), Some(fonts), Some(book)) = (
+                    startup_assets.plrprop_assets(),
+                    startup_assets.clonk_fonts.as_deref(),
+                    startup_assets.options_book_fonts.as_deref(),
                 ) {
-                    clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render(
-                        self.graphics.surface_mut(),
-                        &properties_assets,
-                        fonts,
-                        book,
-                        &pending.controller,
-                        Some(menu_gamma),
-                    );
+                    if let Some(pending) = self.startup_player_properties_dialog.as_ref() {
+                        clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render_player_form(
+                            self.graphics.surface_mut(),
+                            &properties_assets,
+                            book,
+                            &pending.controller,
+                            Some(menu_gamma),
+                        );
+                    }
+                    if ordered_native && portrait_selector_open {
+                        self.next_pending_native_overlay();
+                    }
+                    if let Some(pending) = self
+                        .startup_player_properties_dialog
+                        .as_mut()
+                        .filter(|_| portrait_selector_open)
+                    {
+                        clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render_portrait_selector_dialog(
+                            self.graphics.surface_mut(),
+                            &properties_assets,
+                            fonts,
+                            &mut pending.controller,
+                            Some(menu_gamma),
+                        );
+                    }
                 }
                 if ordered_native {
                     self.commit_pending_native_overlay();
@@ -1742,6 +1777,27 @@ impl GameApp {
                 }
                 if !self.message_dialogs.is_empty() {
                     self.render_message_dialogs(Some(menu_gamma))?;
+                }
+                if portrait_location_popup_open {
+                    if ordered_native {
+                        self.next_pending_native_overlay();
+                    }
+                    if let (Some(properties_assets), Some(fonts), Some(pending)) = (
+                        startup_assets.plrprop_assets(),
+                        startup_assets.clonk_fonts.as_deref(),
+                        self.startup_player_properties_dialog.as_ref(),
+                    ) {
+                        clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render_portrait_location_popup(
+                            self.graphics.surface_mut(),
+                            &properties_assets,
+                            fonts,
+                            &pending.controller,
+                            Some(menu_gamma),
+                        );
+                    }
+                    if ordered_native {
+                        self.next_pending_native_overlay();
+                    }
                 }
                 if ordered_native && !game_option_input_open && self.context_menu.is_some() {
                     self.next_pending_native_overlay();

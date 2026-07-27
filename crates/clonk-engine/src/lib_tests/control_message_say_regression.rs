@@ -4,8 +4,7 @@ fn say_engine() -> (Engine, ObjectId, ObjectId) {
     let mut engine = Engine::new();
     engine
         .register_definition(
-            Definition::from_script("VIEW", "View object", "")
-                .expect("view definition compiles"),
+            Definition::from_script("VIEW", "View object", "").expect("view definition compiles"),
         )
         .expect("view definition registers");
     engine
@@ -95,7 +94,7 @@ fn l051_film_view_scope_requires_raw_replay_and_nonzero_film() {
         assert_eq!(
             engine.film_replay(),
             expected,
-                "Replay={replay}, Film={film}"
+            "Replay={replay}, Film={film}"
         );
     }
 }
@@ -125,6 +124,6 @@ fn l052_fullscreen_film_fallback_requires_replay_and_nonzero_film_mode() {
     engine.finish_replay().expect("finish replay control");
     assert!(
         engine.is_replay_film(),
-            "ViewportCheck keeps using persistent Head.Replay after ChangeToLocal"
+        "ViewportCheck keeps using persistent Head.Replay after ChangeToLocal"
     );
 }

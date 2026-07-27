@@ -23,14 +23,13 @@ pub mod command;
 pub mod compat;
 mod control;
 mod control_execution;
-mod direct_com;
 mod definition;
+mod direct_com;
 #[doc(hidden)]
 pub mod effect;
 pub mod fixtures;
 mod init_placement;
 mod input;
-mod object;
 #[doc(hidden)]
 pub mod landscape;
 mod live_c4_player;
@@ -40,6 +39,7 @@ mod map_creator_s2;
 mod mass_mover;
 #[doc(hidden)]
 pub mod material;
+mod object;
 #[doc(hidden)]
 pub use clonk_engine_core::math;
 mod message;
@@ -4118,8 +4118,6 @@ fn i32_is_minus_one(value: &i32) -> bool {
 const fn default_last_attach_movement_frame() -> i32 {
     -1
 }
-
-
 
 impl ScriptGlobalState {
     pub fn is_empty(&self) -> bool {
@@ -9834,44 +9832,44 @@ impl Default for Engine {
 // `impl Engine` is split across these area files; each mounts under the
 // crate root with `use super::*;` and its own `impl Engine { .. }` block,
 // methods moved verbatim (see REFACTOR_PLAN.md, wave 2).
+#[path = "engine/command_results.rs"]
+mod engine_command_results;
 #[path = "engine/config.rs"]
 mod engine_config;
-#[path = "engine/players.rs"]
-mod engine_players;
-#[path = "engine/world.rs"]
-mod engine_world;
-#[path = "engine/script_exec.rs"]
-mod engine_script_exec;
-#[path = "engine/host_tables.rs"]
-mod engine_host_tables;
-#[path = "engine/game_over.rs"]
-mod engine_game_over;
 #[path = "engine/crew.rs"]
 mod engine_crew;
 #[path = "engine/definitions.rs"]
 mod engine_definitions;
-#[path = "engine/player_view.rs"]
-mod engine_player_view;
-#[path = "engine/tick.rs"]
-mod engine_tick;
-#[path = "engine/state.rs"]
-mod engine_state;
-#[path = "engine/movement.rs"]
-mod engine_movement;
-#[path = "engine/procedures.rs"]
-mod engine_procedures;
 #[path = "engine/economy.rs"]
 mod engine_economy;
 #[path = "engine/exec_order.rs"]
 mod engine_exec_order;
-#[path = "engine/solid_mask.rs"]
-mod engine_solid_mask;
-#[path = "engine/command_results.rs"]
-mod engine_command_results;
+#[path = "engine/game_over.rs"]
+mod engine_game_over;
+#[path = "engine/host_tables.rs"]
+mod engine_host_tables;
 #[path = "engine/landscape_ops.rs"]
 mod engine_landscape_ops;
+#[path = "engine/movement.rs"]
+mod engine_movement;
+#[path = "engine/player_view.rs"]
+mod engine_player_view;
+#[path = "engine/players.rs"]
+mod engine_players;
+#[path = "engine/procedures.rs"]
+mod engine_procedures;
+#[path = "engine/script_exec.rs"]
+mod engine_script_exec;
+#[path = "engine/solid_mask.rs"]
+mod engine_solid_mask;
 #[path = "engine/spawn_queue.rs"]
 mod engine_spawn_queue;
+#[path = "engine/state.rs"]
+mod engine_state;
+#[path = "engine/tick.rs"]
+mod engine_tick;
+#[path = "engine/world.rs"]
+mod engine_world;
 
 impl Engine {
     pub fn new() -> Self {
@@ -10070,7 +10068,6 @@ impl Engine {
         self.control_tick = timing.start_control_tick;
         self.control_rate = timing.control_rate;
     }
-
 }
 
 fn build_state_value(

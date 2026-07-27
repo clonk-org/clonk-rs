@@ -13,7 +13,7 @@ fn control(id: &[u8; 4], x: i32, y: i32) -> EmDropDefControlData {
 #[test]
 fn structures_use_full_create_construction_with_terrain_adjustment() {
     let library = clonk_resources::MaterialLibrary::parse(
-            "[Material Earth]\nName=Earth\nDensity=100\nDigFree=1\n\n\
+        "[Material Earth]\nName=Earth\nDensity=100\nDigFree=1\n\n\
              [Material Granite]\nName=Granite\nDensity=100\nDigFree=0\n",
     )
     .expect("materials parse");
@@ -73,7 +73,7 @@ fn structures_use_full_create_construction_with_terrain_adjustment() {
     assert_eq!(
         oversize.construction,
         FULL_CON * (FULL_CON / 100),
-            "the literal FullCon percentage survives Oversize DoCon"
+        "the literal FullCon percentage survives Oversize DoCon"
     );
 }
 

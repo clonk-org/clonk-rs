@@ -1829,11 +1829,16 @@ impl Engine {
                 }
                 _ => {}
             }
-            // DFA_FLIGHT is only DoGravity + Mobile in C++
-            // (C4Object.cpp:4893-4904). In particular, its free-fall
-            // velocity is not subject to the synthetic PhysicsSettings
-            // terminal-speed bounds; DoGravity keeps adding GravAccel.
-            if !matches!(procedure, ActionProcedure::Flight | ActionProcedure::Lift) {
+            // DFA_FLIGHT is only DoGravity + Mobile in C++, and DFA_FLOAT
+            // applies its own `FIXED100(pPhysical->Float)` bounds
+            // (C4Object.cpp:4893-4904,5291-5310). Neither is subject to the
+            // synthetic PhysicsSettings terminal-speed bounds. Keep those
+            // bounds for physical-less FLOAT fixtures that use the additive
+            // MovementProfile convenience path.
+            let native_float = matches!(procedure, ActionProcedure::Float) && physical.float != 0;
+            if !matches!(procedure, ActionProcedure::Flight | ActionProcedure::Lift)
+                && !native_float
+            {
                 self.physics
                     .clamp_fixed_velocity(&mut object.fixed_velocity);
             }
@@ -1913,5 +1918,4 @@ impl Engine {
         }
         Ok(false)
     }
-
 }

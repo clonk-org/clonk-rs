@@ -6,6 +6,121 @@
 
 use super::*;
 
+fn add_existing_portrait_location(
+    locations: &mut Vec<clonk_frontend::startup_portraitsel::PortraitLocation>,
+    label: &str,
+    path: PathBuf,
+) {
+    if !path.is_dir() {
+        return;
+    }
+    let duplicate = locations.iter().any(|location| {
+        location.path == path
+            || matches!(
+                (fs::canonicalize(&location.path), fs::canonicalize(&path)),
+                (Ok(existing), Ok(candidate)) if existing == candidate
+            )
+    });
+    if !duplicate {
+        locations.push(clonk_frontend::startup_portraitsel::PortraitLocation::new(
+            label, path,
+        ));
+    }
+}
+
+fn add_optional_portrait_locations(
+    locations: &mut Vec<clonk_frontend::startup_portraitsel::PortraitLocation>,
+    platform_locations: impl IntoIterator<Item = (&'static str, Option<PathBuf>)>,
+    home: Option<(&'static str, PathBuf)>,
+    add_desktop_from_home: bool,
+) {
+    platform_locations
+        .into_iter()
+        .filter_map(|(label, path)| path.map(|path| (label, path)))
+        .for_each(|(label, path)| add_existing_portrait_location(locations, label, path));
+    if let Some((label, home)) = home {
+        add_existing_portrait_location(locations, label, home.clone());
+        if add_desktop_from_home {
+            add_existing_portrait_location(locations, "Desktop", home.join("Desktop"));
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_special_folder(csidl: u32) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::SHGetSpecialFolderPathW;
+
+    let mut path = [0_u16; 260];
+    // SAFETY: `path` is the fixed-size writable buffer required by
+    // SHGetSpecialFolderPathW, and FALSE asks Windows not to create the folder.
+    let found =
+        unsafe { SHGetSpecialFolderPathW(HWND(0), &mut path, csidl as i32, false) }.as_bool();
+    found
+        .then(|| {
+            let len = path
+                .iter()
+                .position(|component| *component == 0)
+                .unwrap_or(path.len());
+            PathBuf::from(OsString::from_wide(&path[..len]))
+        })
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn startup_player_portrait_locations(
+    paths: &AppPaths,
+) -> Vec<clonk_frontend::startup_portraitsel::PortraitLocation> {
+    let mut locations = vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
+        "LegacyClonk User Path",
+        paths.user_data_dir(),
+    )];
+    let mut program_path = paths.install_root().as_os_str().to_os_string();
+    if !program_path
+        .to_string_lossy()
+        .ends_with(std::path::MAIN_SEPARATOR)
+    {
+        program_path.push(std::path::MAIN_SEPARATOR_STR);
+    }
+    add_existing_portrait_location(
+        &mut locations,
+        "LegacyClonk Program Directory",
+        PathBuf::from(program_path),
+    );
+
+    // C4PortraitSelDlg::C4PortraitSelDlg, C4FileSelDlg.cpp:541-556: append the
+    // Windows shell folders first, HOME on every platform, and HOME/Desktop
+    // only outside Windows.
+    #[cfg(target_os = "windows")]
+    let platform_locations = {
+        use windows::Win32::UI::Shell::{CSIDL_DESKTOPDIRECTORY, CSIDL_MYPICTURES, CSIDL_PERSONAL};
+
+        [
+            ("My Documents", windows_special_folder(CSIDL_PERSONAL)),
+            ("My Pictures", windows_special_folder(CSIDL_MYPICTURES)),
+            ("Desktop", windows_special_folder(CSIDL_DESKTOPDIRECTORY)),
+        ]
+    };
+    #[cfg(not(target_os = "windows"))]
+    let platform_locations: [(&str, Option<PathBuf>); 0] = [];
+    #[cfg(target_os = "macos")]
+    let home_label = "Home";
+    #[cfg(not(target_os = "macos"))]
+    let home_label = "Home Folder";
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| (home_label, path));
+    add_optional_portrait_locations(
+        &mut locations,
+        platform_locations,
+        home,
+        !cfg!(target_os = "windows"),
+    );
+
+    locations
+}
+
 impl GameApp {
     pub(crate) fn set_scensel_dialog_focus(&mut self, focus: ScenselDialogFocus) {
         self.menu_state.set_dialog_focus(focus);
@@ -1088,43 +1203,35 @@ impl GameApp {
             }
             return;
         };
-        extract_default_startup_portraits_once(paths);
-        let user_path = paths.user_data_dir().to_path_buf();
-        let program_path = paths.install_root().to_path_buf();
-        let mut locations = vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-            "Clonk Rust User Path",
-            user_path.clone(),
-        )];
-        if program_path != user_path {
-            locations.push(clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                "Clonk Rust Program Directory",
-                program_path,
-            ));
+        if !self.startup_user_portraits_written {
+            self.startup_user_portraits_written = true;
+            extract_default_startup_portraits_once(paths);
         }
-        let current_location = load_startup_last_portrait_folder_index(Some(paths))
+        let locations = startup_player_portrait_locations(paths);
+        let current_location = self
+            .startup_last_portrait_folder_index
+            .or_else(|| load_startup_last_portrait_folder_index(Some(paths)))
             .filter(|index| *index < locations.len())
             .unwrap_or(0);
+        self.startup_last_portrait_folder_index = Some(current_location);
         let current_path = locations[current_location].path.clone();
         let entries =
-            clonk_frontend::startup_portraitsel::portrait_files_in_location(&current_path);
-        let (entries, scan_error) = match entries {
-            Ok(entries) => (entries, None),
-            Err(error) => (
-                Vec::new(),
-                Some(format!(
-                    "failed to scan {}: {error}",
-                    current_path.display()
-                )),
-            ),
-        };
+            match clonk_frontend::startup_portraitsel::portrait_files_in_location(&current_path) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %current_path.display(),
+                        %error,
+                        "failed to scan initial portrait location"
+                    );
+                    Vec::new()
+                }
+            };
         if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
             pending
                 .controller
                 .open_portrait_selector(locations, current_location, entries);
             pending.controller.clear_validation_error();
-            if let Some(error) = scan_error {
-                pending.controller.set_portrait_selector_error(error);
-            }
         }
         self.startup_tooltip.pointer_left();
         self.mark_menu_dirty();
@@ -1657,5 +1764,77 @@ impl GameApp {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod portrait_location_tests {
+    use super::*;
+
+    #[test]
+    fn optional_portrait_locations_follow_cpp_windows_order() {
+        // C4FileSelDlg.cpp:541-552 appends the three shell folders, then HOME.
+        let root = tempfile::tempdir().expect("temporary portrait roots");
+        let documents = root.path().join("Documents");
+        let pictures = root.path().join("Pictures");
+        let desktop = root.path().join("Desktop");
+        let home = root.path().join("Home");
+        for path in [&documents, &pictures, &desktop, &home] {
+            fs::create_dir(path).expect("create portrait root");
+        }
+        let mut locations = Vec::new();
+
+        add_optional_portrait_locations(
+            &mut locations,
+            [
+                ("My Documents", Some(documents.clone())),
+                ("My Pictures", Some(pictures.clone())),
+                ("Desktop", Some(desktop.clone())),
+            ],
+            Some(("Home Folder", home.clone())),
+            false,
+        );
+
+        assert_eq!(
+            locations
+                .iter()
+                .map(|location| (location.label.as_str(), location.path.as_path()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("My Documents", documents.as_path()),
+                ("My Pictures", pictures.as_path()),
+                ("Desktop", desktop.as_path()),
+                ("Home Folder", home.as_path()),
+            ]
+        );
+    }
+
+    #[test]
+    fn optional_portrait_locations_append_unix_desktop_after_home() {
+        // C4FileSelDlg.cpp:550-556 uses "Home Folder" off Apple and derives
+        // Desktop from HOME on every non-Windows platform.
+        let root = tempfile::tempdir().expect("temporary portrait roots");
+        let home = root.path().join("Home");
+        let desktop = home.join("Desktop");
+        fs::create_dir_all(&desktop).expect("create portrait roots");
+        let mut locations = Vec::new();
+
+        add_optional_portrait_locations(
+            &mut locations,
+            [],
+            Some(("Home Folder", home.clone())),
+            true,
+        );
+
+        assert_eq!(
+            locations
+                .iter()
+                .map(|location| (location.label.as_str(), location.path.as_path()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Home Folder", home.as_path()),
+                ("Desktop", desktop.as_path()),
+            ]
+        );
     }
 }

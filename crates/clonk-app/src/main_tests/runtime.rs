@@ -2545,7 +2545,7 @@
             .iter()
             .any(|item| item.filename() == Some("Program.BMP")));
 
-        for _ in 0..5 {
+        for _ in 0..6 {
             let actions = app
                 .startup_player_properties_dialog
                 .as_mut()
@@ -2554,12 +2554,24 @@
                 .handle_key_down(KeyCode::Tab);
             assert!(actions.is_empty());
         }
+        // C4GuiDialogs.cpp:386-421 and C4FileSelDlg.cpp:162-169,564-572
+        // put Location after six forward focus steps. C4GuiComboBox.cpp:66-86
+        // and C4GuiMenu.cpp:240-299 then open, highlight, and choose row zero.
+        for key in [KeyCode::Down, KeyCode::Down] {
+            let actions = app
+                .startup_player_properties_dialog
+                .as_mut()
+                .expect("properties remain open")
+                .controller
+                .handle_key_down(key);
+            assert!(actions.is_empty());
+        }
         let actions = app
             .startup_player_properties_dialog
             .as_mut()
             .expect("properties remain open")
             .controller
-            .handle_key_down(KeyCode::Right);
+            .handle_key_down(KeyCode::Enter);
         app.process_startup_player_properties_actions(actions);
         let selector = app
             .startup_player_properties_dialog
@@ -2571,15 +2583,17 @@
             .items()
             .iter()
             .any(|item| item.filename() == Some("Custom.PNG")));
+        // C4FileSelDlg.cpp:189-194 changes the active path immediately, while
+        // C4FileSelDlg.cpp:575-580 remembers its row only from OnClosed.
         assert_eq!(
             clonk_app_netplay::configured_native_value(
                 &fs::read(paths.config_file()).expect("read portrait config"),
                 "Startup",
                 "LastPortraitFolderIdx",
             )
-            .expect("persisted portrait location")
+            .expect("portrait location is not persisted before close")
             .as_bytes(),
-            b"0"
+            b"1"
         );
 
         let actions = app
@@ -2588,10 +2602,34 @@
             .expect("properties remain open")
             .controller
             .handle_key_down(KeyCode::Escape);
-        assert!(
-            actions.is_empty(),
-            "selector cancel stays in player properties"
+        assert_eq!(
+            actions,
+            vec![
+                clonk_frontend::startup_plrproperties::PlayerPropertiesAction::
+                    PortraitSelectorClosed { location_index: 0 }
+            ],
+            "C4FileSelDlg.cpp:209-228 and 575-580 remember the current row on Cancel"
         );
+        app.process_startup_player_properties_actions(actions);
+        assert_eq!(
+            clonk_app_netplay::configured_native_value(
+                &fs::read(paths.config_file()).expect("read portrait config after close"),
+                "Startup",
+                "LastPortraitFolderIdx",
+            )
+            .expect("persisted portrait location after close")
+            .as_bytes(),
+            b"0"
+        );
+        persist_native_config_values(
+            &paths,
+            "Startup",
+            &[(
+                "LastPortraitFolderIdx",
+                clonk_app_netplay::NativeConfigValue::RawAscii("1"),
+            )],
+        )
+        .expect("simulate stale disk state after a failed close-time save");
         app.process_startup_player_properties_actions(vec![
             clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
         ]);
@@ -2601,7 +2639,9 @@
                 .and_then(|pending| pending.controller.portrait_selector())
                 .expect("selector reopens at the persisted location")
                 .current_location_index(),
-            0
+            0,
+            "C++ keeps the close-time config row in memory even when disk persistence fails \
+             (`C4FileSelDlg.cpp:575-580`)"
         );
         reset_cached_app_paths();
     }

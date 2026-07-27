@@ -9,8 +9,7 @@ LegacyClonk is **lockstep-deterministic**. The port is worthless unless it
 matches C++ **bit-for-bit on simulation state**. The pinned C++ snapshot is
 commit `7d43b47b7d789b533f32d005e64596e0a07019cd`, reachable in this repo's Git
 history; no C++ source is checked out here. Set `LEGACYCLONK_ORACLE_ROOT` to an
-external checkout (`~/Documents/code/vendor/legacyclonk-oracle`, tag
-`oracle-src-pinned`) for live differential work.
+external checkout of that exact commit for live differential work.
 
 - C++ is the golden oracle. When Rust and C++ differ, C++ is right — unless you
   can *prove* a C++ bug that cannot affect determinism.

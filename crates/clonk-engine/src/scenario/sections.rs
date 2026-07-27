@@ -1936,7 +1936,9 @@ fn parse_legacy_ini_property(line: &str) -> Option<(&str, &str)> {
     Some((&line[..name_end], &line[position + 1..]))
 }
 
-pub(in crate::scenario) fn parse_legacy_objects(text: &str) -> Result<Vec<LegacyObjectRecord>, ScenarioError> {
+pub(in crate::scenario) fn parse_legacy_objects(
+    text: &str,
+) -> Result<Vec<LegacyObjectRecord>, ScenarioError> {
     let mut records = Vec::new();
     let mut current: Option<LegacyObjectRecord> = None;
     let mut section_stack: Vec<(usize, LegacyObjectParseSection)> = Vec::new();
@@ -2406,7 +2408,10 @@ fn parse_legacy_object_effects(
 /// C4Object::CustomName uses StdCompiler's escaped-string adapter. Modern
 /// saves quote the value; older shipped saves keep the whole unquoted line
 /// (StdCompiler.cpp:734-741, 936-976, 1006-1062).
-pub(in crate::scenario) fn parse_legacy_object_name(value: &str, line: usize) -> Result<Option<String>, ScenarioError> {
+pub(in crate::scenario) fn parse_legacy_object_name(
+    value: &str,
+    line: usize,
+) -> Result<Option<String>, ScenarioError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -2680,7 +2685,10 @@ impl InitialNetworkSkyState {
 }
 
 impl SerializedEffectState {
-    pub(in crate::scenario) fn resolve(self, resolution: &SerializedC4ValueResolution<'_>) -> EffectState {
+    pub(in crate::scenario) fn resolve(
+        self,
+        resolution: &SerializedC4ValueResolution<'_>,
+    ) -> EffectState {
         // C4EnumeratedObjectPtr only recognizes the old pointer-offset
         // spelling inside the complete C4EnumPointer1..C4EnumPointer2 range.
         // A modern, raw object number above that range must not be shifted

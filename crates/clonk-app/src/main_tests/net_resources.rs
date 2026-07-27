@@ -630,7 +630,7 @@
         app.control_player_infos
             .replace_snapshot(4, [authoritative.clone()]);
         app.sync_classic_lobby_roster();
-        let expected_color = lobby_rgba(0x00ff_0000);
+        let expected_color = [0xff, 0x17, 0x17, 0xff];
         assert!(app
                 .classic_host_lobby
                 .as_ref()

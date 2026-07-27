@@ -2579,7 +2579,6 @@ pub(crate) fn set_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
     )?;
 
     with_host_context_mut(Ok(Value::Bool(false)), |context| {
-
         if remove {
             let Some(player) = context.player_state_mut(player_id) else {
                 return Ok(Value::Bool(false));
@@ -2655,7 +2654,6 @@ pub(crate) fn set_plr_magic(args: &[Value]) -> Result<Value, RuntimeError> {
     )?;
 
     with_host_context_mut(Ok(Value::Int(0)), |context| {
-
         if remove {
             let Some(player) = context.player_state_mut(player_id) else {
                 return Ok(Value::Int(0));
@@ -2701,7 +2699,6 @@ pub(crate) fn do_homebase_material(args: &[Value]) -> Result<Value, RuntimeError
     };
 
     with_host_context_mut(Ok(Value::Bool(false)), |context| {
-
         if context.definition_metadata(&definition).is_none()
             && context.definition_category(&definition).is_none()
         {
@@ -2763,7 +2760,6 @@ pub(crate) fn do_homebase_production(args: &[Value]) -> Result<Value, RuntimeErr
     };
 
     with_host_context_mut(Ok(Value::Bool(false)), |context| {
-
         if context.definition_metadata(&definition).is_none()
             && context.definition_category(&definition).is_none()
         {
@@ -4157,9 +4153,7 @@ fn record_cursor_state(context: &mut EffectHostContext, player_id: i32) {
 /// its selection callbacks run before the next player's pointers are cleared,
 /// exactly as the C++ loop does.
 pub(crate) fn clear_player_object_pointers_host(target: ObjectId) {
-    let players = with_host_context(Vec::new(), |context| {
-        context.player_ids().to_vec()
-    });
+    let players = with_host_context(Vec::new(), |context| context.player_ids().to_vec());
     for player_id in players {
         let removed_cursor = with_host_context_mut(false, |context| {
             let Some(player) = context.player_state_mut(player_id) else {

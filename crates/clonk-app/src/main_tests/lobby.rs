@@ -887,10 +887,10 @@
         };
         assert_eq!(client.id, 0);
         assert_eq!(client.name, "Exact Host");
-        assert_eq!(client.color, [0, 0, 255, 255]);
+        assert_eq!(client.color, [0x3b, 0x3b, 0xff, 0xff]);
         assert_eq!(player.client_id, 0);
         assert_eq!(player.name, "Exact Player");
-        assert_eq!(player.color, [0, 0, 255, 255]);
+        assert_eq!(player.color, [0x3b, 0x3b, 0xff, 0xff]);
         assert!(matches!(
             &player.icon,
             LobbyRosterIcon::Raster(icon)
@@ -2132,7 +2132,7 @@
                 .logs()
                 .last()
                 .map(|line| (&*line.text, line.color)),
-            Some(("Not in countdown!", [255, 31, 31, 255]))
+            Some(("Not in countdown!", [255, 32, 32, 255]))
         );
 
         app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/readycheck".to_string()))
@@ -2165,9 +2165,10 @@
             Some(&LobbyLogLine {
                 text: "Unknown command: \"xyz\" - type /help to get a list of valid commands"
                     .to_string(),
-                color: [255, 31, 31, 255],
+                color: [255, 32, 32, 255],
             }),
-            "C4GameLobby::OnError is red and deliberately bypasses log timestamps"
+            "OnError bypasses timestamps, then AddTextLine makes red readable \
+             (src/C4GameLobby.cpp:755-762; src/C4GuiLabels.cpp:293-299)"
         );
     }
 
@@ -7608,6 +7609,17 @@
         app.activate_prepared_network_host(scenario.clone(), SocketAddr::from(([127, 0, 0, 1], 0)));
         assert!(app.network.is_none(), "preparation must precede bind");
         assert!(app.startup_network_connection.is_some());
+        // OpenScenario publishes 4 before InitNetworkHost begins, so the
+        // loader installed around host preparation must retain that value
+        // (src/C4Game.cpp:124-270,421-440).
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .expect("prepared host loader")
+                .state()
+                .progress(),
+            4
+        );
 
         for _ in 0..3_000 {
             app.poll_startup_network_connection()
@@ -7769,6 +7781,24 @@
         assert!(app.loading_state.is_some());
         assert!(app.context_menu.is_none());
         assert_eq!(app.context_menu_lobby_option, None);
+        // Init returns from InitNetworkHost/DoLobby at 7 before beginning
+        // InitGame's script and definition phases
+        // (src/C4Game.cpp:438-457,3872-3913).
+        assert_eq!(
+            app.loading_state
+                .as_ref()
+                .expect("prepared host loading state")
+                .last_progress,
+            7
+        );
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .expect("prepared host loader after lobby")
+                .state()
+                .progress(),
+            7
+        );
         assert!(app
             .network_start_wait
             .as_ref()
@@ -7800,8 +7830,36 @@
         // starts network control after every waited-for client has reached Go
         // (src/C4Network2.cpp:2017-2077,2091-2110). The initialized game must
         // therefore remain behind the loading screen until that exact commit.
-        app.poll_loading()
-            .expect("initialize the retained prepared scenario");
+        let loading_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.poll_loading()
+                .expect("initialize the retained prepared scenario");
+            if app
+                .loading_state
+                .as_ref()
+                .and_then(|loading| loading.prepared_go.as_ref())
+                .is_some_and(|pending| pending.local_reached)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < loading_deadline,
+                "prepared host InitGame worker did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .expect("prepared host loader through Go wait")
+                .state()
+                .progress(),
+            97
+        );
+        assert!(app.loading_state.as_ref().is_some_and(|loading| loading
+            .log
+            .iter()
+            .any(|line| line == "Definition selection resolved")));
         assert_eq!(
                 app.engine.random_seed(),
                 prepared_random_seed,
@@ -8161,10 +8219,15 @@
     }
 
     #[test]
-    fn lobby_message_keeps_markup_timestamp_and_first_player_chat_color() {
+    fn lobby_message_keeps_markup_timestamp_and_makes_chat_color_readable() {
+        // MainDlg::OnMessage forwards the first user player's lobby color to
+        // AddTextLine with fMakeReadableOnBlack=true. MultilineLabel::AddLine
+        // then applies the weighted lightness floor before storing the line
+        // (src/C4GameLobby.cpp:706-721; src/C4GuiLabels.cpp:293-299;
+        // src/C4Gui.cpp:71-89).
         let mut app = new_menu_app(640, 480);
         install_test_classic_host_lobby(&mut app);
-        app.white_lobby_chat = true;
+        app.white_lobby_chat = false;
         app.show_log_timestamps = false;
         app.control_clients
             .replace_snapshot([message_client(0, b"Local"), message_client(7, b"Remote")]);
@@ -8174,7 +8237,7 @@
                 players: vec![clonk_engine::ControlPlayerInfoEntry {
                     player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
                     team: 4,
-                    color: 0x0012_3456,
+                    color: 0x0000_0000,
                     original_color: 0x0065_4321,
                     ..Default::default()
                 }],
@@ -8191,8 +8254,8 @@
             .expect("lobby remains")
             .controller
             .logs()[0];
-        assert_eq!(line.text, "<Remote> <c ffffff>hello");
-        assert_eq!(line.color, [0x12, 0x34, 0x56, 0xff]);
+        assert_eq!(line.text, "<Remote> hello");
+        assert_eq!(line.color, [0x65, 0x65, 0x65, 0xff]);
 
         assert!(app.engine.set_team_distribution(4));
         app.engine.set_team_colors(true);
@@ -8209,7 +8272,7 @@
             .expect("lobby remains")
             .controller
             .logs()[1];
-        assert_eq!(line.color, [0x12, 0x34, 0x56, 0xff]);
+        assert_eq!(line.color, [0x65, 0x65, 0x65, 0xff]);
 
         app.engine.set_teams(vec![clonk_engine::TeamInfo::new(
             4,
@@ -8229,7 +8292,7 @@
             .expect("lobby remains")
             .controller
             .logs()[2];
-        assert_eq!(line.color, [0x65, 0x43, 0x21, 0xff]);
+        assert_eq!(line.color, [0x82, 0x60, 0x3e, 0xff]);
 
         app.show_log_timestamps = true;
         app.execute_message_control(message_control(MESSAGE_TYPE_SYSTEM, -1, -1, b"notice", 0));
@@ -8242,6 +8305,67 @@
         assert!(line.text.starts_with("<c 909090>["));
         assert!(line.text.ends_with("</c> Network: notice"));
         assert_eq!(line.color, [0xaf, 0xaf, 0xaf, 0xff]);
+
+        app.show_log_timestamps = false;
+        app.white_lobby_chat = true;
+        app.execute_message_control(message_control(
+            MESSAGE_TYPE_NORMAL,
+            -1,
+            -1,
+            b"white body",
+            7,
+        ));
+        let line = app
+            .classic_host_lobby
+            .as_ref()
+            .expect("lobby remains")
+            .controller
+            .logs()
+            .last()
+            .expect("white-chat line");
+        assert_eq!(line.text, "<Remote> <c ffffff>white body");
+        assert_eq!(line.color, [0x82, 0x60, 0x3e, 0xff]);
+    }
+
+    #[test]
+    fn lobby_roster_makes_black_client_and_player_names_readable() {
+        // Lobby player and client labels pass their raw lobby colors through
+        // MakeColorReadableOnBlack before drawing (src/C4PlayerInfoListBox.cpp:
+        // 72-87, 143, 648-685, 737-750, 824-825;
+        // src/C4PlayerInfoListBox.h:176-179; src/C4Gui.cpp:71-89).
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Local"), message_client(7, b"Remote")]);
+        app.control_player_infos
+            .apply(clonk_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 41,
+                    player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                    color: 0,
+                    original_color: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+        app.sync_classic_lobby_roster();
+
+        let rows = app
+            .classic_host_lobby
+            .as_ref()
+            .expect("lobby remains")
+            .controller
+            .rows();
+        assert!(rows.iter().any(
+            |row| matches!(row, LobbyRosterRow::Client(client)
+                if client.id == 7 && client.color == [0x65, 0x65, 0x65, 0xff])
+        ));
+        assert!(rows.iter().any(
+            |row| matches!(row, LobbyRosterRow::Player(player)
+                if player.id == 41 && player.color == [0x65, 0x65, 0x65, 0xff])
+        ));
     }
 
     #[test]
@@ -8709,7 +8833,7 @@
             lobby.controller.logs().last(),
             Some(&LobbyLogLine {
                 text: "Preloading error.".to_string(),
-                color: [255, 31, 31, 255],
+                color: [255, 32, 32, 255],
             })
         );
     }

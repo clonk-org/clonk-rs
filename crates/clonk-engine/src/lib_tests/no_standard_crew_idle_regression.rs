@@ -34,8 +34,8 @@ fn empty_id_get_idle_excludes_no_standard_crew_definitions() {
                 .expect("standard definition compiles"),
         )
         .expect("standard definition registers");
-    let mut excluded = Definition::from_script("SPEC", "Special crew", "")
-        .expect("special definition compiles");
+    let mut excluded =
+        Definition::from_script("SPEC", "Special crew", "").expect("special definition compiles");
     excluded.no_standard_crew = -2;
     engine
         .register_definition(excluded)

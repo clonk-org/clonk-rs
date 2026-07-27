@@ -73,7 +73,8 @@ fn load(relative_path: &Path, seed: u64) -> Engine {
 
     let material_group = Group::open(content.join("Material.c4g")).expect("Material.c4g opens");
     let materials = MaterialLibrary::from_group(&material_group).expect("Material.c4g loads");
-    let system_group = Group::open(content_install.join("planet/System.c4g")).expect("System opens");
+    let system_group =
+        Group::open(content_install.join("planet/System.c4g")).expect("System opens");
     let system_scripts = load_system_scripts(&system_group).expect("System scripts load");
     let standard_names = system_group
         .read_file("Names.txt")
@@ -186,7 +187,13 @@ fn main() {
 
     let mut engine = load(Path::new(&relative), seed);
 
-    let colors = [0xff_00_00u32, 0x00_ff_00, 0x00_00_ff, 0xff_ff_00, 0xff_00_ff];
+    let colors = [
+        0xff_00_00u32,
+        0x00_ff_00,
+        0x00_00_ff,
+        0xff_ff_00,
+        0xff_00_ff,
+    ];
     let joined: Vec<i32> = (0..players)
         .filter_map(|index| {
             join(
@@ -288,7 +295,10 @@ fn main() {
                     script: LegacyCString::from_bytes(script.into_bytes()).expect("no NUL"),
                     by_client: 0,
                 };
-                if engine.execute_script_control(&control, boom_policy).is_err() {
+                if engine
+                    .execute_script_control(&control, boom_policy)
+                    .is_err()
+                {
                     control_errors += 1;
                 }
             }
@@ -305,7 +315,10 @@ fn main() {
                 script: LegacyCString::from_bytes(script.into_bytes()).expect("no NUL"),
                 by_client: 0,
             };
-            if engine.execute_script_control(&control, boom_policy).is_err() {
+            if engine
+                .execute_script_control(&control, boom_policy)
+                .is_err()
+            {
                 control_errors += 1;
             }
         }

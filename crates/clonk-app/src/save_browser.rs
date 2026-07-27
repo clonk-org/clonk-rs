@@ -2,8 +2,6 @@ use std::path::PathBuf;
 
 use clonk_engine::{CommandKind, ControlCommand};
 
-
-
 #[derive(Clone, Debug)]
 pub struct SaveEntry {
     pub display_name: String,
@@ -105,7 +103,6 @@ impl SaveBrowserState {
             _ => None,
         }
     }
-
 
     fn advance_selection(&mut self, delta: i32) {
         let Some(current) = self.selected else {

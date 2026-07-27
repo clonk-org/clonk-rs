@@ -178,6 +178,31 @@ live comparison.
 
 ## Open
 
+- Open gap (found 2026-07-25, not closed): script `AddMessage` still emits a
+  fresh `C4GM_Multiple` record (`compat/menus_messages.rs`) instead of calling
+  `C4GameMessageList::Append(..., fNoDuplicates=false)` like C++
+  (`C4Script.cpp:2435-2441`). The target-Build failure path now has the exact
+  append/de-duplicate behavior needed for construction feedback, but converting
+  global `AddMessage` also requires preserving C++'s distinct `ANY_OWNER` (-2)
+  and `NO_OWNER` (-1) message owners; the current `Option<i32>` representation
+  maps both to `None` and can select the wrong first append candidate.
+- Open gap (found 2026-07-25, not closed): a DFA_FLIGHT object can land one
+  frame later than C++. Reproduce with EkeReloaded `TheStippelAge/Invasion`
+  under `LC_PIN_SEED=777` and a `#appendto ST5B` per-frame `Log` of
+  action/position/`GetXDir(0,1000)`: Stippel `o739` reaches
+  `Jump pFLIGHT x2730 y710 U400 V200` identically in both engines, then C++
+  runs `ContactAction`'s bottom-`DFA_FLIGHT` arm (`C4Object.cpp:4360-4377`,
+  `last_xdir`/`ObjectActionWalk`/restore) that frame and reports
+  `Walk pWALK x2731 y710 U-300`, while Rust stays airborne one more frame
+  (`Jump pFLIGHT x2731 y710 U400 V400`) and reconverges by the third frame.
+  Only the frame the contact fires differs, so the cause is sub-pixel `fix_y`
+  drift entering the frame rather than the transition itself; script cannot
+  observe `fix_y` (`FnGetX`/`FnGetY` return whole pixels, `C4Script.cpp:1249`),
+  so isolating it needs an oracle-side dump. Scale: 3 of 37 314 trace lines on
+  that seed; the same run is otherwise bit-exact, and `LC_PIN_SEED=12345` is
+  bit-exact over all 37 161 lines. This is independent of the FindObject
+  ordering fix landed the same day — every `Find`-driven event (all `Bite`s)
+  matches on both seeds.
 - Intentional divergence from C++ (2026-07-24), not a gap to close: the port
   ships **no trademark notice**. C++ draws `FANPROJECTTEXT " " TRADEMARKTEXT`
   (`C4Version.h:21-22`) in the main-menu and About footers
@@ -208,7 +233,7 @@ live comparison.
 - Test gap (2026-07-25): `advance_game_clock_from_elapsed` now coalesces a
   one-second-timer backlog instead of replaying one `sec1_timer` pass per
   elapsed second, matching C++ (`seconds != LastExecute.tv_sec` fires
-  `Sec1Timer()` at most once per Execute, oracle-src-pinned
+  `Sec1Timer()` at most once per Execute, LegacyClonk 7d43b47
   src/StdAppUnix.cpp:288-291; Win32 never queues WM_TIMER twice,
   StdAppWin32.cpp:132). The behavior is verified against that C++ source, but
   the accompanying test only pins that the sub-second phase survives -- it does
@@ -259,17 +284,15 @@ live comparison.
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
 - Graphics overlays: all seven modes now dispatch, and the walk is exhaustive so
-  a new mode cannot be lost to a catch-all. Residual divergences:
-  - MODE_Base blits the whole `Graphics.png` sheet centred on the object, where
-    C++ sets the facet to `(0, 0, Shape.Wdt, Shape.Hgt)` with
-    `TargetX/Y = Shape.x + Shape.Wdt/2, Shape.y + Shape.Hgt/2`
-    (`C4DefGraphics.cpp:642`), which telescopes to a draw at
-    `(iTx + Shape.x, iTy + Shape.y)` (`C4DefGraphics.cpp:826`). Coincides only
-    when the sheet is exactly shape-sized and single-frame, which is true of the
-    shipped MODE_Base users checked so far.
-  - MODE_Base and MODE_Action pass a source scale of 1.0 instead of the source
-    definition's `Scale`, which C++ hands to `DrawT` for every facet mode
-    (`C4DefGraphics.cpp:826`). Latent: no shipped content sets `Scale`.
+  a new mode cannot be lost to a catch-all. MODE_Base selects the source
+  definition's `(0, 0, Shape.Wdt, Shape.Hgt)` facet, applies `Shape.x/y` at the
+  destination, and uses the source definition's `Scale`
+  (`C4DefGraphics.cpp:636-637,815-821`). This keeps Hazard's floating
+  spawnpoint items on their world-face geometry instead of drawing the embedded
+  64×64 inventory picture. Residual divergences:
+  - MODE_Action passes a source scale of 1.0 instead of the source definition's
+    `Scale`, which C++ hands to `DrawT` for every facet mode
+    (`C4DefGraphics.cpp:821`). Latent: no shipped content sets `Scale`.
   - `draw_object_face` reads geometry (Shape, GrowthType, ActMap) from the same
     sprite it blits from, so a cross-definition `SetGraphics(name, obj, idSrcDef, 0)`
     takes the SOURCE definition's geometry. C++ `SetGraphics(gfx, fTemp)` swaps
@@ -293,7 +316,7 @@ an ordered-map model gap.
 
 - **The new-player dialog seeds its name from the localized rank ladder**
   (`GameApp::new_player_default_name`, `crates/clonk-app/src/game_app/startup.rs`;
-  C++ `C4PlayerInfoCore::Default`, oracle-src-pinned src/C4InfoCore.cpp:69).
+  C++ `C4PlayerInfoCore::Default`, LegacyClonk 7d43b47 src/C4InfoCore.cpp:69).
   Approved 2026-07-27. C++ hardcodes the German `"Neuling"` and prefills it in
   the new-player dialog for English players too, so the very first screen a new
   player sees is German. `"Neuling"` is rank 0 of `IDS_RANKS_PLAYER`, whose
@@ -309,9 +332,51 @@ an ordered-map model gap.
   Pinned by `new_player_dialog_seeds_the_name_from_the_localized_first_player_rank`
   and `new_player_dialog_still_seeds_neuling_from_the_german_rank_ladder`.
 
+- **`Network.ControlMode` defaults to 2 (`CNM_Async`), not 0 (`CNM_Decentral`)**
+  (`crates/clonk-app/src/main_parts/resources.rs`,
+  `crates/clonk-app/src/advanced_config.rs`; C++ `C4Config.cpp` ships 0 and
+  labels async `"[!]Asynchroner Netzwerkmodus (experimentell!)"`,
+  `C4GameOptions.cpp:93`). Approved 2026-07-25. The async *mechanism* itself is
+  already a faithful port -- `force_expired_async_control` mirrors
+  `PackCompleteCtrl` (LegacyClonk 7d43b47 src/C4GameControlNetwork.cpp:741-784)
+  and the deadline mirrors :754 exactly; only the default changes.
+  In lockstep the host cannot publish tick T until every client's control for T
+  arrives, so the slowest link paces the whole session and one bad peer stalls
+  everyone. Async bounds that wait at
+  `ControlRate * AsyncMaxWait * 1000 / TargetFPS` (106 ms at defaults), then
+  packs whichever clients arrived. The absent client's input is dropped, not
+  deferred.
+  Determinism is unaffected: only the host decides the timeout and broadcasts
+  one authoritative aggregate, so every client executes the identical control.
+  The straggler's late packet is rejected as stale rather than replayed on a
+  later tick (`ControlCoordinator::ingest`, `tick < current_tick`), which is now
+  pinned by
+  `control_arriving_after_its_tick_was_forced_is_stale_and_never_executes`.
+  Measured with `cargo run -p clonk-network --example async_control_mode`, 16
+  seeds x 400 ticks, 4 clients with one impaired, *with PreSend active* (that
+  pairing is the whole basis for this default -- see the numbers below).
+  p99/max shared-tick lateness, decentral -> async:
+  250 ms peer 232/281 ms -> 190/206 ms (32 packets dropped);
+  +-150 ms jitter peer 278/302 ms -> 233/262 ms (45);
+  8 clients with one at 400 ms 346/408 ms -> 311/337 ms (66);
+  60 ms/10% loss peer 93/106 ms -> 93/106 ms (0 -- the timeout never fires, so
+  enabling it is free where it is not needed).
+  The cost is what changed the decision. Without PreSend the same runs drop
+  1006-2162 packets; with the envelope estimator delivering most control on
+  time, async only fires on genuine outliers and drops 32-66, roughly 0.5-1% of
+  ticks -- and most ticks carry no keypress at all, so real input loss is well
+  below that. PreSend still does the bulk of the work (mean lateness
+  192 -> 63 ms, 216 -> 60 ms, 297 -> 98 ms); async is a tail/hitch fix layered
+  on top, not a replacement for it.
+  Known residuals: the drop is silent, with no client-side signal that a
+  player's input was discarded; and a peer whose latency *consistently* exceeds
+  the budget is dropped on nearly every tick (`AsyncMaxWait` 1 dropped on 6490
+  of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
+  above ordinary delivery time rather than being tuned down to chase the tail.
+
 - **PreSend is sized from the delivery-time envelope, not the mean**
   (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;
-  C++ `C4GameControlNetwork::CalcPerformance`, oracle-src-pinned
+  C++ `C4GameControlNetwork::CalcPerformance`, LegacyClonk 7d43b47
   src/C4GameControlNetwork.cpp:382-447). Approved 2026-07-24.
   C++ derives the PreSend horizon from a 1/150 EWMA of the *mean* control send
   time. Two consequences, both of which stall every participant rather than the
@@ -347,7 +412,7 @@ an ordered-map model gap.
 
 - **One datagram may hold the reliable-UDP hub for at most 2 ms**
   (`crates/clonk-network/src/udp_runtime.rs`, `RELIABLE_UDP_SEND_BUDGET`;
-  C++ `C4NetIOSimpleUDP::Send`, oracle-src-pinned src/C4NetIO.cpp:1772-1790).
+  C++ `C4NetIOSimpleUDP::Send`, LegacyClonk 7d43b47 src/C4NetIO.cpp:1772-1790).
   Approved 2026-07-25. This restores C++'s failure mode, with one bounded
   softening.
   C++ issues a single non-blocking `sendto` and, on EWOULDBLOCK/EINPROGRESS,
@@ -372,7 +437,7 @@ an ordered-map model gap.
 
 - **Control-sized reliable-UDP datagrams are sent three times**
   (`crates/clonk-network/src/udp.rs`, `reliable_udp_redundant_copies`;
-  C++ `C4NetIOUDP::SendDirect`, oracle-src-pinned src/C4NetIO.cpp:3128).
+  C++ `C4NetIOUDP::SendDirect`, LegacyClonk 7d43b47 src/C4NetIO.cpp:3128).
   Approved 2026-07-24, copy count raised from 2 to 3 on 2026-07-25.
   C++ sends each data datagram once and repairs a loss with a request/resend
   round trip. Because reliable-UDP delivery is strictly ordered
@@ -387,7 +452,7 @@ an ordered-map model gap.
   carries the same packet number, and both engines discard a fragment they have
   already stored -- Rust at `ReliableUdpPartialPacket::add_fragment`
   (udp.rs:508-522), C++ at `C4NetIOUDP::Packet::AddFragment`
-  (oracle-src-pinned src/C4NetIO.cpp:2615-2620). The delivered packet stream,
+  (LegacyClonk 7d43b47 src/C4NetIO.cpp:2615-2620). The delivered packet stream,
   its ordering and the wire format are unchanged.
   Only inner packets of <= 256 bytes qualify, which covers control (10-27 bytes
   on the wire) and excludes resource transfer, whose chunks fragment into full
@@ -414,7 +479,7 @@ an ordered-map model gap.
 
 - **Reliable-UDP re-ask damping, 1 s -> 250 ms** (`crates/clonk-network/src/udp.rs`,
   `RELIABLE_UDP_RECHECK_INTERVAL`; C++ `C4NetIOUDP::Peer::iReCheckInterval`,
-  oracle-src-pinned src/C4NetIO.cpp:1914). Approved 2026-07-24.
+  LegacyClonk 7d43b47 src/C4NetIO.cpp:1914). Approved 2026-07-24.
   The first repair request is immediate in both engines, so this interval only
   governs the case where a repair request is itself lost. C++ then waits a full
   second, which in a lockstep session freezes every participant rather than only

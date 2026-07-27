@@ -95,7 +95,9 @@ pub(crate) fn startup_scensel_game_option_bounds(
     clonk_frontend::startup_scensel::scen_sel_layout(width, height, fonts).game_option_bounds()
 }
 
-pub(crate) fn scensel_selection_info(menu: &MenuState) -> clonk_frontend::startup_scensel::SelectionInfo<'_> {
+pub(crate) fn scensel_selection_info(
+    menu: &MenuState,
+) -> clonk_frontend::startup_scensel::SelectionInfo<'_> {
     scensel_selection(menu)
         .map(|entry| clonk_frontend::startup_scensel::SelectionInfo {
             picture: entry.title_picture.as_ref(),
@@ -1119,12 +1121,19 @@ pub(crate) fn render_startup_frame(
                     );
                     clonk_frontend::draw_image_bilinear(surface, &logo_rect, &logo, Some(gamma));
 
-                    // "Version %s" with C4VERSION = "4.9.11.0 [362] " (trailing
-                    // space from empty C4VERSIONEXTRA/C4BUILDOPT, C4Version.h:55),
+                    // Placement, font, colour and markup follow C++ exactly:
                     // right-aligned at (Wdt*39/40, Hgt/18 + 0.4*logoHgt) in the
                     // GUI TextFont, white, markup on (C4StartupMainDlg.cpp:121).
+                    //
+                    // The string itself deliberately diverges. C++ draws
+                    // C4VERSION ("4.9.11.0 [362] "); this port draws its own
+                    // release version, because that is what identifies a build
+                    // in a bug report. The engine compatibility version still
+                    // lives in `clonk_core::version::ENGINE_VERSION` and is what
+                    // content gating and protocol identification use.
                     if !defer_native_main_text {
-                        let version_text = "Version 4.9.11.0 [362] ";
+                        let version_text = format!("Version {}", clonk_core::version::PORT_VERSION);
+                        let version_text = version_text.as_str();
                         let version_x = width * 39 / 40;
                         let version_y = height / 18 + logo_h;
                         if let Some(fonts) = assets.clonk_fonts.as_ref() {
@@ -1202,7 +1211,10 @@ pub(crate) fn startup_fade_packed_modulation(opacity: u8) -> u32 {
     (u32::from(255_u8.saturating_sub(opacity)) << 24) | 0x00ff_ffff
 }
 
-pub(crate) fn apply_startup_fade_to_batch(batch: &mut NativePresentationBatch, opacity: u8) -> Result<()> {
+pub(crate) fn apply_startup_fade_to_batch(
+    batch: &mut NativePresentationBatch,
+    opacity: u8,
+) -> Result<()> {
     // `C4GUI::Dialog::Draw` switches to eFadeNone at the fully visible
     // endpoint and therefore does not activate even a white modulation.
     if opacity == u8::MAX {
@@ -1314,7 +1326,11 @@ pub(crate) struct PhysicalViewportState {
 }
 
 impl PhysicalViewportState {
-    pub(crate) const fn owned(player: i32, expand_player_slots: bool, physical_identity: u64) -> Self {
+    pub(crate) const fn owned(
+        player: i32,
+        expand_player_slots: bool,
+        physical_identity: u64,
+    ) -> Self {
         Self {
             displayed_player: player,
             camera_identity_owner: player,
@@ -2238,7 +2254,9 @@ pub(crate) fn object_menu_buying_player_color(
         .unwrap_or(0)
 }
 
-pub(crate) fn default_owner_definition_sprite(image: clonk_engine::DefinitionSpriteImage) -> ImageData {
+pub(crate) fn default_owner_definition_sprite(
+    image: clonk_engine::DefinitionSpriteImage,
+) -> ImageData {
     let width = image.width();
     let height = image.height();
     let mask = image.color_mask();
@@ -2630,7 +2648,11 @@ fn fow_object_is_closed(snapshot: &SimulationSnapshot, object: &ObjectSnapshot) 
 
 /// Exact interaction predicate from `C4Player::FoWIsVisible`. This is
 /// deliberately independent from the renderer's faded modulation map.
-pub(crate) fn fow_point_is_visible(snapshot: &SimulationSnapshot, owner: i32, point: Vector2) -> bool {
+pub(crate) fn fow_point_is_visible(
+    snapshot: &SimulationSnapshot,
+    owner: i32,
+    point: Vector2,
+) -> bool {
     let Some(player) = snapshot.players.iter().find(|player| player.id == owner) else {
         return false;
     };
@@ -2725,7 +2747,10 @@ pub(crate) fn ingame_pointer_viewport_pixel(
     )
 }
 
-pub(crate) fn build_menu_entries(entries: &[FrontendScenario], include_back: bool) -> Vec<ScenarioEntry> {
+pub(crate) fn build_menu_entries(
+    entries: &[FrontendScenario],
+    include_back: bool,
+) -> Vec<ScenarioEntry> {
     let mut result = Vec::new();
     if include_back {
         result.push(ScenarioEntry {
@@ -2743,7 +2768,9 @@ pub(crate) fn build_menu_entries(entries: &[FrontendScenario], include_back: boo
     result
 }
 
-pub(crate) fn build_scenario_catalog(entries: &[FrontendScenario]) -> HashMap<String, FrontendScenario> {
+pub(crate) fn build_scenario_catalog(
+    entries: &[FrontendScenario],
+) -> HashMap<String, FrontendScenario> {
     let mut catalog = HashMap::new();
     for entry in entries {
         insert_scenario_recursive(entry, &mut catalog);
@@ -3392,22 +3419,32 @@ where
     let mut emitted_percent = 0_u8;
     for (root_index, root) in roots.iter().enumerate() {
         let root_base = root_index.saturating_mul(100);
-        let result = resource_scenario::discover_with_languages_and_packs_with_progress(
-            &root.path,
-            &languages,
-            &language_packs,
-            |progress| {
-                let combined =
-                    (root_base.saturating_add(usize::from(progress.percent()))) / root_count;
-                let combined = u8::try_from(combined.min(100)).unwrap_or(100);
-                emitted_percent = emitted_percent.max(combined);
-                if report_progress(emitted_percent) {
-                    OpsControlFlow::Continue(())
-                } else {
-                    OpsControlFlow::Break(())
-                }
-            },
-        );
+        let mut report_root_progress = |progress: resource_scenario::ScenarioDiscoveryProgress| {
+            let combined = (root_base.saturating_add(usize::from(progress.percent()))) / root_count;
+            let combined = u8::try_from(combined.min(100)).unwrap_or(100);
+            emitted_percent = emitted_percent.max(combined);
+            if report_progress(emitted_percent) {
+                OpsControlFlow::Continue(())
+            } else {
+                OpsControlFlow::Break(())
+            }
+        };
+        let result = if root.include_container {
+            resource_scenario::discover_entry_with_languages_and_packs_with_progress(
+                &root.path,
+                &languages,
+                &language_packs,
+                &mut report_root_progress,
+            )
+            .map(|entry| entry.into_iter().collect())
+        } else {
+            resource_scenario::discover_with_languages_and_packs_with_progress(
+                &root.path,
+                &languages,
+                &language_packs,
+                &mut report_root_progress,
+            )
+        };
         match result {
             Ok(entries) => combined_entries
                 .extend(entries.into_iter().map(|entry| (entry, root.label.clone()))),
@@ -3506,7 +3543,11 @@ fn mutable_group_descend<'a>(
     }
 }
 
-pub(crate) fn scenario_filename_from_title(title: &str, kind: ScenarioKind, old_path: &Path) -> String {
+pub(crate) fn scenario_filename_from_title(
+    title: &str,
+    kind: ScenarioKind,
+    old_path: &Path,
+) -> String {
     const STRIP: &[char] = &[
         '!', '"', '§', '%', '&', '/', '=', '?', '+', '*', '#', ':', ';', '<', '>', '\\', '.',
     ];
@@ -4521,6 +4562,7 @@ pub(crate) fn scenario_storage_is_original(path: &Path) -> bool {
 pub(crate) struct ScenarioRoot {
     pub(crate) path: PathBuf,
     pub(crate) label: String,
+    include_container: bool,
 }
 
 pub(crate) fn scenario_roots(paths: &AppPaths) -> Vec<ScenarioRoot> {
@@ -4530,6 +4572,17 @@ pub(crate) fn scenario_roots(paths: &AppPaths) -> Vec<ScenarioRoot> {
     if let Some(content) = paths.content_dir() {
         push_root(&mut roots, &mut seen, content.to_path_buf(), "Scenarios");
     }
+    // C++ scans ExePath itself, so its configured SaveGameFolder remains one
+    // visible SubFolder before the individual save groups are loaded
+    // (C4StartupScenSelDlg.cpp:948-958, 1431-1439). Rust scans selected roots
+    // instead; retain the configured folder explicitly, including absolute
+    // locations outside the install tree.
+    push_entry_root(
+        &mut roots,
+        &mut seen,
+        configured_savegame_directory(Some(paths)),
+        "Scenarios",
+    );
     // The classic install root is a flat pack namespace. Discover its direct
     // `*.c4f` entries without recursively treating build/source directories
     // beside the executable as scenario folders.
@@ -4577,6 +4630,25 @@ fn push_root(
     path: PathBuf,
     label: &str,
 ) {
+    push_scenario_root(roots, seen, path, label, false);
+}
+
+fn push_entry_root(
+    roots: &mut Vec<ScenarioRoot>,
+    seen: &mut HashSet<String>,
+    path: PathBuf,
+    label: &str,
+) {
+    push_scenario_root(roots, seen, path, label, true);
+}
+
+fn push_scenario_root(
+    roots: &mut Vec<ScenarioRoot>,
+    seen: &mut HashSet<String>,
+    path: PathBuf,
+    label: &str,
+    include_container: bool,
+) {
     let key = scenario_root_key(&path);
     if !seen.insert(key) {
         return;
@@ -4584,6 +4656,7 @@ fn push_root(
     roots.push(ScenarioRoot {
         path,
         label: label.to_string(),
+        include_container,
     });
 }
 
@@ -5603,4 +5676,3 @@ pub(crate) fn compute_mix_values_for(
         pan,
     )
 }
-

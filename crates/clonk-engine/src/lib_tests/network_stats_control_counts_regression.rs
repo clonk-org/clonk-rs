@@ -18,7 +18,7 @@ fn l143_control_counts_drain_without_resetting_action_deduplication() {
     assert_eq!(
         engine.players().map(Player::id).collect::<Vec<_>>(),
         vec![5, 2],
-            "the fixture exercises native link order rather than map order"
+        "the fixture exercises native link order rather than map order"
     );
     assert_eq!(
         engine.take_player_control_counts(),
@@ -27,13 +27,13 @@ fn l143_control_counts_drain_without_resetting_action_deduplication() {
     assert_eq!(
         engine.take_player_control_counts(),
         vec![(5, 0, 0), (2, 0, 0)],
-            "each statistics sample drains only the counters"
+        "each statistics sample drains only the counters"
     );
 
     engine.count_player_control(5, CountedControlType::Command, 77, 1);
     assert_eq!(
         engine.take_player_control_counts(),
         vec![(5, 1, 0), (2, 0, 0)],
-            "LastControl survives the drain and suppresses the repeated action"
+        "LastControl survives the drain and suppresses the repeated action"
     );
 }

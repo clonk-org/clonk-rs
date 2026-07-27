@@ -4104,7 +4104,9 @@ fn find_candidate_ids(world: &impl WorldAccessor, condition: &FindCondition) -> 
                 world.object_sector_ids_in_rect(rect)
             }
         })
-        .unwrap_or_else(|| world.object_ids())
+        // Unbounded criteria walk `Objs.First -> Next`, the forward master
+        // list (C4FindObject.cpp:188-216), not the callback's storage order.
+        .unwrap_or_else(|| world.master_object_ids())
 }
 
 /// Collect matches in C++ walk order (C4FindObject::FindMany,
@@ -4470,8 +4472,19 @@ pub(crate) fn find_at_point(args: &[Value]) -> Result<Value, RuntimeError> {
     let origin = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .and_then(EffectHostContext::object_context)
-            .map(ObjectScopeContext::effective_position)
+            .and_then(|context| {
+                // System.c4g adds FnGetX/FnGetY's cthr->Obj position. An
+                // effect's mutable pForObj carrier is not that receiver.
+                let target = context.script_object_context?;
+                context
+                    .object_scope(target)
+                    .map(ObjectScopeContext::effective_position)
+                    .or_else(|| {
+                        context
+                            .get_world_object(target)
+                            .map(|object| object.position())
+                    })
+            })
             .unwrap_or(Vector2::ZERO)
     });
     Ok(Value::Array(vec![
@@ -4657,7 +4670,6 @@ pub(crate) fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             if context.get_world_object(target).is_some() {
                 return Ok(context
@@ -4743,207 +4755,209 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let registration = try_with_host_context_mut("CreateObject requires an active engine context", |context| {
+    let registration = try_with_host_context_mut(
+        "CreateObject requires an active engine context",
+        |context| {
+            // C4Id2Def failure: no object, silent nullptr (C4Game.cpp:1146).
+            if context.world.definition_known(&definition) == Some(false) {
+                return Ok(None);
+            }
 
-        // C4Id2Def failure: no object, silent nullptr (C4Game.cpp:1146).
-        if context.world.definition_known(&definition) == Some(false) {
-            return Ok(None);
-        }
+            let metadata = context
+                .definition_metadata(&definition)
+                .cloned()
+                .unwrap_or_else(|| DefinitionMetadata {
+                    name: String::new(),
+                    portrait_names: Vec::new(),
+                    category: context
+                        .definition_category(&definition)
+                        .unwrap_or(DEFAULT_CATEGORY),
+                    border_bound: 0,
+                    contact_function_calls: false,
+                    blit_mode: 0,
+                    ocf_base: ocf::NORMAL,
+                    crew_member: false,
+                    crew_member_value: 0,
+                    silent_commands: false,
+                    vehicle_control: 0,
+                    action_library: ActionLibrary::default().into(),
+                    control_transfer_callback: None,
+                    action_graphics: HashMap::new(),
+                    value: 0,
+                    allow_picture_stack: 0,
+                    mass: 0,
+                    no_component_mass: false,
+                    constructable: false,
+                    shape: None,
+                    placement: 0,
+                    growth: 0,
+                    construction_offset: 0,
+                    basement: 0,
+                    physical: PhysicalInfo::default(),
+                    components: Vec::new(),
+                    collection_limit: 0,
+                    grab_put_get: 0,
+                    line_connect: 0,
+                    clonk_name_newlines: None,
+                    stretch_growth: false,
+                    rotateable: 0,
+                    line: 0,
+                    vertices: Vec::new(),
+                    contact_density: None,
+                    fire: DefinitionFireMetadata::default(),
+                });
+            let definition_category = metadata.category;
+            let creator = context.object_context().map(ObjectScopeContext::id);
+            let creator_layer = creator.and_then(|creator| context.object_layer(creator));
+            let creator_layer_cache = creator
+                .map(|creator| context.object_layer_compiler_cache(creator))
+                .unwrap_or(0);
 
-        let metadata = context
-            .definition_metadata(&definition)
-            .cloned()
-            .unwrap_or_else(|| DefinitionMetadata {
-                name: String::new(),
-                portrait_names: Vec::new(),
-                category: context
-                    .definition_category(&definition)
-                    .unwrap_or(DEFAULT_CATEGORY),
-                border_bound: 0,
-                contact_function_calls: false,
-                blit_mode: 0,
-                ocf_base: ocf::NORMAL,
-                crew_member: false,
-                crew_member_value: 0,
-                silent_commands: false,
-                vehicle_control: 0,
-                action_library: ActionLibrary::default().into(),
-                control_transfer_callback: None,
-                action_graphics: HashMap::new(),
-                value: 0,
-                allow_picture_stack: 0,
-                mass: 0,
-                no_component_mass: false,
-                constructable: false,
-                shape: None,
-                placement: 0,
-                growth: 0,
-                construction_offset: 0,
-                basement: 0,
-                physical: PhysicalInfo::default(),
-                components: Vec::new(),
-                collection_limit: 0,
-                grab_put_get: 0,
-                line_connect: 0,
-                clonk_name_newlines: None,
-                stretch_growth: false,
-                rotateable: 0,
-                line: 0,
-                vertices: Vec::new(),
-                contact_density: None,
-                fire: DefinitionFireMetadata::default(),
-            });
-        let definition_category = metadata.category;
-        let creator = context.object_context().map(ObjectScopeContext::id);
-        let creator_layer = creator.and_then(|creator| context.object_layer(creator));
-        let creator_layer_cache = creator
-            .map(|creator| context.object_layer_compiler_cache(creator))
-            .unwrap_or(0);
-
-        let base_position = context
-            .object_context()
-            .map(|object| object.effective_position())
-            .unwrap_or(Vector2::ZERO);
-        // Typed C4ValueInt conversion makes an omitted/explicit nil owner
-        // zero. Local calls replace even an explicit owner when the native
-        // has no script caller or its immediate caller is NONSTRICT.
-        let substitute_local_owner = matches!(
-            clonk_script::caller_strictness(),
-            clonk_script::HostCallerStrictness::NoCaller
-                | clonk_script::HostCallerStrictness::NonStrict
-        );
-        let owner = if substitute_local_owner {
-            context
+            let base_position = context
                 .object_context()
-                .map(ObjectScopeContext::owner)
-                .unwrap_or(requested_owner)
-        } else {
-            requested_owner
-        };
-        let raw_position = Vector2::new(
-            base_position.x.saturating_add(x_offset),
-            base_position.y.saturating_add(y_offset),
-        );
-
-        let id = context.allocate_object_id();
-
-        let mut spawn = SpawnConfig::new(definition.clone())
-            .with_position(raw_position)
-            .with_owner(owner)
-            .with_category(definition_category)
-            // C4Object starts at Con=0. C4Game::NewObject exposes that live
-            // state to Construction before applying the initial FullCon.
-            .with_construction(0)
-            .with_id(id);
-        if let Some(layer) = creator_layer {
-            spawn = spawn.with_layer(layer);
-        }
-        spawn.compiler_cache.layer = creator_layer_cache;
-        // "Set initial controller to creating controller, so more
-        // complicated cause-effect-chains can be traced back to the
-        // causing player" (FnCreateObject, C4Script.cpp:1899-1900).
-        let creator_controller = context
-            .object_context()
-            .map(ObjectScopeContext::controller)
-            .filter(|value| *value > OWNER_NONE);
-        if let Some(controller) = creator_controller {
-            spawn = spawn.with_controller(controller);
-        }
-        // Creation callbacks and initial DoCon run synchronously below;
-        // materialization must repeat neither operation.
-        spawn.initialized = true;
-        spawn.position_adjusted = true;
-
-        let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
-        let preview_ocf = ocf::compute(
-            metadata.ocf_base,
-            metadata.crew_member,
-            initial_alive,
-            ObjectStatus::Normal,
-            false,
-            0,
-            metadata.category,
-        );
-        let preview = HostWorldObject::with_category(
-            id,
-            definition,
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            owner,
-            definition_category,
-            if initial_alive {
-                metadata.physical.energy
+                .map(|object| object.effective_position())
+                .unwrap_or(Vector2::ZERO);
+            // Typed C4ValueInt conversion makes an omitted/explicit nil owner
+            // zero. Local calls replace even an explicit owner when the native
+            // has no script caller or its immediate caller is NONSTRICT.
+            let substitute_local_owner = matches!(
+                clonk_script::caller_strictness(),
+                clonk_script::HostCallerStrictness::NoCaller
+                    | clonk_script::HostCallerStrictness::NonStrict
+            );
+            let owner = if substitute_local_owner {
+                context
+                    .object_context()
+                    .map(ObjectScopeContext::owner)
+                    .unwrap_or(requested_owner)
             } else {
-                0
-            },
-            0,
-            0,
-            raw_position,
-            Vector2::ZERO,
-            0,
-            metadata.vertices.clone(),
-            0,
-            0,
-            0,
-            None,
-            None,
-        )
-        .with_compiler_fields(
-            0,
-            0,
-            -1,
-            crate::ObjectCompilerCache {
-                layer: creator_layer_cache,
-                ..crate::ObjectCompilerCache::default()
-            },
-        )
-        .with_alive(initial_alive)
-        .with_ocf(preview_ocf)
-        // A callable scope for nested calls on the fresh object — C++
-        // creates objects live mid-call (Game.CreateObject), so scripts
-        // arrow-call them immediately (GoldRush: pObj->SetAI right after
-        // CreateObject). The spawn stays authoritative; nested outcomes
-        // fold only touched fields.
-        .with_full_state(Rc::new({
-            let mut state = crate::preview_spawn_state_with_components(
-                raw_position,
-                owner,
+                requested_owner
+            };
+            let raw_position = Vector2::new(
+                base_position.x.saturating_add(x_offset),
+                base_position.y.saturating_add(y_offset),
+            );
+
+            let id = context.allocate_object_id();
+
+            let mut spawn = SpawnConfig::new(definition.clone())
+                .with_position(raw_position)
+                .with_owner(owner)
+                .with_category(definition_category)
+                // C4Object starts at Con=0. C4Game::NewObject exposes that live
+                // state to Construction before applying the initial FullCon.
+                .with_construction(0)
+                .with_id(id);
+            if let Some(layer) = creator_layer {
+                spawn = spawn.with_layer(layer);
+            }
+            spawn.compiler_cache.layer = creator_layer_cache;
+            // "Set initial controller to creating controller, so more
+            // complicated cause-effect-chains can be traced back to the
+            // causing player" (FnCreateObject, C4Script.cpp:1899-1900).
+            let creator_controller = context
+                .object_context()
+                .map(ObjectScopeContext::controller)
+                .filter(|value| *value > OWNER_NONE);
+            if let Some(controller) = creator_controller {
+                spawn = spawn.with_controller(controller);
+            }
+            // Creation callbacks and initial DoCon run synchronously below;
+            // materialization must repeat neither operation.
+            spawn.initialized = true;
+            spawn.position_adjusted = true;
+
+            let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
+            let preview_ocf = ocf::compute(
+                metadata.ocf_base,
+                metadata.crew_member,
+                initial_alive,
+                ObjectStatus::Normal,
+                false,
+                0,
+                metadata.category,
+            );
+            let preview = HostWorldObject::with_category(
+                id,
+                definition,
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
                 owner,
                 definition_category,
+                if initial_alive {
+                    metadata.physical.energy
+                } else {
+                    0
+                },
                 0,
-                metadata.contact_density(),
+                0,
+                raw_position,
+                Vector2::ZERO,
+                0,
                 metadata.vertices.clone(),
-                metadata.components.as_slice(),
-            );
-            state.alive = initial_alive;
-            state.energy = if initial_alive {
-                metadata.physical.energy
-            } else {
-                0
-            };
-            state.crew_member = metadata.crew_member;
-            state.layer = creator_layer;
-            state.blit_mode = metadata.blit_mode;
-            state
-        }));
+                0,
+                0,
+                0,
+                None,
+                None,
+            )
+            .with_compiler_fields(
+                0,
+                0,
+                -1,
+                crate::ObjectCompilerCache {
+                    layer: creator_layer_cache,
+                    ..crate::ObjectCompilerCache::default()
+                },
+            )
+            .with_alive(initial_alive)
+            .with_ocf(preview_ocf)
+            // A callable scope for nested calls on the fresh object — C++
+            // creates objects live mid-call (Game.CreateObject), so scripts
+            // arrow-call them immediately (GoldRush: pObj->SetAI right after
+            // CreateObject). The spawn stays authoritative; nested outcomes
+            // fold only touched fields.
+            .with_full_state(Rc::new({
+                let mut state = crate::preview_spawn_state_with_components(
+                    raw_position,
+                    owner,
+                    owner,
+                    definition_category,
+                    0,
+                    metadata.contact_density(),
+                    metadata.vertices.clone(),
+                    metadata.components.as_slice(),
+                );
+                state.alive = initial_alive;
+                state.energy = if initial_alive {
+                    metadata.physical.energy
+                } else {
+                    0
+                };
+                state.crew_member = metadata.crew_member;
+                state.layer = creator_layer;
+                state.blit_mode = metadata.blit_mode;
+                state
+            }));
 
-        context.register_spawn(spawn, preview);
-        Ok(Some((
-            id,
-            context.object_context().map(ObjectScopeContext::id),
-            creator_controller,
-            metadata.shape,
-            metadata.stretch_growth,
-            metadata.line,
-            metadata.ocf_base,
-            metadata.crew_member,
-            metadata.category,
-            initial_alive,
-        )))
-    })?;
+            context.register_spawn(spawn, preview);
+            Ok(Some((
+                id,
+                context.object_context().map(ObjectScopeContext::id),
+                creator_controller,
+                metadata.shape,
+                metadata.stretch_growth,
+                metadata.line,
+                metadata.ocf_base,
+                metadata.crew_member,
+                metadata.category,
+                initial_alive,
+            )))
+        },
+    )?;
     let Some((
         target,
         creator,
@@ -5117,22 +5131,23 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .unwrap_or(0);
 
-    let (creator, base_position, owner, controller) = try_with_host_context("CastObjects requires an active engine context", |context| {
-        let creator = context.object_context().map(ObjectScopeContext::id);
-        let base_position = context
-            .object_context()
-            .map(ObjectScopeContext::effective_position)
-            .unwrap_or(Vector2::ZERO);
-        let owner = context
-            .object_context()
-            .map(ObjectScopeContext::owner)
-            .unwrap_or(OWNER_NONE);
-        let controller = context
-            .object_context()
-            .map(ObjectScopeContext::controller)
-            .unwrap_or(OWNER_NONE);
-        Ok((creator, base_position, owner, controller))
-    })?;
+    let (creator, base_position, owner, controller) =
+        try_with_host_context("CastObjects requires an active engine context", |context| {
+            let creator = context.object_context().map(ObjectScopeContext::id);
+            let base_position = context
+                .object_context()
+                .map(ObjectScopeContext::effective_position)
+                .unwrap_or(Vector2::ZERO);
+            let owner = context
+                .object_context()
+                .map(ObjectScopeContext::owner)
+                .unwrap_or(OWNER_NONE);
+            let controller = context
+                .object_context()
+                .map(ObjectScopeContext::controller)
+                .unwrap_or(OWNER_NONE);
+            Ok((creator, base_position, owner, controller))
+        })?;
 
     let spread = level.wrapping_mul(2).wrapping_add(1);
     for _ in 0..amount {
@@ -5424,7 +5439,8 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     "creation callback failed; continuing like C++ fail-safe Call"
                 );
             }
-            let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
+            let removed =
+                with_host_context(false, |context| context.nested_object_destroyed(target));
             if !removed {
                 if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[])
                 {
@@ -5789,78 +5805,84 @@ pub(crate) fn place_animal(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     };
 
-    let registration = try_with_host_context_mut("PlaceAnimal requires an active engine context", |context| {
-        let Some(metadata) = context.definition_metadata(&definition).cloned() else {
-            // C4Id2Def failure precedes the Placement switch and Random
-            // (C4Game.cpp:3028-3035).
-            return Ok(None);
-        };
-        if !matches!(metadata.placement, 0..=2) {
-            return Ok(None);
-        }
-        let (shape_width, shape_height) = metadata
-            .shape
-            .map(|shape| (shape.width, shape.height))
-            .unwrap_or((0, 0));
-        let landscape = context.landscape_ref();
-        let world_width = landscape
-            .map(|landscape| landscape.width() as i32)
-            .unwrap_or(0);
-        let world_height = landscape.map(Landscape::estimated_height).unwrap_or(0);
-        let position = match metadata.placement {
-            // Running free: exactly two draws, even when the ground search
-            // later fails (C4Game.cpp:3037-3041).
-            0 => {
-                let x = draw_context_random(world_width)?;
-                let y = draw_context_random(world_height)?;
-                let Some((x, y)) =
-                    landscape.and_then(|landscape| landscape.find_solid_ground(x, y, shape_width))
-                else {
-                    return Ok(None);
-                };
-                Vector2::new(x, y)
+    let registration =
+        try_with_host_context_mut("PlaceAnimal requires an active engine context", |context| {
+            let Some(metadata) = context.definition_metadata(&definition).cloned() else {
+                // C4Id2Def failure precedes the Placement switch and Random
+                // (C4Game.cpp:3028-3035).
+                return Ok(None);
+            };
+            if !matches!(metadata.placement, 0..=2) {
+                return Ok(None);
             }
-            // In liquid: surface search first, then the deep fallback. Both
-            // consume only the initial x/y draws (C4Game.cpp:3043-3051).
-            1 => {
-                let mut x = draw_context_random(world_width)?;
-                let mut y = draw_context_random(world_height)?;
-                let Some(landscape) = landscape else {
-                    return Ok(None);
-                };
-                if !placement_find_surface_liquid(
-                    landscape,
-                    &mut x,
-                    &mut y,
-                    shape_width,
-                    shape_height,
-                ) && !placement_find_liquid(landscape, &mut x, &mut y, shape_width, shape_height)
-                {
-                    return Ok(None);
+            let (shape_width, shape_height) = metadata
+                .shape
+                .map(|shape| (shape.width, shape.height))
+                .unwrap_or((0, 0));
+            let landscape = context.landscape_ref();
+            let world_width = landscape
+                .map(|landscape| landscape.width() as i32)
+                .unwrap_or(0);
+            let world_height = landscape.map(Landscape::estimated_height).unwrap_or(0);
+            let position = match metadata.placement {
+                // Running free: exactly two draws, even when the ground search
+                // later fails (C4Game.cpp:3037-3041).
+                0 => {
+                    let x = draw_context_random(world_width)?;
+                    let y = draw_context_random(world_height)?;
+                    let Some((x, y)) = landscape
+                        .and_then(|landscape| landscape.find_solid_ground(x, y, shape_width))
+                    else {
+                        return Ok(None);
+                    };
+                    Vector2::new(x, y)
                 }
-                Vector2::new(x, y.wrapping_add(shape_height / 2))
-            }
-            // Air: x draw, top-down first-semisolid scan, then y draw only
-            // when the scan result is positive (C4Game.cpp:3053-3060).
-            2 => {
-                let x = draw_context_random(world_width)?;
-                let mut y = 0;
-                while y < world_height
-                    && landscape.is_some_and(|landscape| !landscape.is_semi_solid_at(x, y))
-                {
-                    y += 1;
+                // In liquid: surface search first, then the deep fallback. Both
+                // consume only the initial x/y draws (C4Game.cpp:3043-3051).
+                1 => {
+                    let mut x = draw_context_random(world_width)?;
+                    let mut y = draw_context_random(world_height)?;
+                    let Some(landscape) = landscape else {
+                        return Ok(None);
+                    };
+                    if !placement_find_surface_liquid(
+                        landscape,
+                        &mut x,
+                        &mut y,
+                        shape_width,
+                        shape_height,
+                    ) && !placement_find_liquid(
+                        landscape,
+                        &mut x,
+                        &mut y,
+                        shape_width,
+                        shape_height,
+                    ) {
+                        return Ok(None);
+                    }
+                    Vector2::new(x, y.wrapping_add(shape_height / 2))
                 }
-                if y <= 0 {
-                    return Ok(None);
+                // Air: x draw, top-down first-semisolid scan, then y draw only
+                // when the scan result is positive (C4Game.cpp:3053-3060).
+                2 => {
+                    let x = draw_context_random(world_width)?;
+                    let mut y = 0;
+                    while y < world_height
+                        && landscape.is_some_and(|landscape| !landscape.is_semi_solid_at(x, y))
+                    {
+                        y += 1;
+                    }
+                    if y <= 0 {
+                        return Ok(None);
+                    }
+                    Vector2::new(x, draw_context_random(y)?)
                 }
-                Vector2::new(x, draw_context_random(y)?)
-            }
-            _ => unreachable!("placement validated above"),
-        };
-        Ok(Some(register_placement_object(
-            context, definition, metadata, position, FULL_CON,
-        )))
-    })?;
+                _ => unreachable!("placement validated above"),
+            };
+            Ok(Some(register_placement_object(
+                context, definition, metadata, position, FULL_CON,
+            )))
+        })?;
     let Some(registration) = registration else {
         return Ok(Value::Nil);
     };
@@ -6664,7 +6686,6 @@ pub(crate) fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let to_value = |container: Option<ObjectId>| {
             container.map(object_reference_value).unwrap_or(Value::Nil)
         };
@@ -6714,7 +6735,6 @@ pub(crate) fn contents(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let container_id = if let Some(id) = target_id {
             id
         } else {
@@ -6772,7 +6792,6 @@ pub(crate) fn contents_count(args: &[Value]) -> Result<Value, RuntimeError> {
     )?;
 
     with_host_context(Ok(Value::Int(0)), |context| {
-
         let container_id = if let Some(id) = target_id {
             id
         } else {
@@ -6823,7 +6842,6 @@ pub(crate) fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
     )?;
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let container_id = if let Some(id) = target_id {
             id
         } else {
@@ -6868,7 +6886,6 @@ pub(crate) fn find_other_contents(args: &[Value]) -> Result<Value, RuntimeError>
     )?;
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let container_id = if let Some(id) = target_id {
             id
         } else {
@@ -6915,7 +6932,6 @@ pub(crate) fn get_ocf(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id = parse_object_reference_argument(target_value, "GetOCF", "target")?;
 
     with_host_context(Ok(Value::Nil), |context| {
-
         let ocf_value = |mask: u32| Value::Int(mask as i32);
 
         if let Some(target) = target_id {
@@ -6951,7 +6967,6 @@ pub(crate) fn get_category(args: &[Value]) -> Result<Value, RuntimeError> {
     let definition = parse_native_c4id_argument(args.get(1), "GetCategory")?;
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(definition_id) = definition {
             if let Some(category) = context.definition_category(&definition_id) {
                 return Ok(Value::Int(category));
@@ -7377,9 +7392,10 @@ pub(crate) fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         None => 1,
     };
 
-    let container = try_with_host_context("CreateContents requires an active engine context", |context| {
-        Ok::<_, RuntimeError>(target_id.or(context.script_object_context))
-    })?;
+    let container = try_with_host_context(
+        "CreateContents requires an active engine context",
+        |context| Ok::<_, RuntimeError>(target_id.or(context.script_object_context)),
+    )?;
     let Some(container) = container else {
         return Ok(Value::Nil);
     };
@@ -9461,7 +9477,6 @@ pub(crate) fn get_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
     )?;
 
     with_host_context(Ok(Value::Nil), |context| {
-
         if let Some(target) = target_id {
             if let Some(object) = context.object_scope(target) {
                 return Ok(Value::Int(object.status().to_script_value()));

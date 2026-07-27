@@ -480,19 +480,22 @@ pub(crate) fn launch_lightning(args: &[Value]) -> Result<Value, RuntimeError> {
 /// fails (C4Weather.cpp:178-184).
 pub(crate) fn launch_volcano(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "LaunchVolcano", "x")?;
-    let (height, lava) = try_with_host_context("LaunchVolcano requires an active engine context", |context| {
-        let height = context
-            .landscape_ref()
-            .map(Landscape::estimated_height)
-            .unwrap_or(0);
-        let lava = context
-            .world
-            .materials()
-            .and_then(|materials| materials.id_of("Lava"))
-            .map(|material| material.index() as i32)
-            .unwrap_or(MATERIAL_NONE);
-        Ok((height, lava))
-    })?;
+    let (height, lava) = try_with_host_context(
+        "LaunchVolcano requires an active engine context",
+        |context| {
+            let height = context
+                .landscape_ref()
+                .map(Landscape::estimated_height)
+                .unwrap_or(0);
+            let lava = context
+                .world
+                .materials()
+                .and_then(|materials| materials.id_of("Lava"))
+                .map(|material| material.index() as i32)
+                .unwrap_or(MATERIAL_NONE);
+            Ok((height, lava))
+        },
+    )?;
     let size = (15 * height / 500 + draw_context_random(10)?).clamp(10, 60);
 
     let created = with_creatorless_object_context(|| {
@@ -1064,7 +1067,6 @@ pub(crate) fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
     let y2 = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "PathFree", "y2")?;
 
     with_host_context(Ok(Value::Bool(true)), |context| {
-
         let Some(landscape) = context.landscape_ref() else {
             return Ok(Value::Bool(true));
         };
@@ -1199,20 +1201,22 @@ fn g_back_common(
     let local_x = value_to_i32(args.first().unwrap_or(&Value::Nil), function, "x")?;
     let local_y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), function, "y")?;
 
-    with_host_context(Ok(Value::Bool(fallback_without_context(query))), |context| {
+    with_host_context(
+        Ok(Value::Bool(fallback_without_context(query))),
+        |context| {
+            let mut global_x = local_x;
+            let mut global_y = local_y;
+            if let Some(object) = context.object_context() {
+                let position = object.effective_position();
+                global_x = global_x.saturating_add(position.x);
+                global_y = global_y.saturating_add(position.y);
+            }
 
-        let mut global_x = local_x;
-        let mut global_y = local_y;
-        if let Some(object) = context.object_context() {
-            let position = object.effective_position();
-            global_x = global_x.saturating_add(position.x);
-            global_y = global_y.saturating_add(position.y);
-        }
-
-        let landscape = context.landscape_ref();
-        let result = evaluate_landscape_query(landscape, query, global_x, global_y);
-        Ok(Value::Bool(result))
-    })
+            let landscape = context.landscape_ref();
+            let result = evaluate_landscape_query(landscape, query, global_x, global_y);
+            Ok(Value::Bool(result))
+        },
+    )
 }
 
 pub(crate) fn evaluate_landscape_query(
@@ -1257,7 +1261,6 @@ pub(crate) fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     with_host_context(Ok(Value::Int(MATERIAL_NONE)), |context| {
-
         let mut global_x = local_x;
         let mut global_y = local_y;
         if let Some(object) = context.object_context() {
@@ -1401,25 +1404,25 @@ pub(crate) fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
     let caused_by_plus_one =
         value_to_i32(args.get(3).unwrap_or(&Value::Nil), "BlastFree", "caused by")?;
 
-    let (center, controller) = try_with_host_context("BlastFree requires an active engine context", |context| {
+    let (center, controller) =
+        try_with_host_context("BlastFree requires an active engine context", |context| {
+            let mut controller = if caused_by_plus_one != 0 {
+                Some(caused_by_plus_one.wrapping_sub(1))
+            } else {
+                None
+            };
 
-        let mut controller = if caused_by_plus_one != 0 {
-            Some(caused_by_plus_one.wrapping_sub(1))
-        } else {
-            None
-        };
-
-        if caused_by_plus_one == 0 {
-            if let Some(object) = context.object_context() {
-                let position = object.effective_position();
-                x = x.saturating_add(position.x);
-                y = y.saturating_add(position.y);
-                controller = Some(object.controller());
+            if caused_by_plus_one == 0 {
+                if let Some(object) = context.object_context() {
+                    let position = object.effective_position();
+                    x = x.saturating_add(position.x);
+                    y = y.saturating_add(position.y);
+                    controller = Some(object.controller());
+                }
             }
-        }
 
-        Ok((Vector2::new(x, y), controller))
-    })?;
+            Ok((Vector2::new(x, y), controller))
+        })?;
     native_blast_free_absolute(center, level, controller)?;
     // FnBlastFree is a void engine function; C4AulEngineFunc maps void to
     // C4VNull after performing the landscape side effect.
@@ -1434,28 +1437,29 @@ pub(crate) fn native_blast_free_absolute(
     level: i32,
     controller: Option<i32>,
 ) -> Result<(), RuntimeError> {
-    let counts = try_with_host_context_mut("BlastFree requires an active engine context", |context| {
-        let preview = context.preview_blast_circle(center, level);
-        let counts = preview
-            .as_ref()
-            .map(|(_, counts)| counts.clone())
-            .unwrap_or_default();
-        let replay = preview.map(|(replay, _)| replay);
-        let operation = match replay {
-            Some(replay) => LandscapeOperation::BlastCirclePreviewed {
-                center,
-                radius: level,
-                replay,
-            },
-            None => LandscapeOperation::BlastCircle {
-                center,
-                radius: level,
-                controller,
-            },
-        };
-        context.register_landscape_operation(operation);
-        Ok(counts)
-    })?;
+    let counts =
+        try_with_host_context_mut("BlastFree requires an active engine context", |context| {
+            let preview = context.preview_blast_circle(center, level);
+            let counts = preview
+                .as_ref()
+                .map(|(_, counts)| counts.clone())
+                .unwrap_or_default();
+            let replay = preview.map(|(replay, _)| replay);
+            let operation = match replay {
+                Some(replay) => LandscapeOperation::BlastCirclePreviewed {
+                    center,
+                    radius: level,
+                    replay,
+                },
+                None => LandscapeOperation::BlastCircle {
+                    center,
+                    radius: level,
+                    controller,
+                },
+            };
+            context.register_landscape_operation(operation);
+            Ok(counts)
+        })?;
     process_preview_blast_reactions(center, controller, &counts)?;
     Ok(())
 }
@@ -1554,17 +1558,20 @@ pub(crate) fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
         "back color",
     )? as u32;
 
-    try_with_host_context_mut("SetSkyAdjust requires an active engine context", |context| {
-        context.sky_adjustment = SkyAdjustment {
-            modulation,
-            back_color,
-        };
-        context.register_landscape_operation(LandscapeOperation::SkyAdjust {
-            modulation,
-            back_color,
-        });
-        Ok(Value::Nil)
-    })
+    try_with_host_context_mut(
+        "SetSkyAdjust requires an active engine context",
+        |context| {
+            context.sky_adjustment = SkyAdjustment {
+                modulation,
+                back_color,
+            };
+            context.register_landscape_operation(LandscapeOperation::SkyAdjust {
+                modulation,
+                back_color,
+            });
+            Ok(Value::Nil)
+        },
+    )
 }
 
 fn apply_sky_color_modulation(function: &str, target: RgbColor) -> Result<Value, RuntimeError> {
@@ -1635,14 +1642,17 @@ pub(crate) fn set_sky_color(args: &[Value]) -> Result<Value, RuntimeError> {
 /// is independent of `BackClrEnabled` (C4Sky.h:43-46).
 pub(crate) fn get_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
     let back_color = args.first().is_some_and(Value::as_bool);
-    try_with_host_context("GetSkyAdjust requires an active engine context", |context| {
-        let raw = if back_color {
-            context.sky_adjustment.back_color
-        } else {
-            context.sky_adjustment.modulation
-        };
-        Ok(Value::Int(raw as i32))
-    })
+    try_with_host_context(
+        "GetSkyAdjust requires an active engine context",
+        |context| {
+            let raw = if back_color {
+                context.sky_adjustment.back_color
+            } else {
+                context.sky_adjustment.modulation
+            };
+            Ok(Value::Int(raw as i32))
+        },
+    )
 }
 
 /// FnGetSkyColor (C4Script.cpp:3056-3069), retained for OldGfx scripts.
@@ -1676,25 +1686,31 @@ pub(crate) fn set_mat_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
         "SetMatAdjust",
         "adjust",
     )? as u32;
-    try_with_host_context_mut("SetMatAdjust requires an active engine context", |context| {
-        if let Some(landscape) = context.world.landscape_mut() {
-            landscape.set_modulation(modulation);
-        }
-        context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
-        Ok(Value::Nil)
-    })
+    try_with_host_context_mut(
+        "SetMatAdjust requires an active engine context",
+        |context| {
+            if let Some(landscape) = context.world.landscape_mut() {
+                landscape.set_modulation(modulation);
+            }
+            context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
+            Ok(Value::Nil)
+        },
+    )
 }
 
 /// FnGetMatAdjust (C4Script.cpp:4638-4642): return the raw landscape blit
 /// modulation. C4Landscape::Default initializes this to zero.
 pub(crate) fn get_mat_adjust(_args: &[Value]) -> Result<Value, RuntimeError> {
-    try_with_host_context("GetMatAdjust requires an active engine context", |context| {
-        let modulation = context
-            .world
-            .landscape_ref()
-            .map_or(0, |landscape| landscape.modulation());
-        Ok(Value::Int(modulation as i32))
-    })
+    try_with_host_context(
+        "GetMatAdjust requires an active engine context",
+        |context| {
+            let modulation = context
+                .world
+                .landscape_ref()
+                .map_or(0, |landscape| landscape.modulation());
+            Ok(Value::Int(modulation as i32))
+        },
+    )
 }
 
 /// FnSetLandscapePixel (C4Script.cpp:5082-5088): offset by the current
@@ -1744,18 +1760,21 @@ pub(crate) fn set_sky_parallax(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     let [mode, par_x, par_y, xdir, ydir, x, y] = slots;
 
-    try_with_host_context_mut("SetSkyParallax requires an active engine context", |context| {
-        context.register_landscape_operation(LandscapeOperation::SkyParallax {
-            mode,
-            par_x,
-            par_y,
-            xdir,
-            ydir,
-            x,
-            y,
-        });
-        Ok(Value::Nil)
-    })
+    try_with_host_context_mut(
+        "SetSkyParallax requires an active engine context",
+        |context| {
+            context.register_landscape_operation(LandscapeOperation::SkyParallax {
+                mode,
+                par_x,
+                par_y,
+                xdir,
+                ydir,
+                x,
+                y,
+            });
+            Ok(Value::Nil)
+        },
+    )
 }
 
 pub(crate) fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -1772,16 +1791,17 @@ pub(crate) fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
         false
     };
 
-    let (by_object, counts) = try_with_host_context_mut("DigFree requires an active engine context", |context| {
-        let by_object = context.object_context().map(|object| object.id());
-        let center = Vector2::new(x, y);
-        let counts = context.preview_dig_circle(center, radius);
-        context.register_landscape_operation(LandscapeOperation::DigCirclePreviewed {
-            center,
-            radius,
-        });
-        Ok((by_object, counts))
-    })?;
+    let (by_object, counts) =
+        try_with_host_context_mut("DigFree requires an active engine context", |context| {
+            let by_object = context.object_context().map(|object| object.id());
+            let center = Vector2::new(x, y);
+            let counts = context.preview_dig_circle(center, radius);
+            context.register_landscape_operation(LandscapeOperation::DigCirclePreviewed {
+                center,
+                radius,
+            });
+            Ok((by_object, counts))
+        })?;
     process_preview_dig_reactions(by_object, &counts, requested)?;
     Ok(Value::Nil)
 }
@@ -2306,17 +2326,18 @@ pub(crate) fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
         false
     };
 
-    let (by_object, counts) = try_with_host_context_mut("DigFreeRect requires an active engine context", |context| {
-        let by_object = context.object_context().map(|object| object.id());
-        let origin = Vector2::new(x, y);
-        let counts = context.preview_dig_rect(origin, width, height);
-        context.register_landscape_operation(LandscapeOperation::DigRectPreviewed {
-            origin,
-            width,
-            height,
-        });
-        Ok((by_object, counts))
-    })?;
+    let (by_object, counts) =
+        try_with_host_context_mut("DigFreeRect requires an active engine context", |context| {
+            let by_object = context.object_context().map(|object| object.id());
+            let origin = Vector2::new(x, y);
+            let counts = context.preview_dig_rect(origin, width, height);
+            context.register_landscape_operation(LandscapeOperation::DigRectPreviewed {
+                origin,
+                width,
+                height,
+            });
+            Ok((by_object, counts))
+        })?;
     process_preview_dig_reactions(by_object, &counts, requested)?;
     Ok(Value::Nil)
 }
@@ -2333,23 +2354,24 @@ pub(crate) fn cast_pxs(args: &[Value]) -> Result<Value, RuntimeError> {
     let x_offset = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "CastPXS", "x")?;
     let y_offset = value_to_i32(args.get(4).unwrap_or(&Value::Nil), "CastPXS", "y")?;
 
-    let (material, position) = try_with_host_context("CastPXS requires an active engine context", |context| {
-        let material = context
-            .world
-            .materials()
-            .and_then(|materials| materials.id_of(&material_name));
-        let base = context
-            .object_context()
-            .map(ObjectScopeContext::effective_position)
-            .unwrap_or(Vector2::ZERO);
-        Ok((
-            material,
-            Vector2::new(
-                base.x.saturating_add(x_offset),
-                base.y.saturating_add(y_offset),
-            ),
-        ))
-    })?;
+    let (material, position) =
+        try_with_host_context("CastPXS requires an active engine context", |context| {
+            let material = context
+                .world
+                .materials()
+                .and_then(|materials| materials.id_of(&material_name));
+            let base = context
+                .object_context()
+                .map(ObjectScopeContext::effective_position)
+                .unwrap_or(Vector2::ZERO);
+            Ok((
+                material,
+                Vector2::new(
+                    base.x.saturating_add(x_offset),
+                    base.y.saturating_add(y_offset),
+                ),
+            ))
+        })?;
 
     let velocities = RANDOM_CONTEXT.with(|cell| {
         let context = cell

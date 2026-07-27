@@ -5,7 +5,9 @@
 
 use super::*;
 
-pub(crate) fn retained_gpu_gamma_mode(config: clonk_frontend::AdvancedRendererConfig) -> GpuGammaMode {
+pub(crate) fn retained_gpu_gamma_mode(
+    config: clonk_frontend::AdvancedRendererConfig,
+) -> GpuGammaMode {
     if config.disable_gamma {
         GpuGammaMode::Disabled
     } else if config.shader && config.use_shader_gamma {
@@ -22,7 +24,9 @@ pub(crate) enum RetainedGpuPresentRecovery {
     Fatal,
 }
 
-pub(crate) fn wgpu_device_loss_panic_detail(payload: &(dyn std::any::Any + Send)) -> Option<String> {
+pub(crate) fn wgpu_device_loss_panic_detail(
+    payload: &(dyn std::any::Any + Send),
+) -> Option<String> {
     let detail = payload.downcast_ref::<String>().cloned().or_else(|| {
         payload
             .downcast_ref::<&'static str>()
@@ -741,7 +745,10 @@ pub(crate) fn enforce_min_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
 }
 
-pub(crate) fn classic_platform_cursor_visible(window_active: bool, pointer_inside_window: bool) -> bool {
+pub(crate) fn classic_platform_cursor_visible(
+    window_active: bool,
+    pointer_inside_window: bool,
+) -> bool {
     !(window_active && pointer_inside_window)
 }
 
@@ -1261,7 +1268,11 @@ impl AudioContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn process_audio(&mut self, snapshot: &SimulationSnapshot, runtime_music_enabled: &mut bool) {
+    pub(crate) fn process_audio(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        runtime_music_enabled: &mut bool,
+    ) {
         let _ = self.process_audio_with_viewports(snapshot, &[], runtime_music_enabled);
         self.update_channels(snapshot, &[], true);
     }
@@ -1499,7 +1510,12 @@ impl AudioContext {
             || self.system.music_is_playing()
     }
 
-    pub(crate) fn play_gui_sound(&mut self, name: &str, game_running: bool, snapshot: &SimulationSnapshot) {
+    pub(crate) fn play_gui_sound(
+        &mut self,
+        name: &str,
+        game_running: bool,
+        snapshot: &SimulationSnapshot,
+    ) {
         // C4GUI::GUISound has an outer FESamples gate even while a game is
         // running. StartSoundEffect's instance then independently follows
         // the current RXSound/FESamples gate in Instance::Execute.
@@ -1892,7 +1908,11 @@ impl AudioContext {
         }
     }
 
-    pub(crate) fn active_channel_key(&self, name: &str, target: Option<ObjectId>) -> Option<SoundInstanceKey> {
+    pub(crate) fn active_channel_key(
+        &self,
+        name: &str,
+        target: Option<ObjectId>,
+    ) -> Option<SoundInstanceKey> {
         let pattern = SoundSearchTerms::new(name).prepared_pattern();
         // C4SoundSystem::FindInst walks samples in catalog order, then each
         // sample's instances in insertion order. Detached one-shots have a
@@ -2268,7 +2288,10 @@ impl AudioContext {
         }
     }
 
-    pub(crate) fn ensure_sound_with_key(&mut self, name: &str) -> Result<Option<LoadedSound>, AudioError> {
+    pub(crate) fn ensure_sound_with_key(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<LoadedSound>, AudioError> {
         let request_key = name.to_ascii_lowercase();
         let terms = SoundSearchTerms::new(name);
         let selected_index = if let Some(pattern) = terms.wildcard_pattern.as_deref() {
@@ -2897,7 +2920,9 @@ fn discover_global_sound_libraries() -> (Vec<SoundLibrary>, Vec<String>) {
     }
 }
 
-pub(crate) fn discover_global_sound_libraries_at(exe_data_root: &Path) -> (Vec<SoundLibrary>, Vec<String>) {
+pub(crate) fn discover_global_sound_libraries_at(
+    exe_data_root: &Path,
+) -> (Vec<SoundLibrary>, Vec<String>) {
     // C4SoundSystem's constructor performs exactly one Config.AtExePath
     // lookup. Sound-like siblings, user data, and alternate extensions never
     // enter the native sample bank.
@@ -4237,13 +4262,10 @@ pub(crate) fn initial_control_clients(
     clients
 }
 
-pub(crate) fn lobby_rgba(color: u32) -> [u8; 4] {
-    [
-        ((color >> 16) & 0xff) as u8,
-        ((color >> 8) & 0xff) as u8,
-        (color & 0xff) as u8,
-        0xff,
-    ]
+pub(crate) fn readable_lobby_rgba(color: u32) -> [u8; 4] {
+    // Lobby client/player names are GUI labels with readable-on-black enabled
+    // (src/C4PlayerInfoListBox.cpp:72-87, 143, 648-685, 737-750, 824-825).
+    clonk_frontend::game_lobby::make_color_readable_on_black(color)
 }
 
 /// Reduce the selected message/data route snapshot to the value displayed by
@@ -4426,7 +4448,7 @@ pub(crate) fn classic_lobby_roster_projection(
             id: player.id,
             client_id,
             name,
-            color: lobby_rgba(if hide_random_color {
+            color: readable_lobby_rgba(if hide_random_color {
                 player.original_color
             } else {
                 player.color
@@ -4499,7 +4521,7 @@ pub(crate) fn classic_lobby_roster_projection(
             id: core.client_id,
             name: legacy_presentation_text(core.name.as_bytes()),
             nick: legacy_presentation_text(core.nick.as_bytes()),
-            color: lobby_rgba(first_user_color),
+            color: readable_lobby_rgba(first_user_color),
             status: if players.is_none() {
                 LobbyClientStatus::Unknown
             } else if core.client_id == 0 {
@@ -4886,7 +4908,9 @@ pub(crate) fn initial_network_max_players(network_mode: Option<&NetworkMode>) ->
         .unwrap_or(DEFAULT_SCENARIO_MAX_PLAYERS)
 }
 
-pub(crate) fn initial_host_local_alternate_colors(network_mode: Option<&NetworkMode>) -> HashMap<i32, u32> {
+pub(crate) fn initial_host_local_alternate_colors(
+    network_mode: Option<&NetworkMode>,
+) -> HashMap<i32, u32> {
     network_mode
         .and_then(|mode| match mode {
             NetworkMode::Host(HostSettings {
@@ -4898,7 +4922,9 @@ pub(crate) fn initial_host_local_alternate_colors(network_mode: Option<&NetworkM
         .unwrap_or_default()
 }
 
-pub(crate) fn initial_host_local_player_info_ids(network_mode: Option<&NetworkMode>) -> HashSet<i32> {
+pub(crate) fn initial_host_local_player_info_ids(
+    network_mode: Option<&NetworkMode>,
+) -> HashSet<i32> {
     network_mode
         .and_then(|mode| match mode {
             NetworkMode::Host(HostSettings {
@@ -5036,7 +5062,9 @@ pub(crate) fn synchronized_parameters_are_league(
     !parameters.league_address.is_empty()
 }
 
-pub(crate) fn synchronized_league_name(parameters: &clonk_network::JoinGameParametersEnvelope) -> Vec<u8> {
+pub(crate) fn synchronized_league_name(
+    parameters: &clonk_network::JoinGameParametersEnvelope,
+) -> Vec<u8> {
     parameters.league.as_bytes().to_vec()
 }
 
@@ -5301,7 +5329,9 @@ pub(crate) fn initial_team_metadata_from_join_snapshot(
     })
 }
 
-pub(crate) fn initial_team_from_runtime(team: &clonk_engine::TeamInfo) -> clonk_engine::InitialNetworkTeam {
+pub(crate) fn initial_team_from_runtime(
+    team: &clonk_engine::TeamInfo,
+) -> clonk_engine::InitialNetworkTeam {
     let legacy = |value: &str, max_bytes: Option<usize>| {
         let mut bytes = clonk_script::c4_string_bytes(value);
         if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
@@ -5600,12 +5630,19 @@ pub(crate) fn resize_startup_player_image(image: &ImageData, maximum: u32) -> Im
     ImageData::new(resized_width, resized_height, pixels)
 }
 
-pub(crate) fn materialize_startup_player_image(image: &ImageData, maximum: u32) -> Option<ImageData> {
+pub(crate) fn materialize_startup_player_image(
+    image: &ImageData,
+    maximum: u32,
+) -> Option<ImageData> {
     let image = resize_startup_player_image(image, maximum);
     (image.width() != 0 && image.height() != 0).then_some(image)
 }
 
-pub(crate) fn startup_player_image_from_rgba(width: u32, height: u32, mut pixels: Vec<u8>) -> ImageData {
+pub(crate) fn startup_player_image_from_rgba(
+    width: u32,
+    height: u32,
+    mut pixels: Vec<u8>,
+) -> ImageData {
     // C4Surface::ReadPNG canonicalizes fully transparent source texels before
     // CreateColorByOwner or CopyFromSfcMaxSize can inspect them.
     for pixel in pixels.chunks_exact_mut(4) {
@@ -5618,7 +5655,7 @@ pub(crate) fn startup_player_image_from_rgba(width: u32, height: u32, mut pixels
 
 pub(crate) fn load_startup_portrait_image(path: &Path) -> std::result::Result<ImageData, String> {
     let rgba = image::open(path)
-        .map_err(|error| format!("failed to decode {}: {error}", path.display()))?
+        .map_err(|error| error.to_string())?
         .into_rgba8();
     let (width, height) = rgba.dimensions();
     Ok(startup_player_image_from_rgba(
@@ -6089,4 +6126,3 @@ pub(crate) enum RuntimeDefaultDialog {
     GameOver,
     ExternalIrc,
 }
-

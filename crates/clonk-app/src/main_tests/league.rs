@@ -4612,6 +4612,7 @@
                 network_runtime_join: false,
                 restore_player_infos: vec![restore],
                 runtime_join_players: Vec::new(),
+                pending_client_runtime_join: None,
                 initial_game_data: None,
                 random_seed: 0,
                 use_fair_crew: false,

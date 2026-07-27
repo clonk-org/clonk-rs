@@ -80,22 +80,22 @@ mod game_app_sound;
 #[path = "game_app/startup.rs"]
 mod game_app_startup;
 
+#[path = "main_parts/app_state.rs"]
+mod main_app_state;
 #[path = "main_parts/assets.rs"]
 mod main_assets;
 #[path = "main_parts/audio.rs"]
 mod main_audio;
-#[path = "main_parts/app_state.rs"]
-mod main_app_state;
-#[path = "main_parts/resources.rs"]
-mod main_resources;
 #[path = "main_parts/render_io.rs"]
 mod main_render_io;
+#[path = "main_parts/resources.rs"]
+mod main_resources;
 
+pub(crate) use main_app_state::*;
 pub(crate) use main_assets::*;
 pub(crate) use main_audio::*;
-pub(crate) use main_app_state::*;
-pub(crate) use main_resources::*;
 pub(crate) use main_render_io::*;
+pub(crate) use main_resources::*;
 
 use std::cmp::Ordering;
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
@@ -283,7 +283,9 @@ use offline_startup::{
     offline_player_paths_identical, offline_player_real_path, OfflineStartupPlayers,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
-use png::{BitDepth, ColorType, Decoder, Encoder};
+#[cfg(test)]
+use png::Decoder;
+use png::{BitDepth, ColorType, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
 use serde::{
     de::{self, Unexpected, Visitor},
@@ -1501,6 +1503,8 @@ impl GameApp {
             advertised_game_reference: None,
             startup_player_dialog: None,
             startup_player_properties_dialog: None,
+            startup_user_portraits_written: false,
+            startup_last_portrait_folder_index: None,
             startup_player_files,
             startup_player_models,
             startup_crew_files: Vec::new(),
@@ -3615,12 +3619,7 @@ impl GameApp {
             })
             .map(|client_id| self.control_message_lobby_chat_color(client_id))
             .unwrap_or(color);
-        let rgba = [
-            ((color >> 16) & 0xff) as u8,
-            ((color >> 8) & 0xff) as u8,
-            (color & 0xff) as u8,
-            0xff,
-        ];
+        let rgba = clonk_frontend::game_lobby::make_color_readable_on_black(color);
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.push_log(LobbyLogLine {
                 text: line,
@@ -6256,6 +6255,21 @@ impl GameApp {
         if let Some((scenario, result, prepared_go)) = completion {
             match result {
                 Ok(data) => {
+                    if let Some(pending) = self
+                        .loading_state
+                        .as_mut()
+                        .and_then(|loading| loading.prepared_go.as_mut())
+                    {
+                        let (save_game, network_runtime_join) =
+                            data.lobby_metadata().map_or((false, false), |metadata| {
+                                (
+                                    metadata.head().is_save_game(),
+                                    metadata.head().allows_network_runtime_join(),
+                                )
+                            });
+                        pending.save_game = save_game;
+                        pending.network_runtime_join = network_runtime_join;
+                    }
                     let activation = self.activate_loaded_scenario(scenario.clone(), &data);
                     if activation.is_ok() {
                         self.classic_record_stream_activation_pending = false;

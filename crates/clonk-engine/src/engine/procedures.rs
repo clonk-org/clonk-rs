@@ -2122,7 +2122,10 @@ impl Engine {
     /// ordinary SetActionByName("Walk") and zero both dirs only when that
     /// transition succeeds. Action callbacks may remove or redefine the
     /// object, so every post-callback write resolves its stable id again.
-    pub(crate) fn object_action_stand_live(&mut self, object_id: ObjectId) -> Result<bool, EngineError> {
+    pub(crate) fn object_action_stand_live(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
         let Some(idx) = self.find_object_index(object_id) else {
             return Ok(false);
         };
@@ -2157,7 +2160,10 @@ impl Engine {
     /// `ObjectComStop` (C4ObjectCom.cpp:239-245): enter ActIdle first,
     /// then stand in Walk when that action exists. Both transitions are
     /// ordinary and the Walk lookup uses the live post-Idle definition.
-    pub(crate) fn object_com_stop_live(&mut self, object_id: ObjectId) -> Result<bool, EngineError> {
+    pub(crate) fn object_com_stop_live(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
         let Some(idx) = self.find_object_index(object_id) else {
             return Ok(false);
         };
@@ -4348,5 +4354,4 @@ impl Engine {
         }
         Ok(())
     }
-
 }

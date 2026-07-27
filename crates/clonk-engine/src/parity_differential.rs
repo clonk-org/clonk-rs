@@ -7,7 +7,10 @@
 //! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
 //! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
-//! `src/C4SolidMaskBitmap.h`, plus complete `C4Object::DigOutMaterialCast`,
+//! `src/C4SolidMaskBitmap.h`, plus complete `FnEval`, DirectExec's temporary
+//! context setup, `C4Effect::Execute`, C4AulScriptFunc's engine-call
+//! forwarding and script-context setup, `FnGetX`/`FnGetY`,
+//! `C4Object::DigOutMaterialCast`,
 //! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
 //! `BlastFreePix`, `BlastFree`, `ExecuteScan`, and `DoScan` bodies and the
 //! `C4SGame::ConvertGoals`, `C4Game::InitRules`/`InitGoals`, and
@@ -41,9 +44,9 @@ use crate::scenario::{
 use crate::{
     contact_action_wall_tumble_x, ActionSpec, ActionState, CommandDirection, Definition,
     DefinitionPicture, DefinitionRect, DefinitionSpriteImage, DefinitionTargetRect, Direction,
-    Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo, PhysicsSettings,
-    PlayerConfig, Scenario, ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING, CATEGORY_OBJECT,
-    OWNER_NONE,
+    EffectVarValue, Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo,
+    PhysicsSettings, PlayerConfig, Scenario, ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING,
+    CATEGORY_OBJECT, OWNER_NONE,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -2465,6 +2468,279 @@ func Trigger(object pOther) {
             i(section, "get_no_context"),
             i64::from(OWNER_NONE),
         );
+    }
+
+    // 10b. FnEval -> DirectExec context selection (C4Script.cpp:4501-4513;
+    // C4AulExec.cpp:1674-1683). The C++ oracle executes both mechanically
+    // extracted production blocks. Rust drives the same three contexts through
+    // real C4Script: the object sentinel requires both its named local and its
+    // definition-owned function, while DefinitionCall supplies Def without Obj
+    // and global->eval clears both so Game.Script owns the expression.
+    {
+        let object_script = r#"#strict 2
+local power;
+func Probe()
+{
+    power = 50;
+    return eval("Explode(power)");
+}
+func Explode(value) { return value + 1; }
+"#;
+        let definition_script = r#"#strict
+func DefinitionProbe() { return eval("DefinitionHelper()"); }
+func DefinitionHelper() { return 62; }
+"#;
+        let definition_caller_script = r#"#strict
+func Probe() { return DefinitionCall(DEFV, "DefinitionProbe"); }
+"#;
+        let global_caller_script = r#"#strict 3
+func Probe() { return global->eval("ScenarioHelper()"); }
+"#;
+        let scenario_script = r#"#strict 3
+func ScenarioHelper() { return 73; }
+"#;
+
+        let mut engine = Engine::with_seed(29);
+        for (id, name, script) in [
+            ("OBJV", "Eval object receiver", object_script),
+            ("DEFV", "Eval definition receiver", definition_script),
+            ("CALL", "Eval definition caller", definition_caller_script),
+            ("GEVL", "Eval game caller", global_caller_script),
+        ] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, script)
+                        .unwrap_or_else(|error| panic!("{name} compiles: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("{name} registers: {error}"));
+        }
+        engine
+            .install_scenario_script_with_convention("Scenario", scenario_script, true)
+            .expect("eval differential scenario script installs");
+        let object = engine
+            .spawn_object(SpawnConfig::new("OBJV"))
+            .expect("eval differential object receiver spawns");
+        let definition_caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("eval differential definition caller spawns");
+        let global_caller = engine
+            .spawn_object(SpawnConfig::new("GEVL"))
+            .expect("eval differential game caller spawns");
+
+        let call_probe = |engine: &mut Engine, id| {
+            let index = engine
+                .find_object_index(id)
+                .expect("eval differential caller remains");
+            match engine
+                .call_object_function(index, "Probe", Vec::new())
+                .expect("eval differential probe runs")
+            {
+                ScriptValue::Int(value) => i64::from(value),
+                value => panic!("eval differential probe returned {value:?}"),
+            }
+        };
+        let rust_results = HashMap::from([
+            (
+                "object_definition",
+                (1_i64, 1_i64, 2_i64, 1_i64, call_probe(&mut engine, object)),
+            ),
+            (
+                "definition_only",
+                (
+                    0_i64,
+                    1_i64,
+                    1_i64,
+                    2_i64,
+                    call_probe(&mut engine, definition_caller),
+                ),
+            ),
+            (
+                "game_script",
+                (
+                    0_i64,
+                    0_i64,
+                    3_i64,
+                    3_i64,
+                    call_probe(&mut engine, global_caller),
+                ),
+            ),
+        ]);
+
+        for (index, case) in golden["eval_direct_exec_context"]
+            .as_array()
+            .expect("eval_direct_exec_context is a C++ oracle array")
+            .iter()
+            .enumerate()
+        {
+            let name = case["name"]
+                .as_str()
+                .expect("eval_direct_exec_context case has a name");
+            let &(has_object, has_definition, caller_strict, receiver, result) = rust_results
+                .get(name)
+                .unwrap_or_else(|| panic!("unknown eval_direct_exec_context case `{name}`"));
+            for (field, rust) in [
+                ("has_object", has_object),
+                ("has_definition", has_definition),
+                ("caller_strict", caller_strict),
+                ("expected_receiver", receiver),
+                ("receiver", receiver),
+                ("scope_valid", 1),
+                ("direct_strict", caller_strict),
+                ("result", result),
+            ] {
+                expect_eq(
+                    "eval_direct_exec_context",
+                    index,
+                    field,
+                    i(case, field),
+                    rust,
+                );
+            }
+        }
+    }
+
+    // 10c. C4Effect::Execute passes pCommandTarget—not the affected pForObj—
+    // to C4AulFunc::Exec (oracle-src-pinned src/C4Effect.cpp:319-363).
+    // With only idCommandTarget set, the mechanically extracted C++ path
+    // therefore gives FnGetX/FnGetY a null cthr->Obj while retaining the
+    // carrier as the timer's first argument (src/C4AulExec.cpp:330-364,
+    // 1638-1649; src/C4Script.cpp:1198-1202,1293-1297).
+    {
+        let section = &golden["definition_commanded_effect_position"];
+        let carrier_script = r#"#strict 2
+func Arm()
+{
+    return AddEffect("Origin", this(), 100, 1, 0, PROB);
+}
+"#;
+        let callback_script = r#"#strict 2
+func FxOriginTimer(object target, int number, int time)
+{
+    EffectVar(0, target, number) = GetX();
+    EffectVar(1, target, number) = GetY();
+    EffectVar(2, target, number) = GetX(target);
+    EffectVar(3, target, number) = GetY(target);
+    EffectVar(4, target, number) = time;
+    EffectVar(5, target, number) = !this();
+    EffectVar(6, target, number) = GetID(target) == CARR;
+    EffectVar(7, target, number) = number;
+    return 0;
+}
+"#;
+
+        let mut carrier = Definition::from_script("CARR", "Effect carrier", carrier_script)
+            .expect("effect receiver differential carrier compiles");
+        carrier.set_c4_callback_convention(true);
+        let mut callback = Definition::from_script("PROB", "Effect callback", callback_script)
+            .expect("effect receiver differential callback compiles");
+        callback.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(carrier)
+            .expect("effect receiver differential carrier registers");
+        engine
+            .register_definition(callback)
+            .expect("effect receiver differential callback registers");
+        let carrier = engine
+            .spawn_object(
+                SpawnConfig::new("CARR")
+                    .with_position(crate::Vector2::new(
+                        i(section, "carrier_x") as i32,
+                        i(section, "carrier_y") as i32,
+                    ))
+                    .with_mobile(false),
+            )
+            .expect("effect receiver differential carrier spawns");
+        let carrier_index = engine
+            .find_object_index(carrier)
+            .expect("effect receiver differential carrier exists");
+        engine
+            .call_object_function(carrier_index, "Arm", Vec::new())
+            .expect("definition-commanded effect installs");
+        engine
+            .tick_without_snapshot()
+            .expect("definition-commanded effect timer runs");
+
+        let carrier_index = engine
+            .find_object_index(carrier)
+            .expect("effect receiver differential carrier remains");
+        let carrier_state = &engine.objects[carrier_index].state;
+        let effect = carrier_state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Origin")
+            .expect("definition-commanded effect remains active");
+        let var_i64 = |index: usize, field: &str| match effect.var(index) {
+            EffectVarValue::Int(value) => i64::from(value),
+            EffectVarValue::Bool(value) => i64::from(value),
+            EffectVarValue::RawBool(value) => i64::from(value != 0),
+            value => panic!(
+                "definition_commanded_effect_position `{field}` has unexpected value {value:?}"
+            ),
+        };
+        let position_var = |index: usize, field: &str| match effect.var(index) {
+            EffectVarValue::Nil => Value::Null,
+            EffectVarValue::Int(value) => Value::from(value),
+            value => panic!(
+                "definition_commanded_effect_position `{field}` has unexpected value {value:?}"
+            ),
+        };
+
+        for (index, (field, rust)) in [
+            ("carrier_x", i64::from(carrier_state.position.x)),
+            ("carrier_y", i64::from(carrier_state.position.y)),
+            (
+                "has_id_command_target",
+                i64::from(effect.command_id.as_deref() == Some("PROB")),
+            ),
+            (
+                "command_target_is_null",
+                i64::from(effect.command_target.is_none()),
+            ),
+            (
+                "callback_ran",
+                i64::from(!matches!(effect.var(4), EffectVarValue::Nil)),
+            ),
+            (
+                "callback_receiver_is_null",
+                var_i64(5, "callback_receiver_is_null"),
+            ),
+            (
+                "callback_target_is_carrier",
+                var_i64(6, "callback_target_is_carrier"),
+            ),
+            ("number", var_i64(7, "number")),
+            ("time", var_i64(4, "time")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            expect_eq(
+                "definition_commanded_effect_position",
+                index,
+                field,
+                i(section, field),
+                rust,
+            );
+        }
+        for (index, (field, effect_var)) in [
+            ("implicit_x", 0_usize),
+            ("implicit_y", 1),
+            ("explicit_x", 2),
+            ("explicit_y", 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            expect_json_eq(
+                "definition_commanded_effect_position",
+                index,
+                field,
+                section[field].clone(),
+                position_var(effect_var, field),
+            );
+        }
     }
 
     // 11. C4Landscape::_PathFree (C4Landscape.cpp:890-915): PixCnt scans the

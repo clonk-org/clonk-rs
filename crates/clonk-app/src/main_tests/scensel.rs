@@ -1131,6 +1131,37 @@
         );
     }
 
+    #[test]
+    fn scensel_search_space_stays_in_the_focused_edit() {
+        let scenarios = sample_scenarios();
+        let entries = build_menu_entries(&scenarios, false);
+        let menu = StartupMenu::new(entries, test_font(), None).expect("scenario menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios);
+        app.menu_state.set_include_back(false);
+        let _ = app.menu_state.select_default_entry();
+        app.open_scenario_browser();
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.menu_state.set_search_text("two");
+
+        // Dialog::CharIn routes to the focused control, and Edit::CharIn
+        // accepts ASCII space; the unfocused list cannot consume it
+        // (src/C4GuiDialogs.cpp:552-560; src/C4GuiEdit.cpp:448-455;
+        // src/C4Gui.h:1622-1635).
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("route physical Space without activating the selected folder");
+        assert_eq!(app.menu_state.stack.len(), 1);
+        assert!(app.menu_state.search_focused());
+        app.handle_text_input(' ')
+            .expect("route the separate Space character event");
+        app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+            .expect("consume physical Space release in the edit");
+
+        assert_eq!(app.menu_state.search_text(), "two ");
+        assert_eq!(app.menu_state.stack.len(), 1);
+        assert!(app.menu_state.search_focused());
+    }
+
     // The real window route must consume Ctrl+F/text/Enter in the search
     // edit. Enter confirms the edit instead of starting the selected scenario
     // (C4StartupScenSelDlg.cpp:1400-1401,1804-1808; C4GuiEdit.cpp:364-368).

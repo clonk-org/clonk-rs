@@ -166,6 +166,11 @@ pub(crate) struct GameApp {
     pub(crate) advertised_game_reference: Option<clonk_network::HostGameReference>,
     pub(crate) startup_player_dialog: Option<clonk_frontend::startup_plrsel::PlrSelController>,
     pub(crate) startup_player_properties_dialog: Option<PendingStartupPlayerProperties>,
+    /// Process-local C4Config state set after the first stock extraction
+    /// attempt, independently of whether the config file can be saved.
+    pub(crate) startup_user_portraits_written: bool,
+    /// Process-local C4Config row remembered when the selector closes.
+    pub(crate) startup_last_portrait_folder_index: Option<usize>,
     pub(crate) startup_player_files: Vec<StartupPlayerFile>,
     pub(crate) startup_player_models: Vec<clonk_frontend::startup_plrsel::PlrSelPlayer>,
     pub(crate) startup_crew_files: Vec<StartupCrewFile>,
@@ -609,7 +614,8 @@ pub(crate) struct GameApp {
     /// Process-start localization/encoding metadata needed by live flash
     /// producers. The active message itself is runtime-only, survives a
     /// GraphicsSystem resize, and is reset by Game::Default/new-game.
-    pub(crate) runtime_flash_resources_cache: OnceLock<std::result::Result<RuntimeFlashResources, String>>,
+    pub(crate) runtime_flash_resources_cache:
+        OnceLock<std::result::Result<RuntimeFlashResources, String>>,
     pub(crate) runtime_flash_message: Option<RuntimeFlashMessage>,
     /// Temporary player assigned to the existing primary viewport by replay
     /// `SetFilmView` or viewport cycling. The physical identity is unchanged.
@@ -627,7 +633,8 @@ pub(crate) struct GameApp {
     /// observable, never reconstruct the concrete list until the game resets.
     pub(crate) physical_viewports_authoritative: bool,
     /// Singleton runtime `C4Network2ClientListDlg`, toggled by bare F4.
-    pub(crate) runtime_client_list: Option<clonk_frontend::runtime_client_list::RuntimeClientListDialog>,
+    pub(crate) runtime_client_list:
+        Option<clonk_frontend::runtime_client_list::RuntimeClientListDialog>,
     /// Keys owned by the modal lobby `C4Network2ClientDlg` until release,
     /// including the Escape press that closes it.
     pub(crate) runtime_client_list_consumed_keys: HashSet<VirtualKeyCode>,
@@ -915,7 +922,8 @@ pub(crate) struct RecordingSession {
     pub(crate) description_definition_modules: Vec<Vec<u8>>,
 }
 
-pub(crate) type StartupNetworkResult = std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>;
+pub(crate) type StartupNetworkResult =
+    std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>;
 
 pub(crate) struct StartupNetworkAttempt {
     cancellation: NetworkStartupCancellation,
@@ -1021,7 +1029,8 @@ pub(crate) struct ClassicDirectReferenceQueryResult {
 }
 
 pub(crate) struct ClassicDirectReferenceQuery {
-    pub(crate) receiver: Receiver<std::result::Result<ClassicDirectReferenceQueryResult, NetworkStartError>>,
+    pub(crate) receiver:
+        Receiver<std::result::Result<ClassicDirectReferenceQueryResult, NetworkStartError>>,
 }
 
 impl RecordingSession {
@@ -1228,7 +1237,9 @@ pub(crate) fn path_with_trailing_native_separator(path: &Path) -> PathBuf {
     path_from_group_name_bytes(&bytes)
 }
 
-pub(crate) fn count_direct_stream_player_crew_files(group: &Group) -> std::result::Result<usize, String> {
+pub(crate) fn count_direct_stream_player_crew_files(
+    group: &Group,
+) -> std::result::Result<usize, String> {
     let mut direct_crew = 0;
     for entry in group.entries().map_err(|error| error.to_string())? {
         let is_crew = entry
@@ -1481,7 +1492,12 @@ impl SearchEditState {
         }
     }
 
-    pub(crate) fn move_cursor(&mut self, operation: SearchCursorOperation, ctrl: bool, shift: bool) {
+    pub(crate) fn move_cursor(
+        &mut self,
+        operation: SearchCursorOperation,
+        ctrl: bool,
+        shift: bool,
+    ) {
         if self.selection_range().is_some() && !shift {
             self.anchor = self.caret;
             self.drag_anchor = 0;
@@ -1555,7 +1571,12 @@ impl SearchEditState {
         true
     }
 
-    pub(crate) fn scroll_cursor_in_view(&mut self, cursor_x: i32, client_width: i32, cursor_half: i32) {
+    pub(crate) fn scroll_cursor_in_view(
+        &mut self,
+        cursor_x: i32,
+        client_width: i32,
+        cursor_half: i32,
+    ) {
         if client_width < 5 {
             return;
         }
@@ -2553,7 +2574,9 @@ pub(crate) fn c4_message_target_position(
     Vector2::new(x + offset.x, y + offset.y - shape_height / 2 - 5)
 }
 
-pub(crate) fn report_classic_parity_boundary(error: ClassicParityBoundary) -> ClassicParityBoundary {
+pub(crate) fn report_classic_parity_boundary(
+    error: ClassicParityBoundary,
+) -> ClassicParityBoundary {
     tracing::error!(boundary = ?error, error = %error, "classic menu parity boundary reached");
     error
 }
@@ -3063,7 +3086,9 @@ pub(crate) fn runtime_crew_object_count(snapshot: &SimulationSnapshot) -> usize 
 /// HarpoonRace creates one SF5B owned by each player and calls MakeCrewMember
 /// with it (HarpoonRace.c4s/Script.c:66-73); C++ retains that exact object in
 /// the player's Crew (src/C4Player.cpp:1173-1203).
-pub(crate) fn runtime_players_with_exactly_one_live_sf5b_crew(snapshot: &SimulationSnapshot) -> usize {
+pub(crate) fn runtime_players_with_exactly_one_live_sf5b_crew(
+    snapshot: &SimulationSnapshot,
+) -> usize {
     snapshot
         .players
         .iter()
@@ -3130,7 +3155,11 @@ pub(crate) fn finish_presentation_benchmark(
     }
 }
 
-pub(crate) fn advance_graphics_deadline(deadline: Instant, now: Instant, interval: Duration) -> Instant {
+pub(crate) fn advance_graphics_deadline(
+    deadline: Instant,
+    now: Instant,
+    interval: Duration,
+) -> Instant {
     let next = deadline + interval;
     if next > now {
         next
@@ -3504,7 +3533,11 @@ pub(crate) fn scensel_scrollbar_pin_travel(bar_height: i32) -> Option<i32> {
     (bar_height > 3 * SCENSEL_SCROLLBAR_PART).then_some(bar_height - 3 * SCENSEL_SCROLLBAR_PART)
 }
 
-pub(crate) fn scensel_scrollbar_pin_from_offset(offset: i32, max_scroll: i32, bar_height: i32) -> Option<i32> {
+pub(crate) fn scensel_scrollbar_pin_from_offset(
+    offset: i32,
+    max_scroll: i32,
+    bar_height: i32,
+) -> Option<i32> {
     let travel = scensel_scrollbar_pin_travel(bar_height)?;
     (max_scroll > 0).then(|| {
         let offset = offset.clamp(0, max_scroll);
@@ -3513,7 +3546,11 @@ pub(crate) fn scensel_scrollbar_pin_from_offset(offset: i32, max_scroll: i32, ba
     })
 }
 
-pub(crate) fn scensel_scrollbar_offset_from_pin(pin: i32, max_scroll: i32, bar_height: i32) -> Option<i32> {
+pub(crate) fn scensel_scrollbar_offset_from_pin(
+    pin: i32,
+    max_scroll: i32,
+    bar_height: i32,
+) -> Option<i32> {
     let travel = scensel_scrollbar_pin_travel(bar_height)?;
     (max_scroll > 0).then(|| {
         let pin = pin.clamp(0, travel);
@@ -4354,7 +4391,12 @@ impl NetworkLobbyState {
         expand_hotkey_markup(&self.labels.exit).1
     }
 
-    pub(crate) fn register_peer(&mut self, client_id: ClientId, name: String, kind: ParticipantKind) {
+    pub(crate) fn register_peer(
+        &mut self,
+        client_id: ClientId,
+        name: String,
+        kind: ParticipantKind,
+    ) {
         let ready = self
             .participants
             .get(&client_id)
@@ -4411,7 +4453,10 @@ impl NetworkLobbyState {
         }
     }
 
-    pub(crate) fn apply_ready_check(&mut self, packet: clonk_network::ReadyCheckPacket) -> Option<ClientId> {
+    pub(crate) fn apply_ready_check(
+        &mut self,
+        packet: clonk_network::ReadyCheckPacket,
+    ) -> Option<ClientId> {
         if packet.data.vote_requested() {
             return None;
         }
@@ -5058,7 +5103,11 @@ impl IngameMouseState {
 }
 
 impl IngameButtonMouseState {
-    pub(crate) fn new(start: ViewportPointer, down_target: Option<ObjectId>, down_region: bool) -> Self {
+    pub(crate) fn new(
+        start: ViewportPointer,
+        down_target: Option<ObjectId>,
+        down_region: bool,
+    ) -> Self {
         Self {
             motion: IngameMouseState::new(start, down_target.is_none() && !down_region),
             down_target,
@@ -5186,7 +5235,10 @@ impl MenuState {
         rename.edit.take_previous_focus()
     }
 
-    pub(crate) fn resolve_renaming(&mut self, result: RenameEditResult) -> Option<ScenselFocusSnapshot> {
+    pub(crate) fn resolve_renaming(
+        &mut self,
+        result: RenameEditResult,
+    ) -> Option<ScenselFocusSnapshot> {
         let resolution = self.rename_edit.as_mut()?.edit.resolve(result);
         if resolution == RenameEditResolution::KeepEditing {
             return None;
@@ -5417,7 +5469,12 @@ impl MenuState {
         content_height.saturating_sub(viewport_height).max(0)
     }
 
-    pub(crate) fn scroll_scenario_list_by(&mut self, amount: i32, viewport_height: i32, pitch: i32) -> bool {
+    pub(crate) fn scroll_scenario_list_by(
+        &mut self,
+        amount: i32,
+        viewport_height: i32,
+        pitch: i32,
+    ) -> bool {
         let max_scroll = self.scenario_list_max_scroll(viewport_height, pitch);
         let next = self
             .scenario_list_scroll
@@ -6345,7 +6402,9 @@ fn decode_map_folder_image(name: &str, bytes: &[u8]) -> Result<ImageData> {
     Ok(ImageData::new(width, height, pixels))
 }
 
-pub(crate) fn open_group_path_for_folder_map(path: &Path) -> std::result::Result<Group, GroupError> {
+pub(crate) fn open_group_path_for_folder_map(
+    path: &Path,
+) -> std::result::Result<Group, GroupError> {
     if path.exists() {
         return Group::open(path);
     }
@@ -6373,7 +6432,10 @@ pub(crate) fn open_group_path_for_folder_map(path: &Path) -> std::result::Result
     Ok(group)
 }
 
-pub(crate) fn packed_group_bytes(path: &Path, maker: &[u8]) -> std::result::Result<Vec<u8>, String> {
+pub(crate) fn packed_group_bytes(
+    path: &Path,
+    maker: &[u8],
+) -> std::result::Result<Vec<u8>, String> {
     // A packed top-level group is copied byte-for-byte. C4Group::raw_image is
     // the uncompressed nested image and therefore is not a standalone file.
     if path.is_file() {
@@ -6623,4 +6685,3 @@ pub(crate) struct FrontendScenario {
     /// entries in C4DefinitionSelDlg.
     pub(crate) definition_modules: Vec<String>,
 }
-

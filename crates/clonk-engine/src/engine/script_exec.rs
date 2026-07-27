@@ -1097,7 +1097,11 @@ impl Engine {
     /// app feeds them through PlayerInfo admission before any JoinPlayer is
     /// issued, matching C4PlayerInfoList::DoPlayerInfoUpdate.
     pub fn take_script_player_info_updates(&mut self) -> Vec<PlayerInfoUpdateRequest> {
-        self.host_requests.player_info_updates.borrow_mut().drain(..).collect()
+        self.host_requests
+            .player_info_updates
+            .borrow_mut()
+            .drain(..)
+            .collect()
     }
 
     /// Drain `SetLeagueProgressData` writes in script execution order so the
@@ -1134,7 +1138,12 @@ impl Engine {
 
     /// Drain physical viewport mutations in exact script call order.
     pub fn take_viewport_presentation_requests(&mut self) -> Vec<ViewportPresentationRequest> {
-        std::mem::take(&mut *self.host_requests.viewport_presentation_requests.borrow_mut())
+        std::mem::take(
+            &mut *self
+                .host_requests
+                .viewport_presentation_requests
+                .borrow_mut(),
+        )
     }
 
     /// Update the process-local developer-console target queried by the
@@ -1259,5 +1268,4 @@ impl Engine {
             }
         }
     }
-
 }

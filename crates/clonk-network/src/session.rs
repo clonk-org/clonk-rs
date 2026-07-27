@@ -9071,6 +9071,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn client_join_flow_keeps_non_password_rejection_terminal() {
+        // HandleConnRe presents the peer's exact message text before closing
+        // the rejected connection (src/C4Network2.cpp:1476-1485).
         let host_config = HostConfig {
             allow_join: false,
             ..HostConfig::default()
@@ -9082,7 +9084,10 @@ mod tests {
         let error = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
             .expect_err("closed admission is not a password retry");
-        assert!(matches!(error, ClientError::Handshake(_)));
+        assert_eq!(
+            error.to_string(),
+            "handshake rejected: the peer rejected the local connection: join denied"
+        );
         host.shutdown().await.unwrap();
     }
 

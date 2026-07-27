@@ -344,7 +344,7 @@ pub(in crate::scenario) enum CollectedDefinition {
 
 // C4Game::InitDefs checks every loaded definition against the running engine
 // tuple before script linking (C4Game.cpp:108-115; C4Version.h:28-32).
-const DEFINITION_ENGINE_VERSION: [i32; 5] = [4, 9, 11, 0, 362];
+use clonk_core::version::ENGINE_VERSION as DEFINITION_ENGINE_VERSION;
 
 fn definition_requires_newer_engine(definition: &ScenarioDefinition) -> bool {
     let Some(core) = definition.core.as_ref() else {
@@ -1791,6 +1791,26 @@ impl LegacyDefinitionResolver for AuthoritativeNetworkResourceResolver<'_> {
 }
 
 impl Scenario {
+    /// Whether lobby preloading must defer the landscape until the final
+    /// synchronized player roster is known.
+    ///
+    /// C++ returns from the preloading second part before Landscape::Init for
+    /// a main-section `MapPlayerExtend`, then evaluates `StartupPlayerCount`
+    /// after the lobby and creates the map on the foreground InitGame pass.
+    /// Child sections are initialized only when activated and read the same
+    /// frozen count (src/C4Game.cpp:2455-2462,2642-2649,4084-4223).
+    pub fn uses_map_player_extend(&self) -> bool {
+        self.legacy_core
+            .as_ref()
+            .is_some_and(|core| core.landscape.map_player_extend)
+            || self.scenario_sections.iter().any(|section| {
+                section
+                    .s2_overload
+                    .as_ref()
+                    .is_some_and(|spec| spec.map_player_extend)
+            })
+    }
+
     /// Whether this scenario uses the shipped `SkyParcour` generator whose
     /// final sky overlays can expose its earlier Water fill.
     pub fn generated_landscape_seed_retry_applies(&self) -> bool {
@@ -2229,8 +2249,72 @@ impl Scenario {
     where
         S: AsRef<str>,
     {
+        Self::load_network_from_path_with_languages_and_seed_and_packs_and_progress(
+            path,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            language_packs,
+            |_, _| {},
+        )
+    }
+
+    /// Progress-reporting counterpart used by the post-lobby network loader.
+    /// The callback covers the shared InitGame first/second-part work and
+    /// stops at 93; resource transfer and final activation remain separate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_path_with_languages_and_seed_and_packs_and_progress<S, F>(
+        path: impl AsRef<Path>,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+        report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+        F: FnMut(i32, &'static str),
+    {
+        Self::load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
+            path,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            language_packs,
+            legacy_startup_player_count(),
+            report_progress,
+        )
+    }
+
+    /// Network loader with C4Game's already-frozen StartupPlayerCount.
+    /// Dynamic landscape creation consumes this value before activation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_path_with_languages_and_seed_and_packs_and_startup_player_count_and_progress<
+        S,
+        F,
+    >(
+        path: impl AsRef<Path>,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+        startup_player_count: i32,
+        report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+        F: FnMut(i32, &'static str),
+    {
         let group = Group::open(path)?;
-        Self::load_network_from_group_with_languages_and_seed_and_packs(
+        Self::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
             &group,
             definition_groups,
             material_groups,
@@ -2238,6 +2322,8 @@ impl Scenario {
             languages,
             random_seed,
             language_packs,
+            startup_player_count,
+            report_progress,
         )
     }
 
@@ -2257,6 +2343,70 @@ impl Scenario {
     where
         S: AsRef<str>,
     {
+        Self::load_network_from_group_with_languages_and_seed_and_packs_and_progress(
+            group,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            language_packs,
+            |_, _| {},
+        )
+    }
+
+    /// Group-backed network loader with the shared C4Game InitGame progress
+    /// callback (src/C4Game.cpp:2551-2721).
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_group_with_languages_and_seed_and_packs_and_progress<S, F>(
+        group: &Group,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+        report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+        F: FnMut(i32, &'static str),
+    {
+        Self::load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress(
+            group,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            language_packs,
+            legacy_startup_player_count(),
+            report_progress,
+        )
+    }
+
+    /// Group-backed network loader with the synchronized startup-player
+    /// count used by MapPlayerExtend (src/C4Game.cpp:2394-2431;
+    /// src/C4Landscape.cpp:518-522).
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_group_with_languages_and_seed_and_packs_and_startup_player_count_and_progress<
+        S,
+        F,
+    >(
+        group: &Group,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+        startup_player_count: i32,
+        mut report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+        F: FnMut(i32, &'static str),
+    {
         let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         let definition_modules = (0..definition_groups.len())
             .map(|index| format!("__NetworkDefinition{index}.c4d"))
@@ -2268,7 +2418,6 @@ impl Scenario {
             graphics_groups,
             language_packs,
         };
-        let mut ignore_progress = |_: i32, _: &'static str| {};
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
             group,
             &resolver,
@@ -2277,9 +2426,9 @@ impl Scenario {
             &[],
             Some(&definition_modules),
             None,
-            legacy_startup_player_count(),
+            startup_player_count,
             false,
-            &mut ignore_progress,
+            &mut report_progress,
         )
     }
 
@@ -2637,7 +2786,10 @@ impl Scenario {
         )
     }
 
-    pub(in crate::scenario) fn load_from_group_with_languages_and_seed_and_definition_modules<R, S>(
+    pub(in crate::scenario) fn load_from_group_with_languages_and_seed_and_definition_modules<
+        R,
+        S,
+    >(
         group: &Group,
         resolver: &R,
         languages: &[S],
@@ -3756,7 +3908,10 @@ impl Scenario {
     /// Live environment staged before the native Weather.Init boundary.
     /// Fresh legacy games still expose C4Weather::Default here; savegames
     /// and synthetic scenarios need their configured metadata immediately.
-    pub(in crate::scenario) fn environment_before_weather_init(&self, runtime_savegame: bool) -> EnvironmentSettings {
+    pub(in crate::scenario) fn environment_before_weather_init(
+        &self,
+        runtime_savegame: bool,
+    ) -> EnvironmentSettings {
         if self.weather_init.is_some() && !runtime_savegame {
             EnvironmentSettings::default()
         } else {

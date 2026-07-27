@@ -26,6 +26,10 @@ use clonk_script::Value;
 /// (C4GameMessage.cpp:280-282; C4Surface.cpp:1304; StdColors.h:32).
 const MESSAGE_RED: u32 = 0xfff4_0000;
 
+/// Keep the real Deep Sea world-tick sample bounded while exercising the
+/// C4Object::Build path below (C4Object.cpp:1682-1775,5010-5055).
+const MAX_BUILD_TICKS: i32 = 32;
+
 #[test]
 fn deep_sea_conkit_site_starts_building_underwater() {
     let mut engine = load_installed_scenario("FarWorlds.c4f/Deep.c4s", 0);
@@ -307,10 +311,9 @@ fn deep_sea_conkit_site_starts_building_underwater() {
             .expect("component enters the builder");
     }
 
-    // Deep Sea spawns 7 SHRK predators; a builder standing still for the
-    // 3960-frame construction is prey in either engine, and a real player
-    // would fight or flee. Retire the wildlife so the frame-exact Con pins
-    // below observe only the build loop.
+    // Deep Sea spawns 7 SHRK predators; a stationary builder is prey in
+    // either engine, and a real player would fight or flee. Retire the
+    // wildlife so the frame-exact Con pins below observe only the build loop.
     let wildlife = engine
         .snapshot()
         .objects
@@ -338,55 +341,31 @@ fn deep_sea_conkit_site_starts_building_underwater() {
         .player_in_com(owner, COM_DOWN, 0)
         .expect("second Down inside the double-click window");
 
-    // A 3960-frame dive outlives the 700000-point breath pool: C4Object
-    // breathing drains 2*C4MaxPhysical/100 = 2000 per Tick5 underwater and
-    // then asphyxiates (C4Object.cpp:880-920) — that cadence is what HCLK's
-    // ContextHome shell-return hint manages in real play. Refill through the
-    // same native DoBreath script path a surfacing player would exercise so
-    // the pins below observe only the build loop.
-    engine
-        .register_definition(
-            clonk_engine::Definition::from_script(
-                "BRTH",
-                "Breath refill probe",
-                r#"#strict 2
-public func Refill(object target) { return DoBreath(700000, target); }
-"#,
-            )
-            .expect("breath probe compiles"),
-        )
-        .expect("breath probe registers");
-    let breather = engine
-        .spawn_object(SpawnConfig::new("BRTH").with_position(Vector2::new(0, 0)))
-        .expect("breath probe spawns");
-
     // DFA_BUILD per-frame progression (C4Object.cpp:5010-5055,1682-1775):
     // Build(iLevel=10) grabs at most one carried object per needed id per
     // frame, then DoCon(10 * 100 * 150 / Mass=6000 = 25). HCLK's own ActMap
     // Build entry has no InLiquidAction, so the action persists underwater.
-    let total_frames = (FULL_CON - FULL_CON / 100) / 25;
+    // Six stock-speed frames cover every distinct component-transfer state:
+    // both GLAS are consumed by frame 2 and all six GCOR by frame 6.
+    const STOCK_BUILD_TICKS: i32 = 6;
+    const STOCK_CON_PER_TICK: i32 = 25;
+    const ACCELERATED_BUILD_TICKS: i32 = 10;
+    let sampled_build_ticks = STOCK_BUILD_TICKS + ACCELERATED_BUILD_TICKS;
+    assert!(
+        sampled_build_ticks <= MAX_BUILD_TICKS,
+        "the real-scenario construction sample must stay within {MAX_BUILD_TICKS} world ticks"
+    );
+    let total_frames = (FULL_CON - FULL_CON / 100) / STOCK_CON_PER_TICK;
     assert_eq!(total_frames, 3960);
-    for frame in 1..=total_frames {
-        if frame % 1500 == 0 {
-            let breather_index = engine
-                .find_object_index(breather)
-                .expect("breath probe stays live");
-            engine
-                .call_object_function(
-                    breather_index,
-                    "Refill",
-                    vec![Value::Object(clonk.as_u64())],
-                )
-                .expect("the diver refreshes breath mid-build");
-        }
+    for frame in 1..=STOCK_BUILD_TICKS {
         engine
             .tick_without_snapshot()
-            .expect("Build frames advance");
+            .expect("stock-speed Build frames advance");
         let site_state = engine.object_snapshot(site).expect("site survives");
         assert_eq!(
             site_state.construction,
-            FULL_CON / 100 + frame * 25,
-            "frame {frame}: DoCon rises exactly 25 per Build frame"
+            FULL_CON / 100 + frame * STOCK_CON_PER_TICK,
+            "frame {frame}: DoCon rises exactly 25 per stock-speed Build frame"
         );
         let builder_state = engine.object_snapshot(clonk).expect("builder survives");
         assert_eq!(
@@ -409,6 +388,106 @@ public func Refill(object target) { return DoBreath(700000, target); }
             builder_state.contents.len() as i32,
             8 - expected_gcor - expected_glas,
             "frame {frame}: consumed components leave the builder's inventory"
+        );
+    }
+
+    // Keep executing the native DFA_BUILD -> Build -> DoCon path, but raise
+    // the builder's temporary physical through C++ SetPhysical semantics
+    // (C4Script.cpp:557-601). Ten equal accelerated ticks cover the
+    // material-complete steady state and land exactly on FullCon without
+    // paying for another 3954 identical full-world ticks.
+    let accelerated_delta = (FULL_CON - (FULL_CON / 100 + STOCK_BUILD_TICKS * STOCK_CON_PER_TICK))
+        / ACCELERATED_BUILD_TICKS;
+    assert_eq!(accelerated_delta, 9_885);
+    let accelerated_can_construct = accelerated_delta * 4;
+    assert_eq!(accelerated_can_construct, 39_540);
+    engine
+        .register_definition(
+            clonk_engine::Definition::from_script(
+                "BSPD",
+                "Build-speed probe",
+                r#"#strict 2
+public func Refill(object target)
+{
+  return DoBreath(700000, target);
+}
+
+public func Accelerate(object target, int speed)
+{
+  return SetPhysical("CanConstruct", speed, PHYS_Temporary, target);
+}
+"#,
+            )
+            .expect("build-speed probe compiles"),
+        )
+        .expect("build-speed probe registers");
+    let accelerator = engine
+        .spawn_object(SpawnConfig::new("BSPD").with_position(Vector2::new(0, 0)))
+        .expect("build-speed probe spawns");
+    let accelerator_index = engine
+        .find_object_index(accelerator)
+        .expect("build-speed probe stays live");
+    assert_eq!(
+        engine
+            .call_object_function(
+                accelerator_index,
+                "Refill",
+                vec![Value::Object(clonk.as_u64())],
+            )
+            .expect("the diver refreshes breath before the accelerated build"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("builder survives the breath refill")
+            .breath,
+        700_000,
+        "DoBreath retains the former long-build refill seam (C4Script.cpp:508-514)"
+    );
+    assert_eq!(
+        engine
+            .call_object_function(
+                accelerator_index,
+                "Accelerate",
+                vec![
+                    Value::Object(clonk.as_u64()),
+                    Value::Int(accelerated_can_construct),
+                ],
+            )
+            .expect("temporary CanConstruct acceleration succeeds"),
+        Value::Bool(true)
+    );
+
+    for frame in 1..=ACCELERATED_BUILD_TICKS {
+        engine
+            .tick_without_snapshot()
+            .expect("accelerated Build frames advance");
+        let site_state = engine.object_snapshot(site).expect("site survives");
+        assert_eq!(
+            site_state.construction,
+            FULL_CON / 100 + STOCK_BUILD_TICKS * STOCK_CON_PER_TICK + frame * accelerated_delta,
+            "accelerated frame {frame}: DoCon follows the temporary physical"
+        );
+        let builder_state = engine.object_snapshot(clonk).expect("builder survives");
+        assert_eq!(
+            builder_state.action.name, "Build",
+            "accelerated frame {frame}: the underwater Build action persists"
+        );
+        assert_eq!(
+            site_state.components.get("GCOR").copied().unwrap_or(0),
+            6,
+            "accelerated frame {frame}: transferred GCOR remain on the site"
+        );
+        assert_eq!(
+            site_state.components.get("GLAS").copied().unwrap_or(0),
+            2,
+            "accelerated frame {frame}: transferred GLAS remain on the site"
+        );
+        assert_eq!(
+            builder_state.contents.len(),
+            0,
+            "accelerated frame {frame}: the consumed inventory stays empty"
         );
     }
 

@@ -1369,6 +1369,7 @@
             &[],
             crate::FULL_CON,
         );
+        let definition_commanded_carrier = object.clone();
         let (local, _) =
             with_effect_context(Some(object), &[], HostWorldContext::default(), 1, || {
                 engine.call("Probe", &[Value::Int(45), Value::Int(194)])
@@ -1376,6 +1377,22 @@
         assert_eq!(
             local.expect("object-relative Find_AtPoint succeeds"),
             Value::Array(vec![Value::Int(11), Value::Int(365), Value::Int(144)])
+        );
+
+        let (definition_commanded, _) = with_effect_context_with_state_and_definition(
+            Some(definition_commanded_carrier),
+            Some(DefinitionId::from("PROB")),
+            None,
+            &[],
+            HostWorldContext::default(),
+            1,
+            false,
+            || engine.call("Probe", &[Value::Int(-5), Value::Int(7)]),
+        );
+        assert_eq!(
+            definition_commanded.expect("definition-commanded Find_AtPoint succeeds"),
+            Value::Array(vec![Value::Int(11), Value::Int(-5), Value::Int(7)]),
+            "the affected carrier is not cthr->Obj (C4Effect.cpp:342-345)"
         );
 
         let (global, _) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
@@ -2912,4 +2929,3 @@ global func PreInitializePlayer(int player)
             assert_eq!(*category, CATEGORY_SORT_LIMIT);
         }
     }
-

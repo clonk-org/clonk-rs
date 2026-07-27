@@ -3,7 +3,7 @@ use crate::landscape::PixelGrid;
 
 fn splash_engine() -> Engine {
     let library = clonk_resources::MaterialLibrary::parse(
-            r#"
+        r#"
             [Material Negative]
             Name=Negative
             Density=25
@@ -56,7 +56,7 @@ fn signed_splash_rate_preserves_cpp_rng_consumption() {
     assert_eq!(run_insert_check(&mut negative_engine, negative), !splash);
     assert_eq!(
         negative_engine.rng, expected,
-            "negative range is converted to unsigned for modulo after consuming one draw"
+        "negative range is converted to unsigned for modulo after consuming one draw"
     );
 
     let mut zero_engine = splash_engine();
@@ -82,7 +82,7 @@ fn signed_splash_rate_preserves_cpp_rng_consumption() {
 
 fn conversion_engine(below_matches: bool) -> Engine {
     let library = clonk_resources::MaterialLibrary::parse(
-            r#"
+        r#"
             [Material Natural]
             Name=Natural
             Density=30
@@ -117,8 +117,8 @@ fn conversion_engine(below_matches: bool) -> Engine {
     .expect("conversion material fixture parses");
     let materials = MaterialSet::from_resource_library(&library);
     let below_byte = if below_matches { 1 } else { 2 };
-        // y=0 is Rock, so an accidental absolute-value/sign-flipped depth
-        // succeeds; the native negative depth probes y=4 instead.
+    // y=0 is Rock, so an accidental absolute-value/sign-flipped depth
+    // succeeds; the native negative depth probes y=4 instead.
     let grid = PixelGrid::new(
         1,
         5,
@@ -182,7 +182,7 @@ fn negative_conversion_depths_probe_below_for_builtin_and_custom_reactions() {
         assert_eq!(
             run_depth_conversion(&mut blocked, source),
             (source_id, false),
-                "{source} must reject a nonmatching material below"
+            "{source} must reject a nonmatching material below"
         );
 
         let mut converted = conversion_engine(true);
@@ -190,7 +190,7 @@ fn negative_conversion_depths_probe_below_for_builtin_and_custom_reactions() {
         assert_eq!(
             run_depth_conversion(&mut converted, source),
             (water, true),
-                "{source} must accept the matching material below"
+            "{source} must accept the matching material below"
         );
     }
 }
@@ -198,7 +198,7 @@ fn negative_conversion_depths_probe_below_for_builtin_and_custom_reactions() {
 #[test]
 fn negative_dig_ratio_casts_immediately_and_clears_with_one_rotation_draw() {
     let library = clonk_resources::MaterialLibrary::parse(
-            r#"
+        r#"
             [Material Negative]
             Name=Negative
             Dig2Object=GEM_

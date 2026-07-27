@@ -518,7 +518,10 @@ impl ScenarioValueStore {
     /// ConvertGoals, and the initial C4Landscape/C4Sky initialization, which
     /// all precede scenario `Initialize` (C4Scenario.cpp:86-97;
     /// C4Landscape.cpp:569-570,677; C4Sky.cpp:84-91).
-    pub(in crate::scenario) fn from_runtime_core(core: &LegacyScenarioCore, has_sky_surface: bool) -> Self {
+    pub(in crate::scenario) fn from_runtime_core(
+        core: &LegacyScenarioCore,
+        has_sky_surface: bool,
+    ) -> Self {
         let mut runtime = core.after_load_conversion();
         runtime.landscape.map_width.max = 10_000;
         runtime.landscape.map_height.max = 10_000;
@@ -647,7 +650,9 @@ pub(in crate::scenario) fn id_list_pairs(list: &LegacyIdList) -> Vec<(String, i3
         .collect()
 }
 
-pub(in crate::scenario) fn scenario_id_list_entries(list: &LegacyIdList) -> Vec<ScenarioIdListEntry> {
+pub(in crate::scenario) fn scenario_id_list_entries(
+    list: &LegacyIdList,
+) -> Vec<ScenarioIdListEntry> {
     list.iter()
         .map(|entry| ScenarioIdListEntry::new(entry.id.clone(), entry.count.unwrap_or(0)))
         .collect()
@@ -671,7 +676,11 @@ pub(in crate::scenario) fn legacy_id_count(list: &LegacyIdList, id: &str) -> i32
         .unwrap_or(0)
 }
 
-pub(in crate::scenario) fn legacy_id_count_or(list: &LegacyIdList, id: &str, zero_default: i32) -> i32 {
+pub(in crate::scenario) fn legacy_id_count_or(
+    list: &LegacyIdList,
+    id: &str,
+    zero_default: i32,
+) -> i32 {
     list.iter()
         .find(|entry| entry.id == id)
         .map(|entry| entry.count.unwrap_or(0))
@@ -679,7 +688,10 @@ pub(in crate::scenario) fn legacy_id_count_or(list: &LegacyIdList, id: &str, zer
         .unwrap_or(0)
 }
 
-pub(in crate::scenario) fn parse_legacy_id_list(_field: &str, raw: &str) -> Result<LegacyIdList, ScenarioError> {
+pub(in crate::scenario) fn parse_legacy_id_list(
+    _field: &str,
+    raw: &str,
+) -> Result<LegacyIdList, ScenarioError> {
     let mut entries = Vec::new();
     let mut position = 0;
     let mut first = true;
@@ -756,7 +768,10 @@ fn consume_name_list_separator(
     true
 }
 
-pub(in crate::scenario) fn parse_legacy_name_list(_field: &str, raw: &str) -> Result<LegacyNameList, ScenarioError> {
+pub(in crate::scenario) fn parse_legacy_name_list(
+    _field: &str,
+    raw: &str,
+) -> Result<LegacyNameList, ScenarioError> {
     const C4_MAX_NAME_LIST: usize = 10;
     const C4_MAX_NAME: usize = 30;
 
@@ -800,7 +815,10 @@ pub(in crate::scenario) fn parse_legacy_name_list(_field: &str, raw: &str) -> Re
     Ok(entries)
 }
 
-pub(in crate::scenario) fn parse_legacy_version(_field: &str, raw: &str) -> Result<[i32; 5], ScenarioError> {
+pub(in crate::scenario) fn parse_legacy_version(
+    _field: &str,
+    raw: &str,
+) -> Result<[i32; 5], ScenarioError> {
     let mut version = [0; 5];
     compile_defaulted_i32_components(raw, &mut version, &[0; 5], true);
     Ok(version)
@@ -878,7 +896,10 @@ fn parse_base_functionality_number(raw: &str, position: &mut usize) -> Option<i3
     Some((signed as i64) as i32)
 }
 
-pub(in crate::scenario) fn parse_base_functionality(field: &str, raw: &str) -> Result<i32, ScenarioError> {
+pub(in crate::scenario) fn parse_base_functionality(
+    field: &str,
+    raw: &str,
+) -> Result<i32, ScenarioError> {
     if raw.trim().is_empty() {
         return Ok(BASEFUNC_DEFAULT);
     }
@@ -926,13 +947,19 @@ pub(in crate::scenario) fn parse_base_functionality(field: &str, raw: &str) -> R
     Ok(value)
 }
 
-pub(in crate::scenario) fn parse_i32_array<const N: usize>(_field: &str, raw: &str) -> Result<[i32; N], ScenarioError> {
+pub(in crate::scenario) fn parse_i32_array<const N: usize>(
+    _field: &str,
+    raw: &str,
+) -> Result<[i32; N], ScenarioError> {
     let mut result = [0; N];
     compile_defaulted_i32_components(raw, &mut result, &[0; N], true);
     Ok(result)
 }
 
-pub(in crate::scenario) fn parse_position(_field: &str, raw: &str) -> Result<[i32; 2], ScenarioError> {
+pub(in crate::scenario) fn parse_position(
+    _field: &str,
+    raw: &str,
+) -> Result<[i32; 2], ScenarioError> {
     let mut result = [-1, -1];
     compile_defaulted_i32_components(raw, &mut result, &[-1, -1], true);
     Ok(result)

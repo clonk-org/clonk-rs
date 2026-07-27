@@ -1813,7 +1813,14 @@ impl Engine {
     /// scenario's primitive or push-pull destination path, then run the
     /// FindMatSlide loop, reaction below (meePXSPos), and dead-material write
     /// with the insert-thrust recursion.
-    pub(crate) fn insert_material(&mut self, mut mat: MaterialId, tx: i32, ty: i32, vx: i32, vy: i32) -> bool {
+    pub(crate) fn insert_material(
+        &mut self,
+        mut mat: MaterialId,
+        tx: i32,
+        ty: i32,
+        vx: i32,
+        vy: i32,
+    ) -> bool {
         if std::env::var("LC_RUST_RNG_TRACE").is_ok() && (15..=19).contains(&self.frame) {
             crate::rng::rng_trace_line(&format!(
                 "INSMAT {} {tx} {ty} {vx} {vy} {}",
@@ -2676,5 +2683,4 @@ impl Engine {
             rng,
         })
     }
-
 }

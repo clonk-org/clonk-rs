@@ -1789,6 +1789,112 @@ func Helper() { return 17; }
     }
 
     #[test]
+    fn scheduled_eval_uses_command_target_definition_scope() {
+        // Helpers.c's global FxIntScheduleTimer runs eval() with the scheduled
+        // object as `this` (planet/System.c4g/Helpers.c:110-132). FnEval then
+        // selects cthr->Obj->Def->Script for DirectExec, so both the target's
+        // named locals and its own functions resolve there (C4Script.cpp:
+        // 4501-4513; C4AulExec.cpp:1658-1707).
+        let definition_script = r#"#strict 2
+local power, result;
+
+func Arm()
+{
+    power = 50;
+    result = 0;
+    var effect = AddEffect("IntSchedule", this(), 1, 1, this());
+    EffectVar(0, this(), effect) = "Explode(power)";
+    return true;
+}
+
+func Explode(value) { result = value; return true; }
+func Read() { return result; }
+"#;
+        let global_script = r#"#strict 2
+global func FxIntScheduleTimer(target, number, time)
+{
+    eval(EffectVar(0, target, number));
+    return -1;
+}
+"#;
+        let mut definition =
+            Definition::from_script("FXEV", "Scheduled eval target", definition_script)
+                .expect("definition compiles");
+        definition.set_c4_callback_convention(true);
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/Helpers.c".to_string(),
+                global_script.to_string(),
+            )]),
+            1
+        );
+        let id = engine
+            .spawn_object(SpawnConfig::new("FXEV"))
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+        engine
+            .call_object_function(idx, "Arm", Vec::new())
+            .expect("schedule arms");
+
+        engine.tick_without_snapshot().expect("scheduled eval runs");
+
+        let idx = engine.find_object_index(id).expect("target remains");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Read", Vec::new())
+                .expect("result reads"),
+            Value::Int(50),
+            "eval resolves the target definition's local and function"
+        );
+        assert!(
+            engine.objects[idx]
+                .state
+                .effects
+                .iter()
+                .all(|effect| effect.priority == 0),
+            "the successful one-shot schedule removes its timer"
+        );
+    }
+
+    #[test]
+    fn explicit_global_eval_uses_scenario_script_scope() {
+        // AB_CALLGLOBAL dispatches with null destination Obj/Def, so FnEval
+        // selects Game.Script and DirectExec resolves scenario-local functions
+        // there (C4AulExec.cpp:1216-1297; C4Script.cpp:4501-4513).
+        let definition_script = r#"#strict 3
+func Probe() { return global->eval("ScenarioHelper()"); }
+"#;
+        let scenario_script = r#"#strict 3
+func ScenarioHelper() { return 73; }
+"#;
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(
+                Definition::from_script("GEVL", "Global eval caller", definition_script)
+                    .expect("definition compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .install_scenario_script_with_convention("Scenario", scenario_script, true)
+            .expect("scenario script installs");
+        let id = engine
+            .spawn_object(SpawnConfig::new("GEVL"))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Probe", Vec::new())
+                .expect("global eval resolves through Game.Script"),
+            Value::Int(73)
+        );
+    }
+
+    #[test]
     fn object_effect_uses_and_persists_foreign_command_target_locals() {
         // Every object-effect callback executes with pCommandTarget as its
         // C4Aul `this` (C4Effect.cpp:345). That object owns the live Local[]
@@ -2910,6 +3016,84 @@ func Probe(target) {
             engine.objects[idx].state.energy, 40_000,
             "FxBuffTimer (DoEnergy(-5) = -5000 raw, C4Object.cpp:1347) ran \
              in the spell def's script at iTime 2 and 4"
+        );
+    }
+
+    #[test]
+    fn definition_commanded_effect_has_no_implicit_position_receiver() {
+        // C4Effect selects Fx* CODE from idCommandTarget but executes it on
+        // pCommandTarget, which is null here (C4Effect.cpp:42-56,342-345).
+        // Bare GetX/GetY therefore default to null cthr->Obj and return nil
+        // (C4Script.cpp:1198-1202,1293-1297), even though pForObj still
+        // carries the affected object's mutable effect list.
+        let carrier_script = r#"#strict 2
+func Initialize()
+{
+    AddEffect("Origin", this(), 100, 1, 0, PROB);
+    return true;
+}
+"#;
+        let callback_script = r#"#strict 2
+func FxOriginTimer(object target, int number, int time)
+{
+    EffectVar(0, target, number) = GetX();
+    EffectVar(1, target, number) = GetY();
+    EffectVar(2, target, number) = GetX(target);
+    EffectVar(3, target, number) = GetY(target);
+    EffectVar(4, target, number) = time;
+    return 0;
+}
+"#;
+
+        let mut carrier =
+            Definition::from_script("CARR", "Carrier", carrier_script).expect("carrier compiles");
+        carrier.set_c4_callback_convention(true);
+        let mut callback =
+            Definition::from_script("PROB", "Probe", callback_script).expect("probe compiles");
+        callback.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(carrier)
+            .expect("carrier registers");
+        engine
+            .register_definition(callback)
+            .expect("probe registers");
+        let carrier = engine
+            .spawn_object(
+                SpawnConfig::new("CARR").with_position(Vector2::new(320, -50)),
+            )
+            .expect("carrier spawns");
+
+        engine
+            .tick_without_snapshot()
+            .expect("definition-commanded timer runs");
+
+        let carrier = engine
+            .find_object_index(carrier)
+            .expect("carrier remains live");
+        let effect = engine.objects[carrier]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Origin")
+            .expect("effect remains active");
+        assert_eq!(
+            (
+                effect.var(0),
+                effect.var(1),
+                effect.var(2),
+                effect.var(3),
+                effect.var(4)
+            ),
+            (
+                EffectVarValue::Nil,
+                EffectVarValue::Nil,
+                EffectVarValue::Int(320),
+                EffectVarValue::Int(-50),
+                EffectVarValue::Int(1)
+            ),
+            "the carrier stays an explicit argument without becoming implicit this"
         );
     }
 

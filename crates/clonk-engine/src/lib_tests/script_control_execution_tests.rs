@@ -19,8 +19,8 @@ fn engine_with_probe() -> Engine {
     let mut engine = Engine::with_seed(7);
     assert_eq!(
         engine.install_global_scripts(&[(
-                "ControlProbe.c".to_string(),
-                "static ControlProbe;\n\
+            "ControlProbe.c".to_string(),
+            "static ControlProbe;\n\
                  global func GlobalOnly() { return 37; }"
                 .to_string(),
         )]),
@@ -52,7 +52,7 @@ fn run_gate_case(
             &control(
                 SCRIPT_SCOPE_GLOBAL,
                 ScriptStrictness::Strict3,
-                    "ControlProbe = 17",
+                "ControlProbe = 17",
                 by_client,
             ),
             policy,
@@ -66,12 +66,12 @@ fn script_control_gate_matches_league_host_console_and_replay_policy() {
     assert_eq!(
         run_gate_case(true, 0, ScriptControlPolicy::live(true)),
         (None, Value::Nil),
-            "league blocks even a host with an active console"
+        "league blocks even a host with an active console"
     );
     assert_eq!(
         run_gate_case(false, 4, ScriptControlPolicy::live(false)),
         (None, Value::Nil),
-            "a live non-host needs an active console"
+        "a live non-host needs an active console"
     );
     assert_eq!(
         run_gate_case(
@@ -84,7 +84,7 @@ fn script_control_gate_matches_league_host_console_and_replay_policy() {
             },
         ),
         (None, Value::Nil),
-            "replay permission does not fall back to Console.Active"
+        "replay permission does not fall back to Console.Active"
     );
 
     for (by_client, policy, label) in [
@@ -94,13 +94,13 @@ fn script_control_gate_matches_league_host_console_and_replay_policy() {
         (
             4,
             ScriptControlPolicy::replay(true),
-                "permitted replay peer",
+            "permitted replay peer",
         ),
     ] {
         assert_eq!(
             run_gate_case(false, by_client, policy),
             (Some(Value::Int(17)), Value::Int(17)),
-                "{label} executes"
+            "{label} executes"
         );
     }
 }
@@ -141,14 +141,14 @@ fn script_control_uses_packet_strictness_for_direct_exec() {
                 &control(
                     i32::try_from(object.as_u64()).expect("fixture id fits i32"),
                     ScriptStrictness::NonStrict,
-                        "0",
+                    "0",
                     0,
                 ),
                 ScriptControlPolicy::live(false),
             )
             .expect("object expression executes"),
         Some(Value::Nil),
-            "packet NONSTRICT overrides the destination definition's strict 3"
+        "packet NONSTRICT overrides the destination definition's strict 3"
     );
 }
 
@@ -181,9 +181,9 @@ fn script_control_distinguishes_console_global_and_safe_object_scopes() {
     engine
         .register_definition(
             Definition::from_script(
-                    "TARG",
-                    "Target",
-                    "#strict 3\nlocal Marker;\nfunc ReadMarker() { return Marker; }",
+                "TARG",
+                "Target",
+                "#strict 3\nlocal Marker;\nfunc ReadMarker() { return Marker; }",
             )
             .expect("target definition compiles"),
         )
@@ -207,14 +207,14 @@ fn script_control_distinguishes_console_global_and_safe_object_scopes() {
                 &control(
                     SCRIPT_SCOPE_CONSOLE,
                     ScriptStrictness::Strict3,
-                        "ScenarioOnly()",
+                    "ScenarioOnly()",
                     0,
                 ),
                 ScriptControlPolicy::live(false),
             )
             .expect("console scope executes"),
         Some(Value::Int(41)),
-            "console scope is the scenario-script host"
+        "console scope is the scenario-script host"
     );
     assert_eq!(
         engine
@@ -222,14 +222,14 @@ fn script_control_distinguishes_console_global_and_safe_object_scopes() {
                 &control(
                     SCRIPT_SCOPE_GLOBAL,
                     ScriptStrictness::Strict3,
-                        "ScenarioOnly()",
+                    "ScenarioOnly()",
                     0,
                 ),
                 ScriptControlPolicy::live(false),
             )
             .expect("missing global function is fail-safe"),
         Some(Value::Nil),
-            "global scope must not see scenario-local functions"
+        "global scope must not see scenario-local functions"
     );
     assert_eq!(
         engine
@@ -237,14 +237,14 @@ fn script_control_distinguishes_console_global_and_safe_object_scopes() {
                 &control(
                     SCRIPT_SCOPE_GLOBAL,
                     ScriptStrictness::Strict3,
-                        "GlobalOnly()",
+                    "GlobalOnly()",
                     0,
                 ),
                 ScriptControlPolicy::live(false),
             )
             .expect("global function executes"),
         Some(Value::Int(37)),
-            "global scope is wired to the engine-global function table"
+        "global scope is wired to the engine-global function table"
     );
 
     for (object, marker) in [(normal, 11), (inactive, 12)] {
@@ -270,7 +270,7 @@ fn script_control_distinguishes_console_global_and_safe_object_scopes() {
                 .call_object_function(index, "ReadMarker", Vec::new())
                 .expect("object local can be read"),
             Value::Int(marker),
-                "normal and inactive objects retain object-context writes"
+            "normal and inactive objects retain object-context writes"
         );
     }
 
@@ -301,11 +301,11 @@ fn script_control_distinguishes_console_global_and_safe_object_scopes() {
 
 #[test]
 fn script_control_matches_cpp_global_and_object_state_differential() {
-        // Frozen C++ differential for two CID_Script controls: global
-        // `SetGravity(77)` leaves gravity at 77, then object-scoped
-        // `SetPosition(12,34)` moves only the addressed object. Running the
-        // identical expressions through Rust pins both scope and host-effect
-        // folding without modifying the read-only C++ oracle.
+    // Frozen C++ differential for two CID_Script controls: global
+    // `SetGravity(77)` leaves gravity at 77, then object-scoped
+    // `SetPosition(12,34)` moves only the addressed object. Running the
+    // identical expressions through Rust pins both scope and host-effect
+    // folding without modifying the read-only C++ oracle.
     let mut engine = Engine::with_seed(1);
     engine
         .register_definition(
@@ -322,7 +322,7 @@ fn script_control_matches_cpp_global_and_object_state_differential() {
             &control(
                 SCRIPT_SCOPE_GLOBAL,
                 ScriptStrictness::Strict3,
-                    "SetGravity(77)",
+                "SetGravity(77)",
                 0,
             ),
             ScriptControlPolicy::live(false),
@@ -333,7 +333,7 @@ fn script_control_matches_cpp_global_and_object_state_differential() {
             &control(
                 i32::try_from(object.as_u64()).expect("fixture id fits i32"),
                 ScriptStrictness::Strict3,
-                    "SetPosition(12,34)",
+                "SetPosition(12,34)",
                 0,
             ),
             ScriptControlPolicy::live(false),
