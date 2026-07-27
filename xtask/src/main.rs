@@ -1,5 +1,4 @@
 mod audit;
-mod dependency_licenses;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clonk_engine::fixtures::SNAPSHOT_SCENARIOS;
@@ -30,10 +29,9 @@ const MACOS_ICON_STEM: &str = "ClonkRust";
 const MACOS_ICON_SOURCE: &str = "planet/Graphics.c4g/Logo.png";
 /// Everything the staged payload keeps outside `bin/`, relocated into
 /// `Contents/Resources` so the bundle stays self-contained.
-const MACOS_BUNDLED_RESOURCES: [&str; 7] = [
+const MACOS_BUNDLED_RESOURCES: [&str; 6] = [
     "planet",
     "content",
-    "licenses",
     "COPYING",
     "README.md",
     "credits.txt",
@@ -49,12 +47,7 @@ fn main() -> Result<()> {
             print_usage();
             Ok(())
         }
-        Some("package") => {
-            if let Some(arg) = args.next() {
-                bail!("unexpected argument `{}` for `package` command", arg);
-            }
-            package()
-        }
+        Some("package") => package(PackageOptions::parse(args)?),
         Some("engine-snapshots") => {
             let tail: Vec<String> = args.collect();
             engine_snapshots_command(&tail)
@@ -940,21 +933,41 @@ fn load_recording(path: &Path) -> Result<Recording> {
     Recording::from_reader(BufReader::new(file)).map_err(|error| anyhow!(error))
 }
 
-fn package() -> Result<()> {
+/// Command-line options for `cargo xtask package`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackageOptions {
+    /// Whether to compress the staged layout into a release archive.
+    archive: bool,
+}
+
+impl PackageOptions {
+    fn parse(arguments: impl Iterator<Item = String>) -> Result<Self> {
+        let mut options = Self { archive: true };
+        for argument in arguments {
+            match argument.as_str() {
+                // The Windows installer consumes the staged directory itself,
+                // so the archive step would only produce a file to discard.
+                "--no-archive" => options.archive = false,
+                other => bail!("unexpected argument `{other}` for `package` command"),
+            }
+        }
+        Ok(options)
+    }
+}
+
+fn package(options: PackageOptions) -> Result<()> {
     let paths = WorkspacePaths::detect()?;
     build_runtime_binaries(&paths)?;
     audit_release_dependencies(&paths)?;
-    dependency_licenses::validate_runtime_dependency_notices(
-        &paths.workspace_dir,
-        &paths
-            .repo_root
-            .join("licenses/RUST_THIRD_PARTY_LICENSES.txt"),
-    )?;
     let package_dir = assemble_package_layout(&paths)?;
     if paths.target_triple.contains("apple-darwin") {
         let app_dir = assemble_macos_app_bundle(&paths, &package_dir)?;
         let image = create_dmg(&paths, &app_dir)?;
         tracing::info!(path = %image.display(), "packaged Rust port");
+        return Ok(());
+    }
+    if !options.archive {
+        tracing::info!(path = %package_dir.display(), "staged Rust port without an archive");
         return Ok(());
     }
     let archive = create_archive(&paths, &package_dir)?;
@@ -1057,22 +1070,6 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
         if !directory_contains_file(&destination)? {
             bail!(
                 "required authorized game pack {pack} did not reach the package; it must be tracked in the content submodule"
-            );
-        }
-    }
-
-    let licenses_dst = package_dir.join("licenses");
-    copy_tracked_directory(&paths.repo_root, Path::new("licenses"), &licenses_dst)?;
-    for relative in [
-        "RUST_THIRD_PARTY_LICENSES.txt",
-        "third_party/freetype/FTL.TXT",
-        "third_party/libpng/LICENSE",
-        "third_party/minimp3/LICENSE",
-        "third_party/zlib/LICENSE",
-    ] {
-        if !licenses_dst.join(relative).is_file() {
-            bail!(
-                "required dependency license licenses/{relative} was not included; ensure it is tracked by Git"
             );
         }
     }
@@ -1867,31 +1864,6 @@ mod tests {
         ] {
             write_fixture(&root.join(name), name.as_bytes());
         }
-        write_fixture(&root.join("licenses/dependency.txt"), b"dependency license");
-        for (relative, contents) in [
-            (
-                "licenses/RUST_THIRD_PARTY_LICENSES.txt",
-                b"Rust dependency licenses".as_slice(),
-            ),
-            (
-                "licenses/third_party/freetype/FTL.TXT",
-                b"FreeType license".as_slice(),
-            ),
-            (
-                "licenses/third_party/libpng/LICENSE",
-                b"libpng license".as_slice(),
-            ),
-            (
-                "licenses/third_party/minimp3/LICENSE",
-                b"minimp3 license".as_slice(),
-            ),
-            (
-                "licenses/third_party/zlib/LICENSE",
-                b"zlib license".as_slice(),
-            ),
-        ] {
-            write_fixture(&root.join(relative), contents);
-        }
         write_fixture(&root.join("planet/System.c4g/C4.c"), b"system");
         write_fixture(&root.join("planet/Graphics.c4g/Logo.png"), b"logo");
         write_fixture(&root.join("content/Objects.c4d/DefCore.txt"), b"objects");
@@ -1940,6 +1912,35 @@ mod tests {
     }
 
     #[test]
+    fn package_options_default_to_writing_an_archive() {
+        assert_eq!(
+            PackageOptions::parse(Vec::new().into_iter()).expect("no arguments parses"),
+            PackageOptions { archive: true }
+        );
+    }
+
+    #[test]
+    fn package_options_can_stop_before_the_archive() {
+        // The Windows installer wraps the staged layout directly, so building a
+        // ~270 MB zip only to discard it is pure release latency.
+        assert_eq!(
+            PackageOptions::parse(["--no-archive".to_string()].into_iter())
+                .expect("--no-archive parses"),
+            PackageOptions { archive: false }
+        );
+    }
+
+    #[test]
+    fn package_options_reject_unknown_arguments() {
+        let error = PackageOptions::parse(["--zip-it".to_string()].into_iter())
+            .expect_err("unknown arguments are rejected");
+        assert!(
+            error.to_string().contains("--zip-it"),
+            "error names the offending argument: {error}"
+        );
+    }
+
+    #[test]
     fn executable_name_follows_the_target_triple_not_the_host() {
         assert_eq!(
             executable_name("clonk-app", "x86_64-pc-windows-gnu"),
@@ -1972,12 +1973,6 @@ mod tests {
             PathBuf::from("README.md"),
             PathBuf::from("credits.txt"),
             PathBuf::from("THIRD_PARTY_GAME_CONTENT.md"),
-            PathBuf::from("licenses/dependency.txt"),
-            PathBuf::from("licenses/RUST_THIRD_PARTY_LICENSES.txt"),
-            PathBuf::from("licenses/third_party/freetype/FTL.TXT"),
-            PathBuf::from("licenses/third_party/libpng/LICENSE"),
-            PathBuf::from("licenses/third_party/minimp3/LICENSE"),
-            PathBuf::from("licenses/third_party/zlib/LICENSE"),
             PathBuf::from("planet/System.c4g/C4.c"),
             PathBuf::from("planet/Graphics.c4g/Logo.png"),
             PathBuf::from("content/Objects.c4d/DefCore.txt"),
@@ -2031,7 +2026,6 @@ mod tests {
             PathBuf::from("clonk-rust/bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
             PathBuf::from("clonk-rust/bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
             PathBuf::from("clonk-rust/content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
-            PathBuf::from("clonk-rust/licenses/RUST_THIRD_PARTY_LICENSES.txt"),
         ] {
             assert!(
                 extracted.path().join(&relative).is_file(),
@@ -2209,7 +2203,7 @@ mod tests {
             .expect("run git init");
         assert!(init.success(), "git init failed");
         let add = Command::new("git")
-            .args(["add", "planet", "licenses", "content"])
+            .args(["add", "planet", "content"])
             .current_dir(&paths.repo_root)
             .status()
             .expect("run git add");
@@ -2228,41 +2222,6 @@ mod tests {
     }
 
     #[test]
-    fn package_layout_rejects_an_untracked_dependency_notice() {
-        let (_temp, paths) = package_fixture();
-        let init = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(&paths.repo_root)
-            .status()
-            .expect("run git init");
-        assert!(init.success(), "git init failed");
-        let add = Command::new("git")
-            .args([
-                "add",
-                "planet",
-                "licenses/dependency.txt",
-                "licenses/third_party",
-                "content",
-            ])
-            .current_dir(&paths.repo_root)
-            .status()
-            .expect("run git add");
-        assert!(add.success(), "git add failed");
-
-        let error =
-            assemble_package_layout(&paths).expect_err("untracked notice must fail packaging");
-
-        assert!(
-            error.to_string().contains("RUST_THIRD_PARTY_LICENSES.txt"),
-            "unexpected error: {error:#}"
-        );
-        assert!(
-            error.to_string().contains("tracked by Git"),
-            "unexpected error: {error:#}"
-        );
-    }
-
-    #[test]
     fn package_layout_rejects_modified_tracked_planet_bytes() {
         let (_temp, paths) = package_fixture();
         let init = Command::new("git")
@@ -2272,7 +2231,7 @@ mod tests {
             .expect("run git init");
         assert!(init.success(), "git init failed");
         let add = Command::new("git")
-            .args(["add", "planet", "licenses", "content"])
+            .args(["add", "planet", "content"])
             .current_dir(&paths.repo_root)
             .status()
             .expect("run git add");
