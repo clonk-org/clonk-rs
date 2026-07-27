@@ -262,7 +262,7 @@ impl Link {
             let per_datagram = (CROSS_TRAFFIC_DATAGRAM_BYTES as u128) * 8 * 1_000_000_000;
             while self.cross_owed[slot] >= per_datagram {
                 self.cross_owed[slot] -= per_datagram;
-                self.admit(now, to_host, vec![0u8; CROSS_TRAFFIC_DATAGRAM_BYTES], true);
+                let _ = self.admit(now, to_host, vec![0u8; CROSS_TRAFFIC_DATAGRAM_BYTES], true);
             }
         }
     }
@@ -336,11 +336,19 @@ impl Link {
     /// and only then propagates. Delivery is therefore
     /// `transmit_end + one_way + jitter`, and an unmetered link collapses to the
     /// original `now + one_way + jitter`.
-    pub fn enqueue(&mut self, now: Duration, to_host: bool, payload: Vec<u8>) {
-        self.admit(now, to_host, payload, false);
+    /// Returns when the datagram will become deliverable, or `None` if the link
+    /// lost it or a full queue refused it.
+    pub fn enqueue(&mut self, now: Duration, to_host: bool, payload: Vec<u8>) -> Option<Duration> {
+        self.admit(now, to_host, payload, false)
     }
 
-    fn admit(&mut self, now: Duration, to_host: bool, payload: Vec<u8>, filler: bool) {
+    fn admit(
+        &mut self,
+        now: Duration,
+        to_host: bool,
+        payload: Vec<u8>,
+        filler: bool,
+    ) -> Option<Duration> {
         if filler {
             self.filler_sent += 1;
         } else {
@@ -352,7 +360,7 @@ impl Link {
             } else {
                 self.dropped += 1;
             }
-            return;
+            return None;
         }
 
         let bps = self.conditions.rate_bps(to_host);
@@ -374,7 +382,7 @@ impl Link {
                     self.dropped += 1;
                 }
                 self.queue_drops += 1;
-                return;
+                return None;
             }
             let start = (*cursor).max(now);
             *cursor = start + serialization_time(payload.len(), bps);
@@ -387,12 +395,14 @@ impl Link {
             u64::from(self.rng.below(self.conditions.jitter_ms as u32 * 2 + 1))
         };
         let delay = Duration::from_millis(self.conditions.rtt_ms / 2 + jitter);
+        let deliver_at = transmit_end + delay;
         self.queue.push(InFlight {
-            deliver_at: transmit_end + delay,
+            deliver_at,
             to_host,
             payload,
             filler,
         });
+        Some(deliver_at)
     }
 
     pub fn due(&mut self, now: Duration) -> Vec<InFlight> {

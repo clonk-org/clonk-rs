@@ -38,6 +38,7 @@ mod resync;
 mod search;
 mod session;
 mod sim;
+mod sim_session;
 mod statistics;
 mod stats;
 mod status;
@@ -241,6 +242,10 @@ pub use session::{
 pub use sim::{
     mean, percentile, replay_lockstep, run_control_delivery, ControlDeliveryConfig, InFlight, Link,
     LinkConditions, LinkReport, LockstepPlayout, Lookahead, SimRng, CONTROL_PERIOD, STEP,
+};
+pub use sim_session::{
+    run_session, ClientOutcome, ClientProfile, CpuProfile, SessionConfig, SessionReport,
+    FRAME_INTERVAL,
 };
 pub use statistics::{
     ConnectionRateStatistics, ConnectionStatisticsKey, ConnectionStatisticsRecorder,
