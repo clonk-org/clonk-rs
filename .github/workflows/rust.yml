@@ -184,8 +184,14 @@ jobs:
       - name: Run packaging and release-tool tests
         run: cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
 
+      # nextest, not `cargo test`: this job already installs cargo-nextest, and
+      # only nextest reads `.config/nextest.toml`, where the retries for the
+      # known load-sensitive socket tests and the priority order that front-loads
+      # the long scenario routes live. Under `cargo test` both were silently
+      # inert. `--no-fail-fast` reports every failure instead of stopping at the
+      # first failing binary, which is what CLAUDE.md documents as the gate.
       - name: Run workspace tests
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --no-fail-fast --locked
 
       - name: Run workspace lints
         run: cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
