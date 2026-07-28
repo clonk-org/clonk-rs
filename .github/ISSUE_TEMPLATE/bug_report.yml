@@ -1,75 +1,28 @@
 name: Bug report
-description: Report a reproducible Clonk Rust defect
-title: "[Bug]: "
+description: Something is broken, slow, or crashes
 labels:
   - bug
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for helping improve Clonk Rust. Do not report security vulnerabilities here; follow `SECURITY.md` and use GitHub private vulnerability reporting.
-  - type: input
-    id: revision
-    attributes:
-      label: Clonk Rust revision
-      description: Paste the commit hash or release identifier you tested.
-      placeholder: 0123456789abcdef
-    validations:
-      required: true
-  - type: dropdown
-    id: operating-system
-    attributes:
-      label: Operating system
-      options:
-        - Linux
-        - macOS
-        - Windows
-        - Other
-    validations:
-      required: true
-  - type: input
-    id: scenario
-    attributes:
-      label: Scenario or game mode
-      description: Include the content pack and scenario name when applicable.
-      placeholder: Eke Reloaded / HarpoonRace
   - type: textarea
-    id: description
+    id: what
     attributes:
       label: What happened?
-      description: Describe the observed behavior and its impact.
+      description: What you expected, and what happened instead. Logs, screenshots, or a replay help.
     validations:
       required: true
   - type: textarea
-    id: reproduction
+    id: repro
     attributes:
-      label: Reproduction steps
+      label: How do we reproduce it?
       placeholder: |
-        1. Start ...
-        2. Join ...
-        3. Observe ...
+        1. Start Eke Reloaded / HarpoonRace
+        2. ...
     validations:
       required: true
-  - type: textarea
-    id: expected
+  - type: input
+    id: version
     attributes:
-      label: Expected behavior
-      description: Include what the pinned C++ LegacyClonk build does, if known.
+      label: Version and OS
+      placeholder: v0.3.0 on macOS 15 — or a commit hash
     validations:
       required: true
-  - type: textarea
-    id: diagnostics
-    attributes:
-      label: Relevant diagnostics
-      description: Attach a minimal log, replay, screenshot, or backtrace after removing personal data and secrets.
-  - type: checkboxes
-    id: checks
-    attributes:
-      label: Submission checks
-      options:
-        - label: I searched for an existing report of this problem.
-          required: true
-        - label: I removed credentials, private player data, and unrelated network traffic.
-          required: true
-        - label: This report does not disclose a security vulnerability.
-          required: true
