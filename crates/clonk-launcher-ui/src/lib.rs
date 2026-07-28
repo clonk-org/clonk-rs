@@ -200,6 +200,10 @@ impl ReportSearchState {
 
 pub struct LauncherShellUi {
     gui: Gui,
+    /// The face every rebuilt `Gui` measures and the shell rasterises with.
+    /// Layout and drawing must share one font or hit-testing drifts from the
+    /// painted glyphs.
+    font: Arc<dyn TextFont>,
     layout: LauncherShellLayout,
     state: Option<LauncherShellState>,
     localization: Localization,
@@ -211,8 +215,19 @@ pub struct LauncherShellUi {
 
 impl LauncherShellUi {
     pub fn new(state: Option<LauncherShellState>, localization: Localization) -> GuiResult<Self> {
+        Self::with_font(state, localization, default_font())
+    }
+
+    /// Builds the shell against a caller-supplied text face, so a host that
+    /// can reach the shipped vector font measures with the same face it draws.
+    pub fn with_font(
+        state: Option<LauncherShellState>,
+        localization: Localization,
+        font: Arc<dyn TextFont>,
+    ) -> GuiResult<Self> {
         let mut ui = Self {
-            gui: Gui::new(default_font()),
+            gui: Gui::new(font.clone()),
+            font,
             layout: LauncherShellLayout::default(),
             state: None,
             localization,
@@ -223,6 +238,10 @@ impl LauncherShellUi {
         };
         ui.set_state(state)?;
         Ok(ui)
+    }
+
+    pub fn font(&self) -> Arc<dyn TextFont> {
+        self.font.clone()
     }
 
     pub fn set_state(&mut self, state: Option<LauncherShellState>) -> GuiResult<()> {
@@ -405,6 +424,7 @@ impl LauncherShellUi {
             self.report_scroll_offset,
             self.report_search.as_ref(),
             &self.localization,
+            &self.font,
         )?;
         self.gui = gui;
         self.layout = layout;
@@ -564,8 +584,9 @@ fn build_gui(
     report_scroll_offset: usize,
     report_search: Option<&ReportSearchState>,
     localization: &Localization,
+    font: &Arc<dyn TextFont>,
 ) -> GuiResult<(Gui, LauncherShellLayout)> {
-    let mut gui = Gui::new(default_font());
+    let mut gui = Gui::new(font.clone());
     let mut layout = LauncherShellLayout::default();
     let root = gui.root();
 
@@ -1521,6 +1542,57 @@ mod tests {
 
     fn build_ui(state: Option<LauncherShellState>) -> LauncherShellUi {
         LauncherShellUi::new(state, test_localization()).expect("ui")
+    }
+
+    /// A face with obviously different metrics from the bitmap default, so a
+    /// layout that silently fell back to `default_font` is detectable.
+    struct TallFont;
+
+    impl TextFont for TallFont {
+        fn measure_text(&self, text: &str, font_size: f32) -> clonk_graphics::FontMetrics {
+            clonk_graphics::FontMetrics {
+                width: text.chars().count() as f32 * font_size * 10.0,
+                height: font_size * 10.0,
+                lines: 1,
+            }
+        }
+
+        fn draw_text(
+            &self,
+            _surface: &mut clonk_graphics::Surface,
+            _origin_x: f32,
+            _origin_y: f32,
+            _text: &str,
+            _font_size: f32,
+            _color: Color,
+        ) {
+        }
+    }
+
+    #[test]
+    fn injected_font_still_measures_layout_after_a_rebuild() {
+        let mut default_ui = build_ui(None);
+        default_ui.layout(Size::new(640.0, 480.0));
+        let default_button = default_ui.regenerate_button().expect("regenerate button");
+        let default_height = default_ui
+            .widget_rect(default_button)
+            .expect("regenerate rect")
+            .size
+            .height;
+
+        let mut ui = LauncherShellUi::with_font(None, test_localization(), Arc::new(TallFont))
+            .expect("ui with injected font");
+        // `set_action_feedback` rebuilds the whole widget tree; the injected
+        // face must survive that, not revert to the bitmap default.
+        ui.set_action_feedback(None).expect("rebuild");
+        ui.layout(Size::new(640.0, 480.0));
+        let button = ui.regenerate_button().expect("regenerate button");
+        let height = ui.widget_rect(button).expect("regenerate rect").size.height;
+
+        assert!(
+            height > default_height,
+            "injected font ignored after rebuild: {height} vs {default_height}"
+        );
     }
 
     #[test]

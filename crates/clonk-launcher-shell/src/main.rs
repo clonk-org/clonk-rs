@@ -3,11 +3,11 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, LineWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use arboard::Clipboard;
-use clonk_graphics::{BitmapFont, Color, PixelFormat, Point, Surface, TextFont};
+use clonk_graphics::{BitmapFont, Color, PixelFormat, Point, Surface, TextFont, TrueTypeFont};
 use clonk_gui::{
     DrawCommand, GuiEvent, ImageData, KeyCode, Point as GuiPoint, Rect as GuiRect, Size as GuiSize,
 };
@@ -88,6 +88,74 @@ fn enforce_min_size(size: PhysicalSize<u32>) -> (u32, u32) {
     let width = size.width.max(1);
     let height = size.height.max(1);
     (width, height)
+}
+
+/// A scale factor that can safely divide layout geometry.
+///
+/// winit only ever reports a positive, finite factor, but a hostile compositor
+/// or a headless stub must not be able to collapse the layout box to zero.
+fn normalize_scale(scale_factor: f32) -> f32 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
+/// The logical layout box for a framebuffer of `physical_width` x
+/// `physical_height` device pixels.
+///
+/// The pixel buffer stays at the window's physical extent so the rasteriser
+/// paints at native resolution, but layout and hit-testing run in logical
+/// units; otherwise a 2x display lays the whole UI out at half its size.
+fn logical_extent(physical_width: u32, physical_height: u32, scale_factor: f32) -> (f32, f32) {
+    let scale = normalize_scale(scale_factor);
+    (
+        (physical_width as f32 / scale).max(1.0),
+        (physical_height as f32 / scale).max(1.0),
+    )
+}
+
+/// Maps a winit physical pointer position into the logical space the GUI was
+/// laid out in, so hit-testing agrees with what `scaled_rect` painted.
+fn physical_to_logical_point(x: f64, y: f64, scale_factor: f32) -> GuiPoint {
+    let scale = normalize_scale(scale_factor);
+    GuiPoint::new(x as f32 / scale, y as f32 / scale)
+}
+
+/// The inverse mapping: logical layout geometry to the physical pixels the CPU
+/// rasteriser writes.
+fn scaled_rect(rect: &GuiRect, scale_factor: f32) -> GuiRect {
+    let scale = normalize_scale(scale_factor);
+    GuiRect::new(
+        rect.origin.x * scale,
+        rect.origin.y * scale,
+        rect.size.width * scale,
+        rect.size.height * scale,
+    )
+}
+
+/// The launcher's text face.
+///
+/// `planet/System.c4g` ships as an unpacked directory in both the repo and the
+/// packaged install (`xtask` copies the tracked tree verbatim), so the shell
+/// can read the shipped Endeavour face directly and render real anti-aliased
+/// vector text. The `font8x8` bitmap face remains the fallback for installs
+/// whose system group is missing or unreadable.
+fn load_ui_font(paths: &AppPaths) -> Arc<dyn TextFont> {
+    let path = paths.system_group_path().join("Endeavour.ttf");
+    fs::read(&path)
+        .map_err(|err| err.to_string())
+        .and_then(|bytes| TrueTypeFont::from_bytes(Arc::from(bytes)).map_err(|err| err.to_string()))
+        .map(|font| Arc::new(font) as Arc<dyn TextFont>)
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "falling back to the bitmap launcher font"
+            );
+            Arc::new(BitmapFont::new())
+        })
 }
 
 struct ReportSearchController {
@@ -387,8 +455,11 @@ struct LauncherApp {
     logger: ShellLogger,
     ui: LauncherShellUi,
     surface: Surface,
+    /// Device pixels per logical pixel, from `Window::scale_factor`.
+    scale_factor: f32,
     preferences: LauncherPreferences,
     providers: FirstPartyProviders,
+    /// Pointer position in *logical* GUI coordinates.
     pointer_position: Option<GuiPoint>,
     report_search: ReportSearchController,
 }
@@ -412,9 +483,10 @@ impl LauncherApp {
             .log_line("launcher shell initialised")
             .context("failed to record launcher startup")?;
 
-        let ui = LauncherShellUi::new(
+        let ui = LauncherShellUi::with_font(
             None,
             load_localization(&paths).context("failed to load launcher localization")?,
+            load_ui_font(&paths),
         )
         .map_err(|err| anyhow!(err))?;
         let preferences = match load_launcher_preferences(&paths) {
@@ -433,6 +505,7 @@ impl LauncherApp {
             logger,
             ui,
             surface: Surface::new(width, height, PixelFormat::Rgba8888),
+            scale_factor: window.scale_factor() as f32,
             preferences,
             providers,
             pointer_position: None,
@@ -458,12 +531,16 @@ impl LauncherApp {
             WindowEvent::Resized(size) => {
                 self.handle_resize(size, pixels)?;
             }
-            WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+            WindowEvent::ScaleFactorChanged {
+                scale_factor,
+                new_inner_size,
+            } => {
+                self.scale_factor = scale_factor as f32;
                 let size = *new_inner_size;
                 self.handle_resize(size, pixels)?;
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let logical = GuiPoint::new(position.x as f32, position.y as f32);
+                let logical = physical_to_logical_point(position.x, position.y, self.scale_factor);
                 self.pointer_position = Some(logical);
                 self.dispatch_gui_event(GuiEvent::PointerMove { position: logical })?;
             }
@@ -500,7 +577,11 @@ impl LauncherApp {
                 }
             }
             WindowEvent::Touch(touch) => {
-                let position = GuiPoint::new(touch.location.x as f32, touch.location.y as f32);
+                let position = physical_to_logical_point(
+                    touch.location.x,
+                    touch.location.y,
+                    self.scale_factor,
+                );
                 match touch.phase {
                     TouchPhase::Started => {
                         self.pointer_position = Some(position);
@@ -2036,9 +2117,17 @@ impl LauncherApp {
         let height = self.surface.height();
 
         self.surface.fill(Color::opaque(12, 16, 28));
-        self.ui.layout(GuiSize::new(width as f32, height as f32));
+        let (logical_width, logical_height) = logical_extent(width, height, self.scale_factor);
+        self.ui.layout(GuiSize::new(logical_width, logical_height));
         let commands = self.ui.render();
-        render_commands(&mut self.surface, &commands);
+        // The face layout measured with is the face the rasteriser must use.
+        let font = self.ui.font();
+        render_commands(
+            &mut self.surface,
+            &commands,
+            self.scale_factor,
+            font.as_ref(),
+        );
         debug_assert_eq!(frame.len(), (width as usize) * (height as usize) * 4);
         frame.copy_from_slice(self.surface.pixels());
         Ok(())
@@ -3179,18 +3268,42 @@ struct SubmissionRequest<'a> {
     files: Vec<String>,
 }
 
-fn render_commands(surface: &mut Surface, commands: &[DrawCommand]) {
+/// Rasterises logical draw commands into the physical framebuffer.
+///
+/// Every command carries logical geometry; `scale_factor` is the drawing
+/// transform that turns it into device pixels. Text is rasterised at the
+/// scaled size rather than magnified afterwards, so glyphs stay crisp on a
+/// high-DPI panel.
+fn render_commands(
+    surface: &mut Surface,
+    commands: &[DrawCommand],
+    scale_factor: f32,
+    font: &dyn TextFont,
+) {
+    let scale = normalize_scale(scale_factor);
     for command in commands {
         match command {
-            DrawCommand::Quad { rect, color } => fill_rect(surface, rect, *color),
+            DrawCommand::Quad { rect, color } => {
+                fill_rect(surface, &scaled_rect(rect, scale), *color)
+            }
             DrawCommand::Text {
                 rect,
                 text,
                 color,
                 font_size,
                 padding,
-            } => draw_text(surface, rect, text, *color, *font_size, *padding),
-            DrawCommand::Image { rect, image } => draw_image(surface, rect, image),
+            } => draw_text(
+                surface,
+                &scaled_rect(rect, scale),
+                text,
+                *color,
+                font_size * scale,
+                padding * scale,
+                font,
+            ),
+            DrawCommand::Image { rect, image } => {
+                draw_image(surface, &scaled_rect(rect, scale), image)
+            }
         }
     }
 }
@@ -3322,10 +3435,10 @@ fn draw_text(
     color: Color,
     font_size: f32,
     padding: f32,
+    font: &dyn TextFont,
 ) {
     let origin_x = rect.origin.x + padding;
     let origin_y = rect.origin.y + padding;
-    let font = BitmapFont::new();
     font.draw_text(surface, origin_x, origin_y, text, font_size.max(1.0), color);
 }
 
@@ -4153,5 +4266,75 @@ mod tests {
             overrides[0].source(),
             ProviderOverrideSource::Retargeted { .. }
         ));
+    }
+
+    fn rect_contains(rect: &GuiRect, point: GuiPoint) -> bool {
+        point.x >= rect.origin.x
+            && point.y >= rect.origin.y
+            && point.x <= rect.origin.x + rect.size.width
+            && point.y <= rect.origin.y + rect.size.height
+    }
+
+    #[test]
+    fn logical_extent_divides_physical_pixels_by_the_scale_factor() {
+        // A 960x640 logical window on a 2x panel reports 1920x1280 physical
+        // pixels from `Window::inner_size`; layout must still see 960x640.
+        assert_eq!(logical_extent(1920, 1280, 2.0), (960.0, 640.0));
+        assert_eq!(logical_extent(960, 640, 1.0), (960.0, 640.0));
+        assert_eq!(logical_extent(1440, 960, 1.5), (960.0, 640.0));
+        // A degenerate scale factor must never collapse the layout box.
+        assert_eq!(logical_extent(960, 640, 0.0), (960.0, 640.0));
+    }
+
+    #[test]
+    fn scaled_rect_maps_logical_geometry_onto_physical_pixels() {
+        let logical = GuiRect::new(10.0, 20.0, 100.0, 30.0);
+        let physical = scaled_rect(&logical, 2.0);
+        assert_eq!(physical.origin.x, 20.0);
+        assert_eq!(physical.origin.y, 40.0);
+        assert_eq!(physical.size.width, 200.0);
+        assert_eq!(physical.size.height, 60.0);
+    }
+
+    #[test]
+    fn pointer_positions_land_inside_the_widget_painted_at_two_times_scale() {
+        let scale = 2.0f32;
+        let (logical_width, logical_height) = logical_extent(1920, 1280, scale);
+        let paths = AppPaths::discover().expect("app paths");
+        let localization = load_localization(&paths).expect("localization");
+        let mut ui = LauncherShellUi::new(None, localization).expect("launcher ui");
+        ui.layout(GuiSize::new(logical_width, logical_height));
+
+        let button = ui.regenerate_button().expect("regenerate button");
+        let logical_rect = ui.widget_rect(button).expect("regenerate rect");
+        let painted = scaled_rect(&logical_rect, scale);
+
+        // The cursor arrives in physical pixels at the centre of what was
+        // actually painted; mapping it back must land on the same widget.
+        let centre_x = f64::from(painted.origin.x + painted.size.width / 2.0);
+        let centre_y = f64::from(painted.origin.y + painted.size.height / 2.0);
+        let mapped = physical_to_logical_point(centre_x, centre_y, scale);
+        assert!(
+            rect_contains(&logical_rect, mapped),
+            "cursor {mapped:?} fell outside {logical_rect:?}"
+        );
+
+        // And the painted geometry must stay inside the physical framebuffer.
+        assert!(painted.origin.x + painted.size.width <= 1920.0);
+        assert!(painted.origin.y + painted.size.height <= 1280.0);
+    }
+
+    #[test]
+    fn ui_font_uses_proportional_advances_when_endeavour_is_available() {
+        let paths = AppPaths::discover().expect("app paths");
+        let font = load_ui_font(&paths);
+        // The 8x8 bitmap fallback gives every glyph the same advance; a real
+        // vector face makes "iiii" narrower than "WWWW".
+        let narrow = font.measure_text("iiii", 16.0).width;
+        let wide = font.measure_text("WWWW", 16.0).width;
+        assert!(
+            narrow < wide,
+            "expected proportional advances, got narrow={narrow} wide={wide}"
+        );
     }
 }
