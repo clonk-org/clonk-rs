@@ -1,5 +1,6 @@
 //! The single failure type every transport operation reports.
 
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Why a fetch did not produce the bytes that were asked for.
@@ -39,4 +40,16 @@ pub enum TransportError {
     TooManyRedirects { url: String, limit: usize },
     #[error("update manifest is larger than the {limit}-byte limit this client will read")]
     ManifestTooLarge { declared: Option<u64>, limit: u64 },
+    #[error("{url} served a component without declaring its size")]
+    UndeclaredSize { url: String },
+    #[error("component body is longer than the {declared} bytes it declared")]
+    BodyLongerThanDeclared { declared: u64, written: u64 },
+    #[error("the update download was cancelled")]
+    Cancelled,
+    #[error("failed to write {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }

@@ -3,7 +3,10 @@
 use crate::error::TransportError;
 use crate::urls::ALLOWED_REDIRECT_HOSTS;
 use reqwest::{Client, Response, Url};
+use std::fs::File;
 use std::future::Future;
+use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 use tokio::runtime::{Builder, Handle};
 
@@ -36,6 +39,22 @@ pub trait UpdateTransport {
     /// Fetches a manifest document, refusing a body above
     /// [`MANIFEST_MAX_BYTES`].
     fn fetch_manifest(&self, url: &str) -> Result<Vec<u8>, TransportError>;
+
+    /// Streams a component archive to `into`, reporting `(downloaded, total)`
+    /// as it goes and returning the number of bytes written.
+    ///
+    /// `progress` returning `false` cancels: the transfer stops at the next
+    /// chunk boundary, the partial file is removed, and
+    /// [`TransportError::Cancelled`] is returned. Nothing is left at `into`
+    /// after any failure, so a file there is always a complete response body —
+    /// though only the SHA-256 `clonk-update` checks afterwards says it is the
+    /// *right* body.
+    fn download(
+        &self,
+        url: &str,
+        into: &Path,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<u64, TransportError>;
 }
 
 /// The real transport: `reqwest` over `rustls`, presenting a blocking API.
@@ -131,6 +150,53 @@ impl HttpTransport {
             limit: MAX_REDIRECTS,
         })
     }
+
+    /// The body of [`UpdateTransport::download`], less the cleanup.
+    async fn stream_to_file(
+        &self,
+        url: &str,
+        into: &Path,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<u64, TransportError> {
+        let mut response = self.get(url).await?;
+        let declared = response
+            .content_length()
+            .ok_or_else(|| TransportError::UndeclaredSize {
+                url: response.url().to_string(),
+            })?;
+        let mut file = File::create(into).map_err(|source| TransportError::Io {
+            path: into.to_path_buf(),
+            source,
+        })?;
+        let mut written = 0u64;
+        while let Some(chunk) =
+            response
+                .chunk()
+                .await
+                .map_err(|source| TransportError::Request {
+                    url: url.to_owned(),
+                    source,
+                })?
+        {
+            written += chunk.len() as u64;
+            within_declared(written, declared)?;
+            file.write_all(&chunk)
+                .map_err(|source| TransportError::Io {
+                    path: into.to_path_buf(),
+                    source,
+                })?;
+            // Between chunks, never mid-write: a cancelled transfer leaves a
+            // whole number of chunks on disk right up until they are deleted.
+            progress(written, declared)
+                .then_some(())
+                .ok_or(TransportError::Cancelled)?;
+        }
+        file.flush().map_err(|source| TransportError::Io {
+            path: into.to_path_buf(),
+            source,
+        })?;
+        Ok(written)
+    }
 }
 
 impl UpdateTransport for HttpTransport {
@@ -143,6 +209,22 @@ impl UpdateTransport for HttpTransport {
             within_manifest_cap(response.content_length())?;
             read_capped(response, MANIFEST_MAX_BYTES).await
         })?
+    }
+
+    fn download(
+        &self,
+        url: &str,
+        into: &Path,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<u64, TransportError> {
+        tracing::debug!(url, into = %into.display(), "downloading an update component");
+        self.block_on(self.stream_to_file(url, into, progress))?
+            .inspect_err(|_| {
+                // Whatever went wrong, an incomplete body at the destination
+                // is worse than no body: the next run would hash it, or worse,
+                // unpack it. Removing a path that was never created is fine.
+                let _ = std::fs::remove_file(into);
+            })
     }
 }
 
@@ -227,6 +309,13 @@ fn within_manifest_cap(declared: Option<u64>) -> Result<(), TransportError> {
                 limit: MANIFEST_MAX_BYTES,
             })
         })
+}
+
+/// Refuses to account for a byte past what the response declared.
+fn within_declared(written: u64, declared: u64) -> Result<(), TransportError> {
+    (written <= declared)
+        .then_some(())
+        .ok_or(TransportError::BodyLongerThanDeclared { declared, written })
 }
 
 /// Buffers a body, giving up the moment it passes `limit` rather than after.
@@ -460,6 +549,128 @@ mod tests {
                 "hop to {target} must be accepted"
             );
         }
+    }
+
+    #[test]
+    fn a_component_is_written_to_disk_and_reports_its_byte_progress() {
+        let body = vec![b'z'; 40_000];
+        let fixture = serve(vec![Reply::ok(&body)]);
+        let transport = fixture.transport();
+        let directory = tempfile::tempdir().expect("temporary install cache");
+        let into = directory.path().join("content.zip");
+
+        let mut seen = Vec::new();
+        let written = {
+            let mut progress = |done, total| {
+                seen.push((done, total));
+                true
+            };
+            transport
+                .download(&fixture.url("/content.zip"), &into, &mut progress)
+                .expect("fixture serves the component")
+        };
+
+        assert_eq!(written, body.len() as u64);
+        assert_eq!(std::fs::read(&into).expect("component is on disk"), body);
+        assert_eq!(
+            seen.last().copied(),
+            Some((body.len() as u64, body.len() as u64))
+        );
+        assert!(
+            seen.iter()
+                .all(|(done, total)| *total == body.len() as u64 && *done <= body.len() as u64),
+            "progress never overstates the transfer: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn cancelling_from_the_progress_callback_deletes_the_partial_file() {
+        // A cancelled download must not leave bytes behind that a later run
+        // could mistake for a complete component.
+        let fixture = serve(vec![Reply::ok(&vec![b'z'; 200_000])]);
+        let transport = fixture.transport();
+        let directory = tempfile::tempdir().expect("temporary install cache");
+        let into = directory.path().join("content.zip");
+
+        let outcome = transport.download(&fixture.url("/content.zip"), &into, &mut |_, _| false);
+
+        assert!(matches!(outcome, Err(TransportError::Cancelled)));
+        assert!(!into.exists(), "the partial download is removed");
+    }
+
+    #[test]
+    fn a_component_without_a_declared_size_is_refused() {
+        // Without a length there is no ceiling on what a server can make the
+        // client write to disk, and no honest progress to report.
+        let fixture = serve(vec![Reply::undeclared(b"partial component")]);
+        let transport = fixture.transport();
+        let directory = tempfile::tempdir().expect("temporary install cache");
+        let into = directory.path().join("content.zip");
+
+        assert!(matches!(
+            transport.download(&fixture.url("/content.zip"), &into, &mut |_, _| true),
+            Err(TransportError::UndeclaredSize { .. })
+        ));
+        assert!(!into.exists(), "nothing is left behind");
+    }
+
+    #[test]
+    fn a_body_longer_than_its_declared_size_never_reaches_the_disk() {
+        // The client itself stops at `Content-Length`, and the transport
+        // refuses to write past it regardless; between them the file can never
+        // exceed what the response declared.
+        let fixture = serve(vec![Reply::mismatched(4, b"123456789")]);
+        let transport = fixture.transport();
+        let directory = tempfile::tempdir().expect("temporary install cache");
+        let into = directory.path().join("content.zip");
+
+        let outcome = transport.download(&fixture.url("/content.zip"), &into, &mut |_, _| true);
+
+        let written = outcome.unwrap_or(u64::MAX);
+        assert!(written <= 4, "wrote {written} bytes against a declared 4");
+    }
+
+    #[test]
+    fn writing_past_the_declared_size_is_refused() {
+        // Directly, because a conforming HTTP client truncates at
+        // `Content-Length` before this guard can fire. It exists for the case
+        // that stops being true — a transfer-decoding client makes the
+        // declared length a lie, which is why `Accept-Encoding: identity` is
+        // sent — and an unenforced limit is not a limit.
+        assert!(within_declared(4, 4).is_ok());
+        assert!(matches!(
+            within_declared(5, 4),
+            Err(TransportError::BodyLongerThanDeclared { declared: 4, .. })
+        ));
+    }
+
+    #[test]
+    fn a_failed_component_request_leaves_no_file_behind() {
+        let fixture = serve(vec![Reply::status("404 Not Found")]);
+        let transport = fixture.transport();
+        let directory = tempfile::tempdir().expect("temporary install cache");
+        let into = directory.path().join("content.zip");
+
+        assert!(matches!(
+            transport.download(&fixture.url("/content.zip"), &into, &mut |_, _| true),
+            Err(TransportError::Status { status: 404, .. })
+        ));
+        assert!(!into.exists(), "nothing is left behind");
+    }
+
+    #[test]
+    fn a_component_download_is_bound_by_the_same_redirect_guards() {
+        let fixture = serve(vec![Reply::redirect(
+            "https://evil.example.com/content.zip",
+        )]);
+        let transport = fixture.transport();
+        let directory = tempfile::tempdir().expect("temporary install cache");
+        let into = directory.path().join("content.zip");
+
+        assert!(matches!(
+            transport.download(&fixture.url("/content.zip"), &into, &mut |_, _| true),
+            Err(TransportError::RedirectHostNotAllowed { .. })
+        ));
     }
 
     #[tokio::test]
