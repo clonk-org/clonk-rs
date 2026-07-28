@@ -968,7 +968,9 @@ pub(crate) fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) 
     )
 }
 
-fn legacy_gamepad_axis_code(axis: u8, high: bool) -> Option<u8> {
+/// `KEY_JOY_Axis` (src/C4KeyboardInput.h:76), restricted to the codes
+/// `Key_IsGamepadAxis` still recognizes as an axis (`:105-109`).
+pub(crate) fn legacy_gamepad_axis_code(axis: u8, high: bool) -> Option<u8> {
     let code = u16::from(LEGACY_GAMEPAD_AXIS_OFFSET)
         .checked_add(u16::from(axis).checked_mul(2)?)?
         .checked_add(if high { 1 } else { 0 })?;

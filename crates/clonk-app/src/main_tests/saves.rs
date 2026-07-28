@@ -2475,6 +2475,82 @@
         );
     }
 
+    // C4GamePadControl::FeedEvent converts every raw SDL joystick event into
+    // the classic key space before capture sees it: arbitrary axis ordinals
+    // pass straight through, hats become the axis pair `hat * 2 + 6` and balls
+    // the pair `ball * 2 + 12` (C4GamePadCon.cpp:335-435).
+    #[test]
+    fn options_gamepad_capture_accepts_full_classic_raw_event_space() {
+        use clonk_frontend::startup_options_controls::{ControlCaptureTarget, ControlDevice};
+        use clonk_frontend::startup_options_dlg::OptionsDlgAction;
+
+        use crate::gamepad::{LegacyHatValue, RawJoystickEvent};
+
+        let slot = GamepadSlot::new(0);
+        // A raw ninth axis, hat 2's vertical axis and ball 0's horizontal axis
+        // are all unreachable through gilrs' semantic axes and Hat 0 alone.
+        for (control, raw_event, expected_axis, expected_high) in [
+            (
+                ControlBindingId::Dig,
+                RawJoystickEvent::Axis {
+                    axis: 9,
+                    value: i16::MIN,
+                },
+                9,
+                false,
+            ),
+            (
+                ControlBindingId::Throw,
+                RawJoystickEvent::Hat {
+                    hat: 2,
+                    value: LegacyHatValue::DOWN,
+                },
+                11,
+                true,
+            ),
+            (
+                ControlBindingId::Special,
+                RawJoystickEvent::Ball {
+                    ball: 0,
+                    xrel: 7,
+                    yrel: 0,
+                },
+                12,
+                true,
+            ),
+        ] {
+            let mut app = new_classic_menu_app(640, 480);
+            app.open_options_menu();
+            let target = ControlCaptureTarget {
+                device: ControlDevice::Gamepad,
+                set: 0,
+                control: control as usize,
+            };
+            app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
+                .expect("open gamepad capture");
+
+            let mut manager = GamepadManager::disabled();
+            let events = manager.feed_raw_event(slot, raw_event);
+            assert!(
+                events.iter().any(|sourced| matches!(
+                    sourced.event,
+                    GamepadEvent::Axis { axis, state: ElementState::Pressed, .. }
+                        if axis == LegacyGamepadAxis::new(expected_axis, expected_high)
+                )),
+                "{raw_event:?} must reach the classic axis space"
+            );
+            app.process_sourced_gamepad_event_batch(events, true)
+                .expect("capture the raw axis identity");
+
+            assert!(app.message_dialogs.is_empty(), "capture closed its modal");
+            assert_eq!(
+                app.gamepad_bindings.raw_key_for_set(0, control),
+                input::legacy_gamepad_axis_key(0, expected_axis, expected_high),
+                "{raw_event:?} binds the exact KEY_JOY_Axis code"
+            );
+        }
+    }
+
     // BoolConfig mutates Config.General.ShowLogTimestamps immediately, while
     // DoBack saves the configuration before returning to the main dialog
     // (C4StartupOptionsDlg.cpp:564-568, 1150-1184, 1189-1194).
