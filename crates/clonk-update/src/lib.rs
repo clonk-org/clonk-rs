@@ -29,6 +29,7 @@
 pub mod decide;
 pub mod digest;
 pub mod extract;
+pub mod journal;
 pub mod manifest;
 pub mod state;
 
@@ -38,5 +39,8 @@ pub use decide::{
 };
 pub use digest::{sha256_file, sha256_reader, verify_file, verify_reader, DigestError};
 pub use extract::{extract_archive, EntryFault, ExtractError, ExtractSummary};
+pub use journal::{
+    Journal, JournalError, JournalStep, StepState, JOURNAL_FILE_NAME, JOURNAL_SCHEMA,
+};
 pub use manifest::{ComponentEntry, Manifest, ManifestError, TargetArchive, SUPPORTED_SCHEMA};
 pub use state::{InstalledComponent, InstalledState, StateError};
