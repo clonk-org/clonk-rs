@@ -1684,6 +1684,17 @@ pub(crate) async fn run_client_loop_with_routes(
                     Ok(ControlMessage::StatusAck(status)) => {
                         resource_state.control.clear_target();
                         if status.state == NETWORK_STATE_GO {
+                            // This is the side that matters most. A client
+                            // downloading a resource while the game runs -- a
+                            // runtime join -- carries the chunk fragments and
+                            // its own control on the same strictly-ordered
+                            // stream, so bulk sitting ahead of control blocks
+                            // its own ticks and, through lockstep, everybody
+                            // else's. Narrow the window now that there is
+                            // control to protect.
+                            resource_state.catalog.set_max_loads_per_peer(
+                                crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME,
+                            );
                             let current_tick = Tick::try_from(status.target_tick).unwrap_or_else(
                                 |_| resource_state.control.coordinator.current_tick(),
                             );
