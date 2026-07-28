@@ -3077,10 +3077,7 @@ func ReadWind()
             Definition::from_script(id, id, PROCEDURE_MOVEMENT_SCRIPT).expect("script compiles");
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
-        actions.insert(
-            "Lift".to_string(),
-            ActionSpec::default().with_procedure("lift"),
-        );
+        actions.insert("Lift".to_string(), ActionSpec::for_procedure("lift"));
         definition.configure_actions(Some("Idle".to_string()), actions);
         definition
     }
@@ -5925,10 +5922,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             Definition::from_script("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Fly".to_string(),
-            ActionSpec::default().with_procedure("flight"),
-        );
+        actions.insert("Fly".to_string(), ActionSpec::for_procedure("flight"));
         definition.configure_actions(Some("Fly".to_string()), actions);
 
         let mut engine = Engine::with_seed(0);
@@ -5950,10 +5944,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             Definition::from_script("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Fly".to_string(),
-            ActionSpec::default().with_procedure("flight"),
-        );
+        actions.insert("Fly".to_string(), ActionSpec::for_procedure("flight"));
         definition.configure_actions(Some("Fly".to_string()), actions);
 
         let mut engine = Engine::with_seed(0);

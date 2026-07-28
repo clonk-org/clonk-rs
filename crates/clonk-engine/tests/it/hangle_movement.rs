@@ -15,10 +15,7 @@ fn hangle_procedure_moves_along_ledges() -> Result<(), Box<dyn std::error::Error
     let mut engine = Engine::new();
     let mut definition = Definition::from_script("Hangler", "Hangler", HANGLE_SCRIPT)?;
     let mut actions = HashMap::new();
-    actions.insert(
-        "Hang".to_string(),
-        ActionSpec::default().with_procedure("Hang"),
-    );
+    actions.insert("Hang".to_string(), ActionSpec::for_procedure("Hang"));
     definition.configure_actions(Some("Hang".to_string()), actions);
     definition.set_movement_profile(
         MovementProfile::default()

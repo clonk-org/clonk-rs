@@ -238,14 +238,7 @@ func Probe() {
             .register_script_definition("INCB", "B", "public func Foo() { return(2); }")
             .expect("B registers");
         engine
-            .register_definition(
-                Definition::from_script(
-                    "CHLD",
-                    "Child",
-                    "#include INCA\n#include INCB\n",
-                )
-                .expect("child compiles"),
-            )
+            .register_script_definition("CHLD", "Child", "#include INCA\n#include INCB\n")
             .expect("child registers");
         engine.resolve_includes().expect("includes resolve");
         engine.resolve_includes().expect("repeat resolve is stable");
@@ -279,14 +272,7 @@ func Probe() {
             )
             .expect("B registers");
         engine
-            .register_definition(
-                Definition::from_script(
-                    "CHLD",
-                    "Child",
-                    "#include INCA\n#include INCB\n",
-                )
-                .expect("child compiles"),
-            )
+            .register_script_definition("CHLD", "Child", "#include INCA\n#include INCB\n")
             .expect("child registers");
         engine.resolve_includes().expect("includes resolve");
         let id = engine

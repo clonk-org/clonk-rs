@@ -1498,10 +1498,7 @@ func ReadMenu() { return GetMenu(); }
         let mut definition =
             Definition::from_script("CLNK", "Clonk", script).expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Idle".to_string()), actions);
         let mut engine = Engine::with_seed(7);
         engine

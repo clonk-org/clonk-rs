@@ -28,10 +28,7 @@ fn attach_procedure_synchronizes_position_and_container() -> Result<(), Box<dyn 
 
     let mut attached_definition = Definition::from_script("Attached", "Attached", BASIC_SCRIPT)?;
     let mut attach_actions = HashMap::new();
-    attach_actions.insert(
-        "Attach".to_string(),
-        ActionSpec::default().with_procedure("Attach"),
-    );
+    attach_actions.insert("Attach".to_string(), ActionSpec::for_procedure("Attach"));
     attached_definition.configure_actions(Some("Attach".to_string()), attach_actions);
     engine.register_definition(attached_definition)?;
 
@@ -100,10 +97,7 @@ fn attach_procedure_positions_by_vertices_when_uncontained(
 
     let mut attached_definition = Definition::from_script("Attached", "Attached", BASIC_SCRIPT)?;
     let mut attach_actions = HashMap::new();
-    attach_actions.insert(
-        "Attach".to_string(),
-        ActionSpec::default().with_procedure("Attach"),
-    );
+    attach_actions.insert("Attach".to_string(), ActionSpec::for_procedure("Attach"));
     attached_definition.configure_actions(Some("Attach".to_string()), attach_actions);
     engine.register_definition(attached_definition)?;
 

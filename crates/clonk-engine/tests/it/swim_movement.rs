@@ -15,10 +15,7 @@ fn swim_procedure_handles_direction_and_drift() -> Result<(), Box<dyn std::error
     let mut engine = Engine::new();
     let mut definition = Definition::from_script("Swimmer", "Swimmer", SWIM_SCRIPT)?;
     let mut actions = HashMap::new();
-    actions.insert(
-        "Swim".to_string(),
-        ActionSpec::default().with_procedure("Swim"),
-    );
+    actions.insert("Swim".to_string(), ActionSpec::for_procedure("Swim"));
     definition.configure_actions(Some("Swim".to_string()), actions);
     definition.set_movement_profile(
         MovementProfile::default()

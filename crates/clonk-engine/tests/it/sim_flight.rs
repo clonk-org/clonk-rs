@@ -803,18 +803,9 @@ fn script_jump_native_uses_object_com_jump_deep_water_dive() {
     // must take the same SimFlightHitsLiquid/ObjectActionDive branch as a
     // queued C4CMD_Jump (C4ObjectCom.cpp:280-307).
     let mut actions = HashMap::new();
-    actions.insert(
-        "Walk".to_string(),
-        ActionSpec::default().with_procedure("walk"),
-    );
-    actions.insert(
-        "Jump".to_string(),
-        ActionSpec::default().with_procedure("flight"),
-    );
-    actions.insert(
-        "Dive".to_string(),
-        ActionSpec::default().with_procedure("swim"),
-    );
+    actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+    actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
+    actions.insert("Dive".to_string(), ActionSpec::for_procedure("swim"));
     let mut definition = Definition::from_script(
         "DVER",
         "Script dive probe",
@@ -874,14 +865,8 @@ fn script_jump_native_missing_dive_action_falls_back_to_jump() {
     // Gold Rush BISO has Walk/Jump but no Dive and reaches this path at the
     // pinned frame-3902 TimerCall.
     let mut actions = HashMap::new();
-    actions.insert(
-        "Walk".to_string(),
-        ActionSpec::default().with_procedure("walk"),
-    );
-    actions.insert(
-        "Jump".to_string(),
-        ActionSpec::default().with_procedure("flight"),
-    );
+    actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+    actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
     let mut definition = Definition::from_script(
         "NDVE",
         "No Dive jump probe",
@@ -935,18 +920,9 @@ fn script_jump_native_respects_contact_density_dive_gate() {
     // ContactDensity is greater than C4M_Liquid (C4ObjectCom.cpp:297-305).
     // A liquid-contact object therefore takes the ordinary Jump fallback.
     let mut actions = HashMap::new();
-    actions.insert(
-        "Walk".to_string(),
-        ActionSpec::default().with_procedure("walk"),
-    );
-    actions.insert(
-        "Jump".to_string(),
-        ActionSpec::default().with_procedure("flight"),
-    );
-    actions.insert(
-        "Dive".to_string(),
-        ActionSpec::default().with_procedure("swim"),
-    );
+    actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+    actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
+    actions.insert("Dive".to_string(), ActionSpec::for_procedure("swim"));
     let mut definition = Definition::from_script(
         "LDVR",
         "Liquid contact probe",
@@ -1013,18 +989,9 @@ fn script_set_contact_density_changes_the_same_call_jump_gate() {
     // (C4Script.cpp:1286-1291). The following FnJump in the same script call
     // must observe 25 and skip the dive branch (C4ObjectCom.cpp:297-305).
     let mut actions = HashMap::new();
-    actions.insert(
-        "Walk".to_string(),
-        ActionSpec::default().with_procedure("walk"),
-    );
-    actions.insert(
-        "Jump".to_string(),
-        ActionSpec::default().with_procedure("flight"),
-    );
-    actions.insert(
-        "Dive".to_string(),
-        ActionSpec::default().with_procedure("swim"),
-    );
+    actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+    actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
+    actions.insert("Dive".to_string(), ActionSpec::for_procedure("swim"));
     let script = r#"
 #strict
 func ProbeLow()
@@ -1143,10 +1110,7 @@ fn live_contact_density_controls_movement_contact_with_liquid() {
     // the target to C4M_Liquid and later restores C4M_Solid
     // (WalkOnLiquid.c4d/Script.c:105,131).
     let mut actions = HashMap::new();
-    actions.insert(
-        "Flight".to_string(),
-        ActionSpec::default().with_procedure("flight"),
-    );
+    actions.insert("Flight".to_string(), ActionSpec::for_procedure("flight"));
     let mut definition = Definition::from_script(
         "WALK",
         "Liquid attachment probe",
@@ -1219,14 +1183,8 @@ fn script_jump_native_runs_on_action_jump_before_hardcoded_launch() {
     // non-dive fallback calls OnActionJump with precision 100 before any
     // hardcoded action or velocity write (C4ObjectCom.cpp:48-61,280-307).
     let mut actions = HashMap::new();
-    actions.insert(
-        "Walk".to_string(),
-        ActionSpec::default().with_procedure("walk"),
-    );
-    actions.insert(
-        "Jump".to_string(),
-        ActionSpec::default().with_procedure("flight"),
-    );
+    actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+    actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
     let script = r#"
 #strict
 local jump_calls, jump_xdir, jump_ydir, jump_by_com, allow_hardcoded;

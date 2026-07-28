@@ -15,10 +15,7 @@ fn flight_procedure_applies_gravity() -> Result<(), Box<dyn std::error::Error>> 
     let mut engine = Engine::new();
     let mut definition = Definition::from_script("Flyer", "Flyer", FLIGHT_SCRIPT)?;
     let mut actions = HashMap::new();
-    actions.insert(
-        "Jump".to_string(),
-        ActionSpec::default().with_procedure("Flight"),
-    );
+    actions.insert("Jump".to_string(), ActionSpec::for_procedure("Flight"));
     definition.configure_actions(Some("Jump".to_string()), actions);
     definition.set_movement_profile(MovementProfile::default());
     engine.register_definition(definition)?;

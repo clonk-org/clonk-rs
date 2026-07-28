@@ -565,10 +565,7 @@ func Probe(state) {
     #[test]
     fn action_data_setters_share_missing_material_fallback() {
         let mut specs = HashMap::new();
-        specs.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("bridge"),
-        );
+        specs.insert("Idle".to_string(), ActionSpec::for_procedure("bridge"));
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
@@ -849,10 +846,7 @@ func Probe(state) {
     #[test]
     fn set_action_data_rejects_invalid_attach_vertices() {
         let mut specs = HashMap::new();
-        specs.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("attach"),
-        );
+        specs.insert("Idle".to_string(), ActionSpec::for_procedure("attach"));
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
@@ -1034,10 +1028,7 @@ func Probe(state) {
     #[test]
     fn get_procedure_returns_configured_value() {
         let mut specs = HashMap::new();
-        specs.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        specs.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, _) = with_effect_context(
@@ -1058,14 +1049,8 @@ func Probe(state) {
     #[test]
     fn get_procedure_reflects_pending_action_change() {
         let mut specs = HashMap::new();
-        specs.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        specs.insert(
-            "Float".to_string(),
-            ActionSpec::default().with_procedure("float"),
-        );
+        specs.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        specs.insert("Float".to_string(), ActionSpec::for_procedure("float"));
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, _) = with_effect_context(

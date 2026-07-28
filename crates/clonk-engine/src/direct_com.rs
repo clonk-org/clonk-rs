@@ -7534,22 +7534,10 @@ mod tests {
 
     fn clonk_actions() -> HashMap<String, ActionSpec> {
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Jump".to_string(),
-            ActionSpec::default().with_procedure("flight"),
-        );
-        actions.insert(
-            "Dig".to_string(),
-            ActionSpec::default().with_procedure("dig"),
-        );
-        actions.insert(
-            "Push".to_string(),
-            ActionSpec::default().with_procedure("push"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
+        actions.insert("Dig".to_string(), ActionSpec::for_procedure("dig"));
+        actions.insert("Push".to_string(), ActionSpec::for_procedure("push"));
         actions
     }
 

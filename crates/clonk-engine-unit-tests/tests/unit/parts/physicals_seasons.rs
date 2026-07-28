@@ -12,10 +12,7 @@
 
         let mut definition = Definition::from_script("Walker", "Walker", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Walk".to_string()), actions);
         definition.set_physical(PhysicalInfo {
             walk: 35_000,
@@ -532,10 +529,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         // oracle as the script-host test: left offset +9, right 0 => -9 deg.
         let mut definition = Definition::from_script("Walker", "Walker", "").unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Walk".to_string()), actions);
         definition.set_rotateable(45);
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
@@ -583,10 +577,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         // positive vertex selects the -50 target, clamped to -15 degrees.
         let mut definition = Definition::from_script("Walker", "Walker", "").unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Walk".to_string()), actions);
         definition.set_rotateable(45);
         definition.set_shape_vertices(vec![ObjectVertex::new(5, 0).with_cnat(CNAT_BOTTOM)]);
@@ -626,10 +617,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         // walker does not retain angular velocity from its previous action.
         let mut definition = Definition::from_script("Walker", "Walker", "").unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Walk".to_string()), actions);
         definition.set_rotateable(45);
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
@@ -675,10 +663,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
 
         let mut definition = Definition::from_script("Climber", "Climber", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Scale".to_string(),
-            ActionSpec::default().with_procedure("scale"),
-        );
+        actions.insert("Scale".to_string(), ActionSpec::for_procedure("scale"));
         definition.configure_actions(Some("Scale".to_string()), actions);
         definition.set_physical(PhysicalInfo {
             scale: 30_000,
@@ -944,10 +929,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         let mut definition =
             Definition::from_script("FISH", "Fish", "#strict\n").expect("compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Swim".to_string(),
-            ActionSpec::default().with_procedure("SWIM"),
-        );
+        actions.insert("Swim".to_string(), ActionSpec::for_procedure("SWIM"));
         definition.configure_actions(Some("Swim".to_string()), actions);
         definition.set_physical(PhysicalInfo {
             swim: 100_000,
@@ -1034,10 +1016,7 @@ protected func Activity()
             },
         ]);
         let mut actions = HashMap::new();
-        actions.insert(
-            "Swim".to_string(),
-            ActionSpec::default().with_procedure("SWIM"),
-        );
+        actions.insert("Swim".to_string(), ActionSpec::for_procedure("SWIM"));
         actions.insert(
             "Turn".to_string(),
             ActionSpec::default()
@@ -1463,10 +1442,7 @@ protected func Activity() { SetActionTargets(); return(1); }
 
         let mut definition = Definition::from_script("Boat", "Boat", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Float".to_string(),
-            ActionSpec::default().with_procedure("float"),
-        );
+        actions.insert("Float".to_string(), ActionSpec::for_procedure("float"));
         definition.configure_actions(Some("Float".to_string()), actions);
         definition.set_physical(PhysicalInfo {
             float: 20,
@@ -1992,10 +1968,7 @@ func Death(by) { death_by = by; return 1; }
 
         let mut pusher_definition = Definition::from_script("Pusher", "Pusher", script).unwrap();
         let mut pusher_actions = HashMap::new();
-        pusher_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        pusher_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         pusher_actions.insert(
             "Push".to_string(),
             ActionSpec::default()
@@ -4514,10 +4487,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
 
         let mut definition = Definition::from_script("Chopper", "Chopper", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Chop".to_string(),
-            ActionSpec::default().with_procedure("chop"),
-        );
+        actions.insert("Chop".to_string(), ActionSpec::for_procedure("chop"));
         definition.configure_actions(Some("Chop".to_string()), actions);
 
         let mut engine = Engine::with_seed(20);
@@ -4604,14 +4574,8 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         let mut chopper = Definition::from_script("CLNK", "Clonk", script).unwrap();
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Chop".to_string(),
-            ActionSpec::default().with_procedure("chop"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Chop".to_string(), ActionSpec::for_procedure("chop"));
         chopper.configure_actions(Some("Idle".to_string()), actions);
 
         let target = Definition::from_script("TREE", "Tree", script).unwrap();

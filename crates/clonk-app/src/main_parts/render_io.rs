@@ -3137,10 +3137,7 @@ pub(crate) fn configure_sandbox_engine(
 
     let mut definition = Definition::from_script("Walker", "Rust Walker", walker_script())?;
     let mut actions = HashMap::new();
-    actions.insert(
-        "Walk".to_string(),
-        ActionSpec::default().with_procedure("Walk"),
-    );
+    actions.insert("Walk".to_string(), ActionSpec::for_procedure("Walk"));
     definition.configure_actions(Some("Walk".to_string()), actions);
     definition.set_crew_member(true);
     let profile = MovementProfile::default()
