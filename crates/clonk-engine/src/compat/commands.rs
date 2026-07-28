@@ -1,4 +1,5 @@
 use super::*;
+use clonk_core::log_target::SCRIPT_LOG_TARGET;
 
 /// Which post-name script argument layout a command function uses.
 #[derive(Clone, Copy)]
@@ -4313,7 +4314,7 @@ pub(crate) fn player_object_command_host(args: &[Value]) -> Result<Value, Runtim
         ) {
             return Err(RuntimeError::new(MESSAGE));
         }
-        tracing::warn!(target: "clonk-script", "{MESSAGE}");
+        tracing::warn!(target: SCRIPT_LOG_TARGET, "{MESSAGE}");
         // FnPlayerObjectCommand deliberately skips data.getIntOrID() for Call.
         0
     } else {

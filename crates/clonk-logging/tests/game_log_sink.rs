@@ -5,6 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use clonk_core::log_target::{SCRIPT_LOG_TARGET, SCRIPT_TRACE_TARGET};
 use clonk_logging::GameLogCapture;
 
 #[test]
@@ -24,8 +25,8 @@ fn only_c4script_log_lines_reach_the_message_board_sink() {
     )
     .expect("initialize the session log");
 
-    tracing::info!(target: "clonk-script", "Alpha riddles Beta to death.");
-    tracing::info!(target: "clonk-script-trace", "call trace noise");
+    tracing::info!(target: SCRIPT_LOG_TARGET, "Alpha riddles Beta to death.");
+    tracing::info!(target: SCRIPT_TRACE_TARGET, "call trace noise");
     tracing::info!("engine session log initialized");
 
     assert_eq!(

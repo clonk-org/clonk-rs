@@ -13,8 +13,9 @@ static INITIALIZED: OnceLock<()> = OnceLock::new();
 const DEFAULT_DEPENDENCY_FILTER: &str = "wgpu_core::device=warn";
 /// Target of the C4Script `Log()`/`DebugLog()` stream. It is the Rust
 /// counterpart of the C++ logger whose output `C4LogSystem::GuiSink` shows
-/// in-game (`src/C4Log.cpp:226-240`).
-pub const SCRIPT_LOG_TARGET: &str = "clonk-script";
+/// in-game (`src/C4Log.cpp:226-240`). Re-exported from `clonk-core` so the
+/// engine crates that emit and this crate that routes share one definition.
+pub use clonk_core::log_target::SCRIPT_LOG_TARGET;
 
 /// Process-local copy of formatted log output consumed by the developer
 /// console. The capture is intentionally independent from the bounded GUI

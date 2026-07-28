@@ -1,4 +1,5 @@
 use super::*;
+use clonk_core::log_target::SCRIPT_LOG_TARGET;
 
 fn parse_player_type_filter(value: Option<&Value>, function: &str) -> Result<i32, RuntimeError> {
     match value {
@@ -882,7 +883,7 @@ pub(crate) fn get_team_config(args: &[Value]) -> Result<Value, RuntimeError> {
         "config value",
     )?;
     if !(1..=7).contains(&query) {
-        error!(target: "clonk-script", "GetTeamConfig: Unknown config value: {query}");
+        error!(target: SCRIPT_LOG_TARGET, "GetTeamConfig: Unknown config value: {query}");
         return Ok(Value::Nil);
     }
     Ok(HOST_CONTEXT.with(|cell| {
@@ -1309,7 +1310,7 @@ pub(crate) fn set_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError>
     if !is_extra_data_identifier(name) {
         let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
         tracing::error!(
-            target: "clonk-script",
+            target: SCRIPT_LOG_TARGET,
             "SetCrewExtraData: Ignoring invalid data name \"{}\"! Only alphanumerics, _ and - are allowed.",
             escaped_name
         );
@@ -3143,7 +3144,7 @@ pub(crate) fn get_mission_access(args: &[Value]) -> Result<Value, RuntimeError> 
         };
         if context.world.control_sync_mode {
             tracing::warn!(
-                target: "clonk-script",
+                target: SCRIPT_LOG_TARGET,
                 "using GetMissionAccess may cause desyncs when playing records!"
             );
         }
