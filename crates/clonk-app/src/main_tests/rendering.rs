@@ -626,6 +626,117 @@
     }
 
     #[test]
+    fn a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent() {
+        // On hardware that cannot hold the tick budget, one application pass
+        // drains the whole clamped backlog before the event loop ever gets a
+        // chance to draw. The burst budget bounds that, while still executing
+        // at least one frame so the simulation always makes progress.
+        let mut app = new_running_sandbox_app();
+        let mut schedule = frame_schedule_for_mode(
+            app.mode,
+            app.engine.game_tick_delay_ms(),
+            app.engine.game_tick_delay_revision(),
+            app.max_refresh_delay_ms,
+        );
+
+        // FREEZE the unbudgeted behaviour first: a full backlog drains at once.
+        let mut accumulator = MAX_ACCUMULATED_TIME;
+        let drained = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("an unbudgeted pass drains the clamped backlog");
+        assert_eq!(
+            drained.executed_frames,
+            (MAX_ACCUMULATED_TIME.as_millis() / schedule.simulation_interval.as_millis()) as u32,
+            "the whole backlog runs inside one pass when nothing bounds it"
+        );
+
+        // The same backlog under an exhausted budget yields after one frame.
+        let mut accumulator = MAX_ACCUMULATED_TIME;
+        let before = app.engine.frame();
+        let bounded = advance_simulation_pass_within(
+            &mut app,
+            &mut schedule,
+            &mut accumulator,
+            Duration::ZERO,
+        )
+        .expect("a budgeted pass still executes one frame");
+        assert_eq!(
+            bounded.executed_frames, 1,
+            "an exhausted budget yields after one frame, it does not stall"
+        );
+        assert_eq!(app.engine.frame(), before + 1);
+        assert!(
+            accumulator >= schedule.simulation_interval,
+            "the unspent backlog is retained for the next pass, not discarded"
+        );
+    }
+
+    #[test]
+    fn render_floor_reserves_a_share_of_the_wall_clock_for_drawing() {
+        // A machine that cannot hold the tick budget must still repaint.
+        // `AutomaticFrameSkip` alone cannot do this: it is a one-shot latch on
+        // the *graphics* opportunity, while the cost that starves drawing is a
+        // catch-up burst inside one simulation pass. The floor bounds that
+        // burst so drawing keeps roughly RENDER_RESERVE_PERCENT of the wall
+        // clock, exactly the reservation Spring's game controller makes.
+        let mut floor = RenderFloor::default();
+        let base = Instant::now();
+
+        // With no measurement yet the burst may run a full simulation period.
+        assert_eq!(
+            floor.simulation_burst_budget(Duration::from_millis(28)),
+            Duration::from_millis(28),
+            "an unmeasured graphics pass must not shorten the first burst"
+        );
+
+        // A 3 ms draw is cheap: simulation may run 85/15 of it before yielding.
+        floor.record_presentation(base, Duration::from_millis(3));
+        assert_eq!(
+            floor.simulation_burst_budget(Duration::from_millis(28)),
+            Duration::from_millis(28),
+            "the burst never drops below one simulation period"
+        );
+
+        // A 30 ms draw on a slow machine buys simulation 170 ms, not forever.
+        floor.record_presentation(base, Duration::from_millis(30));
+        assert_eq!(
+            floor.simulation_burst_budget(Duration::from_millis(28)),
+            Duration::from_millis(170),
+        );
+
+        // And the reservation is itself capped by the hard repaint floor.
+        floor.record_presentation(base, Duration::from_millis(400));
+        assert_eq!(
+            floor.simulation_burst_budget(Duration::from_millis(28)),
+            MAX_TIME_BETWEEN_RENDERS,
+            "no burst may outrun the hard repaint floor"
+        );
+    }
+
+    #[test]
+    fn render_floor_forces_a_repaint_at_two_hertz_however_deep_the_skip() {
+        // `/fast 500` and the network catch-up divisor can both suppress every
+        // graphics opportunity for an unbounded number of frames. The floor is
+        // the only thing that guarantees the window still updates.
+        let mut floor = RenderFloor::default();
+        let base = Instant::now();
+        floor.record_presentation(base, Duration::from_millis(5));
+
+        assert!(!floor.must_present(base + Duration::from_millis(499)));
+        assert!(floor.must_present(base + MAX_TIME_BETWEEN_RENDERS));
+        assert!(floor.must_present(base + Duration::from_secs(30)));
+
+        // A repaint rearms it.
+        floor.record_presentation(base + Duration::from_secs(30), Duration::from_millis(5));
+        assert!(!floor.must_present(base + Duration::from_secs(30)));
+
+        // Before the very first repaint the floor is armed from the first ask,
+        // so a game that never draws still gets its first frame on time.
+        let mut fresh = RenderFloor::default();
+        assert!(!fresh.must_present(base));
+        assert!(fresh.must_present(base + MAX_TIME_BETWEEN_RENDERS));
+    }
+
+    #[test]
     fn automatic_frame_skip_never_skips_two_consecutive_graphics_passes() {
         let mut frame_skip = AutomaticFrameSkip::default();
         frame_skip.finish_graphics_pass(true, Duration::from_millis(29), Duration::from_millis(28));

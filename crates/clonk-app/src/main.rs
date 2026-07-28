@@ -545,6 +545,7 @@ fn main() -> Result<()> {
     );
     let mut next_graphics_deadline = previous_instant + frame_schedule.refresh_interval;
     let mut automatic_frame_skip = AutomaticFrameSkip::default();
+    let mut render_floor = RenderFloor::default();
     let mut presentation_benchmark = presentation_benchmark_from_env();
     let presentation_benchmark_asserts_native_tick = presentation_benchmark_asserts_native_tick();
     let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
@@ -675,10 +676,13 @@ fn main() -> Result<()> {
                     accumulator = Duration::ZERO;
                 }
 
-                let simulation_pass = match advance_simulation_pass(
+                let burst_budget =
+                    render_floor.simulation_burst_budget(frame_schedule.simulation_interval);
+                let simulation_pass = match advance_simulation_pass_within(
                     &mut app,
                     &mut frame_schedule,
                     &mut accumulator,
+                    burst_budget,
                 ) {
                     Ok(outcome) => outcome,
                     Err(err) => {
@@ -715,7 +719,13 @@ fn main() -> Result<()> {
                 // graphics still run only on the application timer, so keep
                 // an absolute deadline instead of treating every wake as a
                 // decoupled graphics opportunity.
+                // The repaint floor outranks every skip decision: `/fast N`,
+                // the network catch-up divisor and a long burst can each
+                // suppress graphics indefinitely, and a frozen window is worse
+                // than a late one.
+                let repaint_overdue = render_floor.must_present(graphics_now);
                 let graphics_due = simulation_pass.immediate_network_retry
+                    || repaint_overdue
                     || graphics_now >= next_graphics_deadline;
                 if graphics_due {
                     next_graphics_deadline = if simulation_pass.immediate_network_retry {
@@ -727,11 +737,17 @@ fn main() -> Result<()> {
                             frame_schedule.refresh_interval,
                         )
                     };
-                    if simulation_pass.skip_redraw {
+                    if simulation_pass.skip_redraw && !repaint_overdue {
                         // Native's manual/network DoSkipFrame takes this same
                         // graphics opportunity and clears the shared latch.
                         automatic_frame_skip.consume_suppressed_graphics_pass();
                     } else {
+                        if repaint_overdue {
+                            // An overdue repaint must also outrank the
+                            // automatic latch, or a slow graphics pass keeps
+                            // re-arming the very skip the floor exists to stop.
+                            automatic_frame_skip.consume_suppressed_graphics_pass();
+                        }
                         window.request_redraw();
                     }
                 }
@@ -794,6 +810,8 @@ fn main() -> Result<()> {
                                 graphics_duration,
                                 frame_schedule.simulation_interval,
                             );
+                            render_floor
+                                .record_presentation(graphics_started, graphics_duration);
                             if let Some(benchmark) = presentation_benchmark.as_mut() {
                                 let completed_at = Instant::now();
                                 benchmark.record_successful_presentation(
@@ -996,6 +1014,7 @@ fn main() -> Result<()> {
                             graphics_duration,
                             frame_schedule.simulation_interval,
                         );
+                        render_floor.record_presentation(graphics_started, graphics_duration);
                         if let Some(benchmark) = presentation_benchmark.as_mut() {
                             let completed_at = Instant::now();
                             benchmark.record_successful_presentation(

@@ -13,6 +13,18 @@ pub(crate) const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
 // simulation interval (src/C4Config.cpp:481-485; C4Application.cpp:510-520).
 pub(crate) const DEFAULT_MAX_REFRESH_DELAY_MS: u64 = 30;
 pub(crate) const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
+/// Share of the wall clock a catch-up burst leaves to drawing. C++ reserves
+/// nothing here — `Game.DoSkipFrame` only thins whole graphics opportunities,
+/// so a machine slow enough to spend an entire application pass inside
+/// `advance_simulation_pass` never repaints at all. Spring's game controller
+/// keeps a comparable slice for drawing while it fast-forwards; this is a
+/// deliberate presentation-only divergence for slow hardware (see
+/// `PORT_STATUS.md`).
+pub(crate) const RENDER_RESERVE_PERCENT: u32 = 15;
+/// Hard repaint floor (~2 Hz). `/fast N`, the network catch-up divisor and a
+/// long catch-up burst can each suppress every graphics opportunity for an
+/// unbounded stretch; this is the only guarantee the window still updates.
+pub(crate) const MAX_TIME_BETWEEN_RENDERS: Duration = Duration::from_millis(500);
 pub(crate) const PRESENTATION_BENCHMARK_ENV: &str = "LC_APP_PRESENTATION_BENCHMARK_SECONDS";
 pub(crate) const PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK_ENV: &str =
     "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK";
