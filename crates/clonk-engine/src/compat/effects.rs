@@ -1079,14 +1079,6 @@ pub(crate) fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     let name_filter = effect_name_filter("GetEffect", args.first().unwrap_or(&Value::Nil))?;
 
     let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
-    let effects = match snapshot_effects_from_context(scope) {
-        Some(effects) => effects,
-        None => match scope {
-            EffectScope::Object(_) => extract_effects_from_state(&args[1])?,
-            EffectScope::Global => Vec::new(),
-        },
-    };
-
     let desired_index = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "GetEffect", "index")?;
 
     let query = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "GetEffect", "query")?;
@@ -1097,54 +1089,65 @@ pub(crate) fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         "max priority",
     )?;
 
-    let found = match name_filter {
-        // Name/wildcard given: find by name and index
-        // (C4Script.cpp:5471-5472 -> C4Effect::Get(szName, iIndex,...),
-        // wildcard compare at C4Effect.cpp:229).
-        Some(filter) => usize::try_from(desired_index).ok().and_then(|index| {
-            effects
+    let query_effects = |effects: &[EffectState]| {
+        let found = match name_filter {
+            // Name/wildcard given: find by name and index
+            // (C4Script.cpp:5471-5472 -> C4Effect::Get(szName, iIndex,...),
+            // wildcard compare at C4Effect.cpp:229).
+            Some(filter) => usize::try_from(desired_index).ok().and_then(|index| {
+                effects
+                    .iter()
+                    .filter(|effect| effect.priority != 0)
+                    .filter(|effect| s_wildcard_match_ex(&effect.name, filter))
+                    .filter(|effect| max_priority == 0 || effect.priority <= max_priority)
+                    .nth(index)
+            }),
+            // No name: iIndex is the effect NUMBER (C4Script.cpp:5474-5475 ->
+            // C4Effect::Get(iNumber, fIncludeDead=true), C4Effect.cpp:240-256).
+            None => effects
                 .iter()
-                .filter(|effect| effect.priority != 0)
-                .filter(|effect| s_wildcard_match_ex(&effect.name, filter))
-                .filter(|effect| max_priority == 0 || effect.priority <= max_priority)
-                .nth(index)
-        }),
-        // No name: iIndex is the effect NUMBER (C4Script.cpp:5474-5475 ->
-        // C4Effect::Get(iNumber, fIncludeDead=true), C4Effect.cpp:240-256).
-        None => effects
-            .iter()
-            .find(|effect| effect.number == desired_index)
-            .filter(|effect| max_priority == 0 || effect.priority <= max_priority),
+                .find(|effect| effect.number == desired_index)
+                .filter(|effect| max_priority == 0 || effect.priority <= max_priority),
+        };
+
+        found
+            .map(|effect| match query {
+                // 0: number (C4Script.cpp:5481 `C4VInt(pEffect->iNumber)`)
+                0 => Value::Int(effect.number),
+                1 => Value::String(effect.name.clone().into()),
+                2 => Value::Int(effect.priority.abs()),
+                3 => Value::Int(effect.interval),
+                4 => effect
+                    .command_target
+                    .map(|target| object_reference_value(ObjectId::new(target as u64)))
+                    .unwrap_or(Value::Nil),
+                5 => {
+                    let live_id = effect.command_target.and_then(|target| {
+                        HOST_CONTEXT.with(|cell| {
+                            cell.borrow().as_ref().and_then(|context| {
+                                context.object_effective_definition_id(ObjectId::new(target as u64))
+                            })
+                        })
+                    });
+                    live_id
+                        .or_else(|| effect.command_id.clone())
+                        .map(Value::C4Id)
+                        .unwrap_or(Value::Nil)
+                }
+                6 => Value::Int(effect.timer),
+                _ => Value::Nil,
+            })
+            .unwrap_or(Value::Nil)
     };
 
-    Ok(found
-        .map(|effect| match query {
-            // 0: number (C4Script.cpp:5481 `C4VInt(pEffect->iNumber)`)
-            0 => Value::Int(effect.number),
-            1 => Value::String(effect.name.clone().into()),
-            2 => Value::Int(effect.priority.abs()),
-            3 => Value::Int(effect.interval),
-            4 => effect
-                .command_target
-                .map(|target| object_reference_value(ObjectId::new(target as u64)))
-                .unwrap_or(Value::Nil),
-            5 => {
-                let live_id = effect.command_target.and_then(|target| {
-                    HOST_CONTEXT.with(|cell| {
-                        cell.borrow().as_ref().and_then(|context| {
-                            context.object_effective_definition_id(ObjectId::new(target as u64))
-                        })
-                    })
-                });
-                live_id
-                    .or_else(|| effect.command_id.clone())
-                    .map(Value::C4Id)
-                    .unwrap_or(Value::Nil)
-            }
-            6 => Value::Int(effect.timer),
-            _ => Value::Nil,
-        })
-        .unwrap_or(Value::Nil))
+    if let Some(value) = with_effects_from_context(scope, query_effects) {
+        return Ok(value);
+    }
+    let effects = match scope {
+        EffectScope::Object(_) => extract_effects_from_state(&args[1])?,
+        EffectScope::Global => Vec::new(),
+    };
+    Ok(query_effects(&effects))
 }
 
 pub(crate) fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -1154,37 +1157,41 @@ pub(crate) fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
     let name_filter = effect_name_filter("GetEffectCount", args.first().unwrap_or(&Value::Nil))?;
 
     let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
-    let effects = match snapshot_effects_from_context(scope) {
-        Some(effects) => effects,
-        None => match scope {
-            EffectScope::Object(_) => extract_effects_from_state(&args[1])?,
-            EffectScope::Global => Vec::new(),
-        },
-    };
-
     let max_priority = value_to_i32(
         args.get(2).unwrap_or(&Value::Nil),
         "GetEffectCount",
         "max priority",
     )?;
 
-    let count = effects
-        .iter()
-        .filter(|effect| effect.priority != 0)
-        .filter(|effect| {
-            if let Some(filter) = name_filter {
-                // C4Effect::GetCount wildcard-compares names (C4Effect.cpp:263).
-                if !s_wildcard_match_ex(&effect.name, filter) {
+    let count_effects = |effects: &[EffectState]| {
+        effects
+            .iter()
+            .filter(|effect| effect.priority != 0)
+            .filter(|effect| {
+                if let Some(filter) = name_filter {
+                    // C4Effect::GetCount wildcard-compares names (C4Effect.cpp:263).
+                    if !s_wildcard_match_ex(&effect.name, filter) {
+                        return false;
+                    }
+                }
+                if max_priority != 0 && effect.priority > max_priority {
                     return false;
                 }
-            }
-            if max_priority != 0 && effect.priority > max_priority {
-                return false;
-            }
-            true
-        })
-        .count();
+                true
+            })
+            .count()
+    };
 
+    let count = match with_effects_from_context(scope, count_effects) {
+        Some(count) => count,
+        None => {
+            let effects = match scope {
+                EffectScope::Object(_) => extract_effects_from_state(&args[1])?,
+                EffectScope::Global => Vec::new(),
+            };
+            count_effects(&effects)
+        }
+    };
     let count = i32::try_from(count).unwrap_or(i32::MAX);
     Ok(Value::Int(count))
 }
@@ -1295,18 +1302,33 @@ pub(crate) fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
     )?;
 
     let scope = determine_scope_from_state(target)?;
-    let effects = match snapshot_effects_from_context(scope) {
-        Some(effects) => effects,
-        None => match scope {
-            EffectScope::Object(_) => extract_effects_from_state(target)?,
-            EffectScope::Global => Vec::new(),
-        },
+    let select_effect = |effects: &[EffectState]| {
+        effects
+            .iter()
+            .find(|effect| effect.number == number)
+            .map(|effect| {
+                (
+                    effect.name.clone(),
+                    effect.command_target,
+                    effect.command_id.clone(),
+                )
+            })
     };
-    let Some(effect) = effects.iter().find(|effect| effect.number == number) else {
+    let selected = match with_effects_from_context(scope, select_effect) {
+        Some(effect) => effect,
+        None => {
+            let effects = match scope {
+                EffectScope::Object(_) => extract_effects_from_state(target)?,
+                EffectScope::Global => Vec::new(),
+            };
+            select_effect(&effects)
+        }
+    };
+    let Some((effect_name, command_target, command_id)) = selected else {
         return Ok(Value::Nil);
     };
 
-    let function = format!("Fx{}{}", effect.name, call_fn);
+    let function = format!("Fx{effect_name}{call_fn}");
     // DoCall argument layout (C4Effect.cpp:455): pObj, iNumber, then the
     // seven forwarded values.
     let mut call_args = Vec::with_capacity(9);
@@ -1318,13 +1340,8 @@ pub(crate) fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
     call_args.extend(args.iter().skip(3).take(7).cloned());
     call_args.resize(9, Value::Nil);
 
-    dispatch_effect_fx_callback(
-        effect.command_target,
-        effect.command_id.as_deref(),
-        &function,
-        &call_args,
-    )
-    .unwrap_or(Ok(Value::Nil))
+    dispatch_effect_fx_callback(command_target, command_id.as_deref(), &function, &call_args)
+        .unwrap_or(Ok(Value::Nil))
 }
 
 /// Whether the selected callback script supplies a script implementation

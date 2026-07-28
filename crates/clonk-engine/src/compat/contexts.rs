@@ -2470,6 +2470,39 @@ pub(crate) fn snapshot_effects_from_context(scope: EffectScope) -> Option<Vec<Ef
     HOST_CONTEXT.with(|cell| cell.borrow().as_ref().and_then(|ctx| ctx.snapshot(scope)))
 }
 
+pub(crate) fn with_effects_from_context<R>(
+    scope: EffectScope,
+    func: impl FnOnce(&[EffectState]) -> R,
+) -> Option<R> {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        context
+            .scope(scope)
+            .map(|scope| func(scope.effects.as_slice()))
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static EFFECT_SNAPSHOT_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_effect_snapshot() {
+    EFFECT_SNAPSHOT_COUNT.set(EFFECT_SNAPSHOT_COUNT.get() + 1);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_effect_snapshot_count() {
+    EFFECT_SNAPSHOT_COUNT.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn effect_snapshot_count() -> usize {
+    EFFECT_SNAPSHOT_COUNT.get()
+}
+
 pub(crate) fn determine_scope_from_state(value: &Value) -> Result<EffectScope, RuntimeError> {
     match value {
         // A zero C4Object payload is a null pointer. Every C++ effect native
@@ -3549,6 +3582,14 @@ impl EffectHostContext {
             EffectScope::Global => self.global.as_mut().ok_or_else(|| {
                 RuntimeError::new("global effect operations require an active engine context")
             }),
+        }
+    }
+
+    fn scope(&self, scope: EffectScope) -> Option<&EffectScopeContext> {
+        match scope {
+            EffectScope::Object(Some(target)) => self.object_scope(target).map(|ctx| &ctx.effects),
+            EffectScope::Object(None) => self.object.as_ref().map(|ctx| &ctx.effects),
+            EffectScope::Global => self.global.as_ref(),
         }
     }
 
@@ -6953,6 +6994,8 @@ impl EffectHostContext {
     }
 
     fn snapshot(&self, scope: EffectScope) -> Option<Vec<EffectState>> {
+        #[cfg(test)]
+        record_effect_snapshot();
         match scope {
             EffectScope::Object(Some(target)) => {
                 self.object_scope(target).map(|ctx| ctx.effects.snapshot())

@@ -265,6 +265,23 @@ public func Probe(object carrier)
     }
 
     #[test]
+    fn effect_call_selects_live_callback_metadata_without_cloning_the_effect_stack() {
+        // FnEffectCall resolves the numbered C4Effect node in place before
+        // C4Effect::DoCall (C4Script.cpp:5589-5601); it does not copy the list.
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            let number = add_effect(&[Value::String("Potion".into()), state.clone()])?;
+            reset_effect_snapshot_count();
+            let value =
+                effect_call(&[state.clone(), number, Value::String("Activate".into())])?;
+            assert_eq!(effect_snapshot_count(), 0);
+            Ok(value)
+        });
+
+        assert_eq!(result.expect("EffectCall succeeds"), Value::Nil);
+    }
+
+    #[test]
     fn get_effect_count_filters_by_name_and_priority() {
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
@@ -293,6 +310,23 @@ public func Probe(object carrier)
         });
         let value = result.expect("GetEffectCount with priority succeeds");
         assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn get_effect_count_scans_the_live_context_without_cloning_its_effect_stack() {
+        // FnGetEffectCount scans pTarget->pEffects in place
+        // (C4Script.cpp:5559-5568); counting does not copy the C4Effect list.
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
+            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
+            reset_effect_snapshot_count();
+            let value = get_effect_count(&[Value::Nil, state.clone()])?;
+            assert_eq!(effect_snapshot_count(), 0);
+            Ok(value)
+        });
+
+        assert_eq!(result.expect("GetEffectCount succeeds"), Value::Int(2));
     }
 
     #[test]
@@ -2685,4 +2719,3 @@ public func Trigger(target)
             "foreign target Death runs exactly once"
         );
     }
-
