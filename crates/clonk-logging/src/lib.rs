@@ -249,33 +249,39 @@ pub fn init_verbose_with_file_and_capture(
     capture: Option<ConsoleLogCapture>,
     game_log: Option<GameLogCapture>,
 ) -> io::Result<()> {
-    if INITIALIZED.get().is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "the tracing subscriber is already initialized",
-        ));
-    }
-
+    claim_initialization()?;
     let default_level = if verbose { "debug" } else { "info" };
 
     match open_session_log(log_path) {
-        Ok(file) => {
-            let init_result = install(default_level, Some(file), capture, game_log);
-            let _ = INITIALIZED.set(());
-            init_result.map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("failed to install the session-log subscriber: {err}"),
-                )
-            })
-        }
+        Ok(file) => install(default_level, Some(file), capture, game_log).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("failed to install the session-log subscriber: {err}"),
+            )
+        }),
         Err(err) => {
-            INITIALIZED.get_or_init(|| {
-                let _ = install(default_level, None, capture, game_log);
-            });
+            let _ = install(default_level, None, capture, game_log);
             Err(err)
         }
     }
+}
+
+/// Claim the one-time initialization slot, refusing when any subscriber — ours
+/// or a foreign one, as a test harness or embedder installs — is already in
+/// place. Claiming before opening the session log keeps a doomed install from
+/// rotating and truncating the file first.
+fn claim_initialization() -> io::Result<()> {
+    let already_installed = tracing::dispatcher::has_been_set();
+    INITIALIZED
+        .set(())
+        .ok()
+        .filter(|()| !already_installed)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the tracing subscriber is already initialized",
+            )
+        })
 }
 
 /// Initialise stderr logging, mirror it into the developer console when one is
@@ -287,9 +293,9 @@ pub fn init_verbose_with_capture(
     game_log: Option<GameLogCapture>,
 ) {
     let default_level = if verbose { "debug" } else { "info" };
-    INITIALIZED.get_or_init(|| {
+    if claim_initialization().is_ok() {
         let _ = install(default_level, None, capture, game_log);
-    });
+    }
 }
 
 /// Open this session's log, first setting the previous one aside. A bug report
