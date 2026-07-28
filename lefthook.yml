@@ -72,11 +72,39 @@ commit-msg:
 
 pre-push:
   jobs:
-    # Cheap (~4s, rustfmt only parses) and currently clean, so it stays clean.
-    # This is the whole-repo check the staged-only pre-commit job cannot do, and
-    # it is what keeps the `formatting` CI job green.
-    - name: rustfmt-workspace
-      run: cargo fmt --all -- --check
+    # Checks the `.rs` files in the commits being pushed, reading their content
+    # out of HEAD rather than off disk.
+    #
+    # `cargo fmt --all -- --check` was tried here first and had to be reverted:
+    # it inspects the *working tree*, and this checkout is shared, so a
+    # concurrent session's unformatted uncommitted work blocks your unrelated
+    # push. That happened immediately — four dirty `clonk-network/session*.rs`
+    # files from another session rejected a push whose only content was
+    # `Cargo.lock` and `PORT_STATUS.md`. A hook that forces `--no-verify` for
+    # honest pushes is worse than no hook.
+    - name: rustfmt-pushed-commits
+      run: |
+        base="$(git rev-parse --verify --quiet origin/main || true)"
+        [ -n "$base" ] || exit 0
+
+        files="$(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- '*.rs' \
+          | grep -vE '^third_party/' || true)"
+        [ -n "$files" ] || exit 0
+
+        scratch="$(mktemp -d)"
+        trap 'rm -rf "$scratch"' EXIT
+        status=0
+        for file in $files; do
+          mkdir -p "$scratch/$(dirname "$file")"
+          # Deleted in HEAD, or otherwise unreadable: nothing to format.
+          git show "HEAD:$file" > "$scratch/$file" 2>/dev/null || continue
+          if ! rustfmt --edition 2021 --check "$scratch/$file" >/dev/null 2>&1; then
+            echo "lefthook: not rustfmt-clean in HEAD: $file"
+            status=1
+          fi
+        done
+        [ "$status" -eq 0 ] || echo "lefthook: run 'cargo fmt' on those files and amend."
+        exit "$status"
 
 # `cargo dev-check` is deliberately NOT a hook. Measured in a worktree with a
 # warm target dir: 187s wall, and it `bail!`s on budget exhaustion

@@ -66,7 +66,8 @@ Separate **structural** changes (rename/extract/move, no behavior change) from
 
 `lefthook.yml` enforces the two rules above mechanically — rustfmt on staged
 `.rs` files, a subject-line-only Conventional Commit, no `content/` in the
-index, and `cargo fmt --all -- --check` on push. Bootstrap with:
+index, and rustfmt over the `.rs` files in the commits being pushed. Bootstrap
+with:
 
 ```sh
 lefthook install
@@ -82,6 +83,11 @@ Two traps, both already hit here:
   link`). The jobs still run correctly and the error is only noise, but it means
   lefthook cannot detect partially staged files here — so never add a job that
   rewrites files or sets `stage_fixed`.
+- No hook may inspect the **working tree** as a whole. `cargo fmt --all --
+  --check` on pre-push was tried and reverted: a concurrent session's dirty
+  files reject your unrelated push, which just teaches everyone `--no-verify`.
+  Check committed content (`git show HEAD:<file>`) over the pushed range
+  instead.
 
 `cargo dev-check` is deliberately not a hook: 187s warm, and it exits non-zero
 on budget exhaustion. Run it by hand before opening a pull request.
