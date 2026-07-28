@@ -315,17 +315,39 @@ Landed optimizations, each with its measurement:
   pins that a non-capture surface still produces identical pixels.
 
 - **The landscape render cache stops re-cloning the grid it is already anchored
-  to** (`crates/clonk-frontend/src/graphics_system.rs`) and **particles are
-  grouped by layer once per object pass** instead of rescanning the whole
-  particle slice per object per pass
-  (`draw_definition_particles`, same file). Both are presentation-only. These
-  two have no wall-time measurement of their own — the render path has no
-  headless benchmark and `scenario_profile` does not exercise it at all — so
-  they are recorded as structural removals of per-frame work, not as a measured
-  speedup. Do not cite a number for them that does not exist.
+  to** (`crates/clonk-frontend/src/graphics_system.rs`). The COW dirty-lineage
+  invariant documented at `landscape.rs:550-554` is real, so the cache still
+  holds a grid handle; only the provably redundant re-anchor is skipped, when
+  the cache was reused or freshly rebuilt from this same grid *and*
+  `cache.grid.bytes().as_ptr() == grid.bytes().as_ptr()`, i.e. it already holds
+  that exact `Arc`. Rebuild frames were cloning twice (`:4277` and again at
+  `:4579`); that is gone too. `PixelGrid::clone` with 128 texture + 128
+  material names measures **4.3-5.6 us**, once per viewport per frame, now zero
+  on static-landscape frames.
+
+- **Particles are grouped by layer once per object pass**
+  (`ParticleLayerIndex`, `crates/clonk-frontend/src/graphics_system.rs`)
+  instead of `draw_definition_particles` filtering the whole particle slice on
+  each of its two calls per object, which made a pass O(objects x particles).
+  At 40 objects x 200 particles: **16,000 -> 200 particle examinations per
+  pass**, wall time **54.0/77.9/64.8 us -> 27.9/37.4/28.1 us** over three runs
+  each. Draw order is unchanged — the index is built by reverse traversal, so
+  each layer list is in the same newest-first order the linear scan produced —
+  and the index is rebuilt from, and invalidated at the end of, the single
+  object pass that owns it, with a slice-identity check that falls back to the
+  linear scan rather than trusting a stale list.
 
 ## Open
 
+- Open gap (found 2026-07-27, not closed): `PixelGrid::render_dirty_rects_since`
+  compares `self.material_names != previous.material_names` and
+  `self.texture_names != previous.texture_names`
+  (`crates/clonk-engine/src/landscape.rs:557-558`) — two 128-entry
+  `Vec<Option<String>>` compared element by element on **every** frame,
+  whether or not anything changed. Both tables are fixed once the texmap
+  resolves, so a resolution generation counter would replace the whole compare
+  with one integer test. It survived this pass only because the frontend work
+  that found it could not edit `clonk-engine`.
 - Open gap (found 2026-07-27, not closed): **scenario load is ~half the
   process cost and is unoptimized.** `ClonkMars/03_Chaos` takes 13.8-15.7 s to
   load on the reference machine — roughly two minutes on a Pi 4 — and 99% of
