@@ -292,6 +292,10 @@ pub fn init_verbose_with_capture(
     });
 }
 
+/// Open this session's log, first setting the previous one aside. A bug report
+/// is filed after a relaunch, so the run worth reading is usually the one that
+/// just ended; renaming keeps exactly one generation of it. A missing previous
+/// log is the ordinary first-run case, not a failure.
 fn open_session_log(log_path: &Path) -> io::Result<File> {
     if let Some(parent) = log_path
         .parent()
@@ -299,6 +303,12 @@ fn open_session_log(log_path: &Path) -> io::Result<File> {
     {
         fs::create_dir_all(parent)?;
     }
+    let previous = log_path.with_extension("previous.log");
+    fs::rename(log_path, previous).or_else(|err| {
+        (err.kind() == io::ErrorKind::NotFound)
+            .then_some(())
+            .ok_or(err)
+    })?;
     File::create(log_path)
 }
 
