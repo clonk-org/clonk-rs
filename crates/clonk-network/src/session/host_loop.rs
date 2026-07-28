@@ -312,6 +312,7 @@ pub(crate) async fn run_host(
         ),
         control_mode: config.initial_status.control_mode,
         straggler_late: Default::default(),
+        peer_capabilities: Default::default(),
         async_control_wait: None,
         admission,
         client_cores,

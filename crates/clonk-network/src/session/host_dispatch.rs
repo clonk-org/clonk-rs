@@ -17,6 +17,20 @@ pub(crate) async fn handle_client_message(
     // (src/C4Network2.cpp:1564); route ping state is maintained by the
     // transport task's `ConnectionPing` messages instead.
     match message {
+        ControlMessage::PortCapabilities(capabilities) => {
+            // Record what this peer can do, and answer so it learns the same
+            // about us. A stock C++ peer never sends this and never replies, so
+            // it simply stays absent from the registry and keeps the
+            // compatible path.
+            state
+                .peer_capabilities
+                .record(client_id as i32, capabilities);
+            if let Some(route) = state.accepted_routes.get(&connection_id) {
+                let _ = route.outbound.try_send(ControlMessage::PortCapabilities(
+                    crate::PortCapabilities::supported(),
+                ));
+            }
+        }
         ControlMessage::Ping(packet) => {
             if let Some(route) = state.accepted_routes.get(&connection_id) {
                 let _ = route.outbound.try_send(ControlMessage::Pong(packet));

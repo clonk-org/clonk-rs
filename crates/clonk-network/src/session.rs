@@ -673,6 +673,7 @@ mod tests {
             game_started: false,
             control_mode: config.initial_status.control_mode,
             straggler_late: Default::default(),
+            peer_capabilities: Default::default(),
             async_control_wait: None,
             admission: HostAdmission::new(
                 1,

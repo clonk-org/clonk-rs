@@ -401,6 +401,24 @@ pub(crate) async fn run_client_loop_with_routes(
     mut pending_tcp: Option<PendingTcpClientRoute>,
 ) {
     let local_core = mesh_request_template.local_core.clone();
+    // What the host announced it can do beyond the C++ protocol. Empty until it
+    // says so, which is exactly where a stock C++ host leaves it.
+    let mut peer_capabilities = crate::PeerCapabilityRegistry::default();
+    // Announce ourselves once, unprompted, but only when there is something to
+    // announce. Safe against any peer: C++'s `HandlePacket` switch has no
+    // `default:` case, so a stock host ignores the ID entirely and never
+    // answers -- and that silence is precisely how we conclude it is C++ (see
+    // `crate::capabilities`). An *empty* announcement, though, says nothing the
+    // default does not already imply, so while this build implements no Tier 2
+    // feature it is not worth a packet or a change to the message sequence
+    // every connection currently produces.
+    if crate::PortCapabilities::supported().bits() != 0 {
+        let _ = transport
+            .send_message(ControlMessage::PortCapabilities(
+                crate::PortCapabilities::supported(),
+            ))
+            .await;
+    }
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
     let mut client_performance = ClientPerformanceStats::new(CLIENT_BACKLOG_LIMIT);
     let mut next_control_request_at = resource_state.next_control_request_at;
@@ -1364,6 +1382,13 @@ pub(crate) async fn run_client_loop_with_routes(
                     other => other,
                 };
                 match result {
+                    Ok(ControlMessage::PortCapabilities(capabilities)) => {
+                        // The host telling us what it supports. Recorded against
+                        // the host's client id; a stock C++ host never sends
+                        // this, so it stays absent and the compatible path
+                        // stands.
+                        peer_capabilities.record(HOST_CLIENT_ID as i32, capabilities);
+                    }
                     Ok(ControlMessage::Ping(packet)) => {
                         if let Err(error) = transport.send_message(ControlMessage::Pong(packet)).await {
                             let _ = event_tx
