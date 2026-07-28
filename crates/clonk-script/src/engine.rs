@@ -1937,8 +1937,12 @@ impl Engine {
         self.eval_direct_exec_hook = Some(hook);
     }
 
-    pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, ScriptError> {
-        let vm = Vm::new(
+    /// The VM every call path on this host runs. Each entry point below
+    /// attaches the same function tables, host seams and global tables, so
+    /// assembling it once keeps a newly registered channel from reaching
+    /// some call paths and silently missing others.
+    fn vm(&self) -> Vm<'_> {
+        Vm::new(
             &self.functions,
             &self.host_functions,
             &self.var_decls,
@@ -1965,7 +1969,11 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref());
+        .with_string_registrations(self.string_registrations.as_deref())
+    }
+
+    pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, ScriptError> {
+        let vm = self.vm();
         vm.call(name, args).map_err(ScriptError::from)
     }
 
@@ -1980,34 +1988,7 @@ impl Engine {
         name: &str,
         args: &[Value],
     ) -> Result<(Value, Vec<Value>), ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref());
+        let vm = self.vm();
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
@@ -2028,35 +2009,7 @@ impl Engine {
         name: &str,
         args: &[Value],
     ) -> Result<(Value, Vec<Value>), ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_exact_global_link_lookup()
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref());
+        let vm = self.vm().with_exact_global_link_lookup();
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
@@ -2081,34 +2034,7 @@ impl Engine {
         engine_global: bool,
         args: &[Value],
     ) -> Result<(Value, Vec<Value>), ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref());
+        let vm = self.vm();
         let vm = if engine_global {
             vm.with_exact_global_link_lookup()
         } else {
@@ -2141,35 +2067,7 @@ impl Engine {
         cells: &crate::vm::LocalCells,
         this: Value,
     ) -> Result<Value, ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         let vm = if engine_global {
             vm.with_exact_global_link_lookup()
         } else {
@@ -2187,34 +2085,7 @@ impl Engine {
         args: &[Value],
         local_vars: &std::collections::HashMap<String, Value>,
     ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref());
+        let vm = self.vm();
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
     }
@@ -2232,35 +2103,7 @@ impl Engine {
         cells: &crate::vm::LocalCells,
         this: Value,
     ) -> Result<Value, ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         vm.call_with_cells(name, args, cells)
             .map_err(ScriptError::from)
     }
@@ -2278,35 +2121,7 @@ impl Engine {
         cells: &crate::vm::LocalCells,
         this: Value,
     ) -> Result<Value, ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         vm.call_with_cells_preserving_caller(name, args, cells)
             .map_err(ScriptError::from)
     }
@@ -2323,35 +2138,7 @@ impl Engine {
         cells: &crate::vm::LocalCells,
         this: Value,
     ) -> Result<(Value, Vec<Value>), ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         let arg_cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = arg_cells
@@ -2375,35 +2162,7 @@ impl Engine {
         cells: &crate::vm::LocalCells,
         this: Value,
     ) -> Result<ValueReference, ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         vm.call_reference_with_cells(name, args, cells)
             .map_err(ScriptError::from)
     }
@@ -2418,35 +2177,7 @@ impl Engine {
         cells: &crate::vm::LocalCells,
         this: Value,
     ) -> Result<ValueReference, ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         vm.call_reference_with_cells_preserving_caller(name, args, cells)
             .map_err(ScriptError::from)
     }
@@ -2458,35 +2189,7 @@ impl Engine {
         local_vars: &std::collections::HashMap<String, Value>,
         this: Value,
     ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
     }
@@ -2568,35 +2271,7 @@ impl Engine {
         context: &str,
         diagnostics: bool,
     ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         vm.direct_exec_with_locals_in_context(
             source,
             local_vars,
@@ -2704,35 +2379,7 @@ impl Engine {
         context: &str,
         diagnostics: bool,
     ) -> Result<Value, ScriptError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         vm.direct_exec_with_cells_in_context(source, cells, strict_level, context, diagnostics)
             .map_err(ScriptError::from)
     }
@@ -2750,35 +2397,7 @@ impl Engine {
         strict_level: Option<u8>,
         depth: usize,
     ) -> Result<Value, RuntimeError> {
-        let vm = Vm::new(
-            &self.functions,
-            &self.host_functions,
-            &self.var_decls,
-            self.debugger_hooks.clone(),
-        )
-        .with_host_identity(self.host_identity)
-        .with_owner_definition_name(self.definition_name.as_deref())
-        .with_script_name(self.script_name.as_deref().unwrap_or(""))
-        .with_game_script_name(self.game_script_name.as_deref())
-        .with_definition_context(self.definition_context)
-        .with_host_reference_functions(&self.host_reference_functions)
-        .with_host_function_parameter_types(&self.host_function_parameter_types)
-        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
-        .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
-        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
-        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
-        .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
-        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
-        .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
-        .with_global_variables(self.globals_named.as_deref())
-        .with_global_slots(self.globals_numbered.as_deref())
-        .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref())
-        .with_string_registrations(self.string_registrations.as_deref())
-        .with_this(this);
+        let vm = self.vm().with_this(this);
         vm.eval_direct_exec_with_cells(source, cells, strict_level, depth)
     }
 
