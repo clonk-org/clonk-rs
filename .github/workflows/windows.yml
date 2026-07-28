@@ -108,7 +108,21 @@ jobs:
       # `cargo build`, not `--all-targets`: the test targets `include_bytes!`
       # real game data from the content submodule, which is not checked out.
       - name: Build the runtime and launcher for MSVC
-        run: cargo build -p clonk-app -p clonk-game --locked
+        run: |
+          # `freetype-sys` hardcodes a RELATIVE `libz-sys/src/zlib` include that
+          # does not exist in its published crate, so its bundled libpng only
+          # finds zlib.h where the host happens to ship one. That affects every
+          # Windows toolchain; the mingw cross-build already injects the same
+          # fix as CFLAGS_x86_64_pc_windows_gnu. Resolved dynamically rather
+          # than pinned to a libz-sys version.
+          cargo fetch --locked
+          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
+          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
+            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
+            exit 1
+          fi
+          export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
+          cargo build -p clonk-app -p clonk-game --locked
 
       - name: Report the toolchain that produced them
         run: |
