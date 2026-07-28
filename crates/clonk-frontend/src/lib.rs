@@ -17210,7 +17210,9 @@ mod tests {
             WIDTH,
             HEIGHT,
             vec![1; (WIDTH * HEIGHT) as usize],
-            (0..128).map(|index| if index == 0 { 0 } else { 50 }).collect(),
+            (0..128)
+                .map(|index| if index == 0 { 0 } else { 50 })
+                .collect(),
             material_names,
             texture_names,
         ));
