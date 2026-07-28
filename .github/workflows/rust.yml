@@ -1,24 +1,16 @@
 name: Clonk Rust CI
 
-# Automatic triggers are disabled while the `content/` submodule lives in a
-# separate private repository: the built-in GITHUB_TOKEN is scoped to the
-# repository running the workflow, so `actions/checkout` cannot clone
-# syb0rg/clonk-rs-content and every job fails at checkout with
-# "Repository not found". Runs were also billing private-repo Actions minutes
-# on every push and on each open dependency-update pull request.
+# The full parity gate. Runs the whole suite, so it needs the `content/`
+# submodule; that is why it was trigger-disabled while clonk-rs-content was
+# private, and why it works again now that the repository is public.
 #
-# To re-enable, first give checkout access to the content repository — make it
-# public, or add a fine-grained PAT with Contents:read on both repositories as
-# a secret and pass it to `actions/checkout` via `token:` — then restore:
-#
-#   push:
-#     branches: [main]
-#   pull_request:
-#     branches: [main]
-#
-# The gates below are otherwise current; they run locally via the commands in
-# CLAUDE.md, and `workflow_dispatch` still allows a manual run.
+# `dependency-guard.yml` stays separate: it is submodule-free and cheap, and
+# fires on dependency-shaped changes only.
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -26,7 +18,7 @@ permissions:
 
 concurrency:
   group: rust-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_INCREMENTAL: '0'
