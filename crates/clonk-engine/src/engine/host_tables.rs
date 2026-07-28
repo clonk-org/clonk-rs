@@ -487,6 +487,24 @@ impl Engine {
     /// # Safety
     ///
     /// Same contract as [`Self::lazy_host_world_landscape`].
+    /// Borrow the landscape for read-only host queries. `GBackSolid` and the
+    /// rest of C4Wrappers.h:66-92 read single pixels; copying the whole map to
+    /// answer one was the single largest cost in `advance_tick` on real
+    /// content. Terrain *writes* still go through
+    /// [`Self::lazy_host_world_landscape`] and its private copy.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::lazy_host_world_landscape`], which already
+    /// requires the source landscape to stay put and unmutated for the
+    /// lifetime of every context carrying this provider.
+    unsafe fn lazy_host_world_landscape_borrow(source: *const ()) -> Option<*const Landscape> {
+        let engine = source.cast::<Self>();
+        unsafe { &*std::ptr::addr_of!((*engine).landscape) }
+            .as_ref()
+            .map(std::ptr::from_ref)
+    }
+
     unsafe fn lazy_host_world_landscape_dimensions(source: *const ()) -> Option<(i32, i32)> {
         let engine = source.cast::<Self>();
         unsafe { &*std::ptr::addr_of!((*engine).landscape) }
@@ -679,6 +697,7 @@ impl Engine {
                 Self::lazy_host_world_landscape,
             )
             .with_landscape_dimensions(Self::lazy_host_world_landscape_dimensions)
+            .with_landscape_borrow(Self::lazy_host_world_landscape_borrow)
             .with_legacy_find_object(Self::lazy_host_world_object_matches)
         };
         self.host_world_context_base()

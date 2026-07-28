@@ -308,8 +308,8 @@ protected func QueryWorld()
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
-        1,
-        "terrain is cloned on its first actual query"
+        0,
+        "a terrain query borrows the landscape; only a terrain write copies it"
     );
     assert_eq!(
         engine.objects[caller_index]
@@ -641,8 +641,8 @@ protected func ContactRight()
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
-        1,
-        "Contact* clones terrain only when GBackSolid first queries it"
+        0,
+        "Contact*'s GBackSolid borrows the movement landscape instead of copying it"
     );
     assert_eq!(
         engine.objects[swimmer_index]
@@ -920,5 +920,75 @@ fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
     assert!(
         lists.iter().any(|list| list.len() > 1),
         "the fixture must actually populate a shared sector, or it freezes nothing"
+    );
+}
+
+#[test]
+fn read_only_terrain_queries_never_clone_the_landscape() {
+    // GBackSolid and friends only read `C4Landscape::GetPix`
+    // (C4Wrappers.h:66-92). The lazy host world used to answer them from a
+    // deep copy of the whole landscape, which is O(map) work per script call
+    // on a path real content walks several times per object per frame.
+    // Reads borrow the engine's landscape instead; only a host call that
+    // *writes* terrain materializes the private copy.
+    let mut engine = Engine::with_seed(0);
+    let mut landscape =
+        Landscape::with_default_material(100, vec![100; 100], None).expect("query landscape");
+    landscape.set_world_height(100);
+    landscape.set_pixel_grid(PixelGrid::new(
+        100,
+        100,
+        vec![0; 100 * 100],
+        vec![0, 100],
+        vec![None, Some("Earth".to_owned())],
+        vec![None; 2],
+    ));
+    engine.set_landscape(landscape);
+    engine
+        .landscape
+        .as_mut()
+        .expect("landscape exists")
+        .grid_write_byte(10, 20, 1);
+
+    let mut prober = Definition::from_script(
+        "PROB",
+        "Terrain prober",
+        r#"#strict
+local solid, sky;
+public func Probe()
+{
+    solid = GBackSolid(10 - GetX(), 20 - GetY());
+    sky = GBackSolid(90 - GetX(), 90 - GetY());
+    return(0);
+}
+"#,
+    )
+    .expect("prober compiles");
+    prober.set_c4_callback_convention(true);
+    engine.register_definition(prober).expect("prober registers");
+    let prober = engine
+        .spawn_object(SpawnConfig::new("PROB").with_position(Vector2::new(50, 50)))
+        .expect("prober spawns");
+    let prober_index = engine.find_object_index(prober).expect("prober exists");
+
+    HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+    engine
+        .call_object_function(prober_index, "Probe", Vec::new())
+        .expect("terrain probe succeeds");
+    assert_eq!(
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "read-only GBack* queries must borrow terrain rather than copy it"
+    );
+    // The borrow must still answer exactly what the copy answered.
+    assert_eq!(
+        engine.objects[prober_index].state.local_vars.get("solid"),
+        Some(&Value::Bool(true)),
+        "the borrowed landscape reports the written solid pixel"
+    );
+    assert_eq!(
+        engine.objects[prober_index].state.local_vars.get("sky"),
+        Some(&Value::Bool(false)),
+        "the borrowed landscape reports untouched sky"
     );
 }
