@@ -98,7 +98,13 @@ pre-push:
           mkdir -p "$scratch/$(dirname "$file")"
           # Deleted in HEAD, or otherwise unreadable: nothing to format.
           git show "HEAD:$file" > "$scratch/$file" 2>/dev/null || continue
-          if ! rustfmt --edition 2021 --check "$scratch/$file" >/dev/null 2>&1; then
+          # Fed on stdin rather than by path: rustfmt resolves `mod`
+          # declarations against the filesystem, so a crate root checked beside
+          # sibling modules that are not in this scratch tree fails to *parse*
+          # and reports as unformatted — which made every new crate unpushable.
+          # stdin has no path to resolve against, and it reports through its
+          # output (a diff, or a parse error) rather than its exit status.
+          if [ -n "$(rustfmt --edition 2021 --check <"$scratch/$file" 2>&1)" ]; then
             echo "lefthook: not rustfmt-clean in HEAD: $file"
             status=1
           fi
