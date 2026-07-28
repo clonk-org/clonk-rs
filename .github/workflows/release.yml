@@ -10,9 +10,23 @@ name: Release
 # here would never fire an `on: push: tags` workflow.
 
 on:
+  # Weekly, hands-off: if releasable commits landed since the last tag and
+  # main's CI is green, this bumps, tags, builds and publishes with no
+  # interaction. Cadence rather than per-push, because main takes ~40 commits
+  # a day and releasing on each one would mean several releases daily at
+  # ~210 billed minutes apiece.
+  schedule:
+    - cron: '0 9 * * 1'
+  # Reacts to a `chore: release <version>` commit, which is how the
+  # release-prepare pull request publishes when one is used.
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version (MAJOR.MINOR.PATCH). Leave blank to infer from commits.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -26,8 +40,111 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: Prepare the version
+    # Only the scheduled and manual paths bump. The push path is reacting to a
+    # release commit that already exists.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      prepared: ${{ steps.bump.outputs.prepared }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Nothing here reviews the code, so refuse to release a tree whose own
+      # CI is failing. `Clonk Rust CI` runs on every push to main, so its
+      # latest conclusion is an accurate verdict on what is about to ship.
+      - name: Require main's CI to be green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion=$(gh run list --workflow "Clonk Rust CI" --branch main \
+            --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
+          echo "latest Clonk Rust CI on main: $conclusion"
+          if [[ "$conclusion" != "success" ]]; then
+            echo "refusing to release: main's CI is '$conclusion'" >&2
+            exit 1
+          fi
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-prepare
+          cache-on-failure: true
+
+      - name: Cache git-cliff
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/release-tools
+          key: git-cliff-${{ runner.os }}-${{ hashFiles('scripts/prepare-release.sh') }}
+
+      # prepare-release.sh runs `cargo update --offline`, which needs the
+      # registry present. On a cold runner cache it would otherwise fail.
+      - name: Populate the cargo registry
+        run: cargo fetch --locked
+
+      - name: Bump and commit
+        id: bump
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          # Exit 3 means "no releasable commits"; any other non-zero is a real
+          # failure and must not be mistaken for a quiet skip.
+          set +e
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            scripts/prepare-release.sh "$REQUESTED_VERSION"
+          else
+            scripts/prepare-release.sh
+          fi
+          status=$?
+          set -e
+          if [[ "$status" -eq 3 ]]; then
+            echo "no releasable commits since the last tag"
+            echo "prepared=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [[ "$status" -ne 0 ]]; then
+            echo "prepare-release.sh failed with status $status" >&2
+            exit "$status"
+          fi
+
+          version=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("Cargo.toml").read_text(encoding="utf-8")
+          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
+          print(re.search(r'^version = "([^"]+)"$', section.group(1), re.M).group(1))
+          PY
+          )
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore: release ${version}"
+          git push origin HEAD:main
+          echo "prepared=true" >> "$GITHUB_OUTPUT"
+
   tag:
     name: Tag and draft
+    needs: [prepare]
+    # `always()` keeps the push path working, where prepare is skipped.
+    if: always() && needs.prepare.result != 'failure' && needs.prepare.outputs.prepared != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -41,6 +158,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # main's tip, not the triggering SHA: on the scheduled path the
+          # release commit was created by the prepare job moments ago.
+          ref: main
           fetch-depth: 0
 
       - name: Decide whether this commit releases

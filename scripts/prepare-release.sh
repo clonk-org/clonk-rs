@@ -18,6 +18,8 @@ set -euo pipefail
 # Usage:
 #   scripts/prepare-release.sh              # version inferred from commits
 #   scripts/prepare-release.sh 1.2.3        # explicit version
+#
+# Exit codes: 0 prepared, 3 nothing to release, anything else a failure.
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
@@ -80,9 +82,11 @@ print(found.group(1))
 PY
 )
 
+# Exit 3 specifically means "no releasable commits", distinct from a genuine
+# failure, so automation can skip quietly without masking a broken script.
 if [[ "$current" == "$version" ]]; then
     echo "workspace version is already $version; nothing to prepare" >&2
-    exit 1
+    exit 3
 fi
 
 echo "preparing release: $current -> $version"
