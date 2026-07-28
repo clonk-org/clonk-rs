@@ -13,6 +13,11 @@ use crate::resource_packet::{
 use clonk_engine::NetworkResourceCore;
 
 pub const RESOURCE_MAX_LOAD_PER_PEER_PER_FILE: usize = 3;
+/// Concurrent chunk requests across all resources (C++ `C4NetResMaxLoad`).
+///
+/// Kept at C++'s 20 rather than OpenClonk's 5: the swarm behaviour here is
+/// pinned by tests against C++, and the smaller `STOCK_CHUNK_SIZE` already cuts
+/// the bulk that can sit ahead of control from 2 MB to 200 KB without diverging.
 pub const RESOURCE_MAX_LOADS: usize = 20;
 pub const RESOURCE_LOAD_TIMEOUT_SECONDS: u64 = 60;
 pub const RESOURCE_DELETE_TIME_SECONDS: u64 = 60;

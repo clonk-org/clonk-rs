@@ -356,6 +356,42 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
+- **Published resources advertise 10 KiB chunks, not 100 KiB**
+  (`crates/clonk-network/src/host_resource_core.rs`, `STOCK_CHUNK_SIZE`; C++
+  `C4NetResChunkSize`, LegacyClonk 7d43b47 src/C4Network2Res.h:27). Approved
+  2026-07-27. OpenClonk's value; LegacyClonk raised it to 100 KiB in `2557ff3d`
+  to "better utilize available upload speed".
+  Chunk size is carried per resource in the core and honoured by whoever
+  downloads it, so this is a local publishing choice rather than a protocol
+  change and a stock C++ peer follows it unmodified.
+  The reason it is worth losing transfer throughput for: resource chunks and
+  control share one **strictly-ordered** reliable-UDP sequence space whenever a
+  peer has no TCP route, which is the ordinary internet-play topology because NAT
+  punch-through is UDP-only and `GetDataConnection` falls back to the message
+  connection. At the 499-byte payload limit a 100 KiB chunk is **206 datagrams**,
+  so it puts 206 sequence numbers ahead of every later control packet, and one
+  lost fragment withholds all of them from the game loop until the repair lands —
+  which proceeds at ten fragment asks per check packet. Three concurrent chunks
+  to one peer queue 618 fragments ahead of control. 10 KiB is 21 datagrams,
+  cutting that head-of-line window by an order of magnitude, and with
+  `RESOURCE_MAX_LOADS` unchanged at C++'s 20 it also drops the maximum
+  outstanding bulk from 2 MB to 200 KB.
+  The existing `reliable_udp_redundant_copies` mitigation does not help here: it
+  is gated at inner packets <= 256 bytes, so it protects control against *loss*
+  and does nothing about control being *queued behind* bulk.
+  Scope: the stock size applies only once a core becomes loadable. C++ decodes an
+  unloadable core by substituting its compiled-in defaults for size, CRC and
+  chunk size alike, so a custom value could not round-trip there and would mean
+  nothing if it did.
+  Not changed, having been examined: the control loop still blocks on a pending
+  player-file resource (`crates/clonk-app/src/game_app/sound.rs:649-687`). That
+  wait is a correctness requirement — the tick carries a `JoinPlayer` that needs
+  the file — and unlike a plain control stall it is already surfaced to the
+  player through `begin_blocking_resource_wait_at` ("player file for %s").
+  `RESOURCE_MAX_LOADS` was likewise left at C++'s 20 rather than OpenClonk's 5,
+  because the swarm behaviour is pinned by tests against C++ and the chunk-size
+  change already carries the benefit.
+
 - **PreSend is sized from measured control lateness, not from ping alone**
   (`crates/clonk-app-netplay/src/network.rs`, `observe_control_lateness_ms` and
   `update_control_presend`; C++ `C4GameControlNetwork::CalcPerformance`,

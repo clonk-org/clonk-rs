@@ -13,7 +13,30 @@ use thiserror::Error;
 
 use crate::ResourceFileOwnership;
 
-const STOCK_CHUNK_SIZE: u32 = 100 * 1024;
+/// Chunk size advertised for resources this peer publishes.
+///
+/// OpenClonk's 10 KiB rather than LegacyClonk's 100 KiB
+/// (`C4NetResChunkSize`, C4Network2Res.h:27). Chunk size is carried per
+/// resource in the core and honoured by whoever downloads it, so this is a local
+/// choice rather than a protocol change, and a stock C++ peer follows it.
+///
+/// Why it matters more than transfer throughput: resource chunks and control
+/// share one *strictly-ordered* reliable-UDP sequence space whenever a peer has
+/// no TCP route, which is the ordinary internet-play topology because NAT
+/// punch-through is UDP-only (`GetDataConnection` falls back to the message
+/// connection). A 100 KiB chunk is 206 datagrams at the 499-byte payload limit,
+/// so it puts 206 sequence numbers ahead of every later control packet, and one
+/// lost fragment withholds all of them from the game loop until the repair
+/// lands -- at ten fragment asks per check packet. 10 KiB is 21 datagrams,
+/// cutting that head-of-line window by an order of magnitude. LegacyClonk raised
+/// this to 100 KiB in 2557ff3d to "better utilize available upload speed", which
+/// is the right trade for a fast link and the wrong one for a narrow one.
+const STOCK_CHUNK_SIZE: u32 = 10 * 1024;
+
+/// What an unloadable core carries. Mirrors `clonk_engine`'s
+/// `NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE`, which is the value C++ substitutes
+/// when decoding one, so the core round-trips unchanged.
+const UNLOADABLE_CHUNK_SIZE: u32 = 100 * 1024;
 const DEFAULT_MAX_LOAD_FILE_SIZE: u32 = 100 * 1024 * 1024;
 pub const MAX_PLAYER_BIG_ICON_SIZE: u64 = 20 * 1024;
 static NEXT_STAGED_PATH: AtomicU64 = AtomicU64::new(0);
@@ -192,7 +215,12 @@ pub fn build_host_resource_core(
         loadable: false,
         file_size: u32::MAX,
         file_crc: u32::MAX,
-        chunk_size: STOCK_CHUNK_SIZE,
+        // A non-loadable core carries no transferable payload, and C++ decodes
+        // one by substituting the compiled-in defaults for size, CRC and chunk
+        // size alike (`legacy.rs` mirrors that). A custom chunk size therefore
+        // cannot round-trip here and would mean nothing if it did, so the stock
+        // value is applied only once the resource becomes loadable below.
+        chunk_size: UNLOADABLE_CHUNK_SIZE,
         contents_crc,
         file_sha: None,
         filename: spec.resource_name,
@@ -313,6 +341,7 @@ pub fn build_host_resource_core(
     }
 
     core.loadable = true;
+    core.chunk_size = STOCK_CHUNK_SIZE;
     core.file_size = physical_size as u32;
     core.file_crc = physical_crc;
     Ok(HostResourcePublication {

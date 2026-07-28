@@ -100,7 +100,13 @@ fn cpp_publishes_a_packed_scenario_with_separate_content_and_file_checksums() {
     assert!(publication.core.loadable);
     assert_eq!(publication.core.file_size, packed.len() as u32);
     assert_eq!(publication.core.file_crc, c4group_file_crc(&packed));
-    assert_eq!(publication.core.chunk_size, 100 * 1024);
+    // 10 KiB, OpenClonk's value, not LegacyClonk's 100 KiB. Resource chunks and
+    // control share one strictly-ordered reliable-UDP sequence space whenever a
+    // peer has no TCP route -- the ordinary internet topology, since NAT
+    // punch-through is UDP-only -- so a 100 KiB chunk puts 206 datagrams ahead
+    // of every later control packet and one lost fragment withholds all of them.
+    // See the PORT_STATUS divergence entry.
+    assert_eq!(publication.core.chunk_size, 10 * 1024);
     assert_eq!(publication.core.file_sha, None);
     assert_eq!(
         publication.standalone_path.as_deref(),
@@ -186,6 +192,9 @@ fn cpp_keeps_an_oversize_definition_logical_but_unloadable() {
     assert!(!publication.core.loadable);
     assert_eq!(publication.core.file_size, u32::MAX);
     assert_eq!(publication.core.file_crc, u32::MAX);
+    // An unloadable core keeps C++'s default: nothing will be transferred, and
+    // C++ substitutes its compiled-in defaults when decoding one, so a custom
+    // chunk size could not round-trip.
     assert_eq!(publication.core.chunk_size, 100 * 1024);
     assert_eq!(publication.core.file_sha, None);
     assert_eq!(publication.standalone_path, None);
