@@ -138,14 +138,14 @@ fn install(
                 // Colour helps a developer reading a terminal and corrupts
                 // every other consumer, so it follows the stream itself.
                 .with_ansi(io::stderr().is_terminal())
-                .with_target(false)
+                .with_target(true)
                 .with_level(true),
         )
         .with(file.map(|file| {
             fmt::layer()
                 .with_writer(Mutex::new(file))
                 .with_ansi(false)
-                .with_target(false)
+                .with_target(true)
                 .with_level(true)
         }))
         .with(fmt::layer().with_writer(gui).event_format(GuiSinkFormat))

@@ -38,6 +38,12 @@ fn the_developer_console_sees_engine_lines_the_message_board_does_not() {
         session_log.contains("engine could not open the scenario"),
         "the file sink still receives every logged line"
     );
+    // The session log is read by a developer, who needs to know which
+    // subsystem a line came from — and which target to name in `LC_LOG`.
+    assert!(
+        session_log.contains(SCRIPT_LOG_TARGET),
+        "the session log records the event target: {session_log}"
+    );
 
     if let Some(parent) = log_path.parent() {
         let _ = fs::remove_dir_all(parent);
