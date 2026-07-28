@@ -1379,65 +1379,106 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
             .with_context(|| format!("failed to remove {}", archive_path.display()))?;
     }
 
-    let file = File::create(&archive_path)
-        .with_context(|| format!("unable to create archive {}", archive_path.display()))?;
-    let mut zip = ZipWriter::new(file);
     let base_name = package_dir
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "package".to_string());
-    // Timestamps are pinned rather than inherited: `FileOptions::default()`
-    // reads the wall clock when `zip`'s `time` feature is enabled, which any
-    // dependency in the workspace could turn on through feature unification.
-    // Release archives — and the content-addressed hashes taken over them —
-    // must not depend on that.
+
+    write_deterministic_zip(
+        &archive_path,
+        package_dir,
+        Some(&base_name),
+        &executable_bit_for_bin_directory,
+        true,
+    )?;
+    Ok(archive_path)
+}
+
+/// `bin/` ships executables; everything else is data.
+fn executable_bit_for_bin_directory(relative: &Path) -> u32 {
+    if relative.components().next().map(|c| c.as_os_str()) == Some(std::ffi::OsStr::new("bin")) {
+        0o755
+    } else {
+        0o644
+    }
+}
+
+/// Writes a byte-reproducible zip of `source_root`.
+///
+/// Every axis that could otherwise vary between builds is pinned here rather
+/// than inherited from the environment: entry order, timestamps, permissions
+/// and compression. Component archives are named after their own digest, so
+/// any drift would defeat deduplication and re-upload hundreds of megabytes of
+/// unchanged data.
+///
+/// `mode_for` receives the path relative to `source_root`, so it is unaffected
+/// by whichever `entry_prefix` the caller chose.
+fn write_deterministic_zip(
+    archive_path: &Path,
+    source_root: &Path,
+    entry_prefix: Option<&str>,
+    mode_for: &dyn Fn(&Path) -> u32,
+    include_directory_entries: bool,
+) -> Result<()> {
+    let file = File::create(archive_path)
+        .with_context(|| format!("unable to create archive {}", archive_path.display()))?;
+    let mut zip = ZipWriter::new(file);
+
+    // `FileOptions::default()` reads the wall clock when `zip`'s `time` feature
+    // is enabled, which any dependency could turn on through feature
+    // unification. Release archives must not depend on that.
     let epoch = zip::DateTime::default();
     let dir_options = FileOptions::default()
         .compression_method(CompressionMethod::Stored)
         .last_modified_time(epoch)
         .unix_permissions(0o755);
-    zip.add_directory(format!("{}/", base_name), dir_options)?;
-
     let file_options = FileOptions::default()
         .compression_method(CompressionMethod::Deflated)
         .last_modified_time(epoch);
 
-    let mut entries = WalkDir::new(package_dir)
+    let entry_name = |relative: &Path| match entry_prefix {
+        Some(prefix) => {
+            let mut prefixed = PathBuf::from(prefix);
+            prefixed.push(relative);
+            path_to_zip_string(&prefixed)
+        }
+        None => path_to_zip_string(relative),
+    };
+
+    if include_directory_entries {
+        if let Some(prefix) = entry_prefix {
+            zip.add_directory(format!("{prefix}/"), dir_options)?;
+        }
+    }
+
+    let mut entries = WalkDir::new(source_root)
         .into_iter()
         .collect::<std::result::Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| {
         entry
             .path()
-            .strip_prefix(package_dir)
-            .map(path_to_zip_string)
+            .strip_prefix(source_root)
+            .map(&entry_name)
             .unwrap_or_default()
     });
 
     for entry in entries {
-        let rel_path = entry.path().strip_prefix(package_dir).unwrap();
-        if rel_path.as_os_str().is_empty() {
+        let relative = entry.path().strip_prefix(source_root).unwrap();
+        if relative.as_os_str().is_empty() {
             continue;
         }
-        let mut zip_path = PathBuf::from(&base_name);
-        zip_path.push(rel_path);
-        let zip_path_str = path_to_zip_string(&zip_path);
+        let zip_path_str = entry_name(relative);
 
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
-            let options = dir_options;
-            zip.add_directory(format!("{}/", zip_path_str), options)?;
+            if include_directory_entries {
+                zip.add_directory(format!("{zip_path_str}/"), dir_options)?;
+            }
             continue;
         }
 
         if metadata.is_file() {
-            let mut options = file_options;
-            if zip_path.components().nth(1).map(|c| c.as_os_str())
-                == Some(std::ffi::OsStr::new("bin"))
-            {
-                options = options.unix_permissions(0o755);
-            } else {
-                options = options.unix_permissions(0o644);
-            }
+            let options = file_options.unix_permissions(mode_for(relative));
             zip.start_file(&zip_path_str, options)?;
             let mut src = File::open(entry.path())?;
             io::copy(&mut src, &mut zip)?;
@@ -1445,7 +1486,7 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
     }
 
     zip.finish()?;
-    Ok(archive_path)
+    Ok(())
 }
 
 fn archive_file_name(version: &str, target_triple: &str) -> String {
