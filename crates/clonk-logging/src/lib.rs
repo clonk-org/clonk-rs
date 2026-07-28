@@ -129,8 +129,9 @@ fn install(
     game_log: Option<GameLogCapture>,
 ) -> Result<(), TryInitError> {
     let gui = Optional(capture).and(message_board_sink(game_log));
-    tracing_subscriber::registry()
-        .with(env_filter(default_level))
+    let (filter, rejected_directives) = env_filter(default_level);
+    let installed = tracing_subscriber::registry()
+        .with(filter)
         .with(
             fmt::layer()
                 .with_writer(io::stderr)
@@ -148,7 +149,16 @@ fn install(
                 .with_level(true)
         }))
         .with(fmt::layer().with_writer(gui).event_format(GuiSinkFormat))
-        .try_init()
+        .try_init();
+    // Only reportable once a subscriber exists; before this point every event
+    // is discarded without a trace.
+    if installed.is_ok() && !rejected_directives.is_empty() {
+        tracing::warn!(
+            directives = %rejected_directives.join(","),
+            "ignored unparseable log filter directives"
+        );
+    }
+    installed
 }
 
 pub struct ConsoleLogWriter {
@@ -366,12 +376,15 @@ fn open_session_log(log_path: &Path) -> io::Result<File> {
     File::create(log_path)
 }
 
-fn env_filter(default_level: &'static str) -> EnvFilter {
+fn env_filter(default_level: &str) -> (EnvFilter, Vec<String>) {
     let lc_log = std::env::var("LC_LOG").ok();
     let rust_log = std::env::var("RUST_LOG").ok();
-    let requested =
-        explicit_filter_directive(lc_log.as_deref(), rust_log.as_deref()).unwrap_or(default_level);
-    EnvFilter::new(format!("{DEFAULT_DEPENDENCY_FILTER},{requested}"))
+    let (requested, rejected) =
+        resolve_filter_directive(lc_log.as_deref(), rust_log.as_deref(), default_level);
+    (
+        EnvFilter::new(format!("{DEFAULT_DEPENDENCY_FILTER},{requested}")),
+        rejected,
+    )
 }
 
 fn init_with_default_level(default_level: &'static str) {
@@ -380,20 +393,36 @@ fn init_with_default_level(default_level: &'static str) {
     }
 }
 
+/// Resolve `LC_LOG`/`RUST_LOG` into the directive to install, along with any
+/// comma-separated parts that had to be dropped.
+///
+/// A directive is kept part by part rather than all-or-nothing: rejecting the
+/// whole string over one typo moves the level towards the default in whichever
+/// direction that happens to lie, so asking to go quieter can make the log
+/// louder. An empty or whitespace-only value counts as unset, which is how
+/// shell wrappers export a variable they did not set.
 #[doc(hidden)]
-pub fn select_filter_directive<'a>(
-    lc_log: Option<&'a str>,
-    rust_log: Option<&'a str>,
-    default_level: &'a str,
-) -> &'a str {
-    explicit_filter_directive(lc_log, rust_log).unwrap_or(default_level)
-}
-
-fn explicit_filter_directive<'a>(
-    lc_log: Option<&'a str>,
-    rust_log: Option<&'a str>,
-) -> Option<&'a str> {
-    lc_log
+pub fn resolve_filter_directive(
+    lc_log: Option<&str>,
+    rust_log: Option<&str>,
+    default_level: &str,
+) -> (String, Vec<String>) {
+    let (accepted, rejected): (Vec<&str>, Vec<&str>) = lc_log
         .or(rust_log)
-        .filter(|directive| EnvFilter::try_new(directive).is_ok())
+        .map(str::trim)
+        .filter(|directive| !directive.is_empty())
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .partition(|part| EnvFilter::try_new(*part).is_ok());
+    let directive = if accepted.is_empty() {
+        default_level.to_string()
+    } else {
+        accepted.join(",")
+    };
+    (
+        directive,
+        rejected.into_iter().map(str::to_string).collect(),
+    )
 }
