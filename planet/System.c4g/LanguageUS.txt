@@ -989,6 +989,7 @@ IDS_MSG_TRANSFERNOTYPE=Cannot drop a %s into %s.
 IDS_MSG_TRYLEAGUESIGNUP=League login for player %s on %s...
 IDS_MSG_UPDATEFAILED=Update failed.
 IDS_MSG_UPDATEINPROGRESS=Update still in progress. Please wait.
+IDS_MSG_UPDATEINSTALLMANUALLY=Version %s cannot be installed from within the game. Please install it manually.
 IDS_MSG_UPDATENOTAVAILABLE=The update is possibly not yet available for this operating system.
 IDS_MSG_USINGPLR=Using %s
 IDS_MSG_USINGPLR_DESC=Use this player to continue the savegame

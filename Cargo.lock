@@ -716,6 +716,8 @@ dependencies = [
  "clonk-resources",
  "clonk-scaling",
  "clonk-script",
+ "clonk-update",
+ "clonk-update-net",
  "flate2",
  "freetype-rs",
  "gethostname",

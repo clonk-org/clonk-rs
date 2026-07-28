@@ -3259,23 +3259,6 @@ impl GameApp {
         self.process_about_dialog_actions_with_sound(actions, true)
     }
 
-    /// Update discovery and installation are owned by the launcher/package
-    /// manager in the Rust build. Consequently the incoming, manual and
-    /// automatic `C4StartupMainDlg::OnShown` paths (cpp:258-276) are
-    /// intentionally not repeated in-process; the visible About action
-    /// provides the hand-off.
-    pub(crate) fn open_launcher_update_dialog(&mut self) -> Result<(), EngineError> {
-        self.push_message_dialog(
-            clonk_frontend::message_dialog::MessageDialogState::regular_ok(
-                "Updates for this build are managed outside the game. Use your launcher or package manager to check for updates.",
-                "Updates",
-                // C++ C4UpdateDlg uses Ico_Ex_Update (GUIIcons2 phase 14).
-                clonk_frontend::message_dialog::MessageDialogIcon::Extended(14),
-            ),
-            MessageDialogContinuation::None,
-        )
-    }
-
     pub(crate) fn open_network_game_dialog(&mut self) {
         self.external_irc_dialog_visible = false;
         self.external_irc_dialog = None;
@@ -3651,6 +3634,8 @@ impl GameApp {
                 | MessageDialogContinuation::LeaguePlayerAuthWelcome
                 | MessageDialogContinuation::LeagueEndRetry
                 | MessageDialogContinuation::LeagueEndRejected
+                // `C4UpdateDlg.cpp:277` opens the wait with btnAbort.
+                | MessageDialogContinuation::UpdateCheckWait
         ) {
             state.set_button_label(
                 MessageDialogButton::Cancel,
@@ -4166,6 +4151,21 @@ impl GameApp {
                 self.open_options_advanced_dialog()?;
             }
             MessageDialogContinuation::OptionsAdvancedWarning => {}
+            // Closing the wait dialog by any route is C++'s abort
+            // (`C4UpdateDlg.cpp:294-296`), which reports nothing.
+            MessageDialogContinuation::UpdateCheckWait => self.abort_update_check(),
+            MessageDialogContinuation::UpdatePrompt { version }
+                if result == clonk_frontend::message_dialog::MessageDialogResult::Yes =>
+            {
+                // C++ downloads and applies here (`C4UpdateDlg.cpp:386-394`).
+                // The download and the out-of-process applier are not wired
+                // yet, so the accepted prompt says so rather than appearing to
+                // start an install that cannot finish.
+                let server = self.update_server_address();
+                self.show_manual_install_notice(&version, server)?;
+            }
+            MessageDialogContinuation::UpdatePrompt { .. } => {}
+            MessageDialogContinuation::UpdateNotice => {}
         }
         Ok(())
     }

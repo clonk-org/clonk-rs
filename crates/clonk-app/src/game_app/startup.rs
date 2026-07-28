@@ -5056,15 +5056,28 @@ impl GameApp {
                     self.begin_startup_dialog_fade_in();
                 }
                 self.begin_frontend_music_entry();
-                // Both are consumed unconditionally: C++ applies an incoming
-                // package and then honours a requested check, so neither may
-                // survive into the next boot.
-                let had_incoming = self.incoming_update.take().is_some();
+                // `C4StartupMainDlg::OnShown` (cpp:258-276). Both are consumed
+                // unconditionally: C++ applies an incoming package and *then*
+                // honours a requested check — the incoming branch is not an
+                // `else if` — so neither may survive into the next boot.
+                let incoming = self.incoming_update.take();
                 let check_requested = std::mem::take(&mut self.update_check_requested);
-                if had_incoming || check_requested {
-                    if let Err(err) = self.open_launcher_update_dialog() {
-                        tracing::warn!(error = ?err, "failed to open command-line update hand-off");
+                let had_incoming = incoming.is_some();
+                if let Some(package) = incoming {
+                    if let Err(err) = self.refuse_incoming_update(&package) {
+                        tracing::warn!(error = ?err, "failed to report the refused update package");
                     }
+                }
+                // Manual by command line or url (cpp:265-269), otherwise the
+                // once-a-day automatic check (cpp:270-275).
+                if check_requested
+                    || (self.automatic_update_check_allowed && self.automatic_update_enabled())
+                {
+                    if let Err(err) = self.check_for_updates(!check_requested) {
+                        tracing::warn!(error = ?err, "failed to start the update check");
+                    }
+                }
+                if had_incoming || check_requested {
                     return;
                 }
                 // `--sandbox`: jump straight into the built-in sandbox once boot

@@ -823,28 +823,248 @@
         }
     }
 
+    /// The message dialog a finished check left behind.
+    fn update_result_dialog(app: &GameApp) -> &PendingMessageDialog {
+        app.message_dialogs.last().expect("visible update result")
+    }
+
     #[test]
-    fn about_update_action_opens_launcher_handoff_and_retains_about() {
+    fn an_available_update_opens_the_localized_yes_no_prompt() {
+        // `C4UpdateDlg.cpp:383-385`: IDS_MSG_ANUPDATETOVERSIONISAVAILA under
+        // btnYesNo and Ico_Ex_Update, captioned with the update server.
+        use crate::update_check::test_support::{manifest_for, FakeTransport, OFFERED_VERSION};
+
+        let mut app = new_classic_menu_app(640, 480);
+        let transport = FakeTransport::serving(&manifest_for(
+            OFFERED_VERSION,
+            clonk_core::version::ENGINE_VERSION,
+        ));
+
+        app.check_for_updates_with(false, &transport)
+            .expect("present an available update");
+
+        let prompt = update_result_dialog(&app);
+        assert_eq!(
+            prompt.state.message(),
+            "An update to version 99.0.0 is available. \
+             Do you want to download and install this update?"
+        );
+        assert_eq!(prompt.state.caption(), app.update_server_address());
+        assert_eq!(
+            prompt.state.buttons(),
+            clonk_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            prompt.state.icon(),
+            clonk_frontend::message_dialog::MessageDialogIcon::Extended(14)
+        );
+        assert!(matches!(
+            prompt.continuation,
+            MessageDialogContinuation::UpdatePrompt { .. }
+        ));
+
+        // Declining is silent, exactly as C++'s ShowMessageModal returning
+        // false is (`C4UpdateDlg.cpp:385-394`).
+        let mut declined = new_classic_menu_app(640, 480);
+        declined
+            .check_for_updates_with(false, &transport)
+            .expect("present an available update");
+        declined
+            .finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline the update");
+        assert!(declined.message_dialogs.is_empty());
+
+        // Accepting reports that this build cannot install it: the download
+        // and the out-of-process applier are not wired yet.
+        app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("accept the update");
+        assert_eq!(
+            update_result_dialog(&app).state.message(),
+            "Version 99.0.0 cannot be installed from within the game. \
+             Please install it manually."
+        );
+    }
+
+    #[test]
+    fn only_a_manual_check_reports_that_there_is_no_update() {
+        // `C4UpdateDlg.cpp:396-400`: the "no update" message is suppressed for
+        // an automatic check, so a daily background check is silent.
+        use crate::update_check::test_support::{manifest_for, FakeTransport};
+
+        let transport = FakeTransport::serving(&manifest_for(
+            clonk_core::version::PORT_VERSION,
+            clonk_core::version::ENGINE_VERSION,
+        ));
+
+        let mut manual = new_classic_menu_app(640, 480);
+        manual
+            .check_for_updates_with(false, &transport)
+            .expect("present a manual check with nothing to offer");
+        assert_eq!(
+            update_result_dialog(&manual).state.message(),
+            "No update available for this version."
+        );
+        assert_eq!(
+            update_result_dialog(&manual).state.buttons(),
+            clonk_frontend::message_dialog::MessageDialogButtons::OK
+        );
+
+        let mut automatic = new_classic_menu_app(640, 480);
+        automatic
+            .check_for_updates_with(true, &transport)
+            .expect("run an automatic check with nothing to offer");
+        assert!(automatic.message_dialogs.is_empty());
+    }
+
+    #[test]
+    fn a_failed_check_reports_the_transport_error_after_the_localized_prefix() {
+        // `C4UpdateDlg.cpp:308-322` appends the client's own message to
+        // IDS_MSG_UPDATEFAILED, and does so for automatic checks too.
+        use crate::update_check::test_support::FakeTransport;
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.check_for_updates_with(true, &FakeTransport::failing("https://mirror.invalid/u"))
+            .expect("present a failed check");
+
+        let failure = update_result_dialog(&app);
+        assert!(
+            failure.state.message().starts_with("Update failed.: "),
+            "{}",
+            failure.state.message()
+        );
+        assert!(failure.state.message().contains("503"));
+        assert_eq!(
+            failure.state.icon(),
+            clonk_frontend::message_dialog::MessageDialogIcon::Extended(14)
+        );
+    }
+
+    #[test]
+    fn a_release_built_against_another_engine_asks_for_a_manual_install() {
+        // C++ hides this behind IsValidUpdate and says "no update available"
+        // (`C4UpdateDlg.cpp:248`). The release does exist here, and installing
+        // its content under the running engine would silently prune the game's
+        // definitions, so it is reported as an update to install by hand.
+        use crate::update_check::test_support::{manifest_for, FakeTransport, OFFERED_VERSION};
+
+        let [major, minor, objects, revision, build] = clonk_core::version::ENGINE_VERSION;
+        let mut app = new_classic_menu_app(640, 480);
+        app.check_for_updates_with(
+            false,
+            &FakeTransport::serving(&manifest_for(
+                OFFERED_VERSION,
+                [major, minor, objects + 1, revision, build],
+            )),
+        )
+        .expect("present an engine-changing release");
+
+        assert_eq!(
+            update_result_dialog(&app).state.message(),
+            "Version 99.0.0 cannot be installed from within the game. \
+             Please install it manually."
+        );
+    }
+
+    #[test]
+    fn an_incoming_update_package_is_refused_instead_of_executed() {
+        // C++'s ApplyUpdate extracts the update program out of the handed-in
+        // group and runs it (`C4UpdateDlg.cpp:171-215`). A file argument is
+        // not a reason to execute a program, so this port refuses.
+        let mut app = new_classic_menu_app(640, 480);
+
+        app.refuse_incoming_update(Path::new("Patch.c4u"))
+            .expect("report the refused package");
+
+        let refusal = update_result_dialog(&app);
+        assert_eq!(refusal.state.caption(), "Update");
+        assert_eq!(refusal.state.message(), "Update failed.");
+        assert!(app.update_check.is_none(), "nothing is fetched for a package");
+    }
+
+    #[test]
+    fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
+        // `C4UpdateDlg.cpp:264-268`: an automatic check runs at most daily; a
+        // manual one ignores the gate; and the attempt is recorded either way,
+        // successful or not.
+        let user_data = tempdir().expect("update throttle user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Network", "LastUpdateTime", "1000")
+            .expect("record a previous check");
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+
+        app.check_for_updates_at(true, 1000 + 60 * 60 * 24 - 1)
+            .expect("throttled automatic check");
+        assert!(app.update_check.is_none(), "an automatic check is daily");
+        assert!(app.message_dialogs.is_empty());
+
+        app.check_for_updates_at(false, 1000 + 60 * 60 * 24 - 1)
+            .expect("manual check ignores the throttle");
+        assert!(app.update_check.is_some());
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload config")
+                .get_in(Some("Network"), "LastUpdateTime")
+                .map(str::to_string),
+            Some((1000 + 60 * 60 * 24 - 1).to_string()),
+            "the attempt is stored before the result is known"
+        );
+
+        // A second request while one is in flight says so rather than starting
+        // another; C++ cannot reach this because its check blocks.
+        app.check_for_updates_at(false, 1000 + 60 * 60 * 24)
+            .expect("second manual check");
+        assert_eq!(
+            update_result_dialog(&app).state.message(),
+            "Update still in progress. Please wait."
+        );
+
+        app.abort_update_check();
+        app.check_for_updates_at(true, 1000 + 2 * 60 * 60 * 24)
+            .expect("a day later the automatic check runs");
+        assert!(app.update_check.is_some());
+    }
+
+    #[test]
+    fn about_update_action_runs_a_manual_check_and_retains_about() {
+        // `C4StartupAboutDlg::OnUpdateBtn` runs `C4UpdateDlg::CheckForUpdates`
+        // with fAutomatic unset (C4StartupAboutDlg.cpp:377-380), which opens
+        // the cancellable wait dialog at C4UpdateDlg.cpp:275-279.
         let mut app = new_classic_menu_app(640, 480);
 
         app.open_about_dialog();
         app.process_about_dialog_actions(vec![
             clonk_frontend::startup_about_dlg::AboutDlgAction::CheckForUpdates,
         ])
-        .expect("launcher-owned update checks must not be a fatal parity boundary");
+        .expect("a manual update check must not be a fatal parity boundary");
         assert_eq!(app.startup_view, StartupView::About);
         assert!(app.startup_about_dialog.is_some());
-        let handoff = app.message_dialogs.last().expect("visible update result");
-        assert_eq!(handoff.state.caption(), "Updates");
-        assert!(handoff.state.message().contains("launcher or package manager"));
+        assert!(app.update_check.is_some(), "the check must be in flight");
+        let wait = app.message_dialogs.last().expect("visible update wait");
+        assert_eq!(wait.state.caption(), app.update_server_address());
+        assert_eq!(wait.state.message(), "Checking for updates...");
         assert_eq!(
-            handoff.state.icon(),
+            wait.state.icon(),
             clonk_frontend::message_dialog::MessageDialogIcon::Extended(14)
         );
+        assert_eq!(
+            wait.state.buttons(),
+            clonk_frontend::message_dialog::MessageDialogButtons::CANCEL
+        );
+        assert_eq!(
+            wait.state
+                .button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel),
+            "Abort"
+        );
 
-        app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-            .expect("dismiss launcher hand-off");
+        app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("abort the update check");
         assert!(app.message_dialogs.is_empty());
+        assert!(
+            app.update_check.is_none(),
+            "closing the wait dialog abandons the check"
+        );
         assert_eq!(app.startup_view, StartupView::About);
 
         for key in [VirtualKeyCode::Return, VirtualKeyCode::Space] {
@@ -863,8 +1083,8 @@
                 .expect("activate focused update button");
             assert_eq!(app.message_dialogs.len(), 1);
             assert_eq!(app.startup_view, StartupView::About);
-            app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-                .expect("dismiss focused-key launcher hand-off");
+            app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+                .expect("abort the focused-key update check");
             assert!(app.message_dialogs.is_empty());
             assert_eq!(app.startup_view, StartupView::About);
         }

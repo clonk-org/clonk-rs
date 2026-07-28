@@ -2778,10 +2778,13 @@
         app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
             .expect("SDL Up mnemonic requests updates");
         assert_eq!(app.message_dialogs.len(), 1);
-        assert_eq!(app.message_dialogs[0].state.caption(), "Updates");
+        assert_eq!(
+            app.message_dialogs[0].state.caption(),
+            app.update_server_address()
+        );
         assert!(app.ui_sound_log.is_empty());
-        app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-            .expect("dismiss update handoff");
+        app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("abort the update check");
 
         app.show_main_menu();
         app.handle_game_over()
@@ -4310,16 +4313,18 @@
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press Update");
         app.handle_mouse_button(ElementState::Released)
-            .expect("show launcher update hand-off");
+            .expect("start the manual update check");
         assert_eq!(app.startup_view, StartupView::About);
-        let handoff = app.message_dialogs.last().expect("visible update result");
-        assert_eq!(handoff.state.caption(), "Updates");
-        assert!(handoff.state.message().contains("launcher or package manager"));
-        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
-            .expect("press update hand-off OK");
-        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
-            .expect("dismiss update hand-off");
+        let wait = app.message_dialogs.last().expect("visible update wait");
+        assert_eq!(wait.state.caption(), app.update_server_address());
+        assert_eq!(wait.state.message(), "Checking for updates...");
+        assert!(app.update_check.is_some());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("press Escape on the update wait");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("abort the update check");
         assert!(app.message_dialogs.is_empty());
+        assert!(app.update_check.is_none());
         assert_eq!(app.startup_view, StartupView::About);
 
         app.handle_cursor_moved(about_back_point)

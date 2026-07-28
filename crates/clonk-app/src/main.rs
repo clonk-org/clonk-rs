@@ -46,6 +46,7 @@ mod save_browser;
 mod settings;
 mod startup_player_files;
 mod system_fonts;
+mod update_check;
 
 // Step 6a of the decomposition campaign (rust/REFACTOR_PLAN.md): per-area
 // extension files of the `impl GameApp` block. Each file holds
@@ -79,6 +80,8 @@ mod game_app_scensel;
 mod game_app_sound;
 #[path = "game_app/startup.rs"]
 mod game_app_startup;
+#[path = "game_app/update.rs"]
+mod game_app_update;
 
 #[path = "main_parts/app_state.rs"]
 mod main_app_state;
@@ -1735,6 +1738,8 @@ impl GameApp {
             auto_start_classic_command_line_scenario: false,
             incoming_update: None,
             update_check_requested: false,
+            update_check: None,
+            automatic_update_check_allowed: !cfg!(test),
             ingame_gui_pointer: None,
             ingame_pointer: None,
             ingame_mouse_help: false,

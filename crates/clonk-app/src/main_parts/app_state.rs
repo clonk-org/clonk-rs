@@ -4,6 +4,7 @@
 //! the same binary crate, re-exported from `main.rs` so every path resolves.
 
 use super::*;
+use crate::update_check::PendingUpdateCheck;
 
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
@@ -541,6 +542,17 @@ pub(crate) struct GameApp {
     pub(crate) incoming_update: Option<PathBuf>,
     /// A one-shot update check requested by `/update` or `clonk:update`.
     pub(crate) update_check_requested: bool,
+    /// The update query in flight, if any (`C4UpdateDlg::CheckForUpdates`
+    /// waiting on its `C4Network2VersionInfoClient`, cpp:280-300).
+    pub(crate) update_check: Option<PendingUpdateCheck>,
+    /// Whether showing the main menu may start the *automatic* check
+    /// (`C4StartupMainDlg.cpp:270-275`).
+    ///
+    /// Off in test builds: a suite that opened a network-backed wait dialog on
+    /// every app it boots would be testing the updater in every unrelated
+    /// case. A test covering the boot path sets it explicitly. The manual
+    /// command-line check is not gated by it.
+    pub(crate) automatic_update_check_allowed: bool,
     /// Raw window position used by C4GUI-style viewport/menu hit-testing.
     /// Gameplay keeps a separate pointer because C4MouseControl clamps raw
     /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).

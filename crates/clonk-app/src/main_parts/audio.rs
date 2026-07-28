@@ -3689,6 +3689,16 @@ pub(crate) enum MessageDialogContinuation {
         new_percent: i32,
         remaining_seconds: u32,
     },
+    /// The cancellable wait while a check runs, C++'s `pWaitDlg`
+    /// (`C4UpdateDlg.cpp:275-279`). Closing it abandons the check.
+    UpdateCheckWait,
+    /// `IDS_MSG_ANUPDATETOVERSIONISAVAILA` (`C4UpdateDlg.cpp:383-385`).
+    UpdatePrompt {
+        version: String,
+    },
+    /// Every informational update result: no update, a failure, or a release
+    /// this build cannot install in place.
+    UpdateNotice,
     OptionsControlCapture(clonk_frontend::startup_options_controls::ControlCaptureTarget),
     OptionsAlternateServerNotice,
     OptionsResetConfiguration,

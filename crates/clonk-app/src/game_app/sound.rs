@@ -466,7 +466,9 @@ impl GameApp {
                     self.begin_startup_dialog_fade(StartupDialog::MainMenu);
                     self.show_main_menu();
                 }
-                AboutDlgAction::CheckForUpdates => self.open_launcher_update_dialog()?,
+                // `C4StartupAboutDlg::OnUpdateBtn` runs a manual check
+                // (`C4StartupAboutDlg.cpp:377-380`).
+                AboutDlgAction::CheckForUpdates => self.check_for_updates(false)?,
                 AboutDlgAction::PageChanged(_) if play_activation_sound => {
                     self.play_ui_sound("Click");
                 }
@@ -499,6 +501,7 @@ impl GameApp {
         }
         self.poll_startup_game_search()?;
         self.poll_scenario_selector_discovery()?;
+        self.poll_update_check()?;
         self.poll_startup_irc()?;
         self.poll_classic_direct_reference_query()?;
         self.poll_startup_network_connection()?;
