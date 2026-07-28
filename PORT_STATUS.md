@@ -176,8 +176,177 @@ not an accepted parity baseline.
 Behavior changes also require the relevant scenario sweep/audit and rebuilt
 live comparison.
 
+## Low-power hardware
+
+Reference machine: M4 Max. Simulation cost is measured with
+`cargo run --release -p clonk-engine --example scenario_profile -- <scenario> <frames>`,
+which boots real installed content and times `Engine::tick`. Where a profile is
+cited it is macOS `sample` at 1 ms, aggregated over the `advance_tick` subtree
+only, so scenario loading is excluded.
+
+The 300-frame runs in the table below are the startup burst and are noisy by
+±20% on a shared machine; the 6000-frame `03_Chaos` figure is the one to
+regress against.
+
+Per-frame simulation cost by scenario, before against after, 2000 frames each.
+Both binaries are run **interleaved** in the same pass and repeated twice, so
+machine drift hits both arms; single 300-frame runs swing ±20% on a shared
+machine and must not be compared across time. `before` is the profiler built
+from `4ad017765`, `after` is the same example built from this branch.
+
+| scenario | objects | mean before | mean after | delta | p50 before | p50 after | delta |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `EkeReloaded/InterplanetaryCivilwar/MeltMe` | 22 | 0.466 ms | 0.418 ms | -10.2% | 179 us | 148 us | -17.1% |
+| `ClonkMars/01_Fossae` | 41 | 1.227 ms | 1.065 ms | -13.2% | 818 us | 703 us | -14.1% |
+| `ClonkMars/08_Phobos` | 51 | 1.616 ms | 1.303 ms | -19.4% | 1.222 ms | 0.989 ms | -19.1% |
+| `ClonkMars/03_Chaos` | 130 | 2.962 ms | 2.212 ms | -25.3% | 2.699 ms | 1.971 ms | -27.0% |
+| `ClonkMars/07_Abyss` | 202 | 3.417 ms | 2.754 ms | -19.4% | 2.577 ms | 1.980 ms | -23.2% |
+| `ClonkMars/06_Chasma` | 290 | 6.012 ms | 4.685 ms | -22.1% | 3.393 ms | 2.501 ms | -26.3% |
+
+Repeats agree within ~1% on a quiet machine. p99 moves too, though less:
+`03_Chaos` 8.23 -> 6.48 ms, `07_Abyss` 21.41 -> 19.53 ms.
+
+Cost is roughly linear in object count, not quadratic, so the wall is
+per-object work rather than an all-pairs scan, and the saving grows with object
+count because more objects mean more script callbacks.
+
+Projected onto the stated Pi multipliers (`K_sim` 9 for a Pi 4). **These are
+arithmetic on reference-machine measurements, not runs on Pi hardware — no Pi
+was in the loop for any number in this file.** `03_Chaos` mean goes from
+2.96 ms x 9 = 26.7 ms to 2.21 ms x 9 = 19.9 ms against the 28 ms
+`INGAME_FRAME_INTERVAL`, and a two-frame control tick from 53 ms to 40 ms
+against a 55 ms period — from no headroom to roughly 25% headroom at the mean.
+p99 remains over budget on a Pi 4, which is what the degradation levers exist
+for.
+
+Where the frame actually goes (`03_Chaos`, 122 objects, `advance_tick` = 100%):
+`tick_global_effects` 47.7% and `dispatch_object_effect_events` 27.1% — about
+three quarters of the tick is script-driven effect callbacks — against
+`exec_mobile_object_movement` 6.5%. Roughly a third of the tick is
+`malloc`/`free`. Snapshot construction is **not** a factor: `tick` minus
+`tick_without_snapshot` is 0.09 ms at 128 objects (2.7%).
+
+Scenario **loading** is the other half of the problem and shares the same
+bottleneck. Over a whole `03_Chaos` process (23563 samples),
+`Scenario::apply` is 51% against `advance_tick`'s 44%, and 99% of that
+`apply` subtree is `run_legacy_init_placements` -> `init_create_object` ->
+`call_object_function` -> `Vm::invoke_script_function` — object-placement
+script callbacks running through the same VM the frame loop uses. Wall time is
+13.8-15.7 s for `03_Chaos` on the reference machine, so a Pi 4 (K_sim ~9)
+spends roughly two minutes before the first frame. That is not addressed here
+and is tracked under Open.
+
+Inside `Vm::invoke_script_function` the cost is representation, not dispatch:
+`memcmp` 13.4% + `DYLD-STUB$$memcmp` 5.9% = **19.3% string comparison**, and
+`sip::Hasher::write` 10.7% + `hash_one::<&str>` 6.1% = **16.9% string
+hashing** — about 36% of VM time spent hashing and comparing names, against
+`Value::clone` at 3.5%. The AST tree-walk being slower than C++'s 84-opcode
+stack VM is therefore real but is not primarily a dispatch-shape problem.
+
+Two earlier hypotheses were measured and killed. `benches/engine_tick.rs` is
+not evidence for any of this — its Bouncer fixture exercises the command-DSL
+marshalling shortcut rather than gameplay. Landscape uploads to the GPU were
+already dirty-rect, not full-surface (`texture_upload_plan`,
+`crates/clonk-app-render/src/gpu_renderer.rs`); a full 1.23 MB upload happens
+only on first sight, on an extent/format change, above 75% dirty coverage,
+above 128 accumulated rects, or after a skipped revision.
+
+Landed optimizations, each with its measurement:
+
+- **Read-only terrain queries borrow the landscape instead of copying it**
+  (`LazyHostWorldProvider::with_landscape_borrow`,
+  `crates/clonk-engine/src/compat/world.rs`;
+  `Engine::lazy_host_world_landscape_borrow`,
+  `crates/clonk-engine/src/engine/host_tables.rs`). `GBackSolid` and the rest
+  of C4Wrappers.h:66-92 read one pixel; the lazy host world answered them from
+  a deep copy of the entire landscape, once per callback that touched terrain.
+  `03_Chaos`, 6000 frames: mean 2.645 ms -> **2.223 ms (-16.0%)**, p50
+  2.328 ms -> **1.910 ms (-18.0%)**, wall 15.87 s -> 13.34 s. In the profile
+  `Landscape::clone` (7.6% inclusive) and `drop_glue::<Landscape>` (7.0%)
+  disappear entirely and the `advance_tick` sample count falls 12316 -> 10258.
+  Pure representation: reads see the same bytes and a terrain *write* still
+  materializes the private copy, so simulation state and ordering are
+  unchanged. `cargo xtask parity verify` and `cargo xtask engine-snapshots
+  verify` pass. Pinned by `read_only_terrain_queries_never_clone_the_landscape`;
+  `lazy_host_world_call_object_materializes_only_on_world_access` and
+  `lazy_host_world_contact_materialization_is_deferred_until_query` had their
+  materialization counts updated from 1 to 0 — those assertions pin an
+  implementation cost, not C++ behavior.
+
+- **Per-frame and script name tables hash without a per-process seed**
+  (`CommandObjectSnapshots`, `crates/clonk-engine/src/command/snapshot.rs`;
+  `SlotMap`/`NamedLocalMap`/`FunctionVarMap` and the host-function maps,
+  `crates/clonk-script/src/vm.rs`, `engine.rs`). String hashing and string
+  comparison were about 36% of `Vm::invoke_script_function` (see the profile
+  above). The hot key-probed maps now use `rustc_hash`. Safety argument, and it
+  is pinned as a test rather than left as prose:
+  `std::hash::RandomState` reseeds per process, so any simulation outcome that
+  read HashMap iteration order would already desync between two runs of one
+  seed — it does not, and `refresh_command_master_list_order` exists precisely
+  so iteration order cannot decide a command target. A fixed-seed hasher is
+  therefore strictly *more* reproducible than what it replaces. Pinned by
+  `per_frame_lookup_tables_hash_without_a_per_process_seed`
+  (`crates/clonk-engine/src/engine/exec_order.rs`), which asserts the engine
+  hasher is stable across instances while `RandomState` is not. All four gates
+  pass, including `parity verify`.
+
+- **`c4_names_equal` compares folded byte streams instead of building owned
+  keys** (`crates/clonk-resources/src/material.rs`). `c4_name_key` allocates
+  twice per call and was the comparison primitive, so comparing two material
+  names cost four allocations; it was 1.6% of `advance_tick` self time.
+  Equality is now an iterator comparison. Pinned by
+  `name_equality_matches_the_owned_key_projection`, which asserts the new
+  predicate agrees with the old owned-key one across case, padding, embedded
+  NULs and latin1 spellings.
+
+- **The per-viewport pixel plane is deferred until something touches pixels**
+  (`PixelPlane`, `crates/clonk-graphics/src/surface.rs`). `Surface::new`
+  unconditionally allocated and zeroed `width * height * 4` bytes, and
+  `render_viewport` built one per viewport per frame — but under GPU scene
+  capture every primitive records a command instead of rasterizing, so those
+  bytes were never read or written. The plane is now a `OnceCell` materialized
+  inside the byte accessor, so a missed path allocates rather than reading
+  garbage. Measured by `gpu_capture_frames_materialize_no_viewport_pixel_planes`
+  over 60 steady-state 640x480 capture frames: **1,228,800 deferred bytes per
+  frame, 0 materializations**, and the removed allocate+zero+free costs
+  0.030 ms/frame on the reference machine — memory-bandwidth-bound work, so the
+  stated `K_blit` 10/25/75 multipliers put it near 0.3 ms on a Pi 4 and 2.3 ms
+  on a Pi 1. `deferred_pixel_plane_rasterizes_identically_to_an_eager_one`
+  pins that a non-capture surface still produces identical pixels.
+
+- **The landscape render cache stops re-cloning the grid it is already anchored
+  to** (`crates/clonk-frontend/src/graphics_system.rs`) and **particles are
+  grouped by layer once per object pass** instead of rescanning the whole
+  particle slice per object per pass
+  (`draw_definition_particles`, same file). Both are presentation-only. These
+  two have no wall-time measurement of their own — the render path has no
+  headless benchmark and `scenario_profile` does not exercise it at all — so
+  they are recorded as structural removals of per-frame work, not as a measured
+  speedup. Do not cite a number for them that does not exist.
+
 ## Open
 
+- Open gap (found 2026-07-27, not closed): **scenario load is ~half the
+  process cost and is unoptimized.** `ClonkMars/03_Chaos` takes 13.8-15.7 s to
+  load on the reference machine — roughly two minutes on a Pi 4 — and 99% of
+  that is object-placement script callbacks
+  (`Engine::run_legacy_init_placements` -> `init_create_object` ->
+  `Vm::invoke_script_function`), i.e. the same VM the frame loop uses. Anything
+  that makes script name resolution cheaper (interning definition/function
+  names instead of hashing and comparing `String` keys) pays here twice.
+- Open gap (found 2026-07-27, not closed): **Raspberry Pi 0-3 cannot start.**
+  wgpu-hal's GLES backend rejects any context below GLES 3.0
+  (wgpu-hal-0.16.2 src/gles/adapter.rs:218-225), and VideoCore IV is GLES 2.0,
+  so no adapter is produced on any backend — `build_framebuffer`
+  (`crates/clonk-app/src/main_parts/audio.rs`) now widens to `Backends::all()`
+  and reports this explicitly instead of failing opaquely, but it cannot
+  create a device that does not exist. There is no CPU presentation fallback
+  either: the CPU rasterizer branch in `crates/clonk-app/src/main.rs` is
+  unreachable because the retained-GPU path matches all three `AppMode`
+  variants, and even reaching it would not help, since `pixels` needs a wgpu
+  device to blit a CPU buffer to the window. Closing this means replacing
+  `pixels` with a CPU presenter (`softbuffer` or equivalent) and re-enabling
+  that branch; Pi 4/5 are unaffected.
 - Open gap (found 2026-07-25, not closed): script `AddMessage` still emits a
   fresh `C4GM_Multiple` record (`compat/menus_messages.rs`) instead of calling
   `C4GameMessageList::Append(..., fNoDuplicates=false)` like C++
@@ -313,6 +482,74 @@ hashed but not exported by the C++ bridge; unequal-count duplicate IDs remain
 an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
+
+- **A catch-up burst reserves wall-clock for drawing, and a repaint floor
+  outranks every frame skip** (`RenderFloor`,
+  `crates/clonk-app/src/main_parts/app_state.rs`; `RENDER_RESERVE_PERCENT` and
+  `MAX_TIME_BETWEEN_RENDERS`, `crates/clonk-app/src/main_parts/assets.rs`;
+  C++ `C4Application::Execute`/`Game.DoSkipFrame`, LegacyClonk 7d43b47
+  src/C4Application.cpp:463-476). Approved 2026-07-27.
+  C++ degrades only by thinning whole *graphics opportunities*, which assumes
+  the simulation itself fits its tick. On Pi-class hardware it does not: one
+  `advance_simulation_pass` drains the whole clamped 250 ms backlog
+  (`MAX_ACCUMULATED_TIME`) without ever returning to the event loop, so the
+  window can freeze for the entire burst. The ported `AutoFrameSkip` cannot
+  help — it is a one-shot latch consumed at a graphics opportunity that never
+  arrives, and `network_control_pacing` returns a no-op offline
+  (`crates/clonk-app/src/game_app/network.rs`), so single-player has no lever
+  at all.
+  Two presentation-only rules are added. `simulation_burst_budget` bounds one
+  pass at `(100 - RENDER_RESERVE_PERCENT)/RENDER_RESERVE_PERCENT` times the
+  last measured graphics pass, floored at one simulation period and capped at
+  the repaint floor; `must_present` forces a repaint after 500 ms (~2 Hz)
+  whatever `skip_redraw`, `/fast N` or the automatic latch decided.
+  Worked example (arithmetic from the constants, not a measurement — no Pi
+  was in the loop): at a Pi-4-like 35 ms per simulation frame and a 10 ms
+  graphics pass, one pass previously drained the full 250 ms backlog, i.e. 9
+  frames / ~315 ms with no repaint, so the window updated at best ~3 Hz and,
+  under `/fast N` or network thinning, arbitrarily less. The budget becomes
+  `max(28 ms, 5.67 x 10 ms) = 57 ms`, so a pass runs ~2 frames and yields,
+  putting repaints at roughly 14 Hz for about 15% of the CPU.
+  Determinism is unaffected: the budget is checked only *after* a frame
+  executed, unspent backlog stays in the accumulator, and the same simulation
+  frames therefore run in the same order — only spread across more application
+  passes. Nothing here is visible to script or to the control stream.
+  Pinned by `a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent`,
+  `render_floor_reserves_a_share_of_the_wall_clock_for_drawing` and
+  `render_floor_forces_a_repaint_at_two_hertz_however_deep_the_skip`.
+
+- **Presentation detail is chosen from measured graphics cost instead of
+  static config only** (`PresentationDetailGovernor` / `PresentationDetail`,
+  `crates/clonk-app/src/main_parts/app_state.rs`; C++ `Graphics.FireParticles`
+  and `Graphics.DisableGamma`, LegacyClonk 7d43b47 src/C4Config.cpp).
+  Approved 2026-07-27. C++ exposes both as static `[Graphics]` switches the
+  player sets once. A Pi needs them chosen for it, because the player cannot
+  know in advance which scenario will exceed the budget.
+  After `DETAIL_STEP_DOWN_PASSES` (30) consecutive graphics passes over the
+  simulation interval the governor drops fire particles, then the monitor-gamma
+  resolve pass — a second full-screen fill doing three dependent texture
+  fetches per pixel. It restores one step at a time after
+  `DETAIL_STEP_UP_PASSES` (120) passes under half the budget; the deadband
+  between the two thresholds is what stops it oscillating. It engages only
+  while the round's frozen `Graphics.AutoFrameSkip` allows automatic
+  degradation, and clearing that flag restores full detail immediately.
+  Both steps are presentation-only, so two clients running at different detail
+  levels stay in lockstep. Pinned by
+  `presentation_detail_steps_down_only_on_a_sustained_overrun` and
+  `presentation_detail_recovers_only_with_real_headroom`.
+
+- **Framebuffer creation widens the GPU backend set instead of aborting**
+  (`build_framebuffer` / `framebuffer_backend_attempts`,
+  `crates/clonk-app/src/main_parts/audio.rs`). Approved 2026-07-27. This has no
+  C++ counterpart: the oracle uses SDL/OpenGL directly. The port asked wgpu for
+  `Backends::PRIMARY` only (VULKAN | METAL | DX12 | BROWSER_WEBGPU — no GL at
+  all), chosen because the GL backend probes for libEGL and logs a spurious
+  "Unable to open libEGL" on macOS. On a board whose only usable driver is
+  GLES that produced no adapter, and `PixelsBuilder::build` then failed out of
+  `main` with no retry and no fallback. `PRIMARY` is still tried first, so
+  desktop behavior and the macOS log are unchanged; only the failure path is
+  new. An explicit `WGPU_BACKEND` is honoured exactly and never widened.
+  Pinned by `framebuffer_backends_widen_to_gl_before_giving_up`.
 
 - **The new-player dialog seeds its name from the localized rank ladder**
   (`GameApp::new_player_default_name`, `crates/clonk-app/src/game_app/startup.rs`;
