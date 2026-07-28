@@ -203,8 +203,8 @@ pub use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, OutstandingLoad, PeerStatusOutcome, ResourceCatalog,
     ResourceCatalogAction, ResourceLoadPoll, ResourceRegistration,
     RESOURCE_DISCOVER_INTERVAL_SECONDS, RESOURCE_DISCOVER_TIMEOUT_SECONDS,
-    RESOURCE_LOAD_TIMEOUT_SECONDS, RESOURCE_MAX_LOADS, RESOURCE_MAX_LOAD_PER_PEER_PER_FILE,
-    RESOURCE_STATUS_INTERVAL_SECONDS,
+    RESOURCE_LOAD_TIMEOUT_SECONDS, RESOURCE_MAX_LOADS, RESOURCE_MAX_LOAD_PER_PEER_IN_GAME,
+    RESOURCE_MAX_LOAD_PER_PEER_PER_FILE, RESOURCE_STATUS_INTERVAL_SECONDS,
 };
 pub use resource_file_store::{
     ChunkWriteOutcome, ResourceFileOwnership, ResourceFileStore, ResourceFileStoreError,

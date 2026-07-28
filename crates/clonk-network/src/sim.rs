@@ -558,6 +558,19 @@ pub struct ControlDeliveryConfig {
     /// Stagger between copies, so one congestion burst is less likely to take
     /// all of them.
     pub duplicate_delay_ms: u64,
+    /// Size of a bulk packet pushed through the *same* reliable-UDP stream as
+    /// control, modelling a resource chunk. Zero disables it.
+    ///
+    /// This is the mechanism that actually freezes a session, and it is not the
+    /// same thing as bandwidth contention: because delivery is strictly ordered,
+    /// a chunk's fragments occupy sequence numbers *ahead of* every later
+    /// control packet, so one lost fragment withholds all of them until the
+    /// repair lands. Unlike `cross_traffic_*_bps`, which only competes for link
+    /// capacity, this goes through the real endpoint and takes real packet
+    /// numbers.
+    pub bulk_packet_bytes: usize,
+    /// How often such a chunk is sent.
+    pub bulk_interval: Duration,
     pub lookahead: Lookahead,
     /// Which of the two real client pacings to replay; see [`replay_lockstep`].
     ///
@@ -579,6 +592,8 @@ impl Default for ControlDeliveryConfig {
             seed: 0x5eed_1234,
             duplicates: 1,
             duplicate_delay_ms: 0,
+            bulk_packet_bytes: 0,
+            bulk_interval: Duration::from_secs(1),
             lookahead: Lookahead::Fixed(Duration::ZERO),
             catch_up: false,
         }
@@ -709,6 +724,7 @@ pub fn run_control_delivery(config: &ControlDeliveryConfig) -> LinkReport {
     let mut arrivals: BTreeMap<u32, Duration> = BTreeMap::new();
     let mut latencies: Vec<Duration> = Vec::new();
     let mut next_control_at = Duration::ZERO;
+    let mut next_bulk_at = config.bulk_interval;
     let mut tick: u32 = 0;
     let deadline = CONTROL_PERIOD * (config.ticks as u32 + 40);
     let duplicates = config.duplicates.max(1);
@@ -730,6 +746,17 @@ pub fn run_control_delivery(config: &ControlDeliveryConfig) -> LinkReport {
             }
             tick += 1;
             next_control_at += CONTROL_PERIOD;
+        }
+
+        // A resource chunk on the same ordered stream as control.
+        if config.bulk_packet_bytes > 0 && now >= next_bulk_at {
+            let chunk = vec![0u8; config.bulk_packet_bytes];
+            if let Ok(step) = host.send_packet(client_addr, &chunk) {
+                for datagram in step.datagrams {
+                    link.enqueue(now, false, datagram.payload);
+                }
+            }
+            next_bulk_at += config.bulk_interval;
         }
 
         link.pump_cross_traffic(now, STEP);
@@ -1235,5 +1262,76 @@ mod tests {
             adaptive.frozen_time_fraction(),
             cpp.frozen_time_fraction()
         );
+    }
+}
+
+#[cfg(test)]
+mod bulk_stream_tests {
+    use super::*;
+
+    fn lossy() -> LinkConditions {
+        LinkConditions {
+            rtt_ms: 80,
+            jitter_ms: 20,
+            loss_permille: 20,
+            ..LinkConditions::perfect()
+        }
+    }
+
+    fn control_under_bulk(bulk_packet_bytes: usize) -> (Duration, Duration) {
+        let mut worst = Duration::ZERO;
+        let mut mean_total = Duration::ZERO;
+        let seeds = [1u64, 2, 3, 4, 5, 6, 7, 8];
+        for seed in seeds {
+            let report = run_control_delivery(&ControlDeliveryConfig {
+                conditions: lossy(),
+                ticks: 300,
+                seed,
+                duplicates: 3,
+                bulk_packet_bytes,
+                bulk_interval: Duration::from_millis(500),
+                catch_up: true,
+                lookahead: Lookahead::Adaptive {
+                    estimator: ControlLatencyEstimator::new(),
+                    target_fps: 38,
+                },
+                ..ControlDeliveryConfig::default()
+            });
+            worst = worst.max(report.max_latency());
+            mean_total += report.mean_latency();
+        }
+        (mean_total / seeds.len() as u32, worst)
+    }
+
+    #[test]
+    fn bulk_on_the_same_ordered_stream_delays_control_in_proportion_to_its_size() {
+        // The mechanism behind the multi-second freezes, measured through the
+        // real reliable-UDP layer rather than argued. Delivery is strictly
+        // ordered, so a chunk's fragments take sequence numbers ahead of every
+        // later control packet and one lost fragment withholds all of them.
+        // Outstanding bulk per connection is `per_peer_cap * chunk_size`, so
+        // these are the three configurations that matter.
+        let (quiet_mean, quiet_worst) = control_under_bulk(0);
+        let (cpp_mean, cpp_worst) = control_under_bulk(300 * 1024); // 100 KiB x3
+        let (now_mean, now_worst) = control_under_bulk(30 * 1024); // 10 KiB x3
+        let (tight_mean, tight_worst) = control_under_bulk(10 * 1024); // 10 KiB x1
+
+        assert!(
+            cpp_mean > now_mean && now_mean > tight_mean,
+            "smaller outstanding bulk must mean less delayed control: \
+             C++ {cpp_mean:?} -> shipped {now_mean:?} -> in-game {tight_mean:?}"
+        );
+        assert!(
+            cpp_worst > now_worst,
+            "and the worst case must improve too: {cpp_worst:?} -> {now_worst:?}"
+        );
+        // The tightest setting gets control most of the way back to a link
+        // carrying no bulk at all, which is the point of narrowing it in game.
+        assert!(
+            tight_mean < quiet_mean + (now_mean - quiet_mean) / 2,
+            "in-game window should recover most of the gap: quiet {quiet_mean:?}, \
+             shipped {now_mean:?}, in-game {tight_mean:?}"
+        );
+        assert!(quiet_worst < tight_worst, "bulk still costs something");
     }
 }

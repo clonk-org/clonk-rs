@@ -67,6 +67,9 @@ fn main() {
         seed: env_u64("LC_SEED", 0x5eed_1234),
         duplicates: env_u64("LC_DUP", 1).max(1),
         duplicate_delay_ms: env_u64("LC_DUP_DELAY_MS", 0),
+        // A resource chunk on the same ordered stream as control.
+        bulk_packet_bytes: env_u64("LC_BULK_BYTES", 0) as usize,
+        bulk_interval: Duration::from_millis(env_u64("LC_BULK_INTERVAL_MS", 500)),
         lookahead,
         catch_up: env_u64("LC_CATCHUP", 0) != 0,
     };

@@ -1687,6 +1687,14 @@ pub(crate) async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &m
                 broadcast_status(status, true, state).await;
                 if status.state == NETWORK_STATE_GO {
                     state.game_started = true;
+                    // Once control is flowing, bulk sitting ahead of it in the
+                    // shared ordered stream is what freezes everybody, so the
+                    // per-peer window narrows. In the lobby the opposite is
+                    // true: nothing is being blocked and a fast join is what the
+                    // player is waiting for.
+                    state
+                        .resource_catalog
+                        .set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME);
                 }
                 committed = true;
             }

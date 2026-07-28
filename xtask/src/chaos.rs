@@ -26,6 +26,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
+use std::time::Duration;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -300,6 +301,8 @@ fn measure(
                 seed: *seed,
                 duplicates: 3,
                 duplicate_delay_ms: 0,
+                bulk_packet_bytes: 0,
+                bulk_interval: Duration::from_millis(500),
                 lookahead: Lookahead::Adaptive {
                     estimator: clonk_network::ControlLatencyEstimator::new(),
                     target_fps: 38,

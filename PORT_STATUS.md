@@ -356,6 +356,31 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
+- **One chunk in flight per peer while a game is running, three in the lobby**
+  (`crates/clonk-network/src/resource_catalog.rs`,
+  `ResourceCatalog::set_max_loads_per_peer`, narrowed at the game-start
+  transition in `session/host_dispatch.rs`; C++
+  `C4NetResMaxLoadPerPeerPerFile` = 3 always). Approved 2026-07-27.
+  This cap, not `C4NetResMaxLoad`, is what governs head-of-line blocking: bulk
+  outstanding *on one connection* is this times the chunk size, and the global
+  cap only spreads work across different peers, which are different connections.
+  Measured through the real reliable-UDP layer at 80 ms / +-20 ms / 2% loss,
+  with a chunk pushed down the same ordered stream as control (8 seeds x 300
+  ticks, `sim::bulk_stream_tests`). Control latency, mean and worst:
+  no bulk at all 49.7 ms / 80 ms;
+  100 KiB x3, C++'s configuration, 110.1 ms / 892 ms;
+  10 KiB x3, this port after the chunk-size entry below, 63.1 ms / 445 ms;
+  10 KiB x1, this entry, 53.1 ms / 393 ms.
+  So the narrower window recovers most of the remaining gap to an unloaded link.
+  It is *not* set to one everywhere, because it also divides transfer throughput
+  by three — a peer can only have one chunk in flight per round trip, and on a
+  300 ms link that turns a multi-megabyte scenario download into minutes. The
+  blocking only costs anything while there is control to block, so the lobby
+  keeps C++'s three, where a fast join is the only thing the player is waiting
+  for. Purely local request scheduling either way: a serving peer cannot tell how
+  many chunks we chose to have outstanding, so this is invisible to a stock C++
+  peer.
+
 - **Drawing has a floor while catching up**
   (`crates/clonk-app/src/main_parts/app_state.rs`, `apply_render_floor`;
   `NETWORK_RENDER_FLOOR_FRAMES` = 18). Approved 2026-07-27. No C++ equivalent.
