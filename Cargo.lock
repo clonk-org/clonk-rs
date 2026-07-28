@@ -5636,6 +5636,7 @@ dependencies = [
  "anyhow",
  "clonk-engine",
  "clonk-logging",
+ "clonk-network",
  "clonk-resources",
  "image",
  "tempfile",

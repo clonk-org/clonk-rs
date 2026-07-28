@@ -1,4 +1,5 @@
 mod audit;
+mod chaos;
 mod dependency_licenses;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -63,6 +64,10 @@ fn main() -> Result<()> {
             let tail: Vec<String> = args.collect();
             dev_check::command(&tail)
         }
+        Some("chaos") => {
+            let tail: Vec<String> = args.collect();
+            chaos::command(&tail)
+        }
         Some("parity") => {
             let tail: Vec<String> = args.collect();
             parity_command(&tail)
@@ -85,7 +90,7 @@ fn main() -> Result<()> {
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
     );
 }
 
