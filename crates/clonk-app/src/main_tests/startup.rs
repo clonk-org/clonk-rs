@@ -2985,18 +2985,7 @@
 
     #[test]
     fn pathless_startup_skips_boot_worker_without_bypassing_loader_failure() {
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            None,
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), None)
         .expect("asset-less app state");
         install_classic_test_assets(&mut app);
         assert!(app.boot_loading.is_none(), "pathless app skips boot worker");
@@ -3260,18 +3249,7 @@
         config.set_in(Some("Graphics"), "Gamma2", "6579300");
         config.set_in(Some("Graphics"), "Gamma3", "13158600");
         config.save(paths.config_file()).expect("gamma config");
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("app");
         assert_eq!(
             app.loader_gamma,
@@ -3318,18 +3296,7 @@
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("installed paths");
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("app");
         let resources = app
             .loader_screen

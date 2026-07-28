@@ -803,16 +803,10 @@ protected func Initialize() { Random(100); }
 "#;
         let mut engine = Engine::with_seed(3);
         engine
-            .register_definition(
-                Definition::from_script("SAFE", "Fail safe", fail_safe_script)
-                    .expect("fail-safe script compiles"),
-            )
+            .register_script_definition("SAFE", "Fail safe", fail_safe_script)
             .expect("fail-safe definition registers");
         engine
-            .register_definition(
-                Definition::from_script("GONE", "Removed", removed_script)
-                    .expect("removed script compiles"),
-            )
+            .register_script_definition("GONE", "Removed", removed_script)
             .expect("removed definition registers");
 
         let survivor = engine

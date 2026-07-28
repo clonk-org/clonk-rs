@@ -392,27 +392,12 @@ func ProbeDrawDefMap() {
 
     #[test]
     fn blast_free_offsets_coordinates_without_explicit_controller() {
-        let object_context = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            4,
-            Vector2::new(5, 10),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            FULL_CON,
-        )
+        let object_context = HostObjectContext {
+            owner: 4,
+            controller: 4,
+            position: Vector2::new(5, 10),
+            ..idle_object_context()
+        }
         .with_controller(9);
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -463,27 +448,12 @@ func ProbeDrawDefMap() {
         // Only caused_by_plus_one == 0 selects the caller-relative fallback.
         // A negative explicit value remains global and maps to value-1
         // (C4Script.cpp:2284-2294).
-        let object_context = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            4,
-            Vector2::new(5, 10),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            FULL_CON,
-        )
+        let object_context = HostObjectContext {
+            owner: 4,
+            controller: 4,
+            position: Vector2::new(5, 10),
+            ..idle_object_context()
+        }
         .with_controller(9);
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -661,15 +631,11 @@ func ProbeDrawDefMap() {
     #[test]
     fn g_back_liquid_returns_false_in_height_landscape() {
         let landscape = Landscape::flat(8, 4);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_liquid(&[Value::Int(1), Value::Int(6)])
@@ -682,15 +648,11 @@ func ProbeDrawDefMap() {
     fn g_back_liquid_detects_liquid_column() {
         let mut landscape = Landscape::flat(8, 4);
         landscape.set_liquid_column(1, vec![LiquidSegment::new(5, 9)]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_liquid(&[Value::Int(1), Value::Int(6)])
@@ -729,27 +691,10 @@ func ProbeDrawDefMap() {
             false,
         )
         .with_materials(Some(Rc::new(materials)));
-        let object = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(4, 8),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object = HostObjectContext {
+            position: Vector2::new(4, 8),
+            ..idle_object_context()
+        };
         let mut script = clonk_script::Engine::new();
         register_host_functions(&mut script);
         script
@@ -798,15 +743,11 @@ func ProbeDrawDefMap() {
             vec![None; 2],
         ));
         landscape.resolve_grid_materials(|name| materials.id_of(name));
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         )
         .with_materials(Some(Rc::new(materials)));
         let mut script = clonk_script::Engine::new();
@@ -896,15 +837,11 @@ func ProbeDrawDefMap() {
             vec![None; 3],
         ));
         landscape.resolve_grid_materials(|name| materials.id_of(name));
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         )
         .with_materials(Some(Rc::new(materials)));
 
@@ -979,15 +916,11 @@ func ProbeDrawDefMap() {
             ));
             landscape.set_border_open(0, 0, false, false);
             landscape.resolve_grid_materials(|name| materials.id_of(name));
-            HostWorldContext::with_landscape(
+            world_with(
                 Vec::<HostWorldObject>::new(),
                 Some(landscape),
                 HashMap::new(),
-                Vec::new(),
                 HashMap::new(),
-                HashMap::new(),
-                1,
-                false,
             )
             .with_scenario_values(Rc::new(
                 ScenarioValueStore::with_landscape_push_pull_for_test(push_pull),
@@ -1139,15 +1072,11 @@ func ProbeDrawDefMap() {
                 )
             })
             .collect();
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(4, player), (2, opponent)]),
-            HashMap::new(),
-            1,
-            false,
         );
 
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
@@ -1444,24 +1373,9 @@ func ProbeDrawDefMap() {
         let objects = crew
             .iter()
             .map(|(id, status)| {
-                HostWorldObject::new(
-                    ObjectId::new(*id),
-                    "CLNK",
-                    *status,
-                    "Idle",
-                    None,
-                    None,
-                    None,
-                    4,
-                    100,
-                    crate::FULL_CON,
-                    Vector2::ZERO,
-                    Vector2::ZERO,
-                    Vec::new(),
-                    0,
-                    0,
-                    None,
-                )
+                fixture_world_object(ObjectId::new(*id), "CLNK")
+                    .with_status(*status)
+                    .with_owner(4)
             })
             .collect::<Vec<_>>();
         let player = PlayerState {
@@ -1574,24 +1488,10 @@ func ProbeDrawDefMap() {
             cursor: Some(cursor),
             ..PlayerState::default()
         };
-        let object = HostWorldObject::new(
-            cursor,
-            "CLNK",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            0,
-            100,
-            crate::FULL_CON,
-            Vector2::new(306, 271),
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let object = fixture_world_object(cursor, "CLNK")
+            .with_action_name("Walk")
+            .with_owner(0)
+            .with_position(Vector2::new(306, 271));
         let world = HostWorldContext::from_objects_with_players(vec![object], vec![player]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             get_player_val(&[Value::String("ViewX".into()), Value::Int(0), Value::Int(0)])
@@ -2535,24 +2435,9 @@ func Probe(object crew, object info_less)
                 crew: vec![crate::player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
-                    death_message: String::new(),
-                    core: Default::default(),
-                    rank: 0,
-                    rank_name: "Clonk".to_string(),
-                    experience: 0,
-                    rounds: 0,
                     physical: crate::PhysicalInfo::default(),
-                    death_count: 0,
-                    total_playing_time: 0,
-                    birthday: 0,
-                    age: 0,
-                    participation: 1,
-                    in_action: false,
-                    was_in_action: false,
-                    in_action_time: 0,
-                    has_died: false,
                     extra_data: extra_data.clone(),
-                    portraits: CrewPortraitState::default(),
+                    ..Default::default()
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -2674,24 +2559,8 @@ func Transfer(object donor, object recipient)
                 crew: vec![crate::player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
-                    death_message: String::new(),
-                    core: Default::default(),
-                    rank: 0,
-                    rank_name: "Clonk".to_string(),
-                    experience: 0,
-                    rounds: 0,
                     physical: crate::PhysicalInfo::default(),
-                    death_count: 0,
-                    total_playing_time: 0,
-                    birthday: 0,
-                    age: 0,
-                    participation: 1,
-                    in_action: false,
-                    was_in_action: false,
-                    in_action_time: 0,
-                    has_died: false,
-                    extra_data: Vec::new(),
-                    portraits: CrewPortraitState::default(),
+                    ..Default::default()
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -2864,15 +2733,11 @@ func Transfer(object donor, object recipient)
                 ..DefinitionMetadata::default()
             },
         );
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut script = clonk_script::Engine::new();

@@ -211,10 +211,6 @@ pub fn build_host_resource_core(
     let mut core = NetworkResourceCore {
         resource_type: spec.resource_type as u8,
         id: spec.resource_id,
-        derived_id: -1,
-        loadable: false,
-        file_size: u32::MAX,
-        file_crc: u32::MAX,
         // A non-loadable core carries no transferable payload, and C++ decodes
         // one by substituting the compiled-in defaults for size, CRC and chunk
         // size alike (`legacy.rs` mirrors that). A custom chunk size therefore
@@ -222,9 +218,9 @@ pub fn build_host_resource_core(
         // value is applied only once the resource becomes loadable below.
         chunk_size: UNLOADABLE_CHUNK_SIZE,
         contents_crc,
-        file_sha: None,
         filename: spec.resource_name,
         author,
+        ..Default::default()
     };
 
     // AddByFile deliberately skips GetStandalone for NRT_System, so the core

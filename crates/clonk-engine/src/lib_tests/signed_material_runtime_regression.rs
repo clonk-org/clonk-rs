@@ -223,16 +223,8 @@ fn negative_dig_ratio_casts_immediately_and_clears_with_one_rotation_draw() {
 
     let mut engine = Engine::with_seed(23);
     engine.set_materials(materials);
-    engine
-        .register_definition(
-            Definition::from_script("DGRR", "Digger", "#strict\n").expect("digger compiles"),
-        )
-        .expect("digger registers");
-    engine
-        .register_definition(
-            Definition::from_script("GEM_", "Gem", "#strict\n").expect("gem compiles"),
-        )
-        .expect("gem registers");
+    engine.register_script_definition("DGRR", "Digger", "#strict\n").expect("digger registers");
+    engine.register_script_definition("GEM_", "Gem", "#strict\n").expect("gem registers");
     let digger = engine
         .spawn_object(SpawnConfig::new("DGRR"))
         .expect("digger spawns");

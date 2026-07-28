@@ -12,10 +12,7 @@
 
         let mut definition = Definition::from_script("Walker", "Walker", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Walk".to_string()), actions);
         definition.set_physical(PhysicalInfo {
             walk: 35_000,
@@ -532,10 +529,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         // oracle as the script-host test: left offset +9, right 0 => -9 deg.
         let mut definition = Definition::from_script("Walker", "Walker", "").unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Walk".to_string()), actions);
         definition.set_rotateable(45);
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
@@ -583,10 +577,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         // positive vertex selects the -50 target, clamped to -15 degrees.
         let mut definition = Definition::from_script("Walker", "Walker", "").unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Walk".to_string()), actions);
         definition.set_rotateable(45);
         definition.set_shape_vertices(vec![ObjectVertex::new(5, 0).with_cnat(CNAT_BOTTOM)]);
@@ -626,10 +617,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         // walker does not retain angular velocity from its previous action.
         let mut definition = Definition::from_script("Walker", "Walker", "").unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Walk".to_string()), actions);
         definition.set_rotateable(45);
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
@@ -675,10 +663,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
 
         let mut definition = Definition::from_script("Climber", "Climber", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Scale".to_string(),
-            ActionSpec::default().with_procedure("scale"),
-        );
+        actions.insert("Scale".to_string(), ActionSpec::for_procedure("scale"));
         definition.configure_actions(Some("Scale".to_string()), actions);
         definition.set_physical(PhysicalInfo {
             scale: 30_000,
@@ -944,10 +929,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         let mut definition =
             Definition::from_script("FISH", "Fish", "#strict\n").expect("compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Swim".to_string(),
-            ActionSpec::default().with_procedure("SWIM"),
-        );
+        actions.insert("Swim".to_string(), ActionSpec::for_procedure("SWIM"));
         definition.configure_actions(Some("Swim".to_string()), actions);
         definition.set_physical(PhysicalInfo {
             swim: 100_000,
@@ -1034,10 +1016,7 @@ protected func Activity()
             },
         ]);
         let mut actions = HashMap::new();
-        actions.insert(
-            "Swim".to_string(),
-            ActionSpec::default().with_procedure("SWIM"),
-        );
+        actions.insert("Swim".to_string(), ActionSpec::for_procedure("SWIM"));
         actions.insert(
             "Turn".to_string(),
             ActionSpec::default()
@@ -1463,10 +1442,7 @@ protected func Activity() { SetActionTargets(); return(1); }
 
         let mut definition = Definition::from_script("Boat", "Boat", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Float".to_string(),
-            ActionSpec::default().with_procedure("float"),
-        );
+        actions.insert("Float".to_string(), ActionSpec::for_procedure("float"));
         definition.configure_actions(Some("Float".to_string()), actions);
         definition.set_physical(PhysicalInfo {
             float: 20,
@@ -1992,10 +1968,7 @@ func Death(by) { death_by = by; return 1; }
 
         let mut pusher_definition = Definition::from_script("Pusher", "Pusher", script).unwrap();
         let mut pusher_actions = HashMap::new();
-        pusher_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        pusher_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         pusher_actions.insert(
             "Push".to_string(),
             ActionSpec::default()
@@ -3083,24 +3056,7 @@ public func FailMagicUnderload() { return DoMagicEnergy(-1, this(), false); }
         let crew_info = |name: &str| player_file::CrewInfo {
             id: "FCCH".to_string(),
             name: name.to_string(),
-            death_message: String::new(),
-            core: Default::default(),
-            rank: 0,
-            rank_name: "Clonk".to_string(),
-            experience: 0,
-            rounds: 0,
-            physical: PhysicalInfo::default(),
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
-            participation: 1,
-            in_action: false,
-            was_in_action: false,
-            in_action_time: 0,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: Default::default(),
+            ..Default::default()
         };
 
         let mut engine = Engine::with_seed(0x148);
@@ -3348,24 +3304,8 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
                 crew: vec![player_file::CrewInfo {
                     id: "RANK".to_string(),
                     name: "Ranked".to_string(),
-                    death_message: String::new(),
-                    core: Default::default(),
-                    rank: 0,
                     rank_name: "Recruit".to_string(),
-                    experience: 0,
-                    rounds: 0,
-                    physical: PhysicalInfo::default(),
-                    death_count: 0,
-                    total_playing_time: 0,
-                    birthday: 0,
-                    age: 0,
-                    participation: 1,
-                    in_action: false,
-                    was_in_action: false,
-                    in_action_time: 0,
-                    has_died: false,
-                    extra_data: Vec::new(),
-                    portraits: Default::default(),
+                    ..Default::default()
                 }],
                 startup_player_count: 1,
                 control_style: false,
@@ -4376,24 +4316,10 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
             crew: vec![player_file::CrewInfo {
                 id: "BDAY".to_string(),
                 name: "Rookie".to_string(),
-                death_message: String::new(),
-                core: Default::default(),
-                rank: 0,
-                rank_name: "Clonk".to_string(),
-                experience: 0,
                 rounds: 6,
-                physical: PhysicalInfo::default(),
-                death_count: 0,
                 total_playing_time: 17_999,
                 birthday: 123,
-                age: 0,
-                participation: 1,
-                in_action: false,
-                was_in_action: false,
-                in_action_time: 0,
-                has_died: false,
-                extra_data: Vec::new(),
-                portraits: Default::default(),
+                ..Default::default()
             }],
             control_style: false,
             auto_context_menu: false,
@@ -4561,10 +4487,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
 
         let mut definition = Definition::from_script("Chopper", "Chopper", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Chop".to_string(),
-            ActionSpec::default().with_procedure("chop"),
-        );
+        actions.insert("Chop".to_string(), ActionSpec::for_procedure("chop"));
         definition.configure_actions(Some("Chop".to_string()), actions);
 
         let mut engine = Engine::with_seed(20);
@@ -4651,14 +4574,8 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         let mut chopper = Definition::from_script("CLNK", "Clonk", script).unwrap();
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Chop".to_string(),
-            ActionSpec::default().with_procedure("chop"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Chop".to_string(), ActionSpec::for_procedure("chop"));
         chopper.configure_actions(Some("Idle".to_string()), actions);
 
         let target = Definition::from_script("TREE", "Tree", script).unwrap();
@@ -5381,9 +5298,7 @@ func Activate(inMat, inLength, inStrength)
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FXL1", "Lightning", script).expect("definition builds"),
-            )
+            .register_script_definition("FXL1", "Lightning", script)
             .expect("definition registers");
 
         assert!(
@@ -5466,23 +5381,12 @@ func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gam
 "#;
 
         let mut engine = Engine::with_seed(9);
+        engine.register_script_definition("LAYR", "Layer", "#strict\n").expect("layer registers");
         engine
-            .register_definition(
-                Definition::from_script("LAYR", "Layer", "#strict\n")
-                    .expect("layer compiles"),
-            )
-            .expect("layer registers");
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         engine
-            .register_definition(
-                Definition::from_script("FXL1", "Lightning", lightning_script)
-                    .expect("lightning compiles"),
-            )
+            .register_script_definition("FXL1", "Lightning", lightning_script)
             .expect("lightning registers");
         let layer = engine
             .spawn_object(SpawnConfig::new("LAYR"))
@@ -5567,10 +5471,7 @@ func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gam
             "#strict\nfunc Trigger() { return(LaunchLightning()); }\n";
         let mut engine = Engine::with_seed(9);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL"))
@@ -5602,11 +5503,7 @@ func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gam
         "#;
 
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("FXV1", "Volcano", script).expect("definition builds"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("FXV1", "Volcano", script).expect("definition registers");
         engine.set_landscape(Landscape::flat(64, 40));
         let mut environment = engine.environment();
         environment.volcano = 100;
@@ -5704,16 +5601,10 @@ func Activate(x, y, size, material) {
         landscape.set_world_height(500);
         engine.set_landscape(landscape);
         engine
-            .register_definition(
-                Definition::from_script("FXV1", "Volcano", volcano_script)
-                    .expect("volcano compiles"),
-            )
+            .register_script_definition("FXV1", "Volcano", volcano_script)
             .expect("volcano registers");
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
 
         let caller = engine
@@ -5782,10 +5673,7 @@ func Trigger() { return(LaunchVolcano(12)); }
         landscape.set_world_height(300);
         engine.set_landscape(landscape);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
@@ -5833,16 +5721,10 @@ func Activate(unexpected) {
             .register_definition(simple_definition("LAYR"))
             .expect("layer registers");
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         engine
-            .register_definition(
-                Definition::from_script("FXQ1", "Earthquake", earthquake_script)
-                    .expect("earthquake compiles"),
-            )
+            .register_script_definition("FXQ1", "Earthquake", earthquake_script)
             .expect("earthquake registers");
         let layer = engine
             .spawn_object(SpawnConfig::new("LAYR"))
@@ -5910,10 +5792,7 @@ func Trigger() {
 "#;
         let mut engine = Engine::with_seed(9);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("Tutorial06-shaped call compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL"))
@@ -5944,10 +5823,7 @@ func Trigger() {
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FXQ1", "Earthquake", script)
-                    .expect("definition builds"),
-            )
+            .register_script_definition("FXQ1", "Earthquake", script)
             .expect("definition registers");
         engine.set_landscape(Landscape::flat(64, 40));
         let mut environment = engine.environment();

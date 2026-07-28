@@ -95,24 +95,8 @@ fn crew_entry(name: &str) -> CrewInfo {
     CrewInfo {
         id: "SF5B".to_owned(),
         name: name.to_owned(),
-        death_message: String::new(),
-        core: Default::default(),
-        rank: 0,
         rank_name: "Clonk".to_owned(),
-        experience: 0,
-        rounds: 0,
-        physical: Default::default(),
-        death_count: 0,
-        total_playing_time: 0,
-        birthday: 0,
-        age: 0,
-        participation: 1,
-        in_action: false,
-        was_in_action: false,
-        in_action_time: 0,
-        has_died: false,
-        extra_data: Vec::new(),
-        portraits: Default::default(),
+        ..Default::default()
     }
 }
 

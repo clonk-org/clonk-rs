@@ -73,16 +73,10 @@ fn fixture() -> (Engine, ObjectId, ObjectId, ObjectId) {
         .register_definition(target)
         .expect("target definition registers");
     engine
-        .register_definition(
-            Definition::from_script("STRC", "Strict creator", &caller_source(true))
-                .expect("strict caller compiles"),
-        )
+        .register_script_definition("STRC", "Strict creator", &caller_source(true))
         .expect("strict caller registers");
     engine
-        .register_definition(
-            Definition::from_script("NSTR", "Nonstrict creator", &caller_source(false))
-                .expect("nonstrict caller compiles"),
-        )
+        .register_script_definition("NSTR", "Nonstrict creator", &caller_source(false))
         .expect("nonstrict caller registers");
     engine
         .register_definition(

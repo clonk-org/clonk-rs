@@ -81,16 +81,8 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
 #[test]
 fn zero_requirement_still_consumes_toward_a_negative_live_count() {
     let mut engine = Engine::new();
-    engine
-        .register_definition(
-            Definition::from_script("ZERO", "Zero", "").expect("component compiles"),
-        )
-        .expect("component registers");
-    engine
-        .register_definition(
-            Definition::from_script("BLDR", "Builder", "").expect("builder compiles"),
-        )
-        .expect("builder registers");
+    engine.register_script_definition("ZERO", "Zero", "").expect("component registers");
+    engine.register_script_definition("BLDR", "Builder", "").expect("builder registers");
     let mut target = Definition::from_script("SITE", "Site", "").expect("site compiles");
     target.set_components(vec![DefinitionComponent {
         id: "ZERO".to_owned(),

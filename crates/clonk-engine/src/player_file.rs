@@ -391,6 +391,39 @@ pub struct CrewInfo {
     pub portraits: CrewPortraitState,
 }
 
+/// `C4ObjectInfoCore::Default` (C4InfoCore.cpp:498-524): a nameless crew
+/// entry at rank 0 with the "Clonk" rank name and `Participation` 1.
+///
+/// The roster literals across the engine and its tests all restated these
+/// same defaults field by field; they now override only what they mean to
+/// change.
+impl Default for CrewInfo {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            death_message: String::new(),
+            core: CrewInfoCoreFields::default(),
+            rank: 0,
+            rank_name: default_crew_rank_name(),
+            experience: 0,
+            rounds: 0,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 0,
+            birthday: 0,
+            age: 0,
+            participation: 1,
+            in_action: false,
+            was_in_action: false,
+            in_action_time: 0,
+            has_died: false,
+            extra_data: Vec::new(),
+            portraits: CrewPortraitState::default(),
+        }
+    }
+}
+
 impl CrewInfo {
     /// Loads one `*.c4i` crew group, including its embedded custom-portrait
     /// state, with the same parser used by [`PlayerFile::load`].
@@ -2193,26 +2226,9 @@ mod tests {
             player.info_core,
             PlayerInfoCoreState {
                 pref_name: "Neuling".to_string(),
-                comment: String::new(),
-                rank: 0,
                 rank_name: "Rank".to_string(),
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                extra_data: Vec::new(),
-                pref_color: 0,
                 pref_color_dw: 0xff,
-                pref_color2_dw: 0,
                 pref_control: 1,
-                pref_control_style: false,
-                pref_control_style_value: 0,
-                pref_auto_context_menu: false,
-                pref_auto_context_menu_value: 0,
-                pref_position: 0,
-                pref_mouse: true,
-                pref_mouse_value: 1,
                 last_round: PlayerLastRoundState {
                     title: String::new(),
                     date: 0,
@@ -2224,6 +2240,7 @@ mod tests {
                     bonus: 0,
                     level: 0,
                 },
+                ..Default::default()
             }
         );
     }

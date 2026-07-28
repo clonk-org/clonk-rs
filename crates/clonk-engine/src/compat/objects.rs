@@ -4767,44 +4767,11 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 .definition_metadata(&definition)
                 .cloned()
                 .unwrap_or_else(|| DefinitionMetadata {
-                    name: String::new(),
-                    portrait_names: Vec::new(),
                     category: context
                         .definition_category(&definition)
                         .unwrap_or(DEFAULT_CATEGORY),
-                    border_bound: 0,
-                    contact_function_calls: false,
-                    blit_mode: 0,
                     ocf_base: ocf::NORMAL,
-                    crew_member: false,
-                    crew_member_value: 0,
-                    silent_commands: false,
-                    vehicle_control: 0,
-                    action_library: ActionLibrary::default().into(),
-                    control_transfer_callback: None,
-                    action_graphics: HashMap::new(),
-                    value: 0,
-                    allow_picture_stack: 0,
-                    mass: 0,
-                    no_component_mass: false,
-                    constructable: false,
-                    shape: None,
-                    placement: 0,
-                    growth: 0,
-                    construction_offset: 0,
-                    basement: 0,
-                    physical: PhysicalInfo::default(),
-                    components: Vec::new(),
-                    collection_limit: 0,
-                    grab_put_get: 0,
-                    line_connect: 0,
-                    clonk_name_newlines: None,
-                    stretch_growth: false,
-                    rotateable: 0,
-                    line: 0,
-                    vertices: Vec::new(),
-                    contact_density: None,
-                    fire: DefinitionFireMetadata::default(),
+                    ..Default::default()
                 });
             let definition_category = metadata.category;
             let creator = context.object_context().map(ObjectScopeContext::id);
@@ -5174,44 +5141,11 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 .definition_metadata(definition)
                 .cloned()
                 .unwrap_or_else(|| DefinitionMetadata {
-                    name: String::new(),
-                    portrait_names: Vec::new(),
                     category: context
                         .definition_category(definition)
                         .unwrap_or(DEFAULT_CATEGORY),
-                    border_bound: 0,
-                    contact_function_calls: false,
-                    blit_mode: 0,
                     ocf_base: ocf::NORMAL,
-                    crew_member: false,
-                    crew_member_value: 0,
-                    silent_commands: false,
-                    vehicle_control: 0,
-                    action_library: ActionLibrary::default().into(),
-                    control_transfer_callback: None,
-                    action_graphics: HashMap::new(),
-                    value: 0,
-                    allow_picture_stack: 0,
-                    mass: 0,
-                    no_component_mass: false,
-                    constructable: false,
-                    shape: None,
-                    placement: 0,
-                    growth: 0,
-                    construction_offset: 0,
-                    basement: 0,
-                    physical: PhysicalInfo::default(),
-                    components: Vec::new(),
-                    collection_limit: 0,
-                    grab_put_get: 0,
-                    line_connect: 0,
-                    clonk_name_newlines: None,
-                    stretch_growth: false,
-                    rotateable: 0,
-                    line: 0,
-                    vertices: Vec::new(),
-                    contact_density: None,
-                    fire: DefinitionFireMetadata::default(),
+                    ..Default::default()
                 });
             // C4Object::Init discards sampled rotation/rdir for definitions
             // without Rotateable, after the synced draws already happened.
@@ -6120,44 +6054,12 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
             .definition_metadata(&definition)
             .cloned()
             .unwrap_or_else(|| DefinitionMetadata {
-                name: String::new(),
-                portrait_names: Vec::new(),
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
-                border_bound: 0,
-                contact_function_calls: false,
-                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
-                crew_member: false,
-                crew_member_value: 0,
-                silent_commands: false,
-                vehicle_control: 0,
-                action_library: ActionLibrary::default().into(),
-                control_transfer_callback: None,
-                action_graphics: HashMap::new(),
-                value: 0,
-                allow_picture_stack: 0,
-                mass: 0,
-                no_component_mass: false,
                 constructable: true,
-                shape: None,
-                placement: 0,
-                growth: 0,
-                construction_offset: 0,
-                basement: 0,
-                physical: PhysicalInfo::default(),
-                components: Vec::new(),
-                collection_limit: 0,
-                grab_put_get: 0,
-                line_connect: 0,
-                clonk_name_newlines: None,
-                stretch_growth: false,
-                rotateable: 0,
-                line: 0,
-                vertices: Vec::new(),
-                contact_density: None,
-                fire: DefinitionFireMetadata::default(),
+                ..Default::default()
             });
         let definition_category = metadata.category;
         let creator = context.object_context().map(ObjectScopeContext::id);

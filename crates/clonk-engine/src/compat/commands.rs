@@ -2024,7 +2024,7 @@ fn preview_object_com_dig(actor: ObjectId) -> Result<bool, RuntimeError> {
 }
 
 pub(crate) type PreparedCommandRuntimeData = (
-    HashMap<ObjectId, CommandObjectSnapshot>,
+    CommandObjectSnapshots,
     HashMap<i32, CommandPlayerSnapshot>,
     HashMap<DefinitionId, CommandDefinitionSnapshot>,
     TransferZoneTable,
@@ -2143,6 +2143,79 @@ fn prepare_command_runtime_data_with_physical(
     })
 }
 
+/// Run one pending live-command continuation for `actor` against a fresh
+/// runtime snapshot, then fold the outcome back the way every command seam
+/// does: the stack counts as replaced, a staged update goes through the host
+/// context, and the scope's command count is resynced.
+///
+/// `snapshot_actor` is the argument each seam already passed to
+/// `prepare_command_runtime_data` — `Some(actor)` when the continuation needs
+/// the actor's own post-callback state, `None` when it must not.
+fn preview_pending_command<F>(
+    actor: ObjectId,
+    snapshot_actor: Option<ObjectId>,
+    step: F,
+) -> Vec<CommandEvent>
+where
+    F: FnOnce(
+        &mut ObjectScopeContext,
+        &CommandRuntimeContext<'_>,
+    ) -> Option<crate::CommandStepResult>,
+{
+    let Some((objects, players, definitions, transfers)) =
+        prepare_command_runtime_data(snapshot_actor)
+    else {
+        return Vec::new();
+    };
+    with_host_context_mut(Vec::new(), |context| {
+        let Some(object_snapshot) = objects.get(&actor) else {
+            return Vec::new();
+        };
+        let landscape = context.world.landscape_shared();
+        let runtime = CommandRuntimeContext {
+            rng: None,
+            frame: context.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: context.world.structures_need_energy,
+            base_buy_enabled: context.world.base_buy_enabled,
+            base_sell_enabled: context.world.base_sell_enabled,
+            transfer_zones: &transfers,
+        };
+        let Some(mut result) = context
+            .object_scope_mut(actor)
+            .and_then(|scope| step(scope, &runtime))
+        else {
+            return Vec::new();
+        };
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_stack_replaced = true;
+        }
+        if let Some(update) = result.update.take() {
+            context.stage_object_command_update(actor, update);
+        }
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_count = scope.live_commands.len();
+        }
+        result.events
+    })
+}
+
+/// The throw/put prelude gravity: `C4Physical` gravity scaled to the
+/// command machine's fifth-of-a-pixel step.
+fn preview_command_gravity() -> C4Fixed {
+    PHYSICS_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| fixed100(context.gravity()) / 5)
+            .unwrap_or_else(|| PhysicsSettings::default().gravity_as_c4fixed())
+    })
+}
+
 fn preview_command_event_instance_id(
     actor: ObjectId,
     kind: CommandEventInstanceKind,
@@ -2205,49 +2278,11 @@ fn preview_resume_command_after_physical(
 fn preview_move_to_stop(actor: ObjectId) -> Result<Vec<CommandEvent>, RuntimeError> {
     preview_object_com_stop(actor)?;
 
-    let Some((objects, players, definitions, transfers)) =
-        prepare_command_runtime_data(Some(actor))
-    else {
-        return Ok(Vec::new());
-    };
-    let events = with_host_context_mut(Vec::new(), |context| {
-        let Some(object_snapshot) = objects.get(&actor) else {
-            return Vec::new();
-        };
-        let landscape = context.world.landscape_shared();
-        let runtime = CommandRuntimeContext {
-            rng: None,
-            frame: context.world.frame,
-            position: object_snapshot.position,
-            landscape: landscape.as_deref(),
-            object: object_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: context.world.structures_need_energy,
-            base_buy_enabled: context.world.base_buy_enabled,
-            base_sell_enabled: context.world.base_sell_enabled,
-            transfer_zones: &transfers,
-        };
-        let Some(mut result) = context
-            .object_scope_mut(actor)
-            .and_then(|scope| scope.live_commands.execute_pending_move_to_stop(&runtime))
-        else {
-            return Vec::new();
-        };
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_stack_replaced = true;
-        }
-        if let Some(update) = result.update.take() {
-            context.stage_object_command_update(actor, update);
-        }
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_count = scope.live_commands.len();
-        }
-        result.events
-    });
-
-    Ok(events)
+    Ok(preview_pending_command(
+        actor,
+        Some(actor),
+        |scope, runtime| scope.live_commands.execute_pending_move_to_stop(runtime),
+    ))
 }
 
 /// Continue the exact MoveTo after FlightControl's live Fly transition and
@@ -2257,46 +2292,10 @@ fn preview_resume_move_to_after_flight(
     actor: ObjectId,
     command_instance_id: u64,
 ) -> Vec<CommandEvent> {
-    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
-    else {
-        return Vec::new();
-    };
-    with_host_context_mut(Vec::new(), |context| {
-        let Some(object_snapshot) = objects.get(&actor) else {
-            return Vec::new();
-        };
-        let landscape = context.world.landscape_shared();
-        let runtime = CommandRuntimeContext {
-            rng: None,
-            frame: context.world.frame,
-            position: object_snapshot.position,
-            landscape: landscape.as_deref(),
-            object: object_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: context.world.structures_need_energy,
-            base_buy_enabled: context.world.base_buy_enabled,
-            base_sell_enabled: context.world.base_sell_enabled,
-            transfer_zones: &transfers,
-        };
-        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
-            scope
-                .live_commands
-                .execute_pending_move_to_flight(&runtime, command_instance_id)
-        }) else {
-            return Vec::new();
-        };
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_stack_replaced = true;
-        }
-        if let Some(update) = result.update.take() {
-            context.stage_object_command_update(actor, update);
-        }
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_count = scope.live_commands.len();
-        }
-        result.events
+    preview_pending_command(actor, None, |scope, runtime| {
+        scope
+            .live_commands
+            .execute_pending_move_to_flight(runtime, command_instance_id)
     })
 }
 
@@ -2503,114 +2502,22 @@ fn preview_resume_throw_after_prelude(
     actor: ObjectId,
     command_instance_id: u64,
 ) -> Vec<CommandEvent> {
-    let Some((objects, players, definitions, transfers)) =
-        prepare_command_runtime_data(Some(actor))
-    else {
-        return Vec::new();
-    };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
-        let Some(object_snapshot) = objects.get(&actor) else {
-            return Vec::new();
-        };
-        let landscape = context.world.landscape_shared();
-        let runtime = CommandRuntimeContext {
-            rng: None,
-            frame: context.world.frame,
-            position: object_snapshot.position,
-            landscape: landscape.as_deref(),
-            object: object_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: context.world.structures_need_energy,
-            base_buy_enabled: context.world.base_buy_enabled,
-            base_sell_enabled: context.world.base_sell_enabled,
-            transfer_zones: &transfers,
-        };
-        let gravity = PHYSICS_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(|context| fixed100(context.gravity()) / 5)
-                .unwrap_or_else(|| PhysicsSettings::default().gravity_as_c4fixed())
-        });
-        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
-            scope.live_commands.execute_pending_throw_prelude(
-                &runtime,
-                gravity,
-                command_instance_id,
-            )
-        }) else {
-            return Vec::new();
-        };
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_stack_replaced = true;
-        }
-        if let Some(update) = result.update.take() {
-            context.stage_object_command_update(actor, update);
-        }
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_count = scope.live_commands.len();
-        }
-        result.events
+    preview_pending_command(actor, Some(actor), |scope, runtime| {
+        scope.live_commands.execute_pending_throw_prelude(
+            runtime,
+            preview_command_gravity(),
+            command_instance_id,
+        )
     })
 }
 
 fn preview_resume_put_after_stop(actor: ObjectId, command_instance_id: u64) -> Vec<CommandEvent> {
-    let Some((objects, players, definitions, transfers)) =
-        prepare_command_runtime_data(Some(actor))
-    else {
-        return Vec::new();
-    };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
-        let Some(object_snapshot) = objects.get(&actor) else {
-            return Vec::new();
-        };
-        let landscape = context.world.landscape_shared();
-        let runtime = CommandRuntimeContext {
-            rng: None,
-            frame: context.world.frame,
-            position: object_snapshot.position,
-            landscape: landscape.as_deref(),
-            object: object_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: context.world.structures_need_energy,
-            base_buy_enabled: context.world.base_buy_enabled,
-            base_sell_enabled: context.world.base_sell_enabled,
-            transfer_zones: &transfers,
-        };
-        let gravity = PHYSICS_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(|context| fixed100(context.gravity()) / 5)
-                .unwrap_or_else(|| PhysicsSettings::default().gravity_as_c4fixed())
-        });
-        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
-            scope
-                .live_commands
-                .execute_pending_put_stop(&runtime, gravity, command_instance_id)
-        }) else {
-            return Vec::new();
-        };
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_stack_replaced = true;
-        }
-        if let Some(update) = result.update.take() {
-            context.stage_object_command_update(actor, update);
-        }
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_count = scope.live_commands.len();
-        }
-        result.events
+    preview_pending_command(actor, Some(actor), |scope, runtime| {
+        scope.live_commands.execute_pending_put_stop(
+            runtime,
+            preview_command_gravity(),
+            command_instance_id,
+        )
     })
 }
 
@@ -2619,55 +2526,15 @@ fn preview_resume_construct(
     command_instance_id: u64,
     script_result: Option<AcquireScriptResult>,
 ) -> Vec<CommandEvent> {
-    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
-    else {
-        return Vec::new();
-    };
-    with_host_context_mut(Vec::new(), |context| {
-        let Some(object_snapshot) = objects.get(&actor) else {
-            return Vec::new();
-        };
-        let landscape = context.world.landscape_shared();
-        let runtime = CommandRuntimeContext {
-            rng: None,
-            frame: context.world.frame,
-            position: object_snapshot.position,
-            landscape: landscape.as_deref(),
-            object: object_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: context.world.structures_need_energy,
-            base_buy_enabled: context.world.base_buy_enabled,
-            base_sell_enabled: context.world.base_sell_enabled,
-            transfer_zones: &transfers,
-        };
-        let Some(mut result) =
-            context
-                .object_scope_mut(actor)
-                .and_then(|scope| match script_result {
-                    Some(script_result) => scope.live_commands.execute_pending_construct_script(
-                        &runtime,
-                        command_instance_id,
-                        script_result,
-                    ),
-                    None => scope
-                        .live_commands
-                        .execute_pending_construct_stop(&runtime, command_instance_id),
-                })
-        else {
-            return Vec::new();
-        };
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_stack_replaced = true;
-        }
-        if let Some(update) = result.update.take() {
-            context.stage_object_command_update(actor, update);
-        }
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_count = scope.live_commands.len();
-        }
-        result.events
+    preview_pending_command(actor, None, |scope, runtime| match script_result {
+        Some(script_result) => scope.live_commands.execute_pending_construct_script(
+            runtime,
+            command_instance_id,
+            script_result,
+        ),
+        None => scope
+            .live_commands
+            .execute_pending_construct_stop(runtime, command_instance_id),
     })
 }
 
@@ -2679,48 +2546,12 @@ fn preview_resume_construct_spawn(
     command_instance_id: u64,
     construction_id: Option<ObjectId>,
 ) -> Vec<CommandEvent> {
-    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
-    else {
-        return Vec::new();
-    };
-    with_host_context_mut(Vec::new(), |context| {
-        let Some(object_snapshot) = objects.get(&actor) else {
-            return Vec::new();
-        };
-        let landscape = context.world.landscape_shared();
-        let runtime = CommandRuntimeContext {
-            rng: None,
-            frame: context.world.frame,
-            position: object_snapshot.position,
-            landscape: landscape.as_deref(),
-            object: object_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: context.world.structures_need_energy,
-            base_buy_enabled: context.world.base_buy_enabled,
-            base_sell_enabled: context.world.base_sell_enabled,
-            transfer_zones: &transfers,
-        };
-        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
-            scope.live_commands.execute_pending_construct_spawn(
-                &runtime,
-                command_instance_id,
-                construction_id,
-            )
-        }) else {
-            return Vec::new();
-        };
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_stack_replaced = true;
-        }
-        if let Some(update) = result.update.take() {
-            context.stage_object_command_update(actor, update);
-        }
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_count = scope.live_commands.len();
-        }
-        result.events
+    preview_pending_command(actor, None, |scope, runtime| {
+        scope.live_commands.execute_pending_construct_spawn(
+            runtime,
+            command_instance_id,
+            construction_id,
+        )
     })
 }
 
@@ -2820,90 +2651,18 @@ fn preview_resume_drop_after_prelude(
     actor: ObjectId,
     command_instance_id: u64,
 ) -> Vec<CommandEvent> {
-    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
-    else {
-        return Vec::new();
-    };
-    with_host_context_mut(Vec::new(), |context| {
-        let Some(object_snapshot) = objects.get(&actor) else {
-            return Vec::new();
-        };
-        let landscape = context.world.landscape_shared();
-        let runtime = CommandRuntimeContext {
-            rng: None,
-            frame: context.world.frame,
-            position: object_snapshot.position,
-            landscape: landscape.as_deref(),
-            object: object_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: context.world.structures_need_energy,
-            base_buy_enabled: context.world.base_buy_enabled,
-            base_sell_enabled: context.world.base_sell_enabled,
-            transfer_zones: &transfers,
-        };
-        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
-            scope
-                .live_commands
-                .execute_pending_drop_prelude(&runtime, command_instance_id)
-        }) else {
-            return Vec::new();
-        };
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_stack_replaced = true;
-        }
-        if let Some(update) = result.update.take() {
-            context.stage_object_command_update(actor, update);
-        }
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_count = scope.live_commands.len();
-        }
-        result.events
+    preview_pending_command(actor, None, |scope, runtime| {
+        scope
+            .live_commands
+            .execute_pending_drop_prelude(runtime, command_instance_id)
     })
 }
 
 fn preview_resume_exit_after_stop(actor: ObjectId, command_instance_id: u64) -> Vec<CommandEvent> {
-    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
-    else {
-        return Vec::new();
-    };
-    with_host_context_mut(Vec::new(), |context| {
-        let Some(object_snapshot) = objects.get(&actor) else {
-            return Vec::new();
-        };
-        let landscape = context.world.landscape_shared();
-        let runtime = CommandRuntimeContext {
-            rng: None,
-            frame: context.world.frame,
-            position: object_snapshot.position,
-            landscape: landscape.as_deref(),
-            object: object_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: context.world.structures_need_energy,
-            base_buy_enabled: context.world.base_buy_enabled,
-            base_sell_enabled: context.world.base_sell_enabled,
-            transfer_zones: &transfers,
-        };
-        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
-            scope
-                .live_commands
-                .execute_pending_exit_stop(&runtime, command_instance_id)
-        }) else {
-            return Vec::new();
-        };
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_stack_replaced = true;
-        }
-        if let Some(update) = result.update.take() {
-            context.stage_object_command_update(actor, update);
-        }
-        if let Some(scope) = context.object_scope_mut(actor) {
-            scope.command_count = scope.live_commands.len();
-        }
-        result.events
+    preview_pending_command(actor, None, |scope, runtime| {
+        scope
+            .live_commands
+            .execute_pending_exit_stop(runtime, command_instance_id)
     })
 }
 

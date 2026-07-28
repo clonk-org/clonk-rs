@@ -2692,24 +2692,9 @@ func Ejection(object item)
             vec![player_file::CrewInfo {
                 id: "DCRW".to_string(),
                 name: "Veteran".to_string(),
-                death_message: String::new(),
-                core: Default::default(),
-                rank: 0,
-                rank_name: "Clonk".to_string(),
-                experience: 0,
-                rounds: 0,
-                physical: PhysicalInfo::default(),
                 death_count: 4,
                 total_playing_time: 17,
-                birthday: 0,
-                age: 0,
-                participation: 1,
-                in_action: false,
-                was_in_action: false,
-                in_action_time: 0,
-                has_died: false,
-                extra_data: Vec::new(),
-                portraits: Default::default(),
+                ..Default::default()
             }],
         ))?;
         let crew = engine.player(0).expect("player joins").crew()[0];
@@ -2795,24 +2780,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
         let crew_info = |name: &str| player_file::CrewInfo {
             id: "DCRW".to_string(),
             name: name.to_string(),
-            death_message: String::new(),
-            core: Default::default(),
-            rank: 0,
-            rank_name: "Clonk".to_string(),
-            experience: 0,
-            rounds: 0,
-            physical: PhysicalInfo::default(),
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
-            participation: 1,
-            in_action: false,
-            was_in_action: false,
-            in_action_time: 0,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: Default::default(),
+            ..Default::default()
         };
         let mut engine = Engine::with_seed(155);
         engine.register_definition(definition)?;

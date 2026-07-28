@@ -420,7 +420,7 @@
         let globals = script
             .global_access_functions()
             .map(|(name, function)| (name.clone(), function.clone()))
-            .collect::<HashMap<_, _>>();
+            .collect::<rustc_hash::FxHashMap<_, _>>();
         script.set_global_functions(Some(Arc::new(globals)));
         let script = Arc::new(script);
         let world = HostWorldContext::default().with_scenario_script(Some(Arc::clone(&script)));
@@ -615,15 +615,11 @@
             }],
         );
         let world = || {
-            HostWorldContext::with_landscape(
+            world_with(
                 Vec::<HostWorldObject>::new(),
                 Some(landscape.clone()),
                 HashMap::new(),
-                Vec::new(),
                 HashMap::new(),
-                HashMap::new(),
-                1,
-                false,
             )
         };
         let (semi, _) = with_effect_context(None, &[], world(), 1, || {
@@ -734,15 +730,11 @@
     #[test]
     fn g_back_solid_detects_surface_in_landscape() {
         let landscape = Landscape::flat(32, 10);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_solid(&[Value::Int(5), Value::Int(12)])
@@ -754,15 +746,11 @@
     #[test]
     fn g_back_solid_respects_surface_height() {
         let landscape = Landscape::flat(16, 20);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_solid(&[Value::Int(3), Value::Int(15)])
@@ -785,27 +773,11 @@
             8,
             false,
         );
-        let object_context = HostObjectContext::new(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(4, 6),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object_context = HostObjectContext {
+            id: object_id,
+            position: Vector2::new(4, 6),
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(Some(object_context), &[], world, 9, || {
             g_back_solid(&[Value::Int(0), Value::Int(7)])
         });
@@ -821,15 +793,11 @@
         let mut landscape = Landscape::flat(20, 5);
         landscape.set_height(2, 2);
         landscape.set_tunnel_column(3, vec![(0, 4)]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (ordinary_solid, _) = with_effect_context(None, &[], world.clone(), 1, || {
             g_back_sky(&[Value::Int(2), Value::Int(2)])
@@ -863,15 +831,11 @@
         let material = crate::MaterialId::new(3).expect("material id");
         let mut landscape = Landscape::flat_with_material(32, 10, Some(material));
         landscape.set_world_height(20);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             get_material(&[Value::Int(5), Value::Int(12)])
@@ -899,27 +863,12 @@
             false,
         );
         let object_id = ObjectId::new(11);
-        let object_context = HostObjectContext::new(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(3, 4),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object_context = HostObjectContext {
+            id: object_id,
+            position: Vector2::new(3, 4),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(Some(object_context), &[], world, 6, || {
             get_material(&[Value::Int(0), Value::Int(8)])
         });
@@ -941,15 +890,11 @@
         landscape.set_world_height(20);
         landscape.set_vehicle_material(Some(vehicle));
         landscape.set_border_open(8, 0, false, false);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let query = |x, y| {
             let (result, _) = with_effect_context(None, &[], world.clone(), 1, || {
@@ -1003,16 +948,7 @@
         ));
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     fn draw_mat_chunks_world() -> HostWorldContext {
@@ -1053,16 +989,7 @@
         ));
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 9, texmap));
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     fn draw_mat_chunks_masked_world() -> HostWorldContext {
@@ -1135,16 +1062,7 @@
         ));
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     fn draw_map_world(
@@ -1218,16 +1136,7 @@
         raster.set_map_creator(retain_creator.then_some(retained));
         landscape.set_raster_state(raster);
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     fn draw_map_masked_world() -> HostWorldContext {
@@ -1323,16 +1232,7 @@
         ));
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     #[test]
@@ -1340,27 +1240,12 @@
         // FnGetTexture reads GLOBAL GBackPix coordinates even in an object
         // context, strips the IFT bit through PixCol2Tex, and returns null for
         // sky or an unmapped TextureMap slot (C4Script.cpp:2222-2232).
-        let object_context = HostObjectContext::new(
-            ObjectId::new(11),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(5, 4),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object_context = HostObjectContext {
+            id: ObjectId::new(11),
+            position: Vector2::new(5, 4),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(
             Some(object_context),
             &[],
@@ -1431,15 +1316,11 @@
             "the frontend still sees the remapped Liquid render surface"
         );
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
 
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -2783,27 +2664,12 @@
             .landscape_mut()
             .is_some_and(|landscape| { landscape.set_surface32_pixel(6, 2, 0x0011_2233) }));
         let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
-        let object_context = HostObjectContext::new(
-            ObjectId::new(91),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(30, 40),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object_context = HostObjectContext {
+            id: ObjectId::new(91),
+            position: Vector2::new(30, 40),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
         let seed = 73;
         let mut expected_rng = LcgRng::new(seed);
         let expected_after = expected_rng.random(1_000);

@@ -3,10 +3,7 @@
         let mut definition = Definition::from_script("Glider", "Glider", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Fly".to_string(),
-            ActionSpec::default().with_procedure("flight"),
-        );
+        actions.insert("Fly".to_string(), ActionSpec::for_procedure("flight"));
         definition.configure_actions(Some("Fly".to_string()), actions);
 
         let mut engine = Engine::with_seed(1);
@@ -44,10 +41,7 @@
         let mut definition = Definition::from_script("Glider", "Glider", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Fly".to_string(),
-            ActionSpec::default().with_procedure("flight"),
-        );
+        actions.insert("Fly".to_string(), ActionSpec::for_procedure("flight"));
         definition.configure_actions(Some("Fly".to_string()), actions);
         definition.set_movement_profile(
             MovementProfile::default()
@@ -89,10 +83,7 @@
             Definition::from_script("Balloon", "Balloon", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Float".to_string(),
-            ActionSpec::default().with_procedure("float"),
-        );
+        actions.insert("Float".to_string(), ActionSpec::for_procedure("float"));
         definition.configure_actions(Some("Float".to_string()), actions);
 
         let mut engine = Engine::with_seed(2);
@@ -131,10 +122,7 @@
             Definition::from_script("Balloon", "Balloon", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Float".to_string(),
-            ActionSpec::default().with_procedure("float"),
-        );
+        actions.insert("Float".to_string(), ActionSpec::for_procedure("float"));
         definition.configure_actions(Some("Float".to_string()), actions);
         definition.set_movement_profile(
             MovementProfile::default()
@@ -326,10 +314,7 @@ func ArmBullet() {{
             Definition::from_script("Swimmer", "Swimmer", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Swim".to_string(),
-            ActionSpec::default().with_procedure("swim"),
-        );
+        actions.insert("Swim".to_string(), ActionSpec::for_procedure("swim"));
         definition.configure_actions(Some("Swim".to_string()), actions);
 
         let mut engine = Engine::with_seed(7);
@@ -369,10 +354,7 @@ func ArmBullet() {{
             Definition::from_script("Swimmer", "Swimmer", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Swim".to_string(),
-            ActionSpec::default().with_procedure("swim"),
-        );
+        actions.insert("Swim".to_string(), ActionSpec::for_procedure("swim"));
         definition.configure_actions(Some("Swim".to_string()), actions);
         definition.set_movement_profile(
             MovementProfile::default()
@@ -977,10 +959,7 @@ func LiftTop()
             Definition::from_script("Clinger", "Clinger", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Hang".to_string(),
-            ActionSpec::default().with_procedure("hang"),
-        );
+        actions.insert("Hang".to_string(), ActionSpec::for_procedure("hang"));
         definition.configure_actions(Some("Hang".to_string()), actions);
 
         let mut engine = Engine::with_seed(11);
@@ -1015,10 +994,7 @@ func LiftTop()
             Definition::from_script("Bridger", "Bridger", SET_BRIDGE_ACTION_DATA_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Bridge".to_string(),
-            ActionSpec::default().with_procedure("bridge"),
-        );
+        actions.insert("Bridge".to_string(), ActionSpec::for_procedure("bridge"));
         definition.configure_actions(Some("Bridge".to_string()), actions);
 
         let mut engine = Engine::with_seed(23);
@@ -1074,10 +1050,7 @@ func LiftTop()
             Definition::from_script("Bridger", "Bridger", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Bridge".to_string(),
-            ActionSpec::default().with_procedure("bridge"),
-        );
+        actions.insert("Bridge".to_string(), ActionSpec::for_procedure("bridge"));
         definition.configure_actions(Some("Bridge".to_string()), actions);
 
         let mut engine = Engine::with_seed(13);
@@ -1263,14 +1236,8 @@ func LiftTop()
         definition.set_shape_rect(Some(DefinitionRect::new(-5, -10, 10, 20)));
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("WALK"),
-        );
-        actions.insert(
-            "Bridge".to_string(),
-            ActionSpec::default().with_procedure("BRIDGE"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("WALK"));
+        actions.insert("Bridge".to_string(), ActionSpec::for_procedure("BRIDGE"));
         definition.configure_actions(Some("Idle".to_string()), actions);
 
         let library = MaterialLibrary::parse(
@@ -1475,10 +1442,7 @@ func LiftTop()
             Definition::from_script("Connector", "Connector", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Connect".to_string(),
-            ActionSpec::default().with_procedure("connect"),
-        );
+        actions.insert("Connect".to_string(), ActionSpec::for_procedure("connect"));
         definition.configure_actions(Some("Connect".to_string()), actions);
 
         let mut engine = Engine::with_seed(29);
@@ -1545,10 +1509,7 @@ func LiftTop()
             Definition::from_script("Kneeler", "Kneeler", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Kneel".to_string(),
-            ActionSpec::default().with_procedure("kneel"),
-        );
+        actions.insert("Kneel".to_string(), ActionSpec::for_procedure("kneel"));
         definition.configure_actions(Some("Kneel".to_string()), actions);
 
         let mut engine = Engine::with_seed(19);
@@ -1577,10 +1538,7 @@ func LiftTop()
         let mut definition = Definition::from_script("Digger", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Dig".to_string(),
-            ActionSpec::default().with_procedure("dig"),
-        );
+        actions.insert("Dig".to_string(), ActionSpec::for_procedure("dig"));
         definition.configure_actions(Some("Dig".to_string()), actions);
 
         let mut engine = Engine::with_seed(29);
@@ -1615,14 +1573,8 @@ func ControlDig() { SetAction("Dig"); return true; }
         let mut definition =
             Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Dig".to_string(),
-            ActionSpec::default().with_procedure("dig"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Dig".to_string(), ActionSpec::for_procedure("dig"));
         definition.configure_actions(Some("Idle".to_string()), actions);
         definition.set_movement_profile(MovementProfile::default());
 
@@ -1664,14 +1616,8 @@ func ControlThrow() { return 0; }
         let mut definition =
             Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Dig".to_string(),
-            ActionSpec::default().with_procedure("dig"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Dig".to_string(), ActionSpec::for_procedure("dig"));
         definition.configure_actions(Some("Idle".to_string()), actions);
         definition.set_movement_profile(MovementProfile::default());
 
@@ -1751,10 +1697,7 @@ public func FxGunControlControlDig(pTarget, iNumber)
         let mut clonk =
             Definition::from_script("CLNK", "Clonk", clonk_script).expect("clonk script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         clonk.configure_actions(Some("Idle".to_string()), actions);
         clonk.set_movement_profile(MovementProfile::default());
         let gun = Definition::from_script("GUNX", "Gun", gun_script).expect("gun script compiles");
@@ -1836,10 +1779,7 @@ func ContainedDig(pClonk) { SetR(5); return 1; }
         let mut clonk =
             Definition::from_script("CLNK", "Clonk", clonk_script).expect("clonk script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         clonk.configure_actions(Some("Idle".to_string()), actions);
         clonk.set_movement_profile(MovementProfile::default());
         let hut = Definition::from_script("HUTX", "Hut", hut_script).expect("hut script compiles");
@@ -1986,14 +1926,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut definition =
             Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Dig".to_string(),
-            ActionSpec::default().with_procedure("dig"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Dig".to_string(), ActionSpec::for_procedure("dig"));
         definition.configure_actions(Some("Idle".to_string()), actions);
         definition.set_movement_profile(MovementProfile::default());
 
@@ -2783,10 +2717,7 @@ func Construction(object creator)
                 .expect("script compiles");
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
-        actions.insert(
-            "Throw".to_string(),
-            ActionSpec::default().with_procedure("throw"),
-        );
+        actions.insert("Throw".to_string(), ActionSpec::for_procedure("throw"));
         definition.configure_actions(Some("Throw".to_string()), actions);
 
         let mut engine = Engine::with_seed(17);
@@ -2820,14 +2751,8 @@ func Construction(object creator)
         physical.throw = 50_000;
         clonk.set_physical(physical);
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Throw".to_string(),
-            ActionSpec::default().with_procedure("throw"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Throw".to_string(), ActionSpec::for_procedure("throw"));
         clonk.configure_actions(Some("Walk".to_string()), actions);
         let item =
             Definition::from_script("FLAG", "Flag", "#strict 2\n").expect("script compiles");
@@ -2893,10 +2818,7 @@ func Construction(object creator)
         let mut definition = Definition::from_script("Scaler", "Scaler", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Scale".to_string(),
-            ActionSpec::default().with_procedure("scale"),
-        );
+        actions.insert("Scale".to_string(), ActionSpec::for_procedure("scale"));
         definition.configure_actions(Some("Scale".to_string()), actions);
 
         let mut engine = Engine::with_seed(23);
@@ -2925,10 +2847,7 @@ func Construction(object creator)
         let mut definition = Definition::from_script("Scaler", "Scaler", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Scale".to_string(),
-            ActionSpec::default().with_procedure("scale"),
-        );
+        actions.insert("Scale".to_string(), ActionSpec::for_procedure("scale"));
         definition.configure_actions(Some("Scale".to_string()), actions);
         definition.set_movement_profile(
             MovementProfile::default()
@@ -2962,10 +2881,7 @@ func Construction(object creator)
             Definition::from_script("Hangler", "Hangler", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Hangle".to_string(),
-            ActionSpec::default().with_procedure("hang"),
-        );
+        actions.insert("Hangle".to_string(), ActionSpec::for_procedure("hang"));
         definition.configure_actions(Some("Hangle".to_string()), actions);
         definition.set_movement_profile(
             MovementProfile::default()
@@ -2998,10 +2914,7 @@ func Construction(object creator)
         let mut definition = Definition::from_script("Digger", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Dig".to_string(),
-            ActionSpec::default().with_procedure("dig"),
-        );
+        actions.insert("Dig".to_string(), ActionSpec::for_procedure("dig"));
         definition.configure_actions(Some("Dig".to_string()), actions);
         definition.set_movement_profile(MovementProfile::default().with_dig_speed(6));
 
@@ -3530,14 +3443,8 @@ protected func ControlCommand() { own_control_calls++; return 1; }
 
         let mut builder_definition = Definition::from_script("Builder", "Builder", script)?;
         let mut builder_actions = HashMap::new();
-        builder_actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        builder_actions.insert(
-            "Build".to_string(),
-            ActionSpec::default().with_procedure("build"),
-        );
+        builder_actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+        builder_actions.insert("Build".to_string(), ActionSpec::for_procedure("build"));
         builder_definition.configure_actions(Some("Walk".to_string()), builder_actions);
         builder_definition.set_category(DEFAULT_CATEGORY);
         builder_definition.set_crew_member(true);
@@ -3983,14 +3890,8 @@ protected func BuildAbort()
 
         let mut builder_definition = Definition::from_script("Builder", "Builder", script)?;
         let mut builder_actions = HashMap::new();
-        builder_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        builder_actions.insert(
-            "Build".to_string(),
-            ActionSpec::default().with_procedure("build"),
-        );
+        builder_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        builder_actions.insert("Build".to_string(), ActionSpec::for_procedure("build"));
         builder_definition.configure_actions(Some("Idle".to_string()), builder_actions);
         builder_definition.set_category(DEFAULT_CATEGORY);
         builder_definition.set_mass(50);
@@ -4485,14 +4386,8 @@ protected func RejectEntrance(container)
 
         let mut definition = Definition::from_script("Pusher", "Pusher", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Push".to_string(),
-            ActionSpec::default().with_procedure("push"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Push".to_string(), ActionSpec::for_procedure("push"));
         definition.configure_actions(Some("Idle".to_string()), actions);
 
         let mut engine = Engine::with_seed(12);
@@ -4959,14 +4854,8 @@ protected func TurnStart()
 
         let mut pusher_definition = Definition::from_script("Pusher", "Pusher", script).unwrap();
         let mut pusher_actions = HashMap::new();
-        pusher_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        pusher_actions.insert(
-            "Push".to_string(),
-            ActionSpec::default().with_procedure("push"),
-        );
+        pusher_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        pusher_actions.insert("Push".to_string(), ActionSpec::for_procedure("push"));
         pusher_definition.configure_actions(Some("Idle".to_string()), pusher_actions);
         pusher_definition.set_movement_profile(
             MovementProfile::default()
@@ -4976,10 +4865,7 @@ protected func TurnStart()
 
         let mut target_definition = Definition::from_script("Crate", "Crate", script).unwrap();
         let mut target_actions = HashMap::new();
-        target_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        target_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         target_definition.configure_actions(Some("Idle".to_string()), target_actions);
 
         let mut engine = Engine::with_seed(18);
@@ -5066,18 +4952,9 @@ protected func TurnStart()
 
         let mut definition = Definition::from_script("Puller", "Puller", script).unwrap();
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Pull".to_string(),
-            ActionSpec::default().with_procedure("pull"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Pull".to_string(), ActionSpec::for_procedure("pull"));
         definition.configure_actions(Some("Idle".to_string()), actions);
 
         let mut engine = Engine::with_seed(3);
@@ -5442,14 +5319,8 @@ protected func GrabLost()
 
         let mut puller_definition = Definition::from_script("Puller", "Puller", script).unwrap();
         let mut puller_actions = HashMap::new();
-        puller_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        puller_actions.insert(
-            "Pull".to_string(),
-            ActionSpec::default().with_procedure("pull"),
-        );
+        puller_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        puller_actions.insert("Pull".to_string(), ActionSpec::for_procedure("pull"));
         puller_definition.configure_actions(Some("Idle".to_string()), puller_actions);
         puller_definition.set_movement_profile(
             MovementProfile::default()
@@ -5459,10 +5330,7 @@ protected func GrabLost()
 
         let mut target_definition = Definition::from_script("Crate", "Crate", script).unwrap();
         let mut target_actions = HashMap::new();
-        target_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        target_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         target_definition.configure_actions(Some("Idle".to_string()), target_actions);
 
         let mut engine = Engine::with_seed(5);
@@ -6325,14 +6193,8 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let mut fighter_definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
         fighter_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         let mut fighter_actions = HashMap::new();
-        fighter_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        fighter_actions.insert(
-            "Fight".to_string(),
-            ActionSpec::default().with_procedure("fight"),
-        );
+        fighter_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        fighter_actions.insert("Fight".to_string(), ActionSpec::for_procedure("fight"));
         fighter_definition.configure_actions(Some("Idle".to_string()), fighter_actions);
         // DFA_FIGHT approaches with the Walk physical (C4Object.cpp:5225-5228),
         // not the movement profile. 35000 is the stock Clonk DefCore value.
@@ -6345,14 +6207,8 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
             Definition::from_script("Opponent", "Opponent", script).unwrap();
         opponent_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         let mut opponent_actions = HashMap::new();
-        opponent_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        opponent_actions.insert(
-            "Fight".to_string(),
-            ActionSpec::default().with_procedure("fight"),
-        );
+        opponent_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        opponent_actions.insert("Fight".to_string(), ActionSpec::for_procedure("fight"));
         opponent_definition.configure_actions(Some("Idle".to_string()), opponent_actions);
 
         let mut engine = Engine::with_seed(33);
@@ -6451,18 +6307,9 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
 
         let mut fighter_definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
         let mut fighter_actions = HashMap::new();
-        fighter_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        fighter_actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        fighter_actions.insert(
-            "Fight".to_string(),
-            ActionSpec::default().with_procedure("fight"),
-        );
+        fighter_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        fighter_actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+        fighter_actions.insert("Fight".to_string(), ActionSpec::for_procedure("fight"));
         fighter_definition.configure_actions(Some("Idle".to_string()), fighter_actions);
         fighter_definition.set_movement_profile(
             MovementProfile::default()
@@ -6472,10 +6319,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
 
         let mut passive_definition = Definition::from_script("Passive", "Passive", script).unwrap();
         let mut passive_actions = HashMap::new();
-        passive_actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        passive_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         passive_definition.configure_actions(Some("Idle".to_string()), passive_actions);
 
         let mut engine = Engine::with_seed(41);
@@ -6536,10 +6380,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let mut fighter_definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
         fighter_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         let mut fighter_actions = HashMap::new();
-        fighter_actions.insert(
-            "Fight".to_string(),
-            ActionSpec::default().with_procedure("fight"),
-        );
+        fighter_actions.insert("Fight".to_string(), ActionSpec::for_procedure("fight"));
         fighter_definition.configure_actions(Some("Fight".to_string()), fighter_actions);
         fighter_definition.set_physical(PhysicalInfo {
             walk: 35_000,
@@ -6551,10 +6392,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
             Definition::from_script("Opponent", "Opponent", script).unwrap();
         opponent_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         let mut opponent_actions = HashMap::new();
-        opponent_actions.insert(
-            "Fight".to_string(),
-            ActionSpec::default().with_procedure("fight"),
-        );
+        opponent_actions.insert("Fight".to_string(), ActionSpec::for_procedure("fight"));
         opponent_definition.configure_actions(Some("Fight".to_string()), opponent_actions);
 
         let mut engine = Engine::with_seed(33);
@@ -6697,24 +6535,8 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                 crew: vec![player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Rookie".to_string(),
-                    death_message: String::new(),
-                    core: Default::default(),
-                    rank: 0,
-                    rank_name: "Clonk".to_string(),
                     experience: 998,
-                    rounds: 0,
-                    physical: PhysicalInfo::default(),
-                    death_count: 0,
-                    total_playing_time: 0,
-                    birthday: 0,
-                    age: 0,
-                    participation: 1,
-                    in_action: false,
-                    was_in_action: false,
-                    in_action_time: 0,
-                    has_died: false,
-                    extra_data: Vec::new(),
-                    portraits: Default::default(),
+                    ..Default::default()
                 }],
                 control_style: false,
                 auto_context_menu: false,

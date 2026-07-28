@@ -1,4 +1,4 @@
-use clonk_engine::{compat, Definition, Engine, SpawnConfig};
+use clonk_engine::{compat, Engine, SpawnConfig};
 use clonk_script::Value;
 
 fn call_modulate_color(strict_level: u8, first_color: &str) -> Value {
@@ -18,10 +18,7 @@ fn custom_message_color(strict_level: u8, color: &str) -> u32 {
     );
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("CMST", "CustomMessage strictness probe", &script)
-                .expect("CustomMessage probe compiles"),
-        )
+        .register_script_definition("CMST", "CustomMessage strictness probe", &script)
         .expect("CustomMessage probe registers");
     let object = engine
         .spawn_object(SpawnConfig::new("CMST"))

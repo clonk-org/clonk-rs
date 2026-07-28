@@ -4,6 +4,7 @@
 // separately (process-per-test), so isolation and parallelism are unchanged.
 
 mod integration_tests;
+mod support;
 mod test_any_type;
 mod test_appendto;
 mod test_array_append;

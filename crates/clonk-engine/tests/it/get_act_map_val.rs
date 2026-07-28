@@ -261,10 +261,7 @@ fn shipped_hazard_trail_gets_its_real_facet_width_by_entry_index() {
         )
         .expect("shipped Trail definition registers");
     engine
-        .register_definition(
-            Definition::from_script("SHOT", "Trail shot stub", "#strict\n")
-                .expect("shot stub compiles"),
-        )
+        .register_script_definition("SHOT", "Trail shot stub", "#strict\n")
         .expect("shot stub registers");
     let shot = engine
         .spawn_object(SpawnConfig::new("SHOT").with_loaded(true))

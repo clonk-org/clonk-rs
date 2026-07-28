@@ -10,6 +10,19 @@ impl Engine {
         &self.global_effects
     }
 
+    /// Compile `source` into a definition and register it in one step.
+    ///
+    /// Callers overwhelmingly want exactly this pair; spelling it out invited
+    /// a `from_script` whose result was registered against a different id.
+    pub fn register_script_definition(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        source: &str,
+    ) -> Result<(), EngineError> {
+        self.register_definition(Definition::from_script(id, name, source)?)
+    }
+
     pub fn register_definition(&mut self, definition: Definition) -> Result<(), EngineError> {
         let id = definition.id().to_string();
         if self.definitions.contains_key(&id) {
@@ -71,7 +84,7 @@ impl Engine {
                 .global_function_names_in_link_order()
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            let mut functions: HashMap<String, clonk_script::Function> = self
+            let mut functions: rustc_hash::FxHashMap<String, clonk_script::Function> = self
                 .global_script_functions
                 .as_deref()
                 .cloned()
@@ -117,7 +130,7 @@ impl Engine {
     /// (and future) script host.
     pub(crate) fn distribute_global_script_functions(
         &mut self,
-        table: Option<Arc<HashMap<String, clonk_script::Function>>>,
+        table: Option<Arc<rustc_hash::FxHashMap<String, clonk_script::Function>>>,
         function_order: Vec<String>,
     ) {
         self.global_script_functions = table.clone();
@@ -199,7 +212,7 @@ impl Engine {
             .map(|scenario| scenario.script.script_name())
             .unwrap_or("Script.c")
             .to_owned();
-        let mut functions: HashMap<String, clonk_script::Function> = self
+        let mut functions: rustc_hash::FxHashMap<String, clonk_script::Function> = self
             .global_script_functions
             .as_deref()
             .cloned()
@@ -394,7 +407,7 @@ impl Engine {
 
     fn rebuild_global_script_functions(&mut self) {
         fn chain_function(
-            functions: &mut HashMap<String, clonk_script::Function>,
+            functions: &mut rustc_hash::FxHashMap<String, clonk_script::Function>,
             name: String,
             mut function: clonk_script::Function,
         ) -> clonk_script::Function {
@@ -421,7 +434,7 @@ impl Engine {
                 .map(ScriptLinkSource::Definition),
         );
 
-        let mut functions = HashMap::new();
+        let mut functions = rustc_hash::FxHashMap::default();
         let mut function_order = Vec::new();
         for source in sources {
             match source {

@@ -167,18 +167,7 @@
         .expect("write direct scenario definition core");
         write_test_definition_graphics(&definition_path);
 
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("initialise direct command-line app");
         let boot_result = app
             .boot_loading
@@ -973,18 +962,7 @@
         )
         .expect("write configured participants");
 
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("initialize app");
         wait_for_menu(&mut app);
         fs::write(
@@ -1755,9 +1733,7 @@
             .register_definition(clonk_definition)
             .expect("register Clonk definition");
         engine
-            .register_definition(
-                Definition::from_script("Balloon", "Balloon", "").expect("Balloon definition"),
-            )
+            .register_script_definition("Balloon", "Balloon", "")
             .expect("register Balloon definition");
         let overlay = collect_player_overlays(
             &mut engine,
@@ -2950,18 +2926,7 @@
                 "[General]\nFontName=Endeavour\nFontSize=28\nVendorResetKey=remove\n[Graphics]\nScale=250\n",
             )
             .expect("seed reset config");
-        let mut app = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
         wait_for_menu(&mut app);
         app.open_options_menu();
@@ -3237,18 +3202,7 @@
         )
         .expect("seed DE config");
 
-        let mut app = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
         wait_for_menu(&mut app);
         app.open_options_menu();
@@ -5734,18 +5688,7 @@
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated runtime-help user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-        let app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("construct app under the US process language");
         persist_config_value(&paths, "General", "LanguageEx", "DE")
             .expect("change config after process language initialization");

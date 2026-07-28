@@ -1,4 +1,4 @@
-use clonk_engine::{Definition, Engine, SpawnConfig};
+use clonk_engine::{Engine, SpawnConfig};
 use clonk_script::Value;
 
 #[test]
@@ -16,10 +16,7 @@ func ApplyWithNilTarget(int color)
 "#;
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("SCLR", "SetColor probe", script)
-                .expect("SetColor probe compiles"),
-        )
+        .register_script_definition("SCLR", "SetColor probe", script)
         .expect("SetColor probe registers");
     let probe = engine
         .spawn_object(SpawnConfig::new("SCLR"))
@@ -79,10 +76,7 @@ func ApplyTo(int color, object target)
 "#;
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("SCLR", "SetColor probe", script)
-                .expect("SetColor probe compiles"),
-        )
+        .register_script_definition("SCLR", "SetColor probe", script)
         .expect("SetColor probe registers");
     let caller = engine
         .spawn_object(SpawnConfig::new("SCLR"))

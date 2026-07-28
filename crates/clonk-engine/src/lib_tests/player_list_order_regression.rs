@@ -49,24 +49,7 @@ fn crew_info(name: &str) -> player_file::CrewInfo {
     player_file::CrewInfo {
         id: "CLNK".to_string(),
         name: name.to_string(),
-        death_message: String::new(),
-        core: CrewInfoCoreFields::default(),
-        rank: 0,
-        rank_name: "Clonk".to_string(),
-        experience: 0,
-        rounds: 0,
-        physical: PhysicalInfo::default(),
-        death_count: 0,
-        total_playing_time: 0,
-        birthday: 0,
-        age: 0,
-        participation: 1,
-        in_action: false,
-        was_in_action: false,
-        in_action_time: 0,
-        has_died: false,
-        extra_data: Vec::new(),
-        portraits: CrewPortraitState::default(),
+        ..Default::default()
     }
 }
 
@@ -409,11 +392,7 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
     engine
         .register_definition(crew_definition)
         .expect("crew definition registers");
-    engine
-        .register_definition(
-            Definition::from_script("OWND", "Owned", "").expect("owned definition compiles"),
-        )
-        .expect("owned definition registers");
+    engine.register_script_definition("OWND", "Owned", "").expect("owned definition registers");
     engine
         .load_scenario_script_with_convention(
             "AbortCallbacks",

@@ -236,9 +236,7 @@ protected func GetCustomComponents(builder)
             .expect("component registers");
     }
     engine
-        .register_definition(
-            Definition::from_script("BULD", "Builder", BUILDER_SCRIPT).expect("builder compiles"),
-        )
+        .register_script_definition("BULD", "Builder", BUILDER_SCRIPT)
         .expect("builder registers");
     let mut static_definition =
         Definition::from_script("SITE", "Construction Site", "").expect("site compiles");
@@ -272,16 +270,10 @@ protected func GetCustomComponents(builder)
         .register_definition(static_definition)
         .expect("site registers");
     engine
-        .register_definition(
-            Definition::from_script("DYNA", "Dynamic", DYNAMIC_SCRIPT)
-                .expect("dynamic site compiles"),
-        )
+        .register_script_definition("DYNA", "Dynamic", DYNAMIC_SCRIPT)
         .expect("dynamic site registers");
     engine
-        .register_definition(
-            Definition::from_script("LEAD", "Leading", LEADING_INVALID_SCRIPT)
-                .expect("leading-invalid site compiles"),
-        )
+        .register_script_definition("LEAD", "Leading", LEADING_INVALID_SCRIPT)
         .expect("leading-invalid site registers");
     let mut empty_custom = Definition::from_script("CEMP", "Empty custom", EMPTY_CUSTOM_SCRIPT)
         .expect("empty-custom site compiles");

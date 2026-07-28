@@ -100,10 +100,7 @@ global func InputCallback(string answer, int player)
 fn fixture() -> (Engine, ObjectId, ObjectId) {
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("MBQP", "Message-board query probe", QUERY_PROBE_SCRIPT)
-                .expect("message-board query probe compiles"),
-        )
+        .register_script_definition("MBQP", "Message-board query probe", QUERY_PROBE_SCRIPT)
         .expect("message-board query probe registers");
 
     let mut crew_definition =
@@ -742,10 +739,7 @@ fn ownerless_answer_dispatches_game_script_and_no_answer_only_clears_query() {
     );
 
     engine
-        .register_definition(
-            Definition::from_script("MBQN", "Message-board no-callback probe", "#strict 2\n")
-                .expect("no-callback probe compiles"),
-        )
+        .register_script_definition("MBQN", "Message-board no-callback probe", "#strict 2\n")
         .expect("no-callback probe registers");
     let no_callback_target = engine
         .spawn_object(SpawnConfig::new("MBQN"))

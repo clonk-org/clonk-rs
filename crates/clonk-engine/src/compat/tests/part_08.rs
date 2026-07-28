@@ -7,35 +7,11 @@
         let target_id = ObjectId::new(1);
         let vertices = [ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER)];
         let landscape = Landscape::flat(4, 0);
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            vertices.to_vec(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_energy(0)
+            .with_vertices(vertices.to_vec())
         .with_contact_density(crate::CONTACT_DENSITY_SOLID + 1);
-        let world = HostWorldContext::with_landscape(
-            vec![target],
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        );
+        let world = world_with(vec![target], Some(landscape), HashMap::new(), HashMap::new());
         let target = object_reference_value(target_id);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             Ok::<_, RuntimeError>(Value::Array(vec![
@@ -115,24 +91,9 @@
         );
         state.action.target = target1;
         state.action.target2 = target2;
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            ObjectStatus::Normal,
-            "Idle",
-            target1,
-            target2,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_action_target(target1)
+            .with_action_target2(target2)
         .with_full_state(Rc::new(state));
         (target_id, HostWorldContext::from_objects([target]))
     }
@@ -220,24 +181,9 @@
 
     #[test]
     fn get_action_target_reads_world_context() {
-        let other = HostWorldObject::new(
-            ObjectId::new(99),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Walk",
-            Some(ObjectId::new(77)),
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let other = fixture_world_object(ObjectId::new(99), "Dummy")
+            .with_action_name("Walk")
+            .with_action_target(Some(ObjectId::new(77)));
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
             get_action_target(&[Value::Int(0), object_reference_value(ObjectId::new(99))])
@@ -269,27 +215,11 @@
         );
         let library = ActionLibrary::new(Some("Walk".to_string()), specs);
         with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Walk",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_name: "Walk".to_string(),
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -349,24 +279,8 @@
             Vec::new(),
         );
         state.action = ActionState::new(action_name);
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            ObjectStatus::Normal,
-            action_name,
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_action_name(action_name)
         .with_full_state(Rc::new(state));
         let world = HostWorldContext::from_objects([target]).with_definition_metadata(Rc::new(
             HashMap::from([(
@@ -442,27 +356,11 @@
         );
         let library = ActionLibrary::new(Some("Walk".to_string()), specs);
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Walk",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_name: "Walk".to_string(),
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -503,27 +401,11 @@
             )]),
         );
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Odd",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_name: "Odd".to_string(),
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -632,24 +514,9 @@
         // receives Action.ComDir directly (C4Script.cpp:792-796). Tutorial
         // machinery such as a derrick therefore controls another object.
         let target_id = ObjectId::new(2);
-        let target = HostWorldObject::new(
-            target_id,
-            "CLNK",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "CLNK")
+            .with_action_name("Walk")
+            .with_energy(0)
         .with_full_state(Rc::new(crate::preview_spawn_state(
             Vector2::ZERO,
             OWNER_NONE,
@@ -695,24 +562,9 @@
             Vec::new(),
         );
         state.command_direction = command_direction;
-        HostWorldObject::new(
-            id,
-            "CLNK",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        fixture_world_object(id, "CLNK")
+            .with_action_name("Walk")
+            .with_energy(0)
         .with_full_state(Rc::new(state))
     }
 
@@ -904,24 +756,9 @@
         // from WRKS script context with the CLNK worker as pObj
         // (Objects.c4d/Structures.c4d/Workshop.c4d/Script.c:68-72).
         let worker_id = ObjectId::new(2);
-        let worker = HostWorldObject::new(
-            worker_id,
-            "CLNK",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let worker = fixture_world_object(worker_id, "CLNK")
+            .with_action_name("Walk")
+            .with_energy(0)
         .with_full_state(Rc::new(crate::preview_spawn_state(
             Vector2::ZERO,
             OWNER_NONE,
@@ -1061,24 +898,9 @@
         // Data reads nil. The dragon's Flying() steers by
         // GetCommand(0, 2)/GetCommand(0, 3) (Fantasy.c4d Dragon.c4d
         // Script.c:505-512).
-        let world_object = HostWorldObject::new(
-            ObjectId::new(1),
-            "DRGN",
-            ObjectStatus::Normal,
-            "Fly",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::new(50, 50),
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let world_object = fixture_world_object(ObjectId::new(1), "DRGN")
+            .with_action_name("Fly")
+            .with_position(Vector2::new(50, 50))
         .with_commands(vec![CommandView {
             name: "MoveTo".into(),
             target: None,
@@ -1112,35 +934,13 @@
         // SetR stores 350, but scripts observe -10; movement-produced negative
         // rotations remain negative for AdjustWalkRotation/Flying deltas.
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::with_category(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                0,
-                crate::FULL_CON,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                350,
-                &[],
-                "Walk",
-                0,
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                DEFAULT_CATEGORY,
-                ocf::NORMAL,
-                false,
-                None,
-                None,
-            )),
+            Some(HostObjectContext {
+                energy: 100,
+                rotation: 350,
+                action_name: "Walk".to_string(),
+                direction: Direction::Left,
+                ..idle_object_scope(ObjectId::new(1))
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1159,15 +959,11 @@
         landscape: Option<Landscape>,
         args: &[Value],
     ) -> (Result<Value, RuntimeError>, EffectContextOutcome) {
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             landscape,
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         with_effect_context(
             Some(
@@ -1699,27 +1495,10 @@
     #[test]
     fn get_x_returns_current_position() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::new(42, -7),
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                position: Vector2::new(42, -7),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1733,27 +1512,11 @@
     #[test]
     fn get_y_returns_current_position() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(2),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::new(-5, 63),
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: ObjectId::new(2),
+                position: Vector2::new(-5, 63),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1766,24 +1529,8 @@
 
     #[test]
     fn get_x_reads_world_when_target_provided() {
-        let other = HostWorldObject::new(
-            ObjectId::new(99),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::new(-12, 34),
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let other = fixture_world_object(ObjectId::new(99), "Dummy")
+            .with_position(Vector2::new(-12, 34));
         let world = HostWorldContext::from_objects(vec![other]);
         let args = [object_reference_value(ObjectId::new(99))];
 
@@ -1806,66 +1553,18 @@
         let context_id = ObjectId::new(1);
         let other_id = ObjectId::new(2);
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                context_id,
-                "Clonk",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(10, 15),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                other_id,
-                "Dummy",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(25, 30),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(context_id, "Clonk")
+                .with_position(Vector2::new(10, 15)),
+            fixture_world_object(other_id, "Dummy")
+                .with_position(Vector2::new(25, 30)),
         ]);
         let args = [object_reference_value(other_id)];
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                context_id,
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::new(10, 15),
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: context_id,
+                position: Vector2::new(10, 15),
+                ..idle_object_context()
+            }),
             &[],
             world,
             3,
@@ -1880,42 +1579,10 @@
         let anchor_id = ObjectId::new(5);
         let other_id = ObjectId::new(6);
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                anchor_id,
-                "Anchor",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(-40, 12),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                other_id,
-                "Target",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(-10, -18),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(anchor_id, "Anchor")
+                .with_position(Vector2::new(-40, 12)),
+            fixture_world_object(other_id, "Target")
+                .with_position(Vector2::new(-10, -18)),
         ]);
         let args = [
             object_reference_value(other_id),
@@ -1930,27 +1597,11 @@
     fn object_distance_returns_nil_when_other_missing() {
         let args = [object_reference_value(ObjectId::new(99))];
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(3),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::new(0, 0),
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: ObjectId::new(3),
+                position: Vector2::new(0, 0),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             4,
@@ -1965,24 +1616,7 @@
         // FnObject delegates to SafeObjectPointer (C4Script.cpp:3327-3330).
         // Dragon Rock's GetEndboss resolves the loaded mage as Object(1758).
         let mage_id = ObjectId::new(1758);
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
-            mage_id,
-            "MAGE",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(mage_id, "MAGE")]);
         let (result, _) = with_effect_context(None, &[], world, 1759, || {
             let mut script = clonk_script::Engine::new();
             register_host_functions(&mut script);
@@ -2009,24 +1643,8 @@
         let lookup = |status: Option<ObjectStatus>| {
             let objects: Vec<HostWorldObject> = status
                 .map(|status| {
-                    HostWorldObject::new(
-                        id,
-                        "TEST",
-                        status,
-                        "Idle",
-                        None,
-                        None,
-                        None,
-                        OWNER_NONE,
-                        100,
-                        crate::FULL_CON,
-                        Vector2::ZERO,
-                        Vector2::ZERO,
-                        Vec::new(),
-                        0,
-                        0,
-                        None,
-                    )
+                    fixture_world_object(id, "TEST")
+                        .with_status(status)
                 })
                 .into_iter()
                 .collect();
@@ -2065,82 +1683,16 @@
         let inactive = ObjectId::new(409);
         let deleted = ObjectId::new(1_203);
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                normal,
-                "NORM",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                inactive,
-                "INAC",
-                ObjectStatus::Inactive,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                deleted,
-                "DEAD",
-                ObjectStatus::Deleted,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(normal, "NORM"),
+            fixture_world_object(inactive, "INAC")
+                .with_status(ObjectStatus::Inactive),
+            fixture_world_object(deleted, "DEAD")
+                .with_status(ObjectStatus::Deleted),
         ]);
-        let context = HostObjectContext::new(
-            caller,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: caller,
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(Some(context), &[], world, 1_204, || {
             let mut script = clonk_script::Engine::new();
             register_host_functions(&mut script);
@@ -2200,27 +1752,11 @@
         // without consulting Status (C4Object.cpp:281-315;
         // C4Script.cpp:3321-3325).
         let deleted_caller = ObjectId::new(73);
-        let context = HostObjectContext::new(
-            deleted_caller,
-            None,
-            ObjectStatus::Deleted,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: deleted_caller,
+            status: ObjectStatus::Deleted,
+            ..idle_object_context()
+        };
         let (result, _) =
             with_effect_context(Some(context), &[], HostWorldContext::default(), 74, || {
                 let mut script = clonk_script::Engine::new();
@@ -2238,27 +1774,11 @@
 
     #[test]
     fn get_x_dir_returns_object_velocity() {
-        let context = HostObjectContext::new(
-            ObjectId::new(7),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::new(12, -3),
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: ObjectId::new(7),
+            velocity: Vector2::new(12, -3),
+            ..idle_object_context()
+        };
         let (result, _) =
             with_effect_context(Some(context), &[], HostWorldContext::default(), 1, || {
                 get_x_dir(&[])
@@ -2271,27 +1791,11 @@
 
     #[test]
     fn get_y_dir_applies_precision_scaling() {
-        let context = HostObjectContext::new(
-            ObjectId::new(8),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::new(0, 25),
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: ObjectId::new(8),
+            velocity: Vector2::new(0, 25),
+            ..idle_object_context()
+        };
         let args = [Value::Nil, Value::Int(5)];
         let (result, _) =
             with_effect_context(Some(context), &[], HostWorldContext::default(), 1, || {
@@ -2305,24 +1809,8 @@
 
     #[test]
     fn get_x_dir_reads_world_velocity_when_target_provided() {
-        let other = HostWorldObject::new(
-            ObjectId::new(42),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::new(-8, 3),
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let other = fixture_world_object(ObjectId::new(42), "Dummy")
+            .with_velocity(Vector2::new(-8, 3));
         let world = HostWorldContext::from_objects(vec![other]);
         let args = [object_reference_value(ObjectId::new(42))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_x_dir(&args));
@@ -2438,24 +1926,10 @@ func Probe(object other)
         // DRCK relies on this to stop its PIPH without changing the
         // derrick callback's own velocity (Derrick.c4d/Script.c:92-99).
         let target_id = ObjectId::new(2);
-        let target = HostWorldObject::new(
-            target_id,
-            "PIPH",
-            ObjectStatus::Normal,
-            "Drill",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::new(2, 7),
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "PIPH")
+            .with_action_name("Drill")
+            .with_energy(0)
+            .with_velocity(Vector2::new(2, 7))
         .with_full_state(Rc::new(crate::preview_spawn_state(
             Vector2::ZERO,
             OWNER_NONE,
@@ -2530,24 +2004,8 @@ func Probe(object other)
             crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         );
-        let target = HostWorldObject::new(
-            target_id,
-            "ROCK",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "ROCK")
+            .with_energy(0)
         .with_rotation_velocity(itofix_prec(25, 10))
         .with_full_state(Rc::new(state));
         let world = HostWorldContext::from_objects(vec![target]);
@@ -2602,24 +2060,8 @@ func Probe(object other)
             Vec::new(),
         );
         state.rotation = 37;
-        let target = HostWorldObject::new(
-            target_id,
-            "ROCK",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "ROCK")
+            .with_energy(0)
         .with_full_state(Rc::new(state));
         let world = HostWorldContext::from_objects(vec![target]).with_definition_metadata(Rc::new(
             HashMap::from([(DefinitionId::from("ROCK"), DefinitionMetadata::default())]),
@@ -2704,15 +2146,11 @@ func Probe(object other)
     #[test]
     fn set_position_clamps_coordinates_when_requested() {
         let landscape = Landscape::flat(4, 6);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [
             Value::Int(10),
@@ -2721,27 +2159,7 @@ func Probe(object other)
             Value::Bool(true),
         ];
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[ObjectVertex::new(0, 0)],
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&[ObjectVertex::new(0, 0)])),
             &[],
             world,
             1,

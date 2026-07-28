@@ -2,6 +2,125 @@
 // `include!` from compat.rs so every test id stays `compat::tests::*`.
 // Mostly: host registration, object state, players.
 
+    /// The idle object scope these tests hand to `with_effect_context`: one
+    /// object at rest with no effects and full construction. Sites that need
+    /// a different channel override it through a record update, so the
+    /// shared defaults stay in one place.
+    ///
+    /// Vertices are a parameter rather than an overridable field because the
+    /// constructor derives `shape_vertices` from them. Overriding `owner`
+    /// must also set `controller`, which the constructor seeds from it
+    /// (C4Object.cpp:162), and `construction` is clamped at zero.
+    fn idle_object_context_with_vertices(vertices: &[ObjectVertex]) -> HostObjectContext<'_> {
+        HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            vertices,
+            crate::FULL_CON,
+        )
+    }
+
+    fn idle_object_context() -> HostObjectContext<'static> {
+        idle_object_context_with_vertices(&[])
+    }
+
+    /// A world object carrying the scope defaults these tests share: alive
+    /// and normal, Idle, unowned, full energy and construction, at rest at
+    /// the origin with no vertices and no container. Sites state only the
+    /// channel they exercise, through the type's own builders.
+    fn fixture_world_object(id: ObjectId, definition: impl Into<String>) -> HostWorldObject {
+        HostWorldObject::new(
+            id,
+            definition,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+    }
+
+    /// The idle object scope with an explicit category, for the sites that
+    /// exercise category-dependent behaviour. Same defaults as
+    /// [`idle_object_context`], stated once through `with_category`.
+    fn idle_object_scope(object_id: ObjectId) -> HostObjectContext<'static> {
+        HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            crate::FULL_CON,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            None,
+            None,
+        )
+    }
+
+    /// A world context with the empty scaffolding these tests share: no
+    /// transfer zones, no crew selection, one free object id and no team
+    /// home-base rule. Sites state only the objects, landscape, definitions
+    /// and players they exercise.
+    fn world_with(
+        objects: impl IntoIterator<Item = HostWorldObject>,
+        landscape: Option<Landscape>,
+        definitions: HashMap<DefinitionId, DefinitionMetadata>,
+        players: HashMap<i32, PlayerState>,
+    ) -> HostWorldContext {
+        HostWorldContext::with_landscape(
+            objects,
+            landscape,
+            definitions,
+            Vec::new(),
+            players,
+            HashMap::new(),
+            1,
+            false,
+        )
+    }
+
     #[test]
     fn cpp_add_func_argument_extraction_canonicalizes_scalar_and_pointer_slots() {
         let raw_bool = Value::from_c4_bool_raw(2);
@@ -1023,24 +1142,8 @@
     }
 
     fn scenario_section_world_object(id: u64, status: ObjectStatus) -> HostWorldObject {
-        HostWorldObject::new(
-            ObjectId::new(id),
-            "TEST",
-            status,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        fixture_world_object(ObjectId::new(id), "TEST")
+            .with_status(status)
     }
 
     #[test]
@@ -1348,27 +1451,10 @@
         engine
             .load_script("#strict 2\nfunc Probe(x, y) { return Find_AtPoint(x, y); }")
             .expect("Find_AtPoint probe compiles");
-        let object = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(320, -50),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object = HostObjectContext {
+            position: Vector2::new(320, -50),
+            ..idle_object_context()
+        };
         let definition_commanded_carrier = object.clone();
         let (local, _) =
             with_effect_context(Some(object), &[], HostWorldContext::default(), 1, || {
@@ -2497,24 +2583,10 @@ global func PreInitializePlayer(int player)
         // FnSetObjectOrder (C4Script.cpp:5090-5111): nil pSortObj defaults
         // to the caller, nil pObjBeforeOrAfter and self-pairs return false,
         // and a valid request records fSortAfter without sorting inline.
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(2),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+            "Dummy")],
+        );
         let (result, outcome) = with_object_host_context_with_world(world, || {
             assert_eq!(
                 set_object_order(&[Value::Object(2), Value::Nil, Value::Bool(true)])?,
@@ -2538,24 +2610,7 @@ global func PreInitializePlayer(int player)
     }
 
     fn resort_order_world_object(id: u64, definition: &str) -> HostWorldObject {
-        HostWorldObject::new(
-            ObjectId::new(id),
-            definition,
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        fixture_world_object(ObjectId::new(id), definition)
     }
 
     #[test]
@@ -2881,7 +2936,7 @@ global func PreInitializePlayer(int player)
                 script_a
                     .global_access_functions()
                     .map(|(name, function)| (name.clone(), function.clone()))
-                    .collect::<HashMap<_, _>>(),
+                    .collect::<rustc_hash::FxHashMap<_, _>>(),
             );
             script_a.set_global_functions(Some(Arc::clone(&globals)));
             let script_a = Arc::new(script_a);

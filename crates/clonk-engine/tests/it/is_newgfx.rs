@@ -64,10 +64,7 @@ fn shipped_revaluation_newgfx_branch_executes() {
         ("ROCK", "Rock"),
     ] {
         engine
-            .register_definition(
-                Definition::from_script(id, name, "#strict\n")
-                    .expect("support definition compiles"),
-            )
+            .register_script_definition(id, name, "#strict\n")
             .expect("support definition registers");
     }
 

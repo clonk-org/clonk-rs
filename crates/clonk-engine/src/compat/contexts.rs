@@ -1,4 +1,8 @@
 use super::*;
+// `HostObjectContext::new` is the tests' positional constructor; the
+// engine builds scopes through `with_category`.
+#[cfg(test)]
+use crate::ActionLibrary;
 
 struct FairCrewHostContextState {
     script_object: Option<ObjectId>,
@@ -1468,7 +1472,10 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub vertices: &'a [ObjectVertex],
-    shape_vertices: ShapeVertexBuffer,
+    /// `pub(in crate::compat)` so the sibling `compat::tests` module can
+    /// build a scope through a record update; the field stays invisible
+    /// outside this subtree.
+    pub(in crate::compat) shape_vertices: ShapeVertexBuffer,
     pub construction: i32,
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     pub draw_transform: Option<DrawTransform>,
@@ -4585,7 +4592,7 @@ impl EffectHostContext {
         physicals: &HashMap<ObjectId, PhysicalInfo>,
         deferred_physical_actor: Option<ObjectId>,
     ) -> (
-        HashMap<ObjectId, CommandObjectSnapshot>,
+        CommandObjectSnapshots,
         HashMap<i32, CommandPlayerSnapshot>,
         HashMap<DefinitionId, CommandDefinitionSnapshot>,
         TransferZoneTable,

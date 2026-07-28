@@ -1476,7 +1476,6 @@ global func InitializePlayer(int player)
             let crew_info = |id: &str, name: &str, rank: i32| player_file::CrewInfo {
                 id: id.to_string(),
                 name: name.to_string(),
-                death_message: String::new(),
                 core: Default::default(),
                 rank,
                 rank_name: match rank {
@@ -1485,20 +1484,8 @@ global func InitializePlayer(int player)
                     _ => "Clonk",
                 }
                 .to_string(),
-                experience: 0,
-                rounds: 0,
-                physical: PhysicalInfo::default(),
-                death_count: 0,
-                total_playing_time: 0,
-                birthday: 0,
-                age: 0,
-                participation: 1,
-                in_action: false,
-                was_in_action: false,
-                in_action_time: 0,
-                has_died: false,
-                extra_data: Vec::new(),
                 portraits: Default::default(),
+                ..Default::default()
             };
             let player = engine
                 .join_player(lifecycle_join_config(
@@ -1842,24 +1829,7 @@ func ControlUpSingle()
         let loaded_info = player_file::CrewInfo {
             id: "CRNW".to_string(),
             name: "Existing".to_string(),
-            death_message: String::new(),
-            core: Default::default(),
-            rank: 0,
-            rank_name: "Clonk".to_string(),
-            experience: 0,
-            rounds: 0,
-            physical: PhysicalInfo::default(),
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
-            participation: 1,
-            in_action: false,
-            was_in_action: false,
-            in_action_time: 0,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: Default::default(),
+            ..Default::default()
         };
         let mut reused = Engine::with_seed(1);
         setup(&mut reused)?;
@@ -3993,12 +3963,7 @@ func RefillOther() {
             ..PhysicalInfo::default()
         });
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(
-                Definition::from_script("ACTR", "Actor", actor_script)
-                    .expect("actor compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("ACTR", "Actor", actor_script).expect("actor registers");
         engine
             .register_definition(victim)
             .expect("victim registers");
@@ -4280,16 +4245,10 @@ func Deactivate(object target, bool clear_pointers)
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CTRL", "Controller", controller_script)
-                    .expect("controller compiles"),
-            )
+            .register_script_definition("CTRL", "Controller", controller_script)
             .expect("controller registers");
         engine
-            .register_definition(
-                Definition::from_script("ZONE", "Zone owner", "#strict 2\n")
-                    .expect("zone owner compiles"),
-            )
+            .register_script_definition("ZONE", "Zone owner", "#strict 2\n")
             .expect("zone owner registers");
         let controller = engine
             .spawn_object(SpawnConfig::new("CTRL"))
@@ -4684,10 +4643,7 @@ func FindZones()
         zone.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
         engine.register_definition(zone).expect("zone owner registers");
         engine
-            .register_definition(
-                Definition::from_script("CTRL", "Controller", controller_script)
-                    .expect("controller compiles"),
-            )
+            .register_script_definition("CTRL", "Controller", controller_script)
             .expect("controller registers");
 
         let target = engine
@@ -4830,20 +4786,11 @@ func Ping() { return 17; }
 
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("PRNT", "Parent", parent_script).expect("parent compiles"),
-            )
+            .register_script_definition("PRNT", "Parent", parent_script)
             .expect("parent registers");
+        engine.register_script_definition("CHLD", "Child", child_script).expect("child registers");
         engine
-            .register_definition(
-                Definition::from_script("CHLD", "Child", child_script).expect("child compiles"),
-            )
-            .expect("child registers");
-        engine
-            .register_definition(
-                Definition::from_script("HELP", "Helper", helper_script)
-                    .expect("helper compiles"),
-            )
+            .register_script_definition("HELP", "Helper", helper_script)
             .expect("helper registers");
 
         engine
@@ -4895,11 +4842,7 @@ func Initialize() { seen = GetXDir(FindObject(MARK), 100); }
         engine
             .register_definition(simple_definition("MARK"))
             .expect("marker registers");
-        engine
-            .register_definition(
-                Definition::from_script("CHLD", "Child", child_script).expect("child compiles"),
-            )
-            .expect("child registers");
+        engine.register_script_definition("CHLD", "Child", child_script).expect("child registers");
 
         let marker_id = engine
             .spawn_object(SpawnConfig::new("MARK").with_category(CATEGORY_OBJECT))
@@ -4953,16 +4896,9 @@ func Initialize() { seen = FindObject(CHLD)->Read(); }
 "#;
 
         let mut engine = Engine::with_seed(0);
+        engine.register_script_definition("CHLD", "Child", child_script).expect("child registers");
         engine
-            .register_definition(
-                Definition::from_script("CHLD", "Child", child_script).expect("child compiles"),
-            )
-            .expect("child registers");
-        engine
-            .register_definition(
-                Definition::from_script("OBSV", "Observer", observer_script)
-                    .expect("observer compiles"),
-            )
+            .register_script_definition("OBSV", "Observer", observer_script)
             .expect("observer registers");
 
         let child_id = ObjectId::new(40);
@@ -5595,11 +5531,7 @@ func Dedup() {
 }
 "#;
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(
-                Definition::from_script("TIMR", "Timer", script).expect("timer compiles"),
-            )
-            .expect("timer registers");
+        engine.register_script_definition("TIMR", "Timer", script).expect("timer registers");
         let keeper = engine
             .spawn_object(SpawnConfig::new("TIMR").with_position(Vector2::new(10, 10)))
             .expect("keeper spawns");
@@ -5661,11 +5593,7 @@ func MoveOut(pObj) {
 }
 "#;
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(
-                Definition::from_script("BASE", "Basement", script).expect("basement compiles"),
-            )
-            .expect("basement registers");
+        engine.register_script_definition("BASE", "Basement", script).expect("basement registers");
         engine
             .register_definition(simple_definition("CLNK"))
             .expect("clonk registers");
@@ -5730,9 +5658,7 @@ func Eject() {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CONT", "Container", script).expect("container compiles"),
-            )
+            .register_script_definition("CONT", "Container", script)
             .expect("container registers");
         engine
             .register_definition(simple_definition("ITEM"))
@@ -5806,14 +5732,10 @@ public func Prep() {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("Prob", "Prober", prober_script).expect("script compiles"),
-            )
+            .register_script_definition("Prob", "Prober", prober_script)
             .expect("prober registers");
         engine
-            .register_definition(
-                Definition::from_script("Vict", "Victim", victim_script).expect("script compiles"),
-            )
+            .register_script_definition("Vict", "Victim", victim_script)
             .expect("victim registers");
         engine
             .register_player(PlayerConfig::new(5, "Owner"))
@@ -5874,9 +5796,7 @@ public func Launch(pItem) {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CONT", "Container", script).expect("container compiles"),
-            )
+            .register_script_definition("CONT", "Container", script)
             .expect("container registers");
         let mut item_def = simple_definition("ITEM");
         item_def.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
@@ -6080,16 +6000,9 @@ func Leave()
 "#;
         let mut engine = Engine::with_seed(3);
         engine
-            .register_definition(
-                Definition::from_script("CONT", "Container", container_script)
-                    .expect("container compiles"),
-            )
+            .register_script_definition("CONT", "Container", container_script)
             .expect("container registers");
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
-            )
-            .expect("item registers");
+        engine.register_script_definition("ITEM", "Item", item_script).expect("item registers");
         let container = engine
             .spawn_object(SpawnConfig::new("CONT").with_category(CATEGORY_OBJECT))
             .expect("container spawns");
@@ -6153,10 +6066,7 @@ protected func AttachAbort(int phase)
 
         let mut engine = Engine::with_seed(4);
         engine
-            .register_definition(
-                Definition::from_script("DRVR", "Driver", driver_script)
-                    .expect("driver compiles"),
-            )
+            .register_script_definition("DRVR", "Driver", driver_script)
             .expect("driver registers");
         let mut item_definition =
             Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
@@ -6324,9 +6234,7 @@ public func Take(pItem) {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CONT", "Container", script).expect("container compiles"),
-            )
+            .register_script_definition("CONT", "Container", script)
             .expect("container registers");
         engine
             .register_definition(simple_definition("ITEM"))
@@ -6384,10 +6292,7 @@ public func Replace() {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("OLDK", "Old Knight", old_script)
-                    .expect("old knight compiles"),
-            )
+            .register_script_definition("OLDK", "Old Knight", old_script)
             .expect("old knight registers");
         engine
             .register_definition(simple_definition("NEWK"))
@@ -6464,10 +6369,7 @@ protected func RejectEntrance(pContainer) { return(1); }
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("SRCE", "Source", source_script)
-                    .expect("source compiles"),
-            )
+            .register_script_definition("SRCE", "Source", source_script)
             .expect("source registers");
         engine
             .register_definition(simple_definition("DEST"))

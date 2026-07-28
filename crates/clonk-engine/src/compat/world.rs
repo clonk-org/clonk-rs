@@ -1091,6 +1091,96 @@ pub enum PlayerCommand {
 }
 
 impl HostWorldObject {
+    /// Scope overrides for the test fixtures, which build every world object
+    /// from one shared default and then state only what they exercise.
+    #[cfg(test)]
+    pub(crate) fn with_status(mut self, status: ObjectStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_name(mut self, action_name: impl Into<String>) -> Self {
+        self.action_name = action_name.into();
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_target(mut self, target: Option<ObjectId>) -> Self {
+        self.action_target = target;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_target2(mut self, target: Option<ObjectId>) -> Self {
+        self.action_target2 = target;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_procedure(mut self, procedure: Option<String>) -> Self {
+        self.action_procedure = procedure;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_owner(mut self, owner: i32) -> Self {
+        self.owner = owner;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_energy(mut self, energy: i32) -> Self {
+        self.energy = energy;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_position(mut self, position: Vector2) -> Self {
+        self.position = position;
+        // `with_category` derives the raw fixed pair from the pixel pair, and
+        // the fixed values are the authority everywhere downstream.
+        self.fixed_position = FixedVec2::from_ints(position.x, position.y);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_velocity(mut self, velocity: Vector2) -> Self {
+        self.velocity = velocity;
+        self.fixed_velocity = FixedVec2::from_ints(velocity.x, velocity.y);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_construction(mut self, construction: i32) -> Self {
+        self.construction = construction.max(0);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_data(mut self, action_data: i32) -> Self {
+        self.action_data = action_data;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_ticks(mut self, action_ticks: i32) -> Self {
+        self.action_ticks = action_ticks;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_container(mut self, container: Option<ObjectId>) -> Self {
+        self.container = container;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_vertices(mut self, vertices: Vec<ObjectVertex>) -> Self {
+        self.vertices = vertices;
+        self
+    }
+
     pub(crate) fn with_move_to_range(mut self, move_to_range: i32) -> Self {
         self.move_to_range = move_to_range;
         self
@@ -1644,6 +1734,13 @@ pub(crate) struct LazyHostWorldProvider {
     /// so a provider that can answer those two integers directly spares the
     /// deep clone `landscape` would otherwise force.
     landscape_dimensions: Option<unsafe fn(*const ()) -> Option<(i32, i32)>>,
+    /// The source landscape itself, borrowed rather than copied. Read-only
+    /// terrain queries (`GBackSolid` and the rest of C4Wrappers.h:66-92) are
+    /// the highest-frequency host calls real content makes, and copying an
+    /// entire map to answer one pixel dominated the frame. Only a host call
+    /// that *writes* terrain still materializes the private copy `landscape`
+    /// returns.
+    landscape_borrow: Option<unsafe fn(*const ()) -> Option<*const Landscape>>,
     legacy_find_object: Option<unsafe fn(*const (), ObjectId, &FindObjectParams) -> Option<bool>>,
 }
 
@@ -1672,6 +1769,7 @@ impl LazyHostWorldProvider {
             objects,
             landscape,
             landscape_dimensions: None,
+            landscape_borrow: None,
             legacy_find_object: None,
         }
     }
@@ -1688,6 +1786,24 @@ impl LazyHostWorldProvider {
         landscape_dimensions: unsafe fn(*const ()) -> Option<(i32, i32)>,
     ) -> Self {
         self.landscape_dimensions = Some(landscape_dimensions);
+        self
+    }
+
+    /// Supply a borrow of the source landscape for read-only queries.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`LazyHostWorldProvider::new`], and additionally: the
+    /// returned pointer must stay valid and unaliased-by-`&mut` for as long as
+    /// any `HostWorldContext` carrying this provider is alive. Because the
+    /// contract already forbids mutating the source landscape through another
+    /// path while a callback runs, a borrow is sound exactly where the copying
+    /// `landscape` hook was.
+    pub(crate) fn with_landscape_borrow(
+        mut self,
+        landscape_borrow: unsafe fn(*const ()) -> Option<*const Landscape>,
+    ) -> Self {
+        self.landscape_borrow = Some(landscape_borrow);
         self
     }
 
@@ -1719,6 +1835,16 @@ impl LazyHostWorldProvider {
     fn landscape_dimensions(self) -> Option<(i32, i32)> {
         // SAFETY: see `object`.
         unsafe { (self.landscape_dimensions?)(self.source) }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must not retain the returned reference past the lifetime of
+    /// the `HostWorldContext` that owns this provider, and must materialize
+    /// the owned copy before any host call mutates terrain.
+    unsafe fn landscape_borrow<'a>(self) -> Option<&'a Landscape> {
+        // SAFETY: see `object` and `with_landscape_borrow`.
+        unsafe { (self.landscape_borrow?)(self.source).map(|landscape| &*landscape) }
     }
 }
 
@@ -3385,6 +3511,22 @@ impl HostWorldContext {
     }
 
     pub(crate) fn landscape_ref(&self) -> Option<&Landscape> {
+        // An untouched slot still reads the source landscape directly: a
+        // read-only query must not pay for the private copy that only a
+        // terrain *write* needs. Once the slot holds a copy (seeded landscape,
+        // raster preview, or an earlier `landscape_mut`) that copy is the
+        // truth and the borrow must not be consulted again.
+        if self.landscape.get().is_none() {
+            // SAFETY: the returned reference is bounded by `&self`, so it
+            // cannot outlive this context, and every accessor that mutates
+            // terrain takes `&mut self` and materializes the owned copy first.
+            let borrowed = self
+                .lazy_world
+                .and_then(|provider| unsafe { provider.landscape_borrow() });
+            if borrowed.is_some() {
+                return borrowed;
+            }
+        }
         self.landscape_slot().as_deref()
     }
 

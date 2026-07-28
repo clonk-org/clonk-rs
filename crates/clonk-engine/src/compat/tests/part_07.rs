@@ -434,27 +434,10 @@ func Probe(state) {
 
         let state = empty_state();
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &effects,
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                effects: &effects,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -514,27 +497,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library.clone(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.clone().into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -546,27 +512,11 @@ func Probe(state) {
         assert!(outcome.object_update.is_none());
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(2),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: ObjectId::new(2),
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -593,27 +543,10 @@ func Probe(state) {
             clonk_script::c4_string_from_bytes(&[0xbf])
         );
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -632,34 +565,14 @@ func Probe(state) {
     #[test]
     fn action_data_setters_share_missing_material_fallback() {
         let mut specs = HashMap::new();
-        specs.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("bridge"),
-        );
+        specs.insert("Idle".to_string(), ActionSpec::for_procedure("bridge"));
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -718,24 +631,11 @@ func Probe(state) {
         state.status = status;
         state.action = crate::ActionState::new("Work");
         state.action.data = initial_data;
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            status,
-            "Work",
-            None,
-            None,
-            Some(procedure.to_string()),
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            initial_data,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_status(status)
+            .with_action_name("Work")
+            .with_action_procedure(Some(procedure.to_string()))
+            .with_action_data(initial_data)
         .with_full_state(Rc::new(state));
         let world = HostWorldContext::from_objects([target])
             .with_definition_metadata(Rc::new(HashMap::from([(
@@ -868,24 +768,9 @@ func Probe(state) {
             Vec::new(),
         );
         state.action = crate::ActionState::new("Walk");
-        let target = HostWorldObject::new(
-            clonk,
-            "CLNK",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            Some("walk".into()),
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(clonk, "CLNK")
+            .with_action_name("Walk")
+            .with_action_procedure(Some("walk".into()))
         .with_full_state(Rc::new(state));
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -909,27 +794,10 @@ func Probe(state) {
                 &materials,
             ))));
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                loam,
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: loam,
+                ..idle_object_context()
+            }),
             &[],
             world,
             1,
@@ -978,34 +846,14 @@ func Probe(state) {
     #[test]
     fn set_action_data_rejects_invalid_attach_vertices() {
         let mut specs = HashMap::new();
-        specs.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("attach"),
-        );
+        specs.insert("Idle".to_string(), ActionSpec::for_procedure("attach"));
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1069,27 +917,7 @@ func Probe(state) {
     #[test]
     fn get_action_data_reflects_pending_update() {
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context()),
             &[],
             HostWorldContext::default(),
             1,
@@ -1108,24 +936,9 @@ func Probe(state) {
 
     #[test]
     fn get_action_data_reads_world_context() {
-        let other = HostWorldObject::new(
-            ObjectId::new(23),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            77,
-            0,
-            None,
-        );
+        let other = fixture_world_object(ObjectId::new(23), "Dummy")
+            .with_action_name("Walk")
+            .with_action_data(77);
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = ValueMap::new();
@@ -1171,27 +984,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1215,27 +1011,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1249,34 +1028,14 @@ func Probe(state) {
     #[test]
     fn get_procedure_returns_configured_value() {
         let mut specs = HashMap::new();
-        specs.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        specs.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1290,38 +1049,15 @@ func Probe(state) {
     #[test]
     fn get_procedure_reflects_pending_action_change() {
         let mut specs = HashMap::new();
-        specs.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        specs.insert(
-            "Float".to_string(),
-            ActionSpec::default().with_procedure("float"),
-        );
+        specs.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
+        specs.insert("Float".to_string(), ActionSpec::for_procedure("float"));
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1337,24 +1073,12 @@ func Probe(state) {
 
     #[test]
     fn get_procedure_reads_world_context() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(42),
             "Dummy",
-            ObjectStatus::Normal,
-            "Swim",
-            None,
-            None,
-            Some("swim".to_string()),
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        )
+            .with_action_name("Swim")
+            .with_action_procedure(Some("swim".to_string()))]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(42));
@@ -1380,24 +1104,8 @@ func Probe(state) {
 
     #[test]
     fn get_action_reads_other_object_from_world() {
-        let other = HostWorldObject::new(
-            ObjectId::new(99),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let other = fixture_world_object(ObjectId::new(99), "Dummy")
+            .with_action_name("Walk");
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
             let mut target = ValueMap::new();
@@ -1411,24 +1119,11 @@ func Probe(state) {
 
     #[test]
     fn get_action_uses_world_without_context() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(7),
             "Dummy",
-            ObjectStatus::Normal,
-            "Dig",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        )
+            .with_action_name("Dig")]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(7));
@@ -1456,27 +1151,10 @@ func Probe(state) {
     #[test]
     fn get_act_time_reflects_pending_update() {
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                7,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_ticks: 7,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1503,27 +1181,11 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                5,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_ticks: 5,
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1542,24 +1204,9 @@ func Probe(state) {
 
     #[test]
     fn get_act_time_reads_world_context() {
-        let other = HostWorldObject::new(
-            ObjectId::new(23),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            12,
-            None,
-        );
+        let other = fixture_world_object(ObjectId::new(23), "Dummy")
+            .with_action_name("Walk")
+            .with_action_ticks(12);
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = ValueMap::new();
@@ -1581,27 +1228,7 @@ func Probe(state) {
     fn get_vertex_num_counts_vertices() {
         let vertices = [ObjectVertex::new(0, 0), ObjectVertex::new(1, -1)];
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -1626,24 +1253,10 @@ func Probe(state) {
         // nil without either (C4Script.cpp:4445-4449). The object's live
         // vertices and construction/rotation are deliberately irrelevant.
         let other_id = ObjectId::new(2);
-        let other = HostWorldObject::new(
-            other_id,
-            "OTHR",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::new(10, 50),
-            Vector2::ZERO,
-            vec![ObjectVertex::new(0, 900)],
-            0,
-            0,
-            None,
-        );
+        let other = fixture_world_object(other_id, "OTHR")
+            .with_energy(0)
+            .with_position(Vector2::new(10, 50))
+            .with_vertices(vec![ObjectVertex::new(0, 900)]);
         let definitions = Rc::new(HashMap::from([
             (
                 DefinitionId::from("SELF"),
@@ -1663,27 +1276,11 @@ func Probe(state) {
         let world =
             HostWorldContext::from_objects(vec![other]).with_definition_metadata(definitions);
         let live_vertices = [ObjectVertex::new(0, 1_000)];
-        let object = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            0,
-            OWNER_NONE,
-            Vector2::new(100, 200),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &live_vertices,
-            crate::FULL_CON,
-        )
+        let object = HostObjectContext {
+            energy: 0,
+            position: Vector2::new(100, 200),
+            ..idle_object_context_with_vertices(&live_vertices)
+        }
         .with_definition_id("SELF");
         let (result, _) = with_effect_context(Some(object), &[], world, 1, || {
             Ok::<_, RuntimeError>(Value::Array(vec![
@@ -1734,27 +1331,10 @@ func Probe(state) {
             },
         )]));
         let world = HostWorldContext::default().with_definition_metadata(definitions);
-        let object = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            0,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+        let object = HostObjectContext {
+            energy: 0,
+            ..idle_object_context()
+        }
         .with_definition_id("SELF");
         let (result, _) =
             with_effect_context(Some(object), &[], world, 1, || script.call("Probe", &[]));
@@ -1807,27 +1387,10 @@ func Probe(state) {
         let run = |function| {
             let world =
                 HostWorldContext::default().with_definition_metadata(Rc::clone(&definitions));
-            let object = HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                0,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )
+            let object = HostObjectContext {
+                energy: 0,
+                ..idle_object_context()
+            }
             .with_definition_id("SELF");
             with_effect_context(Some(object), &[], world, 1, || script.call(function, &[]))
         };
@@ -1891,24 +1454,12 @@ func Probe(state) {
         state.container = Some(container);
         state.action.target2 = Some(resolved_target);
         state.layer = Some(layer);
-        let world_object = HostWorldObject::new(
-            target,
-            "SELF",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            Some(resolved_target),
-            None,
-            OWNER_NONE,
-            0,
-            FULL_CON,
-            state.position,
-            state.velocity,
-            Vec::new(),
-            0,
-            0,
-            Some(container),
-        )
+        let world_object = fixture_world_object(target, "SELF")
+            .with_action_target2(Some(resolved_target))
+            .with_energy(0)
+            .with_position(state.position)
+            .with_velocity(state.velocity)
+            .with_container(Some(container))
         .with_compiler_fields(
             12,
             -9,
@@ -1927,24 +1478,8 @@ func Probe(state) {
             },
         )
         .with_full_state(Rc::new(state));
-        let default_world_object = HostWorldObject::new(
-            default_target,
-            "SELF",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let default_world_object = fixture_world_object(default_target, "SELF")
+            .with_energy(0);
         let mut reset_state = crate::preview_spawn_state(
             Vector2::new(3, 4),
             OWNER_NONE,
@@ -1955,24 +1490,11 @@ func Probe(state) {
             Vec::new(),
         );
         reset_state.container = Some(container);
-        let reset_world_object = HostWorldObject::new(
-            reset_target,
-            "SELF",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            FULL_CON,
-            reset_state.position,
-            reset_state.velocity,
-            Vec::new(),
-            0,
-            0,
-            Some(container),
-        )
+        let reset_world_object = fixture_world_object(reset_target, "SELF")
+            .with_energy(0)
+            .with_position(reset_state.position)
+            .with_velocity(reset_state.velocity)
+            .with_container(Some(container))
         .with_compiler_fields(
             0,
             0,
@@ -2179,35 +1701,24 @@ func Probe(state) {
         )]));
         let world = HostWorldContext::from_objects(vec![world_object])
             .with_definition_metadata(definitions);
-        let object = HostObjectContext::with_category(
-            target,
-            None,
-            ObjectStatus::Normal,
-            state.energy,
-            state.damage,
-            state.construction,
-            state.owner,
-            state.position,
-            state.velocity,
-            state.rotation,
-            &[],
-            action.name,
-            action.time,
-            action.data,
-            action.phase,
-            action_library,
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            state.category,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object = HostObjectContext {
+            energy: state.energy,
+            damage: state.damage,
+            construction: (state.construction).max(0),
+            owner: state.owner,
+            controller: state.owner,
+            position: state.position,
+            velocity: state.velocity,
+            rotation: state.rotation,
+            action_name: action.name,
+            action_ticks: action.time,
+            action_data: action.data,
+            action_phase: action.phase,
+            action_library: action_library.into(),
+            direction: Direction::Left,
+            category: state.category,
+            ..idle_object_scope(target)
+        }
         .with_definition_id("SELF")
         .with_script_fixed_position(Some(fixed_position))
         .with_script_fixed_velocity(Some(fixed_velocity))
@@ -2364,24 +1875,9 @@ func Probe(state) {
         let vertices: Vec<ObjectVertex> = (0..29)
             .map(|index| ObjectVertex::new(index, -index))
             .collect();
-        let target = HostWorldObject::new(
-            target_id,
-            "LINE",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            vertices.clone(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "LINE")
+            .with_energy(0)
+            .with_vertices(vertices.clone())
         .with_full_state(Rc::new(crate::preview_spawn_state(
             Vector2::ZERO,
             OWNER_NONE,
@@ -2428,27 +1924,7 @@ func Probe(state) {
         F: FnOnce() -> Result<T, RuntimeError>,
     {
         with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2605,24 +2081,9 @@ func Probe(state) {
     fn remove_vertex_mutates_an_explicit_foreign_target() {
         let target_id = ObjectId::new(2);
         let vertices = distinct_shape_vertices();
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            vertices.clone(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_energy(0)
+            .with_vertices(vertices.clone())
         .with_full_state(Rc::new(crate::preview_spawn_state(
             Vector2::ZERO,
             OWNER_NONE,
@@ -2667,27 +2128,7 @@ func Probe(state) {
             .with_friction(7);
         let vertices = [vertex];
         let (x, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2712,27 +2153,7 @@ func Probe(state) {
             ])
         );
         let (y, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2740,27 +2161,7 @@ func Probe(state) {
         );
         assert_eq!(y.expect("y succeeds"), Value::Int(-3));
         let (cnat, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2771,27 +2172,7 @@ func Probe(state) {
             Value::Int((CNAT_CENTER | CNAT_BOTTOM) as i32)
         );
         let (friction, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2804,38 +2185,14 @@ func Probe(state) {
     fn get_vertex_contact_uses_landscape_sampling() {
         let vertices = [ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM)];
         let landscape = Landscape::flat(8, 0);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             world,
             1,
@@ -2853,39 +2210,15 @@ func Probe(state) {
             ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM),
         ];
         let landscape = Landscape::flat(4, 0);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let object = object_reference_value(ObjectId::new(1));
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             world,
             1,

@@ -4,24 +4,10 @@
 
     #[test]
     fn resort_queues_explicit_context_and_global_category_work() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(2),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+            "Dummy")],
+        );
         let (result, outcome) = with_object_host_context_with_world(world.clone(), || {
             assert_eq!(resort(&[])?, Value::Nil);
             assert_eq!(resort(&[Value::Object(2)])?, Value::Nil);
@@ -439,27 +425,10 @@
         energy: i32,
         maximum: i32,
     ) -> HostObjectContext<'static> {
-        HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
+        HostObjectContext {
             energy,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+            ..idle_object_context()
+        }
         .with_physicals(
             None,
             None,
@@ -494,27 +463,11 @@
             .map(|name| ((*name).to_string(), ActionSpec::default()))
             .collect();
         with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
+            Some(HostObjectContext {
                 action_ticks,
-                0,
-                ActionLibrary::new(None, specs),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+                action_library: ActionLibrary::new(None, specs).into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -541,27 +494,7 @@
         F: FnOnce() -> Result<T, RuntimeError>,
     {
         with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context()),
             &[],
             world,
             next_object_id,
@@ -2015,24 +1948,11 @@ func RenameInfo(object target, string name, bool make_valid)
         let info = |name: &str, experience: i32| crate::player_file::CrewInfo {
             id: "CREW".to_string(),
             name: name.to_string(),
-            death_message: String::new(),
             core: Default::default(),
-            rank: 0,
             rank_name: "Clonk".to_string(),
             experience,
-            rounds: 0,
             physical: crate::PhysicalInfo::default(),
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
-            participation: 1,
-            in_action: false,
-            was_in_action: false,
-            in_action_time: 0,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: CrewPortraitState::default(),
+            ..Default::default()
         };
         engine
             .join_player(crate::JoinPlayerConfig {
@@ -2501,23 +2421,8 @@ func Announce()
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
                     death_message: "Remember me // exactly  ".to_string(),
-                    core: Default::default(),
-                    rank: 0,
-                    rank_name: "Clonk".to_string(),
-                    experience: 0,
-                    rounds: 0,
                     physical: crate::PhysicalInfo::default(),
-                    death_count: 0,
-                    total_playing_time: 0,
-                    birthday: 0,
-                    age: 0,
-                    participation: 1,
-                    in_action: false,
-                    was_in_action: false,
-                    in_action_time: 0,
-                    has_died: false,
-                    extra_data: Vec::new(),
-                    portraits: CrewPortraitState::default(),
+                    ..Default::default()
                 }],
                 control_style: false,
                 auto_context_menu: false,

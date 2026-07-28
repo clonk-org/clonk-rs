@@ -5404,23 +5404,14 @@ LastPlayerID=12
             player_type: PLAYER_INFO_TYPE_SCRIPT,
             color: 0x123456,
             original_color: 0x123456,
-            savegame_player: 0,
             team: 2,
-            auth_id: LegacyCString::default(),
             game_number: 8,
             game_join_frame: 20,
-            game_part_frame: -1,
             extra_data: *b"0007",
-            league_account: LegacyCString::default(),
-            league_score: 0,
-            league_rank: 0,
-            league_rank_symbol: 0,
-            league_projected_gain: -1,
             clan_tag: LegacyCString::from_bytes(b"A\nB".to_vec()).unwrap(),
-            league_performance: 0,
             league_progress_data_is_null: false,
-            league_progress_data: LegacyCString::default(),
             resource: Some(resource),
+            ..Default::default()
         };
         // C++ serializes only PIF_SyncFlags, so the local JoinIssued bit is
         // absent and the unnamed InScenarioFile bit is emitted numerically.

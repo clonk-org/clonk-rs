@@ -7,8 +7,8 @@ use crate::action::{ScriptCallbackTarget, SharedActionLibrary};
 use crate::command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
     CommandDefinitionSnapshot, CommandEvent, CommandEventInstanceKind, CommandFailureFeedback,
-    CommandFailureReason, CommandId, CommandMode, CommandObjectSnapshot, CommandOperation,
-    CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
+    CommandFailureReason, CommandId, CommandMode, CommandObjectSnapshot, CommandObjectSnapshots,
+    CommandOperation, CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
     CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
@@ -30,7 +30,7 @@ use crate::sky::SkyAdjustment;
 use crate::text_spec::{parse_text_spec, TextSpec};
 use crate::transfer::TransferZoneTable;
 use crate::{
-    encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionState, ActionUpdate,
+    encode_bridge_action_data, ActionProcedure, ActionState, ActionUpdate,
     AudioCommand, ChangeDefContentsSort, CommandDirection, CrewInfoCoreFields, CrewInfoLink,
     CrewObjectInfo, CrewPermanentPortrait, CrewPortrait, CrewPortraitState, CrewSelectionState,
     DefinitionId, DefinitionRect, Direction, DrawTransform, EnvironmentSettings, FloatVector2,
@@ -167,6 +167,7 @@ mod tests {
     use crate::AudioCommand;
     use clonk_resources::C4_MAX_PHYSICAL;
     use proptest::prelude::*;
+    use crate::ActionLibrary;
     use std::collections::HashMap;
     use std::fmt;
     use std::sync::{Arc, Mutex};

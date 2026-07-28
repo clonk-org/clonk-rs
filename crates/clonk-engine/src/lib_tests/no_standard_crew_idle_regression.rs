@@ -4,24 +4,9 @@ fn idle_crew(id: &str, name: &str, experience: i32) -> player_file::CrewInfo {
     player_file::CrewInfo {
         id: id.to_string(),
         name: name.to_string(),
-        death_message: String::new(),
-        core: CrewInfoCoreFields::default(),
-        rank: 0,
         rank_name: "Clonk".to_string(),
         experience,
-        rounds: 0,
-        physical: PhysicalInfo::default(),
-        death_count: 0,
-        total_playing_time: 0,
-        birthday: 0,
-        age: 0,
-        participation: 1,
-        in_action: false,
-        was_in_action: false,
-        in_action_time: 0,
-        has_died: false,
-        extra_data: Vec::new(),
-        portraits: CrewPortraitState::default(),
+        ..Default::default()
     }
 }
 
@@ -29,10 +14,7 @@ fn idle_crew(id: &str, name: &str, experience: i32) -> player_file::CrewInfo {
 fn empty_id_get_idle_excludes_no_standard_crew_definitions() {
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("STND", "Standard crew", "")
-                .expect("standard definition compiles"),
-        )
+        .register_script_definition("STND", "Standard crew", "")
         .expect("standard definition registers");
     let mut excluded =
         Definition::from_script("SPEC", "Special crew", "").expect("special definition compiles");

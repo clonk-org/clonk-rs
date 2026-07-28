@@ -48,11 +48,7 @@ fn native_compiled_defaults_are_distinct_from_generic_loaded_fixtures() {
 fn compiled_contents_keep_saved_order_and_cpp_duplicate_repair() {
     let mut engine = Engine::new();
     for id in ["CONT", "ITEM"] {
-        engine
-            .register_definition(
-                Definition::from_script(id, id, "").expect("fixture definition compiles"),
-            )
-            .expect("fixture definition registers");
+        engine.register_script_definition(id, id, "").expect("fixture definition registers");
     }
     let parent = engine
         .spawn_object(SpawnConfig::new("CONT").with_id(ObjectId::new(1)))
@@ -85,11 +81,7 @@ fn compiled_contents_keep_saved_order_and_cpp_duplicate_repair() {
 #[test]
 fn deferred_legacy_containment_preserves_mutual_cycles() {
     let mut engine = Engine::new();
-    engine
-        .register_definition(
-            Definition::from_script("CYCL", "Cycle", "").expect("fixture definition compiles"),
-        )
-        .expect("fixture definition registers");
+    engine.register_script_definition("CYCL", "Cycle", "").expect("fixture definition registers");
     let first = engine
         .spawn_object(SpawnConfig::new("CYCL").with_id(ObjectId::new(1)))
         .expect("first object spawns");
@@ -300,24 +292,11 @@ fn objects_info_name_binds_the_named_idle_crew_entry_after_players_exist() {
         vec![player_file::CrewInfo {
             id: "OTHR".to_string(),
             name: "Captain".to_string(),
-            death_message: String::new(),
-            core: CrewInfoCoreFields::default(),
             rank: 3,
             rank_name: "Captain".to_string(),
             experience: 123,
-            rounds: 0,
             physical,
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
-            participation: 1,
-            in_action: false,
-            was_in_action: false,
-            in_action_time: 0,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: CrewPortraitState::default(),
+            ..Default::default()
         }],
     );
     engine.crew_info_order.insert(0, vec![0]);

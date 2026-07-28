@@ -480,6 +480,24 @@ impl Engine {
         unsafe { &*std::ptr::addr_of!((*engine).landscape) }.clone()
     }
 
+    /// Borrow the landscape for read-only host queries. `GBackSolid` and the
+    /// rest of C4Wrappers.h:66-92 read single pixels; copying the whole map to
+    /// answer one was the single largest cost in `advance_tick` on real
+    /// content. Terrain *writes* still go through
+    /// [`Self::lazy_host_world_landscape`] and its private copy.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::lazy_host_world_landscape`], which already
+    /// requires the source landscape to stay put and unmutated for the
+    /// lifetime of every context carrying this provider.
+    unsafe fn lazy_host_world_landscape_borrow(source: *const ()) -> Option<*const Landscape> {
+        let engine = source.cast::<Self>();
+        unsafe { &*std::ptr::addr_of!((*engine).landscape) }
+            .as_ref()
+            .map(std::ptr::from_ref)
+    }
+
     /// Report the landscape extent without copying the shell. Sector sizing is
     /// the only caller that used to force `lazy_host_world_landscape` for two
     /// integers, once per script call that reaches `FindObjects`.
@@ -679,6 +697,7 @@ impl Engine {
                 Self::lazy_host_world_landscape,
             )
             .with_landscape_dimensions(Self::lazy_host_world_landscape_dimensions)
+            .with_landscape_borrow(Self::lazy_host_world_landscape_borrow)
             .with_legacy_find_object(Self::lazy_host_world_object_matches)
         };
         self.host_world_context_base()
@@ -866,7 +885,7 @@ impl Engine {
         // other script's (C4AulScriptEngine owns AA_GLOBAL functions from
         // EVERY linked script): GoldRush's FxStayThere*/DoInitialize live
         // there and must resolve from def scripts and effect callbacks.
-        let mut functions: HashMap<String, clonk_script::Function> = self
+        let mut functions: rustc_hash::FxHashMap<String, clonk_script::Function> = self
             .global_script_functions
             .as_deref()
             .cloned()

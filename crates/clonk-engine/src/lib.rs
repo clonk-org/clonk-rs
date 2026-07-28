@@ -298,8 +298,9 @@ fn script_context_function_metadata(function: &clonk_script::Function) -> Script
 use command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
     CommandDefinitionSnapshot, CommandEvent, CommandEventInstanceKind, CommandFailureFeedback,
-    CommandId, CommandMode, CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot,
-    CommandRequest, CommandRuntimeContext, CommandStack, CommandStepResult, GetAttemptDisposition,
+    CommandId, CommandMode, CommandObjectSnapshot, CommandObjectSnapshots, CommandOperation,
+    CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack, CommandStepResult,
+    GetAttemptDisposition,
 };
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
@@ -6270,7 +6271,7 @@ impl ScenarioScript {
     /// Shares the System.c4g global-function table into the scenario host.
     fn set_global_functions(
         &mut self,
-        functions: Option<Arc<HashMap<String, clonk_script::Function>>>,
+        functions: Option<Arc<rustc_hash::FxHashMap<String, clonk_script::Function>>>,
     ) {
         Arc::make_mut(&mut self.script).set_global_functions(functions);
     }
@@ -7446,7 +7447,7 @@ pub struct Engine {
     objects_generation: std::cell::Cell<u64>,
     /// Generation-stamped id->index map: CrossCheck resolves object ids per
     /// candidate pair and the former linear scan dominated tick time.
-    object_index_cache: std::cell::RefCell<(u64, HashMap<ObjectId, usize>)>,
+    object_index_cache: std::cell::RefCell<(u64, rustc_hash::FxHashMap<ObjectId, usize>)>,
     /// Shared metadata view of `definitions` for host contexts; definitions
     /// only change while loading, so this is built once and dropped on any
     /// definition mutation (host contexts are built per script callback and
@@ -7668,7 +7669,7 @@ pub struct Engine {
     /// The System.c4g global-function table (Game.ScriptEngine in C++),
     /// shared into every script host.
     #[doc(hidden)]
-    pub global_script_functions: Option<Arc<HashMap<String, clonk_script::Function>>>,
+    pub global_script_functions: Option<Arc<rustc_hash::FxHashMap<String, clonk_script::Function>>>,
     /// Physical `Game.ScriptEngine` SFunc insertion order (`Func0` to
     /// `FuncL`). Context menus enumerate this ledger backward and suppress
     /// older exact-name overloads just like `C4AulScript::GetSFunc`.
@@ -9892,7 +9893,7 @@ impl Engine {
             script_link_sources: Vec::new(),
             reloaded_global_definitions: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
-            object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
+            object_index_cache: std::cell::RefCell::new((0, rustc_hash::FxHashMap::default())),
             definition_metadata_cache: std::cell::RefCell::new(None),
             command_definition_snapshot_cache: std::cell::RefCell::new(None),
             fair_crew_physical_cache: Rc::new(RefCell::new(HashMap::new())),
@@ -10377,46 +10378,14 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             (
                 id.clone(),
                 DefinitionMetadata {
-                    name: String::new(),
-                    portrait_names: Vec::new(),
                     category: *category,
-                    border_bound: 0,
-                    contact_function_calls: false,
-                    blit_mode: 0,
                     ocf_base: OCF_NORMAL,
-                    crew_member: false,
-                    crew_member_value: 0,
-                    silent_commands: false,
-                    vehicle_control: 0,
-                    action_library: ActionLibrary::default().into(),
-                    control_transfer_callback: None,
-                    action_graphics: HashMap::new(),
-                    value: 0,
-                    allow_picture_stack: 0,
-                    mass: 0,
-                    no_component_mass: false,
-                    constructable: false,
-                    shape: None,
-                    placement: 0,
-                    growth: 0,
-                    construction_offset: 0,
-                    basement: 0,
-                    physical: clonk_resources::PhysicalInfo::default(),
-                    components: Vec::new(),
-                    collection_limit: 0,
-                    grab_put_get: 0,
-                    line_connect: 0,
-                    clonk_name_newlines: None,
-                    stretch_growth: false,
-                    rotateable: 0,
                     line: snapshot
                         .definition_lines
                         .get(id)
                         .map(|metadata| metadata.line)
                         .unwrap_or(0),
-                    vertices: Vec::new(),
-                    contact_density: None,
-                    fire: compat::DefinitionFireMetadata::default(),
+                    ..Default::default()
                 },
             )
         })

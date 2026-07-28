@@ -476,13 +476,8 @@ mod tests {
         let mut options = DisplayOptions {
             base_width: 800,
             base_height: 600,
-            scale: 1.0,
-            scale_percent: 100,
-            point_filtering: false,
             mode: DisplayMode::Window,
-            maximized: false,
-            position: None,
-            dirty: false,
+            ..Default::default()
         };
         options.record_actual_size(1024, 768);
         assert_eq!(options.base_width, 1024);
@@ -503,11 +498,8 @@ mod tests {
             base_height: 600,
             scale: 3.0,
             scale_percent: 300,
-            point_filtering: false,
             mode: DisplayMode::Window,
-            maximized: false,
-            position: None,
-            dirty: false,
+            ..Default::default()
         };
         options.record_actual_size(2743, 1717);
         assert_eq!(options.base_width, 915);

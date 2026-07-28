@@ -127,10 +127,7 @@ fn script_control_uses_packet_strictness_for_direct_exec() {
 
     let mut engine = Engine::with_seed(1);
     engine
-        .register_definition(
-            Definition::from_script("STC3", "Strict target", "#strict 3")
-                .expect("strict target compiles"),
-        )
+        .register_script_definition("STC3", "Strict target", "#strict 3")
         .expect("strict target registers");
     let object = engine
         .spawn_object(SpawnConfig::new("STC3"))
@@ -308,10 +305,7 @@ fn script_control_matches_cpp_global_and_object_state_differential() {
     // folding without modifying the read-only C++ oracle.
     let mut engine = Engine::with_seed(1);
     engine
-        .register_definition(
-            Definition::from_script("DIFF", "Differential target", "#strict 3")
-                .expect("target definition compiles"),
-        )
+        .register_script_definition("DIFF", "Differential target", "#strict 3")
         .expect("target definition registers");
     let object = engine
         .spawn_object(SpawnConfig::new("DIFF").with_position(Vector2::new(1, 2)))

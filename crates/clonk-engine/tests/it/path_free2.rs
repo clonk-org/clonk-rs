@@ -1,15 +1,12 @@
 use clonk_engine::landscape::PixelGrid;
-use clonk_engine::{Definition, Engine, EngineError, Landscape, SpawnConfig};
+use clonk_engine::{Engine, EngineError, Landscape, SpawnConfig};
 use clonk_script::Value;
 
 fn call_probe_result(script: &str, landscape: Landscape) -> Result<Value, EngineError> {
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(landscape);
     engine
-        .register_definition(
-            Definition::from_script("PF2T", "PathFree2 probe", script)
-                .expect("probe script compiles"),
-        )
+        .register_script_definition("PF2T", "PathFree2 probe", script)
         .expect("probe definition registers");
     let object = engine
         .spawn_object(SpawnConfig::new("PF2T"))

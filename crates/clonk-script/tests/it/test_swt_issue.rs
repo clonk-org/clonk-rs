@@ -9,16 +9,7 @@ func Test() {
     while (Local(i)) ++++i;
 }
     "#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
@@ -31,16 +22,7 @@ func Test(pTarget, iDir) {
     Local(i) = iDir;
 }
     "#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
@@ -54,14 +36,5 @@ public func AddTarget(object pTarget, int iDir)
   Local(i++) = pTarget; Local(i) = iDir;
   }
     "#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }

@@ -27,20 +27,30 @@ fn c4_name_byte_key(byte: u8) -> u8 {
 /// APIs remain strings without replacing arbitrary native bytes.
 #[doc(hidden)]
 pub fn c4_name_key(name: &str) -> String {
-    let bytes = clonk_script::c4_string_bytes(name);
-    let visible = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
-    let folded = visible
+    let bytes = clonk_script::c4_string_bytes_cow(name);
+    let folded = c4_name_key_bytes(&bytes).collect::<Vec<_>>();
+    clonk_script::c4_string_from_bytes(&folded)
+}
+
+/// The folded, NUL-terminated byte stream [`c4_name_key`] projects back into a
+/// string. Comparing the stream avoids the owned key the texmap lookups would
+/// otherwise build for every candidate name on every frame.
+fn c4_name_key_bytes(bytes: &[u8]) -> impl Iterator<Item = u8> + '_ {
+    bytes
         .iter()
         .copied()
+        .take_while(|byte| *byte != 0)
         .map(c4_name_byte_key)
-        .collect::<Vec<_>>();
-    clonk_script::c4_string_from_bytes(&folded)
 }
 
 /// C++ `SEqualNoCase` over the native bytes represented by two Rust strings.
 #[doc(hidden)]
 pub fn c4_names_equal(left: &str, right: &str) -> bool {
-    c4_name_key(left) == c4_name_key(right)
+    // `c4_string_from_bytes` is injective, so equal keys and equal folded
+    // byte streams are the same predicate.
+    let left = clonk_script::c4_string_bytes_cow(left);
+    let right = clonk_script::c4_string_bytes_cow(right);
+    c4_name_key_bytes(&left).eq(c4_name_key_bytes(&right))
 }
 
 /// Copy one native C string into the reversible Rust projection.
@@ -1065,6 +1075,68 @@ fn parse_u32_array(value: &str) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Raw native bytes projected into the reversible Rust spelling, so the
+    /// name-folding matrix can exercise latin1 material names.
+    fn native(bytes: &[u8]) -> String {
+        clonk_script::c4_string_from_bytes(bytes)
+    }
+
+    /// The owned-key spelling `c4_names_equal` used before it compared the
+    /// normalized byte streams directly (`SEqualNoCase`, C4Material.cpp).
+    fn owned_key_names_equal(left: &str, right: &str) -> bool {
+        c4_name_key(left) == c4_name_key(right)
+    }
+
+    #[test]
+    fn name_equality_matches_the_owned_key_projection() {
+        let cases = [
+            ("Earth".to_owned(), "Earth".to_owned()),
+            ("Earth".to_owned(), "earth".to_owned()),
+            ("Earth".to_owned(), "EARTH".to_owned()),
+            ("Earth".to_owned(), "Earth ".to_owned()),
+            ("Earth".to_owned(), " Earth".to_owned()),
+            ("Vehicle".to_owned(), "Vehicl".to_owned()),
+            ("Vehicl".to_owned(), "Vehicle".to_owned()),
+            (String::new(), String::new()),
+            ("\0".to_owned(), String::new()),
+            ("Earth\0extra".to_owned(), "Earth".to_owned()),
+            ("Earth\0left".to_owned(), "earth\0right".to_owned()),
+            ("\0Earth".to_owned(), "\0Water".to_owned()),
+            (native(&[0xc4]), native(&[0xe4])),
+            (native(&[0xd6]), native(&[0xf6])),
+            (native(&[0xdc]), native(&[0xfc])),
+            (native(&[0xc4]), "ä".to_owned()),
+            ("Ä".to_owned(), "ä".to_owned()),
+            (native(&[0xff]), native(&[0xff, 0xff])),
+            (native(&[b'E', 0xe4, b'r']), native(&[b'e', 0xc4, b'R'])),
+            (native(&[b'E', 0xe4, b'r']), native(&[b'e', 0xf6, b'R'])),
+        ];
+        for (left, right) in &cases {
+            assert_eq!(
+                c4_names_equal(left, right),
+                owned_key_names_equal(left, right),
+                "{left:?} vs {right:?}"
+            );
+            assert_eq!(
+                c4_names_equal(right, left),
+                owned_key_names_equal(right, left),
+                "{right:?} vs {left:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compares_material_names_without_owning_native_bytes() {
+        // The texmap lookups run this per object per frame, so the ASCII
+        // material names must not round-trip through owned byte storage.
+        assert!(matches!(
+            clonk_script::c4_string_bytes_cow("Vehicle"),
+            std::borrow::Cow::Borrowed(bytes) if bytes == b"Vehicle"
+        ));
+        assert!(c4_names_equal("Vehicle", "vehicle"));
+        assert!(!c4_names_equal("Vehicle", "Tunnel"));
+    }
 
     fn sample_materials() -> &'static str {
         r#"

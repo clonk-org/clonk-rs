@@ -397,6 +397,14 @@ impl ActionSpec {
         self
     }
 
+    /// The plain procedure action: defaults with only `procedure` set.
+    ///
+    /// Overwhelmingly the shape action maps build, and spelling it out let
+    /// sites drift into `default()` chains that forgot the procedure.
+    pub fn for_procedure(procedure: impl Into<String>) -> Self {
+        Self::default().with_procedure(procedure)
+    }
+
     pub fn with_procedure(mut self, procedure: impl Into<String>) -> Self {
         self.procedure = Some(procedure.into());
         self

@@ -1427,27 +1427,10 @@ protected func Death()
     #[test]
     fn get_con_returns_current_construction() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON / 2,
-            )),
+            Some(HostObjectContext {
+                construction: (crate::FULL_CON / 2).max(0),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1472,24 +1455,11 @@ protected func Death()
 
     #[test]
     fn get_energy_reads_world_when_target_provided() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(55),
             "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            33_000,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        )
+            .with_energy(33_000)]);
         let args = [object_reference_value(ObjectId::new(55))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_energy(&args));
 
@@ -1514,27 +1484,11 @@ protected func Death()
     #[test]
     fn get_energy_converts_raw_units_to_percent() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(3),
-                None,
-                ObjectStatus::Normal,
-                LEGACY_MAX_PHYSICAL / 2,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: ObjectId::new(3),
+                energy: LEGACY_MAX_PHYSICAL / 2,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -2857,15 +2811,11 @@ public func RecordSale(int wealth, int stock)
                 },
             ),
         ]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let mut expected_rng = LcgRng::new(41);
         let _ = expected_rng.random(20);

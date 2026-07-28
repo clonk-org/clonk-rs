@@ -434,6 +434,9 @@ pub(crate) struct GameApp {
     /// Frozen `C4GameParameters::AutoFrameSkip` for the active round. Unlike
     /// the startup option, this must not change while a game is running.
     pub(crate) auto_frame_skip: bool,
+    /// Presentation detail the event loop's [`PresentationDetailGovernor`]
+    /// currently allows. Presentation only — never consulted by simulation.
+    pub(crate) presentation_detail: PresentationDetail,
     /// Process-local Config.Graphics.MaxRefreshDelay used by the application
     /// timer divisor. It is read once, then refreshed only after Options saves.
     pub(crate) max_refresh_delay_ms: u64,
@@ -2703,6 +2706,161 @@ impl AutomaticFrameSkip {
     }
 }
 
+/// How much presentation detail a machine that cannot draw fast enough gives
+/// up so the frame budget goes to simulation instead.
+///
+/// Both steps are things C++ already exposes as static `[Graphics]` config
+/// (`FireParticles`, `DisableGamma`); the divergence is choosing them
+/// automatically from measured cost. Nothing here reaches the simulation, so
+/// two clients at different detail levels stay in lockstep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PresentationDetail {
+    #[default]
+    Full,
+    /// Fire particles off. Each one is an independent unbatched draw call.
+    NoFireParticles,
+    /// ...and the monitor-gamma resolve dropped. That pass is a whole extra
+    /// full-screen fill doing three dependent texture fetches per pixel, which
+    /// is pure memory bandwidth on a tile-based GPU.
+    NoGammaPass,
+}
+
+impl PresentationDetail {
+    const LADDER: [Self; 3] = [Self::Full, Self::NoFireParticles, Self::NoGammaPass];
+
+    fn step_down(self) -> Self {
+        let rung = Self::LADDER.iter().position(|step| *step == self);
+        rung.and_then(|rung| Self::LADDER.get(rung + 1).copied())
+            .unwrap_or(self)
+    }
+
+    fn step_up(self) -> Self {
+        let rung = Self::LADDER.iter().position(|step| *step == self);
+        rung.filter(|rung| *rung > 0)
+            .and_then(|rung| Self::LADDER.get(rung - 1).copied())
+            .unwrap_or(Self::Full)
+    }
+
+    pub(crate) fn draws_fire_particles(self) -> bool {
+        self == Self::Full
+    }
+
+    pub(crate) fn resolves_monitor_gamma(self) -> bool {
+        self < Self::NoGammaPass
+    }
+}
+
+/// Consecutive graphics passes over budget before detail is reduced. Long
+/// enough that a shader compile or a texture upload cannot cost the player a
+/// visual feature.
+pub(crate) const DETAIL_STEP_DOWN_PASSES: u32 = 30;
+/// Consecutive comfortable passes before detail is restored. Deliberately much
+/// longer than the step down: re-adding cost is what caused the overrun.
+pub(crate) const DETAIL_STEP_UP_PASSES: u32 = 120;
+/// A pass only counts as comfortable below this share of the budget, so
+/// recovery cannot oscillate around the threshold that triggered it.
+const DETAIL_HEADROOM_PERCENT: u32 = 50;
+
+/// Picks a [`PresentationDetail`] from measured graphics cost, with hysteresis
+/// in both directions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PresentationDetailGovernor {
+    detail: PresentationDetail,
+    over_budget: u32,
+    comfortable: u32,
+}
+
+impl PresentationDetailGovernor {
+    pub(crate) fn detail(&self) -> PresentationDetail {
+        self.detail
+    }
+
+    /// Feed one completed graphics pass. `enabled` mirrors the same
+    /// `Graphics.AutoFrameSkip` game parameter that governs the existing
+    /// automatic skip; turning it off restores full detail at once.
+    pub(crate) fn record_graphics_pass(
+        &mut self,
+        enabled: bool,
+        graphics_duration: Duration,
+        budget: Duration,
+    ) {
+        if !enabled {
+            *self = Self::default();
+            return;
+        }
+        let comfortable_ceiling = budget
+            .saturating_mul(DETAIL_HEADROOM_PERCENT)
+            .checked_div(100)
+            .unwrap_or(Duration::ZERO);
+        if graphics_duration > budget {
+            self.comfortable = 0;
+            self.over_budget = self.over_budget.saturating_add(1);
+            if self.over_budget >= DETAIL_STEP_DOWN_PASSES {
+                self.over_budget = 0;
+                self.detail = self.detail.step_down();
+            }
+        } else if graphics_duration <= comfortable_ceiling {
+            self.over_budget = 0;
+            self.comfortable = self.comfortable.saturating_add(1);
+            if self.comfortable >= DETAIL_STEP_UP_PASSES {
+                self.comfortable = 0;
+                self.detail = self.detail.step_up();
+            }
+        }
+    }
+}
+
+/// Keeps a slow machine drawing.
+///
+/// `AutomaticFrameSkip` thins graphics opportunities; it cannot help when the
+/// starvation happens *inside* one application pass, because
+/// `advance_simulation_pass` drains its accumulator without ever yielding. Two
+/// presentation-only rules fix that:
+///
+///  * `simulation_burst_budget` bounds how long one pass may simulate before
+///    returning to the event loop, sized so drawing keeps roughly
+///    [`RENDER_RESERVE_PERCENT`] of the wall clock.
+///  * `must_present` forces a repaint once [`MAX_TIME_BETWEEN_RENDERS`] has
+///    elapsed, whatever the skip machinery decided.
+///
+/// Neither rule touches the engine: the same simulation frames run in the same
+/// order, only spread across more application passes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RenderFloor {
+    last_graphics: Duration,
+    last_presented: Option<Instant>,
+}
+
+impl RenderFloor {
+    pub(crate) fn record_presentation(&mut self, at: Instant, graphics_duration: Duration) {
+        self.last_graphics = graphics_duration;
+        self.last_presented = Some(at);
+    }
+
+    /// How long one `advance_simulation_pass` may run before yielding so the
+    /// event loop can draw. Simulation gets `100 - RENDER_RESERVE_PERCENT` of
+    /// the wall clock the last measured draw implies, never less than a single
+    /// simulation period (progress must be guaranteed at any game speed) and
+    /// never more than the repaint floor.
+    pub(crate) fn simulation_burst_budget(&self, simulation_interval: Duration) -> Duration {
+        let reserved = self
+            .last_graphics
+            .saturating_mul(100_u32.saturating_sub(RENDER_RESERVE_PERCENT))
+            .checked_div(RENDER_RESERVE_PERCENT)
+            .unwrap_or(MAX_TIME_BETWEEN_RENDERS);
+        // `clamp` would panic for a game speed slower than the repaint floor.
+        let ceiling = MAX_TIME_BETWEEN_RENDERS.max(simulation_interval);
+        reserved.max(simulation_interval).min(ceiling)
+    }
+
+    /// Whether the repaint floor is due. The first call arms the floor, so a
+    /// session that has never drawn still gets its first frame on time.
+    pub(crate) fn must_present(&mut self, now: Instant) -> bool {
+        let since = *self.last_presented.get_or_insert(now);
+        now.saturating_duration_since(since) >= MAX_TIME_BETWEEN_RENDERS
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PresentationBenchmarkMeasurement {
     started: Option<Instant>,
@@ -3195,6 +3353,10 @@ pub(crate) struct SimulationPassOutcome {
     pub(crate) skipped_render_frames: u32,
     pub(crate) skip_redraw: bool,
     pub(crate) immediate_network_retry: bool,
+    /// The pass returned early to leave the event loop time to draw
+    /// ([`RenderFloor::simulation_burst_budget`]). Backlog is retained, so the
+    /// next pass continues from exactly the same frame.
+    pub(crate) yielded_for_render: bool,
 }
 
 pub(crate) fn frame_schedule_for_mode(
@@ -3284,6 +3446,24 @@ pub(crate) fn advance_simulation_pass(
     frame_schedule: &mut FrameSchedule,
     accumulator: &mut Duration,
 ) -> Result<SimulationPassOutcome, EngineError> {
+    advance_simulation_pass_within(app, frame_schedule, accumulator, Duration::MAX)
+}
+
+/// [`advance_simulation_pass`] bounded by a wall-clock budget.
+///
+/// A pass that exceeds `burst_budget` returns to the event loop instead of
+/// draining the rest of its backlog, so drawing gets its reserved share on a
+/// machine too slow to hold the tick budget ([`RenderFloor`]). The budget is
+/// only ever checked *after* a frame executed, so simulation always advances.
+/// Unspent backlog stays in `accumulator` and runs in the following passes:
+/// the same frames execute in the same order either way.
+pub(crate) fn advance_simulation_pass_within(
+    app: &mut GameApp,
+    frame_schedule: &mut FrameSchedule,
+    accumulator: &mut Duration,
+    burst_budget: Duration,
+) -> Result<SimulationPassOutcome, EngineError> {
+    let burst_started = Instant::now();
     let mut outcome = SimulationPassOutcome::default();
     let mut catch_up = false;
     let mut full_speed_due = app.mode == AppMode::Running && app.full_speed;
@@ -3365,6 +3545,13 @@ pub(crate) fn advance_simulation_pass(
             accumulator,
         );
         if schedule_changed && !catch_up {
+            break;
+        }
+        // Checked last, so every pass executes at least one frame before it
+        // can yield. Overrunning here is normal on slow hardware: the frame
+        // that spent the budget has already run.
+        if burst_started.elapsed() >= burst_budget {
+            outcome.yielded_for_render = true;
             break;
         }
     }

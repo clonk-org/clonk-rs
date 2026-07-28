@@ -38,27 +38,10 @@
             false,
         )
         .with_materials(Some(Rc::new(materials)));
-        let caller = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(200, 150),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            FULL_CON,
-        );
+        let caller = HostObjectContext {
+            position: Vector2::new(200, 150),
+            ..idle_object_context()
+        };
         let mut expected_rng = LcgRng::new(17);
         assert_eq!(expected_rng.random(200), 94);
         assert_eq!(expected_rng.random(200), 2);
@@ -263,15 +246,11 @@ public func SeedFull()
                 ..DefinitionMetadata::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         )
         .with_materials(Some(Rc::new(materials)));
         let mut expected_rng = LcgRng::new(23);
@@ -323,15 +302,11 @@ public func SeedFull()
                 ..DefinitionMetadata::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         )
         .with_materials(Some(Rc::new(materials)));
         let mut expected_rng = LcgRng::new(2);
@@ -424,15 +399,11 @@ public func SeedFull()
                 ..DefinitionMetadata::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [
             Value::C4Id("ELEV".into()),
@@ -470,53 +441,20 @@ public func SeedFull()
         let definitions = HashMap::from([(
             "WORK".to_string(),
             DefinitionMetadata {
-                name: String::new(),
-                portrait_names: Vec::new(),
                 category: crate::CATEGORY_STRUCTURE,
-                border_bound: 0,
-                contact_function_calls: false,
-                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
-                crew_member: false,
-                crew_member_value: 0,
-                silent_commands: false,
-                vehicle_control: 0,
-                action_library: ActionLibrary::default().into(),
-                control_transfer_callback: None,
-                action_graphics: HashMap::new(),
-                value: 0,
-                allow_picture_stack: 0,
                 mass: 100,
-                no_component_mass: false,
                 constructable: true,
                 shape: Some(DefinitionRect::new(-10, -40, 20, 40)),
-                placement: 0,
-                growth: 0,
-                construction_offset: 0,
-                basement: 0,
-                physical: PhysicalInfo::default(),
                 components: vec![("WOOD".to_owned(), 4)],
-                collection_limit: 0,
-                grab_put_get: 0,
-                line_connect: 0,
-                clonk_name_newlines: None,
-                stretch_growth: false,
-                rotateable: 0,
-                line: 0,
-                vertices: Vec::new(),
-                contact_density: None,
-                fire: DefinitionFireMetadata::default(),
+                ..Default::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [
             Value::C4Id("WORK".into()),
@@ -571,15 +509,11 @@ public func SeedFull()
                 ..DefinitionMetadata::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [
             Value::C4Id("WORK".into()),
@@ -736,42 +670,12 @@ protected func Construction()
     fn create_construction_returns_nil_when_site_blocked() {
         let landscape = Landscape::flat(64, 50);
         let workshop_metadata = DefinitionMetadata {
-            name: String::new(),
-            portrait_names: Vec::new(),
             category: crate::CATEGORY_STRUCTURE,
-            border_bound: 0,
-            contact_function_calls: false,
-            blit_mode: 0,
             ocf_base: ocf::NORMAL,
-            crew_member: false,
-            crew_member_value: 0,
-            silent_commands: false,
-            vehicle_control: 0,
-            action_library: ActionLibrary::default().into(),
-            control_transfer_callback: None,
-            action_graphics: HashMap::new(),
-            value: 0,
-            allow_picture_stack: 0,
             mass: 100,
-            no_component_mass: false,
             constructable: true,
             shape: Some(DefinitionRect::new(-10, -40, 20, 40)),
-            placement: 0,
-            growth: 0,
-            construction_offset: 0,
-            basement: 0,
-            physical: PhysicalInfo::default(),
-            components: Vec::new(),
-            collection_limit: 0,
-            grab_put_get: 0,
-            line_connect: 0,
-            clonk_name_newlines: None,
-            stretch_growth: false,
-            rotateable: 0,
-            line: 0,
-            vertices: Vec::new(),
-            contact_density: None,
-            fire: DefinitionFireMetadata::default(),
+            ..Default::default()
         };
         let definitions = HashMap::from([
             ("WORK".to_string(), workshop_metadata.clone()),
@@ -800,16 +704,7 @@ protected func Construction()
             None,
             None,
         );
-        let world = HostWorldContext::with_landscape(
-            vec![existing],
-            Some(landscape),
-            definitions,
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        );
+        let world = world_with(vec![existing], Some(landscape), definitions, HashMap::new());
         let args = [
             Value::C4Id("WORK".into()),
             Value::Int(32),
@@ -859,24 +754,7 @@ protected func Construction()
     #[test]
     fn create_particle_with_object_sets_layer() {
         let target_id = ObjectId::new(5);
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
-            target_id,
-            "Torch",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(target_id, "Torch")]);
         let args = [
             Value::String("Spark".into()),
             Value::Int(0),
@@ -923,24 +801,9 @@ protected func Construction()
     }
 
     fn find_world_object(id: u64, definition: &str, x: i32, y: i32, owner: i32) -> HostWorldObject {
-        HostWorldObject::new(
-            ObjectId::new(id),
-            definition,
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            owner,
-            100,
-            crate::FULL_CON,
-            Vector2::new(x, y),
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        fixture_world_object(ObjectId::new(id), definition)
+            .with_owner(owner)
+            .with_position(Vector2::new(x, y))
     }
 
     #[test]
@@ -2357,24 +2220,7 @@ protected func Construction()
         // FnCastBackParticles (C4Script.cpp:4905-4908) = FnCastAParticles
         // with fBack = true → the object's BackParticles list.
         let target_id = ObjectId::new(9);
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
-            target_id,
-            "Engine",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(target_id, "Engine")]);
         let args = [
             Value::String("Exhaust".into()),
             Value::Int(3),
@@ -2457,24 +2303,10 @@ protected func Construction()
     #[test]
     fn clear_particles_with_object_sets_scope() {
         let target_id = ObjectId::new(12);
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             target_id,
-            "Emitter",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+            "Emitter")],
+        );
         let args = [
             Value::String("Smoke".into()),
             object_reference_value(target_id),
@@ -2508,64 +2340,17 @@ protected func Construction()
         let container_id = ObjectId::new(42);
         let object_id = ObjectId::new(7);
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                container_id,
-                "Chest",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                0,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                object_id,
-                "Gem",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                0,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                Some(container_id),
-            ),
+            fixture_world_object(container_id, "Chest")
+                .with_energy(0),
+            fixture_world_object(object_id, "Gem")
+                .with_energy(0)
+                .with_container(Some(container_id)),
         ]);
-        let context = HostObjectContext::new(
-            object_id,
-            Some(container_id),
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: object_id,
+            container: Some(container_id),
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(Some(context), &[], world, 100, || contained(&[]));
         let value = result.expect("Contained with container succeeds");
         assert_eq!(value, object_reference_value(container_id));
@@ -2579,101 +2364,29 @@ protected func Construction()
         let deleted_id = ObjectId::new(103);
         let second_item_id = ObjectId::new(104);
 
-        let container = HostWorldObject::new(
-            container_id,
-            "Crew",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let container = fixture_world_object(container_id, "Crew")
+            .with_action_name("Walk")
         .with_contents(vec![attached_id, deleted_id, first_item_id, second_item_id]);
 
-        let attached = HostWorldObject::new(
-            attached_id,
-            "Banner",
-            ObjectStatus::Normal,
-            "Attach",
-            None,
-            None,
-            Some("Attach".into()),
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let attached = fixture_world_object(attached_id, "Banner")
+            .with_action_name("Attach")
+            .with_action_procedure(Some("Attach".into()))
+            .with_energy(0)
+            .with_container(Some(container_id));
 
-        let first_item = HostWorldObject::new(
-            first_item_id,
-            "FirstGem",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let first_item = fixture_world_object(first_item_id, "FirstGem")
+            .with_energy(0)
+            .with_container(Some(container_id));
 
-        let deleted = HostWorldObject::new(
-            deleted_id,
-            "DeletedGem",
-            ObjectStatus::Deleted,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let deleted = fixture_world_object(deleted_id, "DeletedGem")
+            .with_status(ObjectStatus::Deleted)
+            .with_energy(0)
+            .with_container(Some(container_id));
 
-        let second_item = HostWorldObject::new(
-            second_item_id,
-            "SecondGem",
-            ObjectStatus::Inactive,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let second_item = fixture_world_object(second_item_id, "SecondGem")
+            .with_status(ObjectStatus::Inactive)
+            .with_energy(0)
+            .with_container(Some(container_id));
 
         let world = HostWorldContext::from_objects(vec![
             container,
@@ -2682,27 +2395,12 @@ protected func Construction()
             deleted,
             second_item,
         ]);
-        let context = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Walk",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: container_id,
+            action_name: "Walk".to_string(),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
 
         let call_contents = |index, include_attached| {
             let args = [Value::Int(index), Value::Nil, Value::Bool(include_attached)];
@@ -2746,67 +2444,23 @@ protected func Construction()
         let container_id = ObjectId::new(110);
         let attached_id = ObjectId::new(111);
 
-        let container = HostWorldObject::new(
-            container_id,
-            "Crew",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let container = fixture_world_object(container_id, "Crew")
+            .with_action_name("Walk")
         .with_contents(vec![attached_id]);
 
-        let attached = HostWorldObject::new(
-            attached_id,
-            "Banner",
-            ObjectStatus::Normal,
-            "Attach",
-            None,
-            None,
-            Some("Attach".into()),
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let attached = fixture_world_object(attached_id, "Banner")
+            .with_action_name("Attach")
+            .with_action_procedure(Some("Attach".into()))
+            .with_energy(0)
+            .with_container(Some(container_id));
 
         let world = HostWorldContext::from_objects(vec![container, attached]);
-        let context = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Walk",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: container_id,
+            action_name: "Walk".to_string(),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
 
         let args = [Value::Nil, Value::Nil, Value::Bool(true)];
         let (result, _) = with_effect_context(Some(context), &[], world, 200, || contents(&args));
@@ -2820,107 +2474,26 @@ protected func Construction()
         let gem_id = ObjectId::new(121);
         let hammer_id = ObjectId::new(122);
 
-        let container = HostWorldObject::new(
-            container_id,
-            "CHST",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let container = fixture_world_object(container_id, "CHST")
         .with_contents(vec![gem_id, hammer_id]);
 
-        let gem = HostWorldObject::new(
-            gem_id,
-            "GEM1",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let gem = fixture_world_object(gem_id, "GEM1")
+            .with_energy(0)
+            .with_container(Some(container_id));
 
-        let hammer = HostWorldObject::new(
-            hammer_id,
-            "HAMR",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let hammer = fixture_world_object(hammer_id, "HAMR")
+            .with_energy(0)
+            .with_container(Some(container_id));
 
         let world = HostWorldContext::from_objects(vec![container, gem, hammer]);
-        let context_all = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
-        let context_filtered = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context_all = HostObjectContext {
+            id: container_id,
+            ..idle_object_context()
+        };
+        let context_filtered = HostObjectContext {
+            id: container_id,
+            ..idle_object_context()
+        };
 
         let (result, _) = with_effect_context(Some(context_all), &[], world.clone(), 300, || {
             contents_count(&[])
@@ -2942,86 +2515,22 @@ protected func Construction()
         let gem_id = ObjectId::new(131);
         let hammer_id = ObjectId::new(132);
 
-        let container = HostWorldObject::new(
-            container_id,
-            "CHST",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let container = fixture_world_object(container_id, "CHST")
         .with_contents(vec![hammer_id, gem_id]);
 
-        let hammer = HostWorldObject::new(
-            hammer_id,
-            "HAMR",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let hammer = fixture_world_object(hammer_id, "HAMR")
+            .with_energy(0)
+            .with_container(Some(container_id));
 
-        let gem = HostWorldObject::new(
-            gem_id,
-            "GEM1",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let gem = fixture_world_object(gem_id, "GEM1")
+            .with_energy(0)
+            .with_container(Some(container_id));
 
         let world = HostWorldContext::from_objects(vec![container, hammer, gem]);
-        let context = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: container_id,
+            ..idle_object_context()
+        };
 
         let args = [Value::C4Id("GEM1".into())];
         let (result, _) =
@@ -3036,90 +2545,28 @@ protected func Construction()
         let gem_id = ObjectId::new(141);
         let hammer_id = ObjectId::new(142);
 
-        let container = HostWorldObject::new(
-            container_id,
-            "CHST",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let container = fixture_world_object(container_id, "CHST")
         .with_contents(vec![hammer_id, gem_id]);
 
-        let gem = HostWorldObject::new(
-            gem_id,
-            "GEM1",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let gem = fixture_world_object(gem_id, "GEM1")
+            .with_energy(0)
+            .with_container(Some(container_id));
 
-        let hammer = HostWorldObject::new(
-            hammer_id,
-            "HAMR",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            Some(container_id),
-        );
+        let hammer = fixture_world_object(hammer_id, "HAMR")
+            .with_energy(0)
+            .with_container(Some(container_id));
 
         let world = HostWorldContext::from_objects(vec![container, gem, hammer])
             .with_definition_metadata(Rc::new(HashMap::from([
                 (DefinitionId::from("GEM1"), DefinitionMetadata::default()),
                 (DefinitionId::from("HAMR"), DefinitionMetadata::default()),
             ])));
-        let context = HostObjectContext::new(
-            hammer_id,
-            Some(container_id),
-            ObjectStatus::Normal,
-            0,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+        let context = HostObjectContext {
+            id: hammer_id,
+            container: Some(container_id),
+            energy: 0,
+            ..idle_object_context()
+        }
         .with_definition_id("HAMR");
 
         let args = [
@@ -3450,42 +2897,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn find_object_returns_first_matching_definition() {
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                ObjectId::new(1),
-                "FLAG",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(10, 5),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                ObjectId::new(2),
-                "ROCK",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(50, 5),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(ObjectId::new(1), "FLAG")
+                .with_position(Vector2::new(10, 5)),
+            fixture_world_object(ObjectId::new(2), "ROCK")
+                .with_position(Vector2::new(50, 5)),
         ]);
 
         let args = [Value::C4Id("FLAG".into())];
@@ -3497,42 +2912,12 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn find_object_has_no_owner_parameter_like_cpp() {
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                ObjectId::new(10),
-                "DUMY",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                1,
-                100,
-                crate::FULL_CON,
-                Vector2::new(0, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                ObjectId::new(11),
-                "DUMY",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                2,
-                100,
-                crate::FULL_CON,
-                Vector2::new(5, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(ObjectId::new(10), "DUMY")
+                .with_owner(1)
+                .with_position(Vector2::new(0, 0)),
+            fixture_world_object(ObjectId::new(11), "DUMY")
+                .with_owner(2)
+                .with_position(Vector2::new(5, 0)),
         ]);
         // FnFindObject has NO owner parameter — C++ always searches with
         // ANY_OWNER (C4Script.cpp:2133); only FindObjectOwner filters.
@@ -3561,42 +2946,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn find_object_closest_mode_orders_by_distance() {
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                ObjectId::new(20),
-                "DUMY",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(2, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                ObjectId::new(21),
-                "DUMY",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(6, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(ObjectId::new(20), "DUMY")
+                .with_position(Vector2::new(2, 0)),
+            fixture_world_object(ObjectId::new(21), "DUMY")
+                .with_position(Vector2::new(6, 0)),
         ]);
         let args = [
             Value::C4Id("DUMY".into()),
@@ -3637,42 +2990,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         // Game.Objects.First -> Next and replaces the best only for a
         // strictly smaller distance (C4Game.cpp:1367-1424). Storage order
         // must not decide an equal-distance tie.
-        let first_in_storage = HostWorldObject::new(
-            ObjectId::new(30),
-            "DUMY",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::new(-2, 0),
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
-        let first_in_master = HostWorldObject::new(
-            ObjectId::new(31),
-            "DUMY",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::new(2, 0),
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let first_in_storage = fixture_world_object(ObjectId::new(30), "DUMY")
+            .with_position(Vector2::new(-2, 0));
+        let first_in_master = fixture_world_object(ObjectId::new(31), "DUMY")
+            .with_position(Vector2::new(2, 0));
         let world = HostWorldContext::from_objects([first_in_storage, first_in_master])
             .with_master_order([ObjectId::new(31), ObjectId::new(30)]);
         let args = [
@@ -3695,43 +3016,11 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     fn find_object_respects_ocf_filter() {
         let matching_id = ObjectId::new(51);
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                matching_id,
-                "Dummy",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(0, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )
+            fixture_world_object(matching_id, "Dummy")
+                .with_position(Vector2::new(0, 0))
             .with_ocf(ocf::AVAILABLE | ocf::ALIVE),
-            HostWorldObject::new(
-                ObjectId::new(52),
-                "Dummy",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(5, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(ObjectId::new(52), "Dummy")
+                .with_position(Vector2::new(5, 0)),
         ]);
         let args = [
             Value::Nil,
@@ -3758,24 +3047,8 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             },
         );
         let world = HostWorldContext::with_landscape(
-            vec![HostWorldObject::new(
-                id,
-                "WIDE",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(40, 10),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )],
+            vec![fixture_world_object(id, "WIDE")
+                .with_position(Vector2::new(40, 10))],
             Some(Landscape::flat(120, 120)),
             definitions,
             Vec::new(),
@@ -3810,42 +3083,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let second = ObjectId::new(72);
         let world = HostWorldContext::with_landscape(
             vec![
-                HostWorldObject::new(
-                    first,
-                    "DUMY",
-                    ObjectStatus::Normal,
-                    "Idle",
-                    None,
-                    None,
-                    None,
-                    OWNER_NONE,
-                    100,
-                    crate::FULL_CON,
-                    Vector2::new(70, 10),
-                    Vector2::ZERO,
-                    Vec::new(),
-                    0,
-                    0,
-                    None,
-                ),
-                HostWorldObject::new(
-                    second,
-                    "DUMY",
-                    ObjectStatus::Normal,
-                    "Idle",
-                    None,
-                    None,
-                    None,
-                    OWNER_NONE,
-                    100,
-                    crate::FULL_CON,
-                    Vector2::new(10, 10),
-                    Vector2::ZERO,
-                    Vec::new(),
-                    0,
-                    0,
-                    None,
-                ),
+                fixture_world_object(first, "DUMY")
+                    .with_position(Vector2::new(70, 10)),
+                fixture_world_object(second, "DUMY")
+                    .with_position(Vector2::new(10, 10)),
             ],
             Some(Landscape::flat(120, 120)),
             HashMap::new(),
@@ -3905,35 +3146,11 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         )
         .with_ocf(ocf_mask)]);
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = HostObjectContext {
+            energy: 100,
+            direction: Direction::Left,
+            ..idle_object_scope(object_id)
+        }
         .with_alive(true)
         .with_base_graphics(None)
         .with_ocf(ocf_mask);
@@ -3953,35 +3170,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_graphics_records_overlay_update() {
         let object_id = ObjectId::new(42);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(Vec::new())
         .with_base_graphics(None);
 
@@ -4053,35 +3242,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         existing.color_modulation = 0x0012_3456;
         existing.phase = 7;
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(vec![existing])
         .with_base_graphics(None);
 
@@ -4135,35 +3296,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             .with_definition(Some("Clonk".into()))
             .with_action(Some("Pointer".into()));
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(vec![existing])
         .with_base_graphics(None);
 
@@ -4199,35 +3332,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let object_id = ObjectId::new(7);
         let overlay = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
             .with_definition(Some("Clonk".into()));
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(vec![overlay])
         .with_base_graphics(None);
 
@@ -4265,24 +3370,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             map
         };
         let world = HostWorldContext::with_landscape(
-            vec![HostWorldObject::new(
-                object_id,
-                "CLON",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )],
+            vec![fixture_world_object(object_id, "CLON")],
             None,
             definitions,
             Vec::new(),
@@ -4292,35 +3380,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             false,
         );
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        );
+        let object_context = idle_object_scope(object_id);
 
         let (result, outcome) = with_effect_context(
             Some(object_context.with_base_graphics(None)),
@@ -4357,24 +3417,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             map
         };
         let world = HostWorldContext::with_landscape(
-            vec![HostWorldObject::new(
-                object_id,
-                "CLON",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )],
+            vec![fixture_world_object(object_id, "CLON")],
             None,
             definitions,
             Vec::new(),
@@ -4390,35 +3433,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             blit_mode: 0,
         };
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_base_graphics(Some(base));
 
         let (result, outcome) = with_effect_context(Some(object_context), &[], world, 100, || {
@@ -4434,35 +3449,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_obj_draw_transform_updates_object_transform() {
         let object_id = ObjectId::new(1);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        );
+        let object_context = idle_object_scope(object_id);
 
         let object_context = object_context.with_base_graphics(None);
 
@@ -4511,35 +3498,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_obj_draw_transform_default_matrix_resets_base() {
         let object_id = ObjectId::new(2);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            Some(DrawTransform::from_components(2.0, 3.0, 4.0, 5.0)),
-            None,
-        );
+        let object_context = HostObjectContext {
+            draw_transform: Some(DrawTransform::from_components(2.0, 3.0, 4.0, 5.0)),
+            ..idle_object_scope(object_id)
+        };
 
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -4567,35 +3529,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let object_id = ObjectId::new(5);
         let overlay = ObjectGraphicsOverlay::new(-2, GraphicsOverlayMode::Base);
         let zero_overlay = ObjectGraphicsOverlay::new(-3, GraphicsOverlayMode::Base);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(vec![overlay, zero_overlay])
         .with_base_graphics(None);
 
@@ -4751,35 +3685,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_obj_draw_transform2_retains_identity_matrix() {
         let object_id = ObjectId::new(7);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        );
+        let object_context = idle_object_scope(object_id);
 
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -4817,35 +3723,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_obj_draw_transform2_tenth_argument_is_the_overlay_id() {
         let object_id = ObjectId::new(8);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        );
+        let object_context = idle_object_scope(object_id);
         let with_overlay =
             object_context
                 .clone()
@@ -4928,42 +3806,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn object_count_returns_number_of_matches() {
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                ObjectId::new(30),
-                "DUMY",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(0, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                ObjectId::new(31),
-                "DUMY",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(10, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(ObjectId::new(30), "DUMY")
+                .with_position(Vector2::new(0, 0)),
+            fixture_world_object(ObjectId::new(31), "DUMY")
+                .with_position(Vector2::new(10, 0)),
         ]);
         let args = [Value::C4Id("DUMY".into())];
         let (result, _) = with_effect_context(None, &[], world, 1, || object_count(&args));
@@ -4974,42 +3820,12 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn object_count_honours_owner_filter() {
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                ObjectId::new(40),
-                "DUMY",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                1,
-                100,
-                crate::FULL_CON,
-                Vector2::new(0, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                ObjectId::new(41),
-                "DUMY",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                2,
-                100,
-                crate::FULL_CON,
-                Vector2::new(5, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(ObjectId::new(40), "DUMY")
+                .with_owner(1)
+                .with_position(Vector2::new(0, 0)),
+            fixture_world_object(ObjectId::new(41), "DUMY")
+                .with_owner(2)
+                .with_position(Vector2::new(5, 0)),
         ]);
         let args = [
             Value::C4Id("DUMY".into()),
@@ -5033,60 +3849,14 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     fn find_objects_returns_all_matches_in_order() {
         let container = ObjectId::new(40);
         let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                container,
-                "CONT",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(0, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                ObjectId::new(41),
-                "ITEM",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(3, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                Some(container),
-            ),
-            HostWorldObject::new(
-                ObjectId::new(42),
-                "ITEM",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::new(5, 0),
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                Some(container),
-            ),
+            fixture_world_object(container, "CONT")
+                .with_position(Vector2::new(0, 0)),
+            fixture_world_object(ObjectId::new(41), "ITEM")
+                .with_position(Vector2::new(3, 0))
+                .with_container(Some(container)),
+            fixture_world_object(ObjectId::new(42), "ITEM")
+                .with_position(Vector2::new(5, 0))
+                .with_container(Some(container)),
         ]);
         let args = [
             Value::C4Id("ITEM".into()),

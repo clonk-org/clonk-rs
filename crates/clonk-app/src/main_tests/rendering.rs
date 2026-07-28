@@ -626,6 +626,217 @@
     }
 
     #[test]
+    fn presentation_detail_steps_down_only_on_a_sustained_overrun() {
+        // Quality reduction must be invisible on hardware that copes: a single
+        // slow frame (a shader compile, a texture upload, an OS hiccup) must
+        // never cost the player fire particles.
+        let budget = Duration::from_millis(28);
+        let mut governor = PresentationDetailGovernor::default();
+        assert_eq!(governor.detail(), PresentationDetail::Full);
+
+        for _ in 0..DETAIL_STEP_DOWN_PASSES - 1 {
+            governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+            assert_eq!(
+                governor.detail(),
+                PresentationDetail::Full,
+                "an overrun shorter than the streak must not degrade anything"
+            );
+        }
+        governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+        assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+
+        // Still over budget after the first step: give up the gamma resolve
+        // pass too, then stop — there is nothing cheaper left to trade.
+        for _ in 0..DETAIL_STEP_DOWN_PASSES {
+            governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+        }
+        assert_eq!(governor.detail(), PresentationDetail::NoGammaPass);
+        for _ in 0..DETAIL_STEP_DOWN_PASSES * 4 {
+            governor.record_graphics_pass(true, Duration::from_millis(400), budget);
+        }
+        assert_eq!(
+            governor.detail(),
+            PresentationDetail::NoGammaPass,
+            "the ladder has a bottom; it must not wrap or keep counting"
+        );
+    }
+
+    #[test]
+    fn presentation_detail_recovers_only_with_real_headroom() {
+        let budget = Duration::from_millis(28);
+        let mut governor = PresentationDetailGovernor::default();
+        for _ in 0..DETAIL_STEP_DOWN_PASSES {
+            governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+        }
+        assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+
+        // Just inside budget is the deadband: recovering there would step back
+        // up into the very cost that caused the overrun and oscillate.
+        for _ in 0..DETAIL_STEP_UP_PASSES * 2 {
+            governor.record_graphics_pass(true, Duration::from_millis(27), budget);
+        }
+        assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+
+        // Comfortable headroom restores detail, one step at a time.
+        for _ in 0..DETAIL_STEP_UP_PASSES {
+            governor.record_graphics_pass(true, Duration::from_millis(5), budget);
+        }
+        assert_eq!(governor.detail(), PresentationDetail::Full);
+
+        // Disabling automatic degradation restores full detail immediately.
+        let mut governor = PresentationDetailGovernor::default();
+        for _ in 0..DETAIL_STEP_DOWN_PASSES * 2 {
+            governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+        }
+        assert_ne!(governor.detail(), PresentationDetail::Full);
+        governor.record_graphics_pass(false, Duration::from_millis(400), budget);
+        assert_eq!(governor.detail(), PresentationDetail::Full);
+    }
+
+    #[test]
+    fn framebuffer_backends_widen_to_gl_before_giving_up() {
+        use pixels::wgpu::Backends;
+
+        // `Backends::PRIMARY` is VULKAN | METAL | DX12 | BROWSER_WEBGPU — it
+        // contains no GL/GLES at all. That is right on desktop (the GL backend
+        // probes for libEGL and logs noise on macOS) but on a Raspberry Pi it
+        // is the difference between running and aborting at startup, because a
+        // board without a usable Vulkan driver produces no adapter and
+        // `PixelsBuilder::build` then fails out of `main`.
+        let attempts = framebuffer_backend_attempts(None);
+        assert_eq!(
+            attempts.first().copied(),
+            Some(Backends::PRIMARY),
+            "the desktop-clean set is still tried first"
+        );
+        assert!(
+            attempts
+                .last()
+                .is_some_and(|backends| backends.contains(Backends::GL)),
+            "a board with only GLES must still get an adapter attempt"
+        );
+        assert!(attempts.len() >= 2);
+
+        // An explicit WGPU_BACKEND is an instruction, not a hint: never widen
+        // past what the operator asked for.
+        assert_eq!(
+            framebuffer_backend_attempts(Some(Backends::VULKAN)),
+            vec![Backends::VULKAN],
+        );
+    }
+
+    #[test]
+    fn a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent() {
+        // On hardware that cannot hold the tick budget, one application pass
+        // drains the whole clamped backlog before the event loop ever gets a
+        // chance to draw. The burst budget bounds that, while still executing
+        // at least one frame so the simulation always makes progress.
+        let mut app = new_running_sandbox_app();
+        let mut schedule = frame_schedule_for_mode(
+            app.mode,
+            app.engine.game_tick_delay_ms(),
+            app.engine.game_tick_delay_revision(),
+            app.max_refresh_delay_ms,
+        );
+
+        // FREEZE the unbudgeted behaviour first: a full backlog drains at once.
+        let mut accumulator = MAX_ACCUMULATED_TIME;
+        let drained = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("an unbudgeted pass drains the clamped backlog");
+        assert_eq!(
+            drained.executed_frames,
+            (MAX_ACCUMULATED_TIME.as_millis() / schedule.simulation_interval.as_millis()) as u32,
+            "the whole backlog runs inside one pass when nothing bounds it"
+        );
+
+        // The same backlog under an exhausted budget yields after one frame.
+        let mut accumulator = MAX_ACCUMULATED_TIME;
+        let before = app.engine.frame();
+        let bounded = advance_simulation_pass_within(
+            &mut app,
+            &mut schedule,
+            &mut accumulator,
+            Duration::ZERO,
+        )
+        .expect("a budgeted pass still executes one frame");
+        assert_eq!(
+            bounded.executed_frames, 1,
+            "an exhausted budget yields after one frame, it does not stall"
+        );
+        assert_eq!(app.engine.frame(), before + 1);
+        assert!(
+            accumulator >= schedule.simulation_interval,
+            "the unspent backlog is retained for the next pass, not discarded"
+        );
+    }
+
+    #[test]
+    fn render_floor_reserves_a_share_of_the_wall_clock_for_drawing() {
+        // A machine that cannot hold the tick budget must still repaint.
+        // `AutomaticFrameSkip` alone cannot do this: it is a one-shot latch on
+        // the *graphics* opportunity, while the cost that starves drawing is a
+        // catch-up burst inside one simulation pass. The floor bounds that
+        // burst so drawing keeps roughly RENDER_RESERVE_PERCENT of the wall
+        // clock, exactly the reservation Spring's game controller makes.
+        let mut floor = RenderFloor::default();
+        let base = Instant::now();
+
+        // With no measurement yet the burst may run a full simulation period.
+        assert_eq!(
+            floor.simulation_burst_budget(Duration::from_millis(28)),
+            Duration::from_millis(28),
+            "an unmeasured graphics pass must not shorten the first burst"
+        );
+
+        // A 3 ms draw is cheap: simulation may run 85/15 of it before yielding.
+        floor.record_presentation(base, Duration::from_millis(3));
+        assert_eq!(
+            floor.simulation_burst_budget(Duration::from_millis(28)),
+            Duration::from_millis(28),
+            "the burst never drops below one simulation period"
+        );
+
+        // A 30 ms draw on a slow machine buys simulation 170 ms, not forever.
+        floor.record_presentation(base, Duration::from_millis(30));
+        assert_eq!(
+            floor.simulation_burst_budget(Duration::from_millis(28)),
+            Duration::from_millis(170),
+        );
+
+        // And the reservation is itself capped by the hard repaint floor.
+        floor.record_presentation(base, Duration::from_millis(400));
+        assert_eq!(
+            floor.simulation_burst_budget(Duration::from_millis(28)),
+            MAX_TIME_BETWEEN_RENDERS,
+            "no burst may outrun the hard repaint floor"
+        );
+    }
+
+    #[test]
+    fn render_floor_forces_a_repaint_at_two_hertz_however_deep_the_skip() {
+        // `/fast 500` and the network catch-up divisor can both suppress every
+        // graphics opportunity for an unbounded number of frames. The floor is
+        // the only thing that guarantees the window still updates.
+        let mut floor = RenderFloor::default();
+        let base = Instant::now();
+        floor.record_presentation(base, Duration::from_millis(5));
+
+        assert!(!floor.must_present(base + Duration::from_millis(499)));
+        assert!(floor.must_present(base + MAX_TIME_BETWEEN_RENDERS));
+        assert!(floor.must_present(base + Duration::from_secs(30)));
+
+        // A repaint rearms it.
+        floor.record_presentation(base + Duration::from_secs(30), Duration::from_millis(5));
+        assert!(!floor.must_present(base + Duration::from_secs(30)));
+
+        // Before the very first repaint the floor is armed from the first ask,
+        // so a game that never draws still gets its first frame on time.
+        let mut fresh = RenderFloor::default();
+        assert!(!fresh.must_present(base));
+        assert!(fresh.must_present(base + MAX_TIME_BETWEEN_RENDERS));
+    }
+
+    #[test]
     fn automatic_frame_skip_never_skips_two_consecutive_graphics_passes() {
         let mut frame_skip = AutomaticFrameSkip::default();
         frame_skip.finish_graphics_pass(true, Duration::from_millis(29), Duration::from_millis(28));
@@ -3028,18 +3239,7 @@
                 ("LC_USER_DATA_DIR", Some(user.as_path())),
             ]);
             let paths = AppPaths::discover().expect("missing-sheet fixture paths");
-            let error = GameApp::new(
-                320,
-                200,
-                AudioOptions::default(),
-                Some(&paths),
-                RuntimeConfig {
-                    player_owner: 1,
-                    player_name: "Player".to_string(),
-                    network: None,
-                    record_enabled: false,
-                },
-            )
+            let error = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
             .err()
             .expect("real app construction must stop at the global bundle");
             assert_global_gui_boundary(
@@ -3183,18 +3383,7 @@
             "[General]\nFontName=Endeavour\nFontSize=14\n",
         )
         .expect("seed font config");
-        let mut app = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
         wait_for_menu(&mut app);
         app.open_options_menu();
@@ -3264,18 +3453,7 @@
         assert_eq!(fs::read(paths.config_file()).unwrap(), before_failure);
 
         drop(app);
-        let mut restarted = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut restarted = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("restart with persisted font selection");
         wait_for_menu(&mut restarted);
         assert_eq!(
@@ -3399,18 +3577,7 @@
             "[General]\nFontName=Endeavour\nFontSize=14\n",
         )
         .expect("seed font config");
-        let mut app = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
         wait_for_menu(&mut app);
         app.open_options_menu();
@@ -4251,10 +4418,7 @@
             .expect("sandbox cursor remains live")
             .position;
         app.engine
-            .register_definition(
-                Definition::from_script("MREG", "Mouse region fixture", "#strict\n")
-                    .expect("region fixture compiles"),
-            )
+            .register_script_definition("MREG", "Mouse region fixture", "#strict\n")
             .expect("register region fixture");
         let container = app
             .engine

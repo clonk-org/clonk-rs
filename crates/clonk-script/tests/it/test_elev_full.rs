@@ -72,14 +72,5 @@ protected func Incineration() { if(pCase) RemoveObject(pCase); }
 protected func IncinerationEx() { if(pCase) RemoveObject(pCase); }
 protected func Destruction() { if(pCase) RemoveObject(pCase); return(_inherited()); }
     "#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }

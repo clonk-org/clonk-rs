@@ -2001,18 +2001,7 @@
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("installed paths");
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("app");
         assert_eq!(app.mode, AppMode::Loading);
         let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -2053,18 +2042,7 @@
         config
             .save(paths.config_file())
             .expect("explicit loader language config");
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("app");
         let scenario =
             resolve_next_mission_scenario(&app.scenario_catalog, "Fantasy.c4f/Crystalvalley.c4s")
@@ -4195,18 +4173,7 @@
 
         let (_guard, paths) = exact_loader_test_paths(&user_dir, None);
 
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
 
         let scenario = app

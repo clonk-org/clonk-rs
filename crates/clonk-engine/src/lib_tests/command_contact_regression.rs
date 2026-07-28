@@ -10,11 +10,7 @@ fn synchronize_control_applies_clearance_only_when_requested() {
     // 9ffa0a5d src/C4Control.cpp:537-550;
     // src/C4Game.cpp:3679-3715; src/C4Object.cpp:3803-3815).
     let mut engine = Engine::with_seed(0);
-    engine
-        .register_definition(
-            Definition::from_script("SYNC", "Sync", "").expect("definition compiles"),
-        )
-        .expect("definition registers");
+    engine.register_script_definition("SYNC", "Sync", "").expect("definition registers");
     let object = engine
         .spawn_object(SpawnConfig::new("SYNC").with_position(Vector2::new(10, 20)))
         .expect("object spawns");
@@ -49,24 +45,11 @@ fn synchronize_control_checkpoints_live_player_and_crew_time_but_not_replays() {
         vec![player_file::CrewInfo {
             id: "CLNK".to_string(),
             name: "Crew".to_string(),
-            death_message: String::new(),
-            core: CrewInfoCoreFields::default(),
-            rank: 0,
-            rank_name: "Clonk".to_string(),
-            experience: 0,
-            rounds: 0,
-            physical: PhysicalInfo::default(),
-            death_count: 0,
             total_playing_time: 7,
-            birthday: 0,
-            age: 0,
-            participation: 1,
             in_action: true,
             was_in_action: true,
             in_action_time: 10,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: CrewPortraitState::default(),
+            ..Default::default()
         }],
     );
     engine
@@ -91,24 +74,11 @@ fn synchronize_control_checkpoints_live_player_and_crew_time_but_not_replays() {
     let suppressed_crew = player_file::CrewInfo {
         id: "CLNK".to_string(),
         name: "Suppressed Crew".to_string(),
-        death_message: String::new(),
-        core: CrewInfoCoreFields::default(),
-        rank: 0,
-        rank_name: "Clonk".to_string(),
-        experience: 0,
-        rounds: 0,
-        physical: PhysicalInfo::default(),
-        death_count: 0,
         total_playing_time: 17,
-        birthday: 0,
-        age: 0,
-        participation: 1,
         in_action: true,
         was_in_action: true,
         in_action_time: 10,
-        has_died: false,
-        extra_data: Vec::new(),
-        portraits: CrewPortraitState::default(),
+        ..Default::default()
     };
     engine.crew_rosters.insert(4, vec![suppressed_crew.clone()]);
     engine.crew_rosters.insert(5, vec![suppressed_crew]);
@@ -230,11 +200,7 @@ fn lazy_host_world_call_object_materializes_only_on_world_access() {
     ));
     engine.set_landscape(landscape);
 
-    engine
-        .register_definition(
-            Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
-        )
-        .expect("filler registers");
+    engine.register_script_definition("FILL", "Filler", "#strict\n").expect("filler registers");
     let mut caller = Definition::from_script(
         "LAZY",
         "Lazy caller",
@@ -308,8 +274,8 @@ protected func QueryWorld()
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
-        1,
-        "terrain is cloned on its first actual query"
+        0,
+        "a terrain query borrows the landscape; only a terrain write copies it"
     );
     assert_eq!(
         engine.objects[caller_index]
@@ -324,11 +290,7 @@ protected func QueryWorld()
 #[test]
 fn lazy_host_world_action_callback_seeds_only_caller() {
     let mut engine = Engine::with_seed(0);
-    engine
-        .register_definition(
-            Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
-        )
-        .expect("filler registers");
+    engine.register_script_definition("FILL", "Filler", "#strict\n").expect("filler registers");
     let mut actor = Definition::from_script(
         "ACTR",
         "Action caller",
@@ -500,11 +462,7 @@ fn lazy_host_world_global_effect_without_world_access_copies_nothing() {
     engine
         .register_definition(definition)
         .expect("effect definition registers");
-    engine
-        .register_definition(
-            Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
-        )
-        .expect("filler registers");
+    engine.register_script_definition("FILL", "Filler", "#strict\n").expect("filler registers");
     for x in 0..64 {
         engine
             .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)))
@@ -544,11 +502,7 @@ fn lazy_host_world_contact_materialization_is_deferred_until_query() {
     ));
     engine.set_landscape(landscape);
 
-    engine
-        .register_definition(
-            Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
-        )
-        .expect("filler registers");
+    engine.register_script_definition("FILL", "Filler", "#strict\n").expect("filler registers");
     let mut swimmer = Definition::from_script(
         "SWIM",
         "Contact swimmer",
@@ -641,8 +595,8 @@ protected func ContactRight()
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
-        1,
-        "Contact* clones terrain only when GBackSolid first queries it"
+        0,
+        "Contact*'s GBackSolid borrows the movement landscape instead of copying it"
     );
     assert_eq!(
         engine.objects[swimmer_index]
@@ -794,11 +748,7 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
     // integers costs a full deep clone on the first FindObjects of every
     // script call, which is the hot path while many flames are alive.
     let mut engine = Engine::with_seed(0);
-    engine
-        .register_definition(
-            Definition::from_script("SECT", "Sector", "").expect("definition compiles"),
-        )
-        .expect("definition registers");
+    engine.register_script_definition("SECT", "Sector", "").expect("definition registers");
     engine.set_landscape(Landscape::flat(100, 100));
     for x in 0..8 {
         engine
@@ -920,5 +870,75 @@ fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
     assert!(
         lists.iter().any(|list| list.len() > 1),
         "the fixture must actually populate a shared sector, or it freezes nothing"
+    );
+}
+
+#[test]
+fn read_only_terrain_queries_never_clone_the_landscape() {
+    // GBackSolid and friends only read `C4Landscape::GetPix`
+    // (C4Wrappers.h:66-92). The lazy host world used to answer them from a
+    // deep copy of the whole landscape, which is O(map) work per script call
+    // on a path real content walks several times per object per frame.
+    // Reads borrow the engine's landscape instead; only a host call that
+    // *writes* terrain materializes the private copy.
+    let mut engine = Engine::with_seed(0);
+    let mut landscape =
+        Landscape::with_default_material(100, vec![100; 100], None).expect("query landscape");
+    landscape.set_world_height(100);
+    landscape.set_pixel_grid(PixelGrid::new(
+        100,
+        100,
+        vec![0; 100 * 100],
+        vec![0, 100],
+        vec![None, Some("Earth".to_owned())],
+        vec![None; 2],
+    ));
+    engine.set_landscape(landscape);
+    engine
+        .landscape
+        .as_mut()
+        .expect("landscape exists")
+        .grid_write_byte(10, 20, 1);
+
+    let mut prober = Definition::from_script(
+        "PROB",
+        "Terrain prober",
+        r#"#strict
+local solid, sky;
+public func Probe()
+{
+    solid = GBackSolid(10 - GetX(), 20 - GetY());
+    sky = GBackSolid(90 - GetX(), 90 - GetY());
+    return(0);
+}
+"#,
+    )
+    .expect("prober compiles");
+    prober.set_c4_callback_convention(true);
+    engine.register_definition(prober).expect("prober registers");
+    let prober = engine
+        .spawn_object(SpawnConfig::new("PROB").with_position(Vector2::new(50, 50)))
+        .expect("prober spawns");
+    let prober_index = engine.find_object_index(prober).expect("prober exists");
+
+    HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+    engine
+        .call_object_function(prober_index, "Probe", Vec::new())
+        .expect("terrain probe succeeds");
+    assert_eq!(
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "read-only GBack* queries must borrow terrain rather than copy it"
+    );
+    // The borrow must still answer exactly what the copy answered.
+    assert_eq!(
+        engine.objects[prober_index].state.local_vars.get("solid"),
+        Some(&Value::Bool(true)),
+        "the borrowed landscape reports the written solid pixel"
+    );
+    assert_eq!(
+        engine.objects[prober_index].state.local_vars.get("sky"),
+        Some(&Value::Bool(false)),
+        "the borrowed landscape reports untouched sky"
     );
 }

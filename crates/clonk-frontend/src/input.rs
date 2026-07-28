@@ -175,18 +175,9 @@ global func Step(state, frame, random) { return 0; }
 
     fn walker_actions() -> HashMap<String, ActionSpec> {
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Jump".to_string(),
-            ActionSpec::default().with_procedure("flight"),
-        );
-        actions.insert(
-            "Push".to_string(),
-            ActionSpec::default().with_procedure("push"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
+        actions.insert("Push".to_string(), ActionSpec::for_procedure("push"));
         actions
     }
 
@@ -678,10 +669,7 @@ public func FxGunControlControlThrow(pTarget, iNumber)
         let mut clonk = Definition::from_script("TRPR", "Trapper", clonk_script)
             .expect("clonk script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         clonk.configure_actions(Some("Idle".to_string()), actions);
         clonk.set_movement_profile(MovementProfile::default());
         let gun = Definition::from_script("GUNX", "Gun", gun_script).expect("gun script compiles");
@@ -774,18 +762,9 @@ protected func ControlSpecial() { Sound("Magic1"); return(1); }
         let mut mage =
             Definition::from_script("MAGE", "Mage", mage_script).expect("mage script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Jump".to_string(),
-            ActionSpec::default().with_procedure("flight"),
-        );
-        actions.insert(
-            "Dig".to_string(),
-            ActionSpec::default().with_procedure("dig"),
-        );
+        actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
+        actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
+        actions.insert("Dig".to_string(), ActionSpec::for_procedure("dig"));
         mage.configure_actions(Some("Walk".to_string()), actions);
         mage.set_movement_profile(MovementProfile::default());
         let physical = PhysicalInfo {

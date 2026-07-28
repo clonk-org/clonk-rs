@@ -65,7 +65,7 @@
         item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
         item.construction = FULL_CON;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(item.id, item);
 
@@ -82,21 +82,13 @@
             )
             .expect("command enqueued");
 
-        let ctx_initial = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: builder_snapshot.position,
-            object: builder_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx_initial = command_ctx_at_frame(
+            builder_snapshot,
+            &objects,
+            &players,
+            &definitions,
+            0,
+        );
 
         let evaluation = stack.step(&ctx_initial).expect("Acquire evaluates");
         assert_eq!(evaluation.status, CommandStatus::Running);
@@ -166,21 +158,13 @@
         );
         assert_eq!(snapshot.commands[0].failures, 0);
 
-        let ctx_followup = CommandRuntimeContext {
-            landscape: None,
-            frame: 25,
-            position: builder_snapshot.position,
-            object: builder_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx_followup = command_ctx_at_frame(
+            builder_snapshot,
+            &objects,
+            &players,
+            &definitions,
+            25,
+        );
 
         let original_second = stack.step(&ctx_followup).expect("second step evaluates");
 
@@ -273,10 +257,10 @@
         let target2 = ObjectId::new(3);
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.command_direction = CommandDirection::Right;
-        let objects = HashMap::from([(actor_id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -324,10 +308,10 @@
             command_direction: CommandDirection::Right,
             ..snapshot_with_id(actor_id.as_u64())
         };
-        let objects = HashMap::from([(actor_id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -359,8 +343,8 @@
         let definitions = HashMap::new();
 
         let target = snapshot_with_id(target_id.as_u64());
-        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone()), (target_id, target)]);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut enter = CommandStack::new();
         enter
             .push_front(
@@ -377,8 +361,8 @@
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.collectible = false;
-        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone()), (target_id, target)]);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut get = CommandStack::new();
         get.push_front(
             CommandRequest::new(CommandId::Get)
@@ -540,10 +524,10 @@
     #[test]
     fn targetless_enter_materializes_and_increments_the_base_failure_counter() {
         let actor = snapshot_with_id(1);
-        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -564,10 +548,10 @@
     #[test]
     fn targetless_call_materializes_before_parent_failure_handling() {
         let actor = snapshot_with_id(2);
-        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -608,10 +592,10 @@
         actor.action_procedure = ActionProcedure::Push;
         actor.action_target = Some(pushed_id);
         let pushed = snapshot_with_id(pushed_id.as_u64());
-        let objects = HashMap::from([(actor_id, actor.clone()), (pushed_id, pushed)]);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone()), (pushed_id, pushed)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -644,10 +628,10 @@
     #[test]
     fn typed_malformed_exceptions_keep_native_evaluation_and_guard_order() {
         let actor = snapshot_with_id(5);
-        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let dig = DigState::from_request(&CommandRequest::new(CommandId::Dig))
             .expect("missing Dig coordinates are numeric zero");
@@ -657,7 +641,7 @@
         unselected.crew_member = true;
         unselected.owner = 7;
         unselected.selected = false;
-        let unselected_ctx = move_to_ctx_at_frame(&unselected, &objects, &players, &definitions, 0);
+        let unselected_ctx = command_ctx_at_frame(&unselected, &objects, &players, &definitions, 0);
         let mut follow = FollowState::from_request(&CommandRequest::new(CommandId::Follow))
             .expect("targetless Follow still links");
         assert_eq!(
@@ -703,26 +687,12 @@
         actor.position = Vector2::new(0, 0);
         actor.command_direction = CommandDirection::Right;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(actor.id, actor.clone());
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         let wait_request = CommandRequest::new(CommandId::Wait)
@@ -786,24 +756,11 @@
         actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
         actor.collectible = false;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(actor.id, actor.clone());
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -862,24 +819,11 @@
         // command below them without inspecting BaseMode (C4Command.cpp:2498-2508).
         let actor_id = ObjectId::new(1);
         let actor = snapshot_with_id(actor_id.as_u64());
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(actor.id, actor.clone());
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -932,7 +876,7 @@
         container.category = CATEGORY_STRUCTURE;
         container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(actor.id, actor.clone());
         objects.insert(item.id, item.clone());
         objects.insert(container.id, container.clone());
@@ -950,21 +894,7 @@
             .expect("put enqueued");
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor_snapshot.position,
-            object: actor_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
 
         let command_instance_id = stack.entries.front().expect("Put remains").instance_id;
         let result = stack.step(&ctx).expect("put evaluates");
@@ -992,7 +922,7 @@
             .contents
             .clear();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
         let result = stack.step(&ctx).expect("Put observes transferred item");
         assert_eq!(result.status, CommandStatus::Completed);
         assert_eq!(stack.len(), 0);
@@ -1169,7 +1099,7 @@
         base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
         base.collectible = false;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(base.id, base.clone());
 
@@ -1204,19 +1134,14 @@
         );
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: builder.position,
-            object: objects.get(&builder_id).expect("builder present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&builder_id).expect("builder present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = BuyState::from_request(
@@ -1268,7 +1193,7 @@
         item.container = Some(target_id);
         item.position = target.position;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(target.id, target);
         objects.insert(item.id, item);
@@ -1301,19 +1226,15 @@
         );
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: builder.position,
-            object: objects.get(&builder_id).expect("builder present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
             base_buy_enabled: false,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&builder_id).expect("builder present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let parent_request = CommandRequest::new(CommandId::Buy)
@@ -1363,7 +1284,7 @@
         item.container = Some(base_id);
         item.position = base.position;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(base.id, base.clone());
         objects.insert(item.id, item);
@@ -1396,18 +1317,14 @@
         );
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: builder.position,
-            object: objects.get(&builder_id).expect("builder present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&builder_id).expect("builder present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = SellState::from_request(
@@ -1461,7 +1378,7 @@
         item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
         item.construction = FULL_CON;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(base.id, base.clone());
         objects.insert(item.id, item.clone());
@@ -1494,18 +1411,14 @@
         );
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: builder.position,
-            object: objects.get(&builder_id).expect("builder present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&builder_id).expect("builder present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = SellState::from_request(
@@ -1554,7 +1467,7 @@
         base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
         base.collectible = false;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(base.id, base.clone());
 
@@ -1575,18 +1488,15 @@
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: builder.position,
-            object: objects.get(&builder_id).expect("builder present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
             base_sell_enabled: false,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&builder_id).expect("builder present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = SellState::from_request(
@@ -1626,7 +1536,7 @@
         item.container = Some(target_id);
         item.position = target.position;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(target.id, target);
         objects.insert(item.id, item);
@@ -1659,19 +1569,14 @@
         );
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: builder.position,
-            object: objects.get(&builder_id).expect("builder present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&builder_id).expect("builder present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = BuyState::from_request(
@@ -1715,7 +1620,7 @@
         item.container = Some(target_id);
         item.position = target.position;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(target.id, target);
         objects.insert(item.id, item);
@@ -1748,19 +1653,14 @@
         );
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 10,
             position: builder.position,
-            object: objects.get(&builder_id).expect("builder present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&builder_id).expect("builder present"),
+                &objects,
+                &players,
+                &definitions,
+                10,
+            )
         };
 
         let mut state = BuyState::from_request(
@@ -1802,7 +1702,7 @@
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
         target.alive = false;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -1827,20 +1727,7 @@
 
         {
             let builder_entry = objects.get(&builder_id).expect("builder present");
-            let ctx = CommandRuntimeContext {
-                landscape: None,
-                frame: 0,
-                position: builder_entry.position,
-                object: builder_entry,
-                objects: &objects,
-                players: &players,
-                definitions: &definitions,
-                structures_need_energy: false,
-                base_buy_enabled: true,
-                base_sell_enabled: true,
-                transfer_zones: &EMPTY_TRANSFER_ZONES,
-                rng: None,
-            };
+            let ctx = command_ctx_at_frame(builder_entry, &objects, &players, &definitions, 0);
 
             let result = state.step(&ctx);
             assert_eq!(result.status, CommandStatus::Running);
@@ -1860,20 +1747,7 @@
         builder.command_direction = CommandDirection::Stop;
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 1,
-            position: builder_entry.position,
-            object: builder_entry,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(builder_entry, &objects, &players, &definitions, 1);
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -1906,7 +1780,7 @@
         target.position = Vector2::new(0, 0);
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -1925,21 +1799,7 @@
         );
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: builder_entry.position,
-            object: builder_entry,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(builder_entry, &objects, &players, &definitions, 0);
 
         let mut state = ChopState::from_request(
             &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
@@ -1982,7 +1842,7 @@
         target.shape = DefinitionRect::new(-3, -3, 6, 6);
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
 
-        let objects = HashMap::from([(builder_id, builder), (target_id, target)]);
+        let objects = CommandObjectSnapshots::from_iter([(builder_id, builder), (target_id, target)]);
         let players = HashMap::new();
         let definitions = HashMap::from([(
             builder_definition,
@@ -1993,20 +1853,7 @@
             },
         )]);
         let builder = objects.get(&builder_id).expect("builder present");
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: builder.position,
-            object: builder,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(builder, &objects, &players, &definitions, 0);
         let mut state = ChopState::from_request(
             &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
         )
@@ -2044,7 +1891,7 @@
         target.position = Vector2::new(0, 0);
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -2063,21 +1910,7 @@
         );
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: builder_entry.position,
-            object: builder_entry,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(builder_entry, &objects, &players, &definitions, 0);
 
         let mut state = ChopState::from_request(
             &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
@@ -2108,7 +1941,7 @@
         target.position = Vector2::new(0, 0);
         target.ocf = ocf::AVAILABLE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -2127,21 +1960,7 @@
         );
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: builder_entry.position,
-            object: builder_entry,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(builder_entry, &objects, &players, &definitions, 0);
 
         let mut state = ChopState::from_request(
             &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
@@ -2170,7 +1989,7 @@
         target.position = Vector2::new(0, 0);
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -2189,21 +2008,7 @@
         );
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: builder_entry.position,
-            object: builder_entry,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(builder_entry, &objects, &players, &definitions, 0);
 
         let mut state = ChopState::from_request(
             &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
@@ -2248,10 +2053,10 @@
         stack.restore_from_snapshot(&snapshot);
         let mut actor = snapshot_with_id(1);
         actor.position = Vector2::new(100, 100);
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
         let result = stack.execute_front(&ctx).expect("restored MoveTo executes");
         assert_eq!(result.status, CommandStatus::Completed);
         assert_eq!(stack.legacy_save_commands()[0].update_interval, -4);

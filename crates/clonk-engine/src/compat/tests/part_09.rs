@@ -674,26 +674,10 @@ public func Probe(object carrier)
             );
             state.action = crate::ActionState::new("Walk");
             state.ocf = cached_ocf;
-            HostWorldObject::new(
-                id,
-                definition,
-                ObjectStatus::Normal,
-                "Walk",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )
-            .with_ocf(cached_ocf)
-            .with_full_state(Rc::new(state))
+            fixture_world_object(id, definition)
+                .with_action_name("Walk")
+                .with_ocf(cached_ocf)
+                .with_full_state(Rc::new(state))
         };
 
         let build_script = |probe: bool, reject_body: Option<&str>| {
@@ -744,27 +728,12 @@ public func Probe(object carrier)
                 build_script(false, target_reject_body),
             ),
         ]));
-        let caller = HostObjectContext::new(
-            caller_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Walk",
-            0,
-            0,
-            library,
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+        let caller = HostObjectContext {
+            id: caller_id,
+            action_name: "Walk".to_string(),
+            action_library: library.into(),
+            ..idle_object_context()
+        }
         .with_definition_id("CLNK")
         .with_ocf(caller_ocf);
 
@@ -917,24 +886,9 @@ public func Probe(object carrier)
         );
         target_state.status = target_status;
         target_state.action.target = Some(target_id);
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            target_status,
-            "Idle",
-            Some(target_id),
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_status(target_status)
+            .with_action_target(Some(target_id))
         .with_full_state(Rc::new(target_state));
 
         let mut holder_state = crate::preview_spawn_state(
@@ -952,24 +906,8 @@ public func Probe(object carrier)
         holder_commands
             .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(target_id)))
             .expect("holder command is valid");
-        let holder = HostWorldObject::new(
-            holder_id,
-            "HOLD",
-            ObjectStatus::Normal,
-            "Idle",
-            Some(target_id),
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let holder = fixture_world_object(holder_id, "HOLD")
+            .with_action_target(Some(target_id))
         .with_full_state(Rc::new(holder_state))
         .with_commands(holder_commands.command_views())
         .with_command_stack(holder_commands.snapshot());
@@ -1207,27 +1145,11 @@ public func Probe(object carrier)
     #[test]
     fn get_owner_returns_current_owner() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                5,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                owner: 5,
+                controller: 5,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1240,24 +1162,11 @@ public func Probe(object carrier)
 
     #[test]
     fn get_owner_reads_world_when_target_provided() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(7),
             "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            42,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        )
+            .with_owner(42)]);
         let args = [object_reference_value(ObjectId::new(7))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_owner(&args));
 
@@ -1353,27 +1262,10 @@ func ChangeAndProbe()
             .call_object_function(caller_index, "ChangeAndProbe", vec![])
             .expect("ChangeDef probe runs");
 
-        let carrier = HostObjectContext::new(
-            ObjectId::new(99),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+        let carrier = HostObjectContext {
+            id: ObjectId::new(99),
+            ..idle_object_context()
+        }
         .with_definition_id("RAWW");
         let (global, _) = with_effect_context_with_state_and_definition(
             Some(carrier),
@@ -1413,24 +1305,8 @@ func ChangeAndProbe()
             crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         );
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            owner,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_owner(owner)
         .with_full_state(Rc::new(target_state));
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -1449,27 +1325,11 @@ func ChangeAndProbe()
     #[test]
     fn set_owner_records_owner_update() {
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                1,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                owner: 1,
+                controller: 1,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::from_objects_with_players(
                 Vec::<HostWorldObject>::new(),
@@ -1697,27 +1557,7 @@ func ChangeAndProbe()
     fn set_alive_records_alive_update() {
         let (result, outcome) = with_effect_context(
             Some(
-                HostObjectContext::new(
-                    ObjectId::new(1),
-                    None,
-                    ObjectStatus::Normal,
-                    100,
-                    OWNER_NONE,
-                    Vector2::ZERO,
-                    Vector2::ZERO,
-                    &[],
-                    "Idle",
-                    0,
-                    0,
-                    ActionLibrary::default(),
-                    Direction::Left,
-                    CommandDirection::Stop,
-                    0,
-                    None,
-                    None,
-                    &[],
-                    crate::FULL_CON,
-                )
+                idle_object_context()
                 .with_alive(true),
             ),
             &[],
@@ -1743,24 +1583,7 @@ func ChangeAndProbe()
             Vec::new(),
         );
         state.alive = alive;
-        let target = HostWorldObject::new(
-            target_id,
-            "CLNK",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "CLNK")
         .with_alive(alive)
         .with_full_state(Rc::new(state));
         HostWorldContext::from_objects(vec![target])
@@ -1827,27 +1650,7 @@ func ChangeAndProbe()
     fn get_alive_returns_current_state() {
         let (result, _) = with_effect_context(
             Some(
-                HostObjectContext::new(
-                    ObjectId::new(1),
-                    None,
-                    ObjectStatus::Normal,
-                    100,
-                    OWNER_NONE,
-                    Vector2::ZERO,
-                    Vector2::ZERO,
-                    &[],
-                    "Idle",
-                    0,
-                    0,
-                    ActionLibrary::default(),
-                    Direction::Left,
-                    CommandDirection::Stop,
-                    0,
-                    None,
-                    None,
-                    &[],
-                    crate::FULL_CON,
-                )
+                idle_object_context()
                 .with_alive(false),
             ),
             &[],
@@ -1933,24 +1736,8 @@ func ChangeAndProbe()
             crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         ));
-        let target = HostWorldObject::new(
-            ObjectId::new(7),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            1,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(ObjectId::new(7), "Dummy")
+            .with_owner(1)
         .with_full_state(target_state);
         let world = HostWorldContext::from_objects_with_players(
             [target],
@@ -1963,27 +1750,11 @@ func ChangeAndProbe()
             DefinitionId::from("Dummy"),
             DefinitionMetadata::default(),
         )])));
-        let caller = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            0,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let caller = HostObjectContext {
+            owner: 0,
+            controller: 0,
+            ..idle_object_context()
+        };
         let (result, outcome) = with_effect_context(Some(caller), &[], world, 8, || {
             assert_eq!(
                 kill(&[object_reference_value(ObjectId::new(7))])?,

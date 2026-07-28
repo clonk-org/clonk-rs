@@ -19,6 +19,7 @@ use crate::classic_gui::{
     draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect, STANDARD_BACKGROUND_COLOR,
 };
 use crate::context_menu::draw_classic_tooltip;
+use crate::draw_scaled_caret;
 use crate::game_option_buttons::{
     game_option_buttons_layout, GameOptionButton, GameOptionButtonResources, GameOptionButtons,
     GameOptionContext,
@@ -6578,68 +6579,6 @@ fn pin_to_scroll(pin: i32, max_scroll: i32, max_pin: i32) -> i32 {
     } else {
         (max_scroll * pin / max_pin).clamp(0, max_scroll)
     }
-}
-
-/// Edit draws its flashing broken-bar cursor through `TextOut(..., 1.5f)`.
-fn draw_scaled_caret(
-    surface: &mut Surface,
-    font: &clonk_graphics::clonk_font::ClonkFont,
-    x: i32,
-    y: i32,
-    clip: IntRect,
-    gamma: Option<&GammaRamp>,
-) {
-    const SCALE: f32 = 1.5;
-    let Some(glyph) = font.glyph('\u{a6}') else {
-        return;
-    };
-    let Ok(width) = u32::try_from(glyph.width) else {
-        return;
-    };
-    let Ok(height) = u32::try_from(font.cell_height) else {
-        return;
-    };
-    if width == 0 || height == 0 {
-        return;
-    }
-    let mut pixels = Vec::with_capacity(glyph.pixels.len() * 4);
-    for pixel in &glyph.pixels {
-        let (red, green, blue) = if pixel.a == 0 {
-            (255, 255, 255)
-        } else {
-            (pixel.r, pixel.g, pixel.b)
-        };
-        pixels.extend_from_slice(&[red, green, blue, pixel.a]);
-    }
-    if pixels.len() != width as usize * height as usize * 4 {
-        return;
-    }
-    let image = ImageData::new(width, height, pixels);
-    let destination = (
-        x as f32,
-        y as f32,
-        width as f32 * SCALE,
-        height as f32 * SCALE,
-    );
-    let left = destination.0.max(clip.x as f32);
-    let top = destination.1.max(clip.y as f32);
-    let right = (destination.0 + destination.2).min((clip.x + clip.w) as f32);
-    let bottom = (destination.1 + destination.3).min((clip.y + clip.h) as f32);
-    if left >= right || top >= bottom {
-        return;
-    }
-    draw_facet_stretch(
-        surface,
-        &image,
-        (
-            (left - destination.0) / SCALE,
-            (top - destination.1) / SCALE,
-            (right - left) / SCALE,
-            (bottom - top) / SCALE,
-        ),
-        (left, top, right - left, bottom - top),
-        gamma,
-    );
 }
 
 fn contains(rect: IntRect, point: GuiPoint) -> bool {

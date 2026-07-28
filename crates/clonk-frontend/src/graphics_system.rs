@@ -190,6 +190,87 @@ impl TiledUnderlayCache {
     }
 }
 
+/// `ParticleLayer` is not `Hash`, so the per-pass index keys on this
+/// projection of it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ParticleLayerKey {
+    Global,
+    ObjectFront(ObjectId),
+    ObjectBack(ObjectId),
+}
+
+impl ParticleLayerKey {
+    fn of(layer: &ParticleLayer) -> Self {
+        match layer {
+            ParticleLayer::Global => Self::Global,
+            ParticleLayer::ObjectFront(id) => Self::ObjectFront(*id),
+            ParticleLayer::ObjectBack(id) => Self::ObjectBack(*id),
+        }
+    }
+}
+
+/// Particle offsets grouped by layer, each list already in the newest-first
+/// order [`GraphicsSystem::draw_definition_particles`] draws in. An object
+/// pass calls that method twice per object, so filtering the whole slice per
+/// call makes the pass O(objects * particles); one grouping pass per object
+/// list makes it O(particles) plus the particles actually drawn.
+///
+/// `source` pins the slice the lists describe. A lookup against any other
+/// slice is refused and the caller falls back to the linear scan, so a stale
+/// index can never change what is drawn.
+#[derive(Default)]
+struct ParticleLayerIndex {
+    source: Option<(usize, usize)>,
+    layers: HashMap<ParticleLayerKey, Vec<u32>>,
+}
+
+impl ParticleLayerIndex {
+    fn rebuild(&mut self, particles: &[ParticleSnapshot]) {
+        #[cfg(test)]
+        PARTICLE_LAYER_SCANS.with(|scans| scans.set(scans.get() + particles.len()));
+        self.layers.values_mut().for_each(Vec::clear);
+        // Snapshot order is creation order whereas C++ prepends new particles,
+        // so reverse traversal is native newest-first order. Recording it here
+        // hands the walk back in exactly the order the linear scan produced.
+        for (offset, particle) in particles.iter().enumerate().rev() {
+            self.layers
+                .entry(ParticleLayerKey::of(&particle.layer))
+                .or_default()
+                .push(offset as u32);
+        }
+        self.source = Some((particles.as_ptr() as usize, particles.len()));
+    }
+
+    fn invalidate(&mut self) {
+        self.source = None;
+    }
+
+    fn offsets(&self, particles: &[ParticleSnapshot], layer: &ParticleLayer) -> Option<&[u32]> {
+        (self.source == Some((particles.as_ptr() as usize, particles.len()))).then(|| {
+            self.layers
+                .get(&ParticleLayerKey::of(layer))
+                .map_or(&[][..], Vec::as_slice)
+        })
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Particle entries examined to decide layer membership, whether by the
+    /// linear scan or by the grouping pass that replaces it.
+    static PARTICLE_LAYER_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_particle_layer_scans() {
+    PARTICLE_LAYER_SCANS.with(|scans| scans.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn particle_layer_scans() -> usize {
+    PARTICLE_LAYER_SCANS.with(std::cell::Cell::get)
+}
+
 pub struct GraphicsSystem {
     pub(crate) surface: Surface,
     tiled_underlay_cache: TiledUnderlayCache,
@@ -276,6 +357,10 @@ pub struct GraphicsSystem {
     render_phase_identity: Arc<()>,
     render_phase_generation: u64,
     pending_viewport_foregrounds: Vec<PendingViewportForeground>,
+    /// Particle offsets grouped by layer for the object pass in flight, and
+    /// the reused draw order one layer walk copies out of it.
+    particle_layer_index: ParticleLayerIndex,
+    particle_draw_order: Vec<u32>,
     /// C4ConfigGeneral::ScrollSmooth. Config plumbing lives above the
     /// frontend; retain the exact C++ default and clamp at use meanwhile.
     scroll_smooth: i32,
@@ -389,6 +474,8 @@ impl GraphicsSystem {
             render_phase_identity: Arc::new(()),
             render_phase_generation: 0,
             pending_viewport_foregrounds: Vec::new(),
+            particle_layer_index: ParticleLayerIndex::default(),
+            particle_draw_order: Vec::new(),
             scroll_smooth: DEFAULT_SCROLL_SMOOTH,
             sky: None,
             retained_lit_sky: None,
@@ -3710,20 +3797,43 @@ impl GraphicsSystem {
         target: Option<&ObjectSnapshot>,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
-        for particle in particles.iter().rev() {
-            if &particle.layer != layer {
-                continue;
+        let mut order = std::mem::take(&mut self.particle_draw_order);
+        order.clear();
+        match self.particle_layer_index.offsets(particles, layer) {
+            Some(offsets) => order.extend_from_slice(offsets),
+            None => {
+                #[cfg(test)]
+                PARTICLE_LAYER_SCANS.with(|scans| scans.set(scans.get() + particles.len()));
+                order.extend(
+                    particles
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .filter(|(_, particle)| &particle.layer == layer)
+                        .map(|(offset, _)| offset as u32),
+                );
             }
-            let Some(definition) = self.particle_sprites.get(&particle.definition_id).cloned()
-            else {
-                continue;
-            };
-            match definition.draw_proc {
-                ParticleDrawProc::Smoke => self.draw_smoke_particle(particle, &definition, gamma),
-                ParticleDrawProc::Std => {
-                    self.draw_std_particle(particle, &definition, target, gamma)
-                }
+        }
+        for offset in &order {
+            if let Some(particle) = particles.get(*offset as usize) {
+                self.draw_definition_particle(particle, target, gamma);
             }
+        }
+        self.particle_draw_order = order;
+    }
+
+    fn draw_definition_particle(
+        &mut self,
+        particle: &ParticleSnapshot,
+        target: Option<&ObjectSnapshot>,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
+        let Some(definition) = self.particle_sprites.get(&particle.definition_id).cloned() else {
+            return;
+        };
+        match definition.draw_proc {
+            ParticleDrawProc::Smoke => self.draw_smoke_particle(particle, &definition, gamma),
+            ParticleDrawProc::Std => self.draw_std_particle(particle, &definition, target, gamma),
         }
     }
 
@@ -4245,7 +4355,10 @@ impl GraphicsSystem {
                 None => CacheUpdate::Rebuild,
             },
         };
-        if !matches!(&update, CacheUpdate::Reuse) {
+        // A reused cache is already anchored to the grid this frame presents;
+        // a rebuilt one is constructed from it below.
+        let mut anchored = matches!(&update, CacheUpdate::Reuse);
+        if !anchored {
             let regions = match update {
                 CacheUpdate::Reuse => unreachable!(),
                 CacheUpdate::Patch {
@@ -4280,6 +4393,7 @@ impl GraphicsSystem {
                         shade_materials,
                         border_state,
                     ));
+                    anchored = true;
                     vec![(0, 0, width, height)]
                 }
             };
@@ -4576,7 +4690,13 @@ impl GraphicsSystem {
         };
         // Anchor the exact byte-plane generation presented by this snapshot.
         // The next engine mutation then starts a new COW dirty generation.
-        cache.grid = grid.clone();
+        // A reused or freshly rebuilt cache already holds that generation, so
+        // re-cloning would only deep-copy the grid's texture names, material
+        // names, densities, materials, dirty generations and pending relights
+        // to arrive at the anchor it is already on.
+        if !anchored || cache.grid.bytes().as_ptr() != grid.bytes().as_ptr() {
+            cache.grid = grid.clone();
+        }
         if record_gpu_landscape(
             &mut self.surface,
             cache,
@@ -5249,6 +5369,11 @@ impl GraphicsSystem {
     ) {
         let saved_current_audibility_facet = self.current_audibility_facet;
         self.current_audibility_facet = self.audibility_facet_for_pass(pass);
+        // Group the particle slice by layer once instead of letting every
+        // object's two `draw_definition_particles` calls filter all of it.
+        let mut particle_layer_index = std::mem::take(&mut self.particle_layer_index);
+        particle_layer_index.rebuild(particles);
+        self.particle_layer_index = particle_layer_index;
 
         // Engine snapshots keep object payloads in canonical ID order, while
         // C4ObjectList draws Last -> Prev in its mutable master-list order
@@ -5401,6 +5526,9 @@ impl GraphicsSystem {
             }
         }
 
+        // The index describes this call's slice only; anything drawn outside
+        // an object pass scans linearly rather than trusting it.
+        self.particle_layer_index.invalidate();
         self.current_audibility_facet = saved_current_audibility_facet;
     }
 

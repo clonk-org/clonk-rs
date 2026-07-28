@@ -16,11 +16,7 @@
         func ReadMenu() { return GetMenu(this()); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -92,11 +88,7 @@
         func AddValued() { return AddMenuItem("Val", "Choose", CLNK, this(), 0, "txt", 0, 384, 0, 42); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -346,27 +338,15 @@
         func AddLowercaseIcon() { return AddMenuItem("ico:Locked", "", NONE, this(), 0, 0, "", 5); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("AB_D", "Uppercase", "").expect("definition compiles"),
-            )
-            .expect("definition registers");
-        engine
-            .register_definition(
-                Definition::from_script("abcd", "Lowercase", "").expect("definition compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("AB_D", "Uppercase", "").expect("definition registers");
+        engine.register_script_definition("abcd", "Lowercase", "").expect("definition registers");
         let mut portrait_definition =
             Definition::from_script("cowb", "Portrait", "").expect("definition compiles");
         attach_one_pixel_portrait(&mut engine, &mut portrait_definition, "Captain1");
         engine
             .register_definition(portrait_definition)
             .expect("definition registers");
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -573,16 +553,8 @@ func Probe(object target)
         }
         "#;
         let mut engine = Engine::new();
-        engine
-            .register_definition(
-                Definition::from_script("NEWW", "New", "").expect("new definition compiles"),
-            )
-            .expect("new definition registers");
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("NEWW", "New", "").expect("new definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -646,10 +618,7 @@ func Probe(object target)
         let mut engine = Engine::new();
         for (id, definition_script) in [("TEMP", ""), ("PICT", ""), ("CTRL", script)] {
             engine
-                .register_definition(
-                    Definition::from_script(id, id, definition_script)
-                        .expect("definition compiles"),
-                )
+                .register_script_definition(id, id, definition_script)
                 .expect("definition registers");
         }
         let controller = engine
@@ -712,23 +681,13 @@ func Probe(object target)
 
         let mut engine = Engine::with_seed(7);
         for id in ["WOOD", "METL", "GOLD", "ROCK"] {
-            engine
-                .register_definition(
-                    Definition::from_script(id, id, "").expect("component definition compiles"),
-                )
-                .expect("component definition registers");
+            engine.register_script_definition(id, id, "").expect("component definition registers");
         }
         engine
-            .register_definition(
-                Definition::from_script("BULD", "Builder", builder_script)
-                    .expect("builder compiles"),
-            )
+            .register_script_definition("BULD", "Builder", builder_script)
             .expect("builder registers");
         engine
-            .register_definition(
-                Definition::from_script("CMND", "Command", command_script)
-                    .expect("command compiles"),
-            )
+            .register_script_definition("CMND", "Command", command_script)
             .expect("command registers");
         let mut item =
             Definition::from_script("DYNA", "Dynamic", item_script).expect("item compiles");
@@ -821,22 +780,11 @@ func Probe(object target)
 
         let mut engine = Engine::with_seed(7);
         for id in ["WOOD", "METL", "GOLD"] {
-            engine
-                .register_definition(
-                    Definition::from_script(id, id, "").expect("component definition compiles"),
-                )
-                .expect("component definition registers");
+            engine.register_script_definition(id, id, "").expect("component definition registers");
         }
+        engine.register_script_definition("BULD", "Builder", "").expect("builder registers");
         engine
-            .register_definition(
-                Definition::from_script("BULD", "Builder", "").expect("builder compiles"),
-            )
-            .expect("builder registers");
-        engine
-            .register_definition(
-                Definition::from_script("CMND", "Command", command_script)
-                    .expect("command compiles"),
-            )
+            .register_script_definition("CMND", "Command", command_script)
             .expect("command registers");
 
         let register_item = |engine: &mut Engine,
@@ -952,10 +900,7 @@ func Probe(object target)
         let mut engine = Engine::with_seed(7);
         for (id, definition_script) in [("PICT", ""), ("CLNK", script)] {
             engine
-                .register_definition(
-                    Definition::from_script(id, id, definition_script)
-                        .expect("definition compiles"),
-                )
+                .register_script_definition(id, id, definition_script)
                 .expect("definition registers");
         }
         let clonk = engine
@@ -1011,10 +956,7 @@ func Probe(object target)
         let mut engine = Engine::with_seed(7);
         for (id, definition_script) in [("PICT", ""), ("CLNK", script)] {
             engine
-                .register_definition(
-                    Definition::from_script(id, id, definition_script)
-                        .expect("definition compiles"),
-                )
+                .register_script_definition(id, id, definition_script)
                 .expect("definition registers");
         }
         let clonk = engine
@@ -1069,11 +1011,7 @@ func Probe(object target)
         func Sel(i) { return SelectMenuItem(i, this()); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -1173,11 +1111,7 @@ func AddAgain() { return AddMenuItem("C", "CmdC", WIPF, this()); }
 func ReadMenu() { return GetMenu(); }
 "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -1235,16 +1169,8 @@ func ReadMenu() { return GetMenu(); }
         func LeaveAndRead() { Exit(); return GetMenu(this()); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
-        engine
-            .register_definition(
-                Definition::from_script("HUT1", "Hut", "").expect("script compiles"),
-            )
-            .expect("hut registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
+        engine.register_script_definition("HUT1", "Hut", "").expect("hut registers");
         let hut = engine
             .spawn_object(SpawnConfig::new("HUT1"))
             .expect("hut spawns");
@@ -1289,16 +1215,8 @@ func ReadMenu() { return GetMenu(); }
         func BoardThenReopen(hut) { Enter(hut); Exit(); Enter(hut); CreateMenu(MENU, this(), this(), 0, "After"); return GetMenu(this()); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
-        engine
-            .register_definition(
-                Definition::from_script("HUT1", "Hut", "").expect("script compiles"),
-            )
-            .expect("hut registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
+        engine.register_script_definition("HUT1", "Hut", "").expect("hut registers");
         let hut = engine
             .spawn_object(SpawnConfig::new("HUT1"))
             .expect("hut spawns");
@@ -1380,16 +1298,10 @@ func ReadMenu() { return GetMenu(); }
         "#;
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", moving_script)
-                    .expect("moving object compiles"),
-            )
+            .register_script_definition("CLNK", "Clonk", moving_script)
             .expect("moving object registers");
         engine
-            .register_definition(
-                Definition::from_script("HUT1", "Hut", container_script)
-                    .expect("container compiles"),
-            )
+            .register_script_definition("HUT1", "Hut", container_script)
             .expect("container registers");
         let container = engine
             .spawn_object(SpawnConfig::new("HUT1"))
@@ -1484,16 +1396,8 @@ func ReadMenu() { return GetMenu(); }
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
-        engine
-            .register_definition(
-                Definition::from_script("HUT1", "Hut", "").expect("script compiles"),
-            )
-            .expect("hut registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
+        engine.register_script_definition("HUT1", "Hut", "").expect("hut registers");
         let hut = engine
             .spawn_object(SpawnConfig::new("HUT1"))
             .expect("hut spawns");
@@ -1550,11 +1454,7 @@ func ReadMenu() { return GetMenu(); }
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -1598,10 +1498,7 @@ func ReadMenu() { return GetMenu(); }
         let mut definition =
             Definition::from_script("CLNK", "Clonk", script).expect("script compiles");
         let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
+        actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
         definition.configure_actions(Some("Idle".to_string()), actions);
         let mut engine = Engine::with_seed(7);
         engine
@@ -1696,11 +1593,7 @@ func ReadMenu() { return GetMenu(); }
         }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -1744,11 +1637,7 @@ func ReadMenu() { return GetMenu(); }
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -1812,11 +1701,7 @@ func ReadMenu() { return GetMenu(); }
         func Prog(n) { return SetMenuTextProgress(n, this()); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -1976,11 +1861,7 @@ func ReadMenu() { return GetMenu(); }
         func Deco(decoration) { return SetMenuDecoration(decoration, this()); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let mut decoration = Definition::from_script(
             "DECO",
             "Deco",
@@ -2104,11 +1985,7 @@ func ReadMenu() { return GetMenu(); }
         func OpenEmpty() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -2245,11 +2122,7 @@ func ReadMenu() { return GetMenu(); }
         func ReadHeight() { return LandscapeHeight(); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("HORS", "Horse", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("HORS", "Horse", script).expect("definition registers");
         engine.set_landscape(Landscape::flat_with_material(23, 41, None));
         let horse = engine
             .spawn_object(SpawnConfig::new("HORS"))
@@ -2493,16 +2366,8 @@ func ReadMenu() { return GetMenu(); }
         func Halt(target) { return SetCommand(target, "None"); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("BOSS", "Boss", script).expect("script compiles"),
-            )
-            .expect("boss registers");
-        engine
-            .register_definition(
-                Definition::from_script("MNON", "Minion", "").expect("minion compiles"),
-            )
-            .expect("minion registers");
+        engine.register_script_definition("BOSS", "Boss", script).expect("boss registers");
+        engine.register_script_definition("MNON", "Minion", "").expect("minion registers");
         let boss = engine
             .spawn_object(SpawnConfig::new("BOSS"))
             .expect("boss spawns");
@@ -2624,10 +2489,7 @@ func ReadMenu() { return GetMenu(); }
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let mut crew_definition =
             Definition::from_script("CREW", "Crew", "").expect("crew compiles");
@@ -2635,11 +2497,7 @@ func ReadMenu() { return GetMenu(); }
         engine
             .register_definition(crew_definition)
             .expect("crew registers");
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", "").expect("item compiles"),
-            )
-            .expect("item registers");
+        engine.register_script_definition("ITEM", "Item", "").expect("item registers");
         let mut container_definition =
             Definition::from_script("CONT", "Container", "").expect("container compiles");
         container_definition.set_ocf_base(ocf::CONTAINER);
@@ -2704,10 +2562,7 @@ func ReadMenu() { return GetMenu(); }
                 "#
             );
             engine
-                .register_definition(
-                    Definition::from_script(definition, definition, &script)
-                        .expect("legacy caller compiles"),
-                )
+                .register_script_definition(definition, definition, &script)
                 .expect("legacy caller registers");
             let caller = engine
                 .spawn_object(SpawnConfig::new(definition))
@@ -4855,22 +4710,12 @@ protected func WorkFailed(caller, tx, ty, other)
                 .expect("actor definition registers");
         }
         engine
-            .register_definition(
-                Definition::from_script("TGTF", "Falsy target", &target_script("0"))
-                    .expect("falsy target compiles"),
-            )
+            .register_script_definition("TGTF", "Falsy target", &target_script("0"))
             .expect("falsy target registers");
         engine
-            .register_definition(
-                Definition::from_script("TGTT", "Truthy target", &target_script("WOOD"))
-                    .expect("truthy target compiles"),
-            )
+            .register_script_definition("TGTT", "Truthy target", &target_script("WOOD"))
             .expect("truthy target registers");
-        engine
-            .register_definition(
-                Definition::from_script("MARK", "Marker", "#strict").expect("marker compiles"),
-            )
-            .expect("marker registers");
+        engine.register_script_definition("MARK", "Marker", "#strict").expect("marker registers");
 
         let falsy_target = engine
             .spawn_object(SpawnConfig::new("TGTF"))
@@ -5079,10 +4924,7 @@ protected func WorkFailed(caller, tx, ty, target2)
                 .register_definition(actor)
                 .expect("actor definition registers");
             engine
-                .register_definition(
-                    Definition::from_script("CTXT", "Call target", target_script)
-                        .expect("target compiles"),
-                )
+                .register_script_definition("CTXT", "Call target", target_script)
                 .expect("target definition registers");
             engine
                 .register_definition(simple_definition("CTXM"))
@@ -5435,11 +5277,7 @@ public func RunNow() { return ExecuteCommand(); }
             .register_definition(builder)
             .expect("builder registers");
         engine.register_definition(site).expect("site registers");
-        engine
-            .register_definition(
-                Definition::from_script("WOOD", "Wood", "#strict").expect("wood compiles"),
-            )
-            .expect("wood registers");
+        engine.register_script_definition("WOOD", "Wood", "#strict").expect("wood registers");
         let target = engine
             .spawn_object(
                 SpawnConfig::new("SITE")
@@ -5612,16 +5450,8 @@ protected func ControlCommandFinished() { finished_dir = GetComDir(); }
             .register_definition(builder)
             .expect("builder registers");
         engine.register_definition(site).expect("site registers");
-        engine
-            .register_definition(
-                Definition::from_script("WOOD", "Wood", "#strict").expect("wood compiles"),
-            )
-            .expect("wood registers");
-        engine
-            .register_definition(
-                Definition::from_script("METL", "Metal", "#strict").expect("metal compiles"),
-            )
-            .expect("metal registers");
+        engine.register_script_definition("WOOD", "Wood", "#strict").expect("wood registers");
+        engine.register_script_definition("METL", "Metal", "#strict").expect("metal registers");
 
         let target = engine
             .spawn_object(
@@ -5753,11 +5583,7 @@ protected func ControlCommandFinished(command)
 }
 "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         engine
             .register_player(PlayerConfig::new(1, "Player"))
             .expect("player registers");
@@ -6083,11 +5909,7 @@ protected func ControlCommandFinished(command)
 }
 "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         engine
             .register_player(PlayerConfig::new(1, "Player"))
             .expect("player registers");
@@ -6140,16 +5962,10 @@ protected func ControlCommandFinished(command) { finished = command; }
 "#;
         let mut engine = Engine::with_seed(3);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         engine
-            .register_definition(
-                Definition::from_script("TARG", "Target", target_script)
-                    .expect("target compiles"),
-            )
+            .register_script_definition("TARG", "Target", target_script)
             .expect("target registers");
         engine
             .register_player(PlayerConfig::new(1, "Player"))
@@ -6359,11 +6175,7 @@ public func Run()
 protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
 "#;
         let mut engine = Engine::with_seed(3);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK").with_alive(true))
             .expect("clonk spawns");

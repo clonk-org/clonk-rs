@@ -1191,7 +1191,7 @@ impl Definition {
     /// Shares the System.c4g global-function table into this script host.
     pub(crate) fn set_global_functions(
         &mut self,
-        functions: Option<Arc<HashMap<String, clonk_script::Function>>>,
+        functions: Option<Arc<rustc_hash::FxHashMap<String, clonk_script::Function>>>,
     ) {
         Arc::make_mut(&mut self.script).set_global_functions(functions);
     }
@@ -2241,6 +2241,76 @@ impl Definition {
         }
     }
 
+    /// The object scope every object-context script call publishes.
+    ///
+    /// C++ hands each callback the same `C4Object *`, so every entry point
+    /// here has to expose the same channels. The setters below assign
+    /// independent fields, so the call sites that ordered them differently
+    /// were already building an identical context.
+    pub(crate) fn host_object_context<'a>(
+        &self,
+        state: &'a ObjectState,
+        object_id: ObjectId,
+        world: &HostWorldContext,
+    ) -> compat::HostObjectContext<'a> {
+        compat::HostObjectContext::with_category(
+            object_id,
+            state.container,
+            state.status,
+            state.energy,
+            state.damage,
+            state.construction,
+            state.owner,
+            state.position,
+            state.velocity,
+            state.rotation,
+            &state.effects,
+            state.action.name.clone(),
+            state.action.time,
+            state.action.data,
+            state.action.phase,
+            self.shared_action_library(world),
+            state.direction,
+            state.command_direction,
+            0,
+            state.action.target,
+            state.action.target2,
+            &state.vertices,
+            state.category,
+            self.ocf_base,
+            self.crew_member,
+            state.draw_transform,
+            state.base_graphics.clone(),
+        )
+        .with_action_index(state.action.act_map_index)
+        .with_shape_vertices(&state.shape_vertices)
+        .with_definition_id(self.id.as_str())
+        // The scope publishes its whole overlay list, so it must start
+        // from the object's real overlays: C4Object::GetGraphicsOverlay
+        // splices a single node (src/C4Object.cpp:5962-5977).
+        .with_graphics_overlays(state.graphics_overlays.clone())
+        .with_base_graphics(state.base_graphics.clone())
+        .with_alive(state.alive)
+        .with_controller(state.controller)
+        .with_in_liquid(state.in_liquid)
+        .with_own_mass(state.own_mass)
+        .with_physicals(
+            state.info_physical,
+            state.temporary_physical,
+            state.physical_changes.clone(),
+            *self.physical(),
+        )
+        .with_walk_rotation(self.walk_rotation_seed(state))
+        .with_script_fixed_position(state.script_fixed_position)
+        .with_script_fixed_velocity(state.script_fixed_velocity)
+        .with_script_rotation_velocity(state.script_rotation_velocity)
+        .with_script_fixed_rotation(state.script_fixed_rotation)
+        .with_magic_energy(state.magic_energy)
+        .with_breath(state.breath)
+        .with_need_energy(state.need_energy)
+        .with_ocf(state.ocf)
+    }
+
     pub fn set_physical(&mut self, physical: PhysicalInfo) {
         self.physical = physical;
     }
@@ -2437,61 +2507,7 @@ impl Definition {
         // nothing back, C4AulExec.cpp:1318-1342).
         let cells = clonk_script::LocalCells::from_local_vars(&state.local_vars);
         let (result, host_effects) = compat::with_effect_context_with_state(
-            Some(
-                compat::HostObjectContext::with_category(
-                    object_id,
-                    state.container,
-                    state.status,
-                    state.energy,
-                    state.damage,
-                    state.construction,
-                    state.owner,
-                    state.position,
-                    state.velocity,
-                    state.rotation,
-                    &state.effects,
-                    state.action.name.clone(),
-                    state.action.time,
-                    state.action.data,
-                    state.action.phase,
-                    self.shared_action_library(&world),
-                    state.direction,
-                    state.command_direction,
-                    0,
-                    state.action.target,
-                    state.action.target2,
-                    &state.vertices,
-                    state.category,
-                    self.ocf_base,
-                    self.crew_member,
-                    state.draw_transform,
-                    state.base_graphics.clone(),
-                )
-                .with_action_index(state.action.act_map_index)
-                .with_shape_vertices(&state.shape_vertices)
-                .with_definition_id(self.id.as_str())
-                .with_graphics_overlays(state.graphics_overlays.clone())
-                .with_base_graphics(state.base_graphics.clone())
-                .with_alive(state.alive)
-                .with_controller(state.controller)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
-                .with_physicals(
-                    state.info_physical,
-                    state.temporary_physical,
-                    state.physical_changes.clone(),
-                    *self.physical(),
-                )
-                .with_walk_rotation(self.walk_rotation_seed(state))
-                .with_script_fixed_position(state.script_fixed_position)
-                .with_script_fixed_velocity(state.script_fixed_velocity)
-                .with_script_rotation_velocity(state.script_rotation_velocity)
-                .with_script_fixed_rotation(state.script_fixed_rotation)
-                .with_magic_energy(state.magic_energy)
-                .with_breath(state.breath)
-                .with_need_energy(state.need_energy)
-                .with_ocf(state.ocf),
-            ),
+            Some(self.host_object_context(state, object_id, &world)),
             global_effects,
             world,
             next_object_id,
@@ -2678,61 +2694,7 @@ impl Definition {
         // pre-error local writes (C4AulExec.cpp:1318-1342, no rollback).
         let cells = clonk_script::LocalCells::from_local_vars(&state.local_vars);
         let (result, host_effects) = compat::with_effect_context_with_state(
-            Some(
-                compat::HostObjectContext::with_category(
-                    object_id,
-                    state.container,
-                    state.status,
-                    state.energy,
-                    state.damage,
-                    state.construction,
-                    state.owner,
-                    state.position,
-                    state.velocity,
-                    state.rotation,
-                    &state.effects,
-                    state.action.name.clone(),
-                    state.action.time,
-                    state.action.data,
-                    state.action.phase,
-                    self.shared_action_library(&world),
-                    state.direction,
-                    state.command_direction,
-                    0,
-                    state.action.target,
-                    state.action.target2,
-                    &state.vertices,
-                    state.category,
-                    self.ocf_base,
-                    self.crew_member,
-                    state.draw_transform,
-                    state.base_graphics.clone(),
-                )
-                .with_action_index(state.action.act_map_index)
-                .with_shape_vertices(&state.shape_vertices)
-                .with_definition_id(self.id.as_str())
-                .with_graphics_overlays(state.graphics_overlays.clone())
-                .with_base_graphics(state.base_graphics.clone())
-                .with_alive(state.alive)
-                .with_controller(state.controller)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
-                .with_physicals(
-                    state.info_physical,
-                    state.temporary_physical,
-                    state.physical_changes.clone(),
-                    *self.physical(),
-                )
-                .with_walk_rotation(self.walk_rotation_seed(state))
-                .with_script_fixed_position(state.script_fixed_position)
-                .with_script_fixed_velocity(state.script_fixed_velocity)
-                .with_script_rotation_velocity(state.script_rotation_velocity)
-                .with_script_fixed_rotation(state.script_fixed_rotation)
-                .with_magic_energy(state.magic_energy)
-                .with_breath(state.breath)
-                .with_need_energy(state.need_energy)
-                .with_ocf(state.ocf),
-            ),
+            Some(self.host_object_context(state, object_id, &world)),
             global_effects,
             world,
             next_object_id,
@@ -2879,61 +2841,7 @@ impl Definition {
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
         let (result, host_effects) = compat::with_effect_context_with_state(
-            Some(
-                compat::HostObjectContext::with_category(
-                    object_id,
-                    state.container,
-                    state.status,
-                    state.energy,
-                    state.damage,
-                    state.construction,
-                    state.owner,
-                    state.position,
-                    state.velocity,
-                    state.rotation,
-                    &state.effects,
-                    state.action.name.clone(),
-                    state.action.time,
-                    state.action.data,
-                    state.action.phase,
-                    self.shared_action_library(&world),
-                    state.direction,
-                    state.command_direction,
-                    0,
-                    state.action.target,
-                    state.action.target2,
-                    &state.vertices,
-                    state.category,
-                    self.ocf_base,
-                    self.crew_member,
-                    state.draw_transform,
-                    state.base_graphics.clone(),
-                )
-                .with_action_index(state.action.act_map_index)
-                .with_shape_vertices(&state.shape_vertices)
-                .with_definition_id(self.id.as_str())
-                .with_graphics_overlays(state.graphics_overlays.clone())
-                .with_base_graphics(state.base_graphics.clone())
-                .with_alive(state.alive)
-                .with_controller(state.controller)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
-                .with_physicals(
-                    state.info_physical,
-                    state.temporary_physical,
-                    state.physical_changes.clone(),
-                    *self.physical(),
-                )
-                .with_walk_rotation(self.walk_rotation_seed(state))
-                .with_script_fixed_position(state.script_fixed_position)
-                .with_script_fixed_velocity(state.script_fixed_velocity)
-                .with_script_rotation_velocity(state.script_rotation_velocity)
-                .with_script_fixed_rotation(state.script_fixed_rotation)
-                .with_magic_energy(state.magic_energy)
-                .with_breath(state.breath)
-                .with_need_energy(state.need_energy)
-                .with_ocf(state.ocf),
-            ),
+            Some(self.host_object_context(state, object_id, &world)),
             global_effects,
             world,
             next_object_id,
@@ -3100,61 +3008,7 @@ impl Definition {
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
         let (result, host_effects) = compat::with_effect_context_with_state(
-            Some(
-                compat::HostObjectContext::with_category(
-                    object_id,
-                    state.container,
-                    state.status,
-                    state.energy,
-                    state.damage,
-                    state.construction,
-                    state.owner,
-                    state.position,
-                    state.velocity,
-                    state.rotation,
-                    &state.effects,
-                    state.action.name.clone(),
-                    state.action.time,
-                    state.action.data,
-                    state.action.phase,
-                    object_definition.shared_action_library(&world),
-                    state.direction,
-                    state.command_direction,
-                    0,
-                    state.action.target,
-                    state.action.target2,
-                    &state.vertices,
-                    state.category,
-                    object_definition.ocf_base,
-                    object_definition.crew_member,
-                    state.draw_transform,
-                    state.base_graphics.clone(),
-                )
-                .with_action_index(state.action.act_map_index)
-                .with_shape_vertices(&state.shape_vertices)
-                .with_definition_id(object_definition.id.as_str())
-                .with_graphics_overlays(state.graphics_overlays.clone())
-                .with_base_graphics(state.base_graphics.clone())
-                .with_alive(state.alive)
-                .with_controller(state.controller)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
-                .with_physicals(
-                    state.info_physical,
-                    state.temporary_physical,
-                    state.physical_changes.clone(),
-                    *object_definition.physical(),
-                )
-                .with_walk_rotation(object_definition.walk_rotation_seed(state))
-                .with_script_fixed_position(state.script_fixed_position)
-                .with_script_fixed_velocity(state.script_fixed_velocity)
-                .with_script_rotation_velocity(state.script_rotation_velocity)
-                .with_script_fixed_rotation(state.script_fixed_rotation)
-                .with_magic_energy(state.magic_energy)
-                .with_breath(state.breath)
-                .with_need_energy(state.need_energy)
-                .with_ocf(state.ocf),
-            ),
+            Some(object_definition.host_object_context(state, object_id, &world)),
             global_effects,
             world,
             next_object_id,
@@ -3233,62 +3087,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let object_context = compat::HostObjectContext::with_category(
-            object_id,
-            state.container,
-            state.status,
-            state.energy,
-            state.damage,
-            state.construction,
-            state.owner,
-            state.position,
-            state.velocity,
-            state.rotation,
-            &state.effects,
-            state.action.name.clone(),
-            state.action.time,
-            state.action.data,
-            state.action.phase,
-            self.shared_action_library(&world),
-            state.direction,
-            state.command_direction,
-            0,
-            state.action.target,
-            state.action.target2,
-            &state.vertices,
-            state.category,
-            self.ocf_base,
-            self.crew_member,
-            state.draw_transform,
-            state.base_graphics.clone(),
-        )
-        .with_action_index(state.action.act_map_index)
-        .with_shape_vertices(&state.shape_vertices)
-        .with_definition_id(self.id.as_str())
-        .with_alive(state.alive)
-        .with_controller(state.controller)
-        .with_in_liquid(state.in_liquid)
-        .with_own_mass(state.own_mass)
-        .with_physicals(
-            state.info_physical,
-            state.temporary_physical,
-            state.physical_changes.clone(),
-            *self.physical(),
-        )
-        .with_base_graphics(state.base_graphics.clone())
-        // The scope publishes its whole overlay list, so it must start
-        // from the object's real overlays: C4Object::GetGraphicsOverlay
-        // splices a single node (src/C4Object.cpp:5962-5977).
-        .with_graphics_overlays(state.graphics_overlays.clone())
-        .with_walk_rotation(self.walk_rotation_seed(state))
-        .with_script_fixed_position(state.script_fixed_position)
-        .with_script_fixed_velocity(state.script_fixed_velocity)
-        .with_script_rotation_velocity(state.script_rotation_velocity)
-        .with_script_fixed_rotation(state.script_fixed_rotation)
-        .with_magic_energy(state.magic_energy)
-        .with_breath(state.breath)
-        .with_need_energy(state.need_energy)
-        .with_ocf(state.ocf);
+        let object_context = self.host_object_context(state, object_id, &world);
         let (result, outcome) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
@@ -3373,62 +3172,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let object_context = compat::HostObjectContext::with_category(
-            object_id,
-            state.container,
-            state.status,
-            state.energy,
-            state.damage,
-            state.construction,
-            state.owner,
-            state.position,
-            state.velocity,
-            state.rotation,
-            &state.effects,
-            state.action.name.clone(),
-            state.action.time,
-            state.action.data,
-            state.action.phase,
-            self.shared_action_library(&world),
-            state.direction,
-            state.command_direction,
-            0,
-            state.action.target,
-            state.action.target2,
-            &state.vertices,
-            state.category,
-            self.ocf_base,
-            self.crew_member,
-            state.draw_transform,
-            state.base_graphics.clone(),
-        )
-        .with_action_index(state.action.act_map_index)
-        .with_shape_vertices(&state.shape_vertices)
-        .with_definition_id(self.id.as_str())
-        .with_alive(state.alive)
-        .with_controller(state.controller)
-        .with_in_liquid(state.in_liquid)
-        .with_own_mass(state.own_mass)
-        .with_physicals(
-            state.info_physical,
-            state.temporary_physical,
-            state.physical_changes.clone(),
-            *self.physical(),
-        )
-        .with_base_graphics(state.base_graphics.clone())
-        // The scope publishes its whole overlay list, so it must start
-        // from the object's real overlays: C4Object::GetGraphicsOverlay
-        // splices a single node (src/C4Object.cpp:5962-5977).
-        .with_graphics_overlays(state.graphics_overlays.clone())
-        .with_walk_rotation(self.walk_rotation_seed(state))
-        .with_script_fixed_position(state.script_fixed_position)
-        .with_script_fixed_velocity(state.script_fixed_velocity)
-        .with_script_rotation_velocity(state.script_rotation_velocity)
-        .with_script_fixed_rotation(state.script_fixed_rotation)
-        .with_magic_energy(state.magic_energy)
-        .with_breath(state.breath)
-        .with_need_energy(state.need_energy)
-        .with_ocf(state.ocf);
+        let object_context = self.host_object_context(state, object_id, &world);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
@@ -3952,59 +3696,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let object_context = compat::HostObjectContext::with_category(
-            object_id,
-            state.container,
-            state.status,
-            state.energy,
-            state.damage,
-            state.construction,
-            state.owner,
-            state.position,
-            state.velocity,
-            state.rotation,
-            &state.effects,
-            state.action.name.clone(),
-            state.action.time,
-            state.action.data,
-            state.action.phase,
-            object_definition.shared_action_library(&world),
-            state.direction,
-            state.command_direction,
-            0,
-            state.action.target,
-            state.action.target2,
-            &state.vertices,
-            state.category,
-            object_definition.ocf_base,
-            object_definition.crew_member,
-            state.draw_transform,
-            state.base_graphics.clone(),
-        )
-        .with_action_index(state.action.act_map_index)
-        .with_shape_vertices(&state.shape_vertices)
-        .with_definition_id(object_definition.id.as_str())
-        .with_graphics_overlays(state.graphics_overlays.clone())
-        .with_base_graphics(state.base_graphics.clone())
-        .with_alive(state.alive)
-        .with_controller(state.controller)
-        .with_in_liquid(state.in_liquid)
-        .with_own_mass(state.own_mass)
-        .with_physicals(
-            state.info_physical,
-            state.temporary_physical,
-            state.physical_changes.clone(),
-            *object_definition.physical(),
-        )
-        .with_walk_rotation(object_definition.walk_rotation_seed(state))
-        .with_script_fixed_position(state.script_fixed_position)
-        .with_script_fixed_velocity(state.script_fixed_velocity)
-        .with_script_rotation_velocity(state.script_rotation_velocity)
-        .with_script_fixed_rotation(state.script_fixed_rotation)
-        .with_magic_energy(state.magic_energy)
-        .with_breath(state.breath)
-        .with_need_energy(state.need_energy)
-        .with_ocf(state.ocf);
+        let object_context = object_definition.host_object_context(state, object_id, &world);
         let cells = clonk_script::LocalCells::from_local_vars(&state.local_vars);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -4252,62 +3944,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let object_context = compat::HostObjectContext::with_category(
-            object_id,
-            state.container,
-            state.status,
-            state.energy,
-            state.damage,
-            state.construction,
-            state.owner,
-            state.position,
-            state.velocity,
-            state.rotation,
-            &state.effects,
-            state.action.name.clone(),
-            state.action.time,
-            state.action.data,
-            state.action.phase,
-            self.shared_action_library(&world),
-            state.direction,
-            state.command_direction,
-            0,
-            state.action.target,
-            state.action.target2,
-            &state.vertices,
-            state.category,
-            self.ocf_base,
-            self.crew_member,
-            state.draw_transform,
-            state.base_graphics.clone(),
-        )
-        .with_action_index(state.action.act_map_index)
-        .with_shape_vertices(&state.shape_vertices)
-        .with_definition_id(self.id.as_str())
-        .with_alive(state.alive)
-        .with_controller(state.controller)
-        .with_in_liquid(state.in_liquid)
-        .with_own_mass(state.own_mass)
-        .with_physicals(
-            state.info_physical,
-            state.temporary_physical,
-            state.physical_changes.clone(),
-            *self.physical(),
-        )
-        .with_base_graphics(state.base_graphics.clone())
-        // The scope publishes its whole overlay list, so it must start
-        // from the object's real overlays: C4Object::GetGraphicsOverlay
-        // splices a single node (src/C4Object.cpp:5962-5977).
-        .with_graphics_overlays(state.graphics_overlays.clone())
-        .with_walk_rotation(self.walk_rotation_seed(state))
-        .with_script_fixed_position(state.script_fixed_position)
-        .with_script_fixed_velocity(state.script_fixed_velocity)
-        .with_script_rotation_velocity(state.script_rotation_velocity)
-        .with_script_fixed_rotation(state.script_fixed_rotation)
-        .with_magic_energy(state.magic_energy)
-        .with_breath(state.breath)
-        .with_need_energy(state.need_energy)
-        .with_ocf(state.ocf);
+        let object_context = self.host_object_context(state, object_id, &world);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,

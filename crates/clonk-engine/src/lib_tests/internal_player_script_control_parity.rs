@@ -106,9 +106,7 @@ fn admitted_joined_player_team_update_applies_add_player_side_effects_only() {
         )
         .expect("joined player registers");
     engine
-        .register_definition(
-            Definition::from_script("OWND", "Owned", "").expect("owned-object definition compiles"),
-        )
+        .register_script_definition("OWND", "Owned", "")
         .expect("owned-object definition registers");
     let owned = engine
         .spawn_object(
