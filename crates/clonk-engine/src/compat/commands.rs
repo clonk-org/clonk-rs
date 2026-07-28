@@ -2024,7 +2024,7 @@ fn preview_object_com_dig(actor: ObjectId) -> Result<bool, RuntimeError> {
 }
 
 pub(crate) type PreparedCommandRuntimeData = (
-    HashMap<ObjectId, CommandObjectSnapshot>,
+    CommandObjectSnapshots,
     HashMap<i32, CommandPlayerSnapshot>,
     HashMap<DefinitionId, CommandDefinitionSnapshot>,
     TransferZoneTable,

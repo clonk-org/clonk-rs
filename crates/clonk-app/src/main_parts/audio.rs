@@ -70,20 +70,74 @@ pub(crate) fn retained_gpu_present_recovery(error: &anyhow::Error) -> RetainedGp
     }
 }
 
+/// Backend sets to try, in order, when creating the framebuffer device.
+///
+/// `Backends::PRIMARY` (VULKAN | METAL | DX12 | BROWSER_WEBGPU) comes first
+/// because the GL backend probes for libEGL and logs a spurious "Unable to
+/// open libEGL" on macOS before falling back to Metal. It contains no GL at
+/// all, though, so a board whose only usable driver is GLES — the common
+/// Raspberry Pi case — produced no adapter and aborted startup. Widening on
+/// failure costs a desktop machine nothing and is the difference between
+/// running and not running there.
+///
+/// An explicit `WGPU_BACKEND` is an operator instruction: honour it exactly
+/// and never widen past it.
+pub(crate) fn framebuffer_backend_attempts(
+    requested: Option<pixels::wgpu::Backends>,
+) -> Vec<pixels::wgpu::Backends> {
+    requested.map_or_else(
+        || vec![pixels::wgpu::Backends::PRIMARY, pixels::wgpu::Backends::all()],
+        |backends| vec![backends],
+    )
+}
+
+/// Create the framebuffer, widening the backend set rather than aborting.
+///
+/// Note what this cannot fix: wgpu-hal's GLES backend rejects any context
+/// below GLES 3.0 (wgpu-hal-0.16.2 src/gles/adapter.rs:218-225), so VideoCore
+/// IV boards (Pi 0-3) still produce no adapter on any backend. There is no CPU
+/// presentation fallback either — `pixels` needs a wgpu device even to blit a
+/// CPU buffer — so those boards fail here with the diagnostic below.
+pub(crate) fn build_framebuffer(window: &Window, size: PhysicalSize<u32>) -> Result<Pixels> {
+    let attempts = framebuffer_backend_attempts(pixels::wgpu::util::backend_bits_from_env());
+    let mut last_error = None;
+    for backends in attempts {
+        let surface = SurfaceTexture::new(size.width, size.height, window);
+        match PixelsBuilder::new(size.width, size.height, surface)
+            .wgpu_backend(backends)
+            // StdGLCtx::PageFlip calls SDL_GL_SwapWindow without ever selecting
+            // a swap interval. Do not make drawable acquisition serialize the
+            // independently scheduled simulation and graphics timers behind an
+            // implicit FIFO-vsync wait that the C++ application does not request.
+            .enable_vsync(false)
+            .build()
+        {
+            Ok(pixels) => return Ok(pixels),
+            Err(error) => {
+                tracing::warn!(?backends, %error, "no usable GPU adapter for these backends");
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.map_or_else(
+        || anyhow::anyhow!("no GPU backends were attempted"),
+        anyhow::Error::from,
+    ))
+    .context(
+        "failed to create pixel framebuffer: no GPU adapter on any backend \
+         (GLES 2.0-only hardware such as Raspberry Pi 0-3 cannot be supported \
+         by this renderer; it requires GLES 3.0 or a Vulkan/Metal/DX12 driver)",
+    )
+}
+
 pub(crate) fn rebuild_retained_gpu_device(
     window: &Window,
     pixels: &mut Pixels,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
 ) -> Result<()> {
     let size = enforce_min_size(window.inner_size());
-    let surface = SurfaceTexture::new(size.width, size.height, window);
-    let mut replacement = PixelsBuilder::new(size.width, size.height, surface)
-        .wgpu_backend(
-            pixels::wgpu::util::backend_bits_from_env().unwrap_or(pixels::wgpu::Backends::PRIMARY),
-        )
-        .enable_vsync(false)
-        .build()
-        .context("failed to rebuild retained GPU surface")?;
+    let mut replacement =
+        build_framebuffer(window, size).context("failed to rebuild retained GPU surface")?;
     replacement
         .resize_buffer(1, 1)
         .context("failed to restore retained GPU presentation buffer")?;

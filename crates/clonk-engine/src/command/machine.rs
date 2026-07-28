@@ -6700,7 +6700,7 @@ pub struct CommandRuntimeContext<'a> {
     /// C4Command JumpControl/FlightControl, C4Command.cpp:1816-1920).
     pub landscape: Option<&'a crate::Landscape>,
     pub object: &'a CommandObjectSnapshot,
-    pub objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
+    pub objects: &'a CommandObjectSnapshots,
     pub players: &'a HashMap<i32, CommandPlayerSnapshot>,
     pub definitions: &'a HashMap<DefinitionId, CommandDefinitionSnapshot>,
     pub structures_need_energy: bool,

@@ -22,7 +22,7 @@ pub use gpu_scene::{
 pub use sampling::{stdgl_blit_sampling, BlitSampling};
 pub use snapshot::{SnapshotHasher, SurfaceSnapshot};
 pub use surface::{
-    BlitMode, PixelFormat, Point, Rect, RgbaSurfaceViewMut, Surface, SurfaceDrawTarget,
-    SurfaceError,
+    pixel_plane_stats, BlitMode, PixelFormat, PixelPlaneStats, Point, Rect, RgbaSurfaceViewMut,
+    Surface, SurfaceDrawTarget, SurfaceError,
 };
 pub use transform::Transform;

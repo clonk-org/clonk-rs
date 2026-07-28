@@ -19382,6 +19382,7 @@ fn a_long_catch_up_still_draws_at_the_render_floor() {
         skipped_render_frames: 0,
         skip_redraw: true,
         immediate_network_retry: false,
+        yielded_for_render: false,
     };
     apply_render_floor(&mut app, &mut outcome);
     assert!(

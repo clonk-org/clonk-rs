@@ -25,8 +25,8 @@ pub use crate::error::{ParseError, RuntimeCallFrame, RuntimeError, ScriptError};
 pub use crate::value::{
     c4_hash_combine, c4_id_from_raw, c4_id_parse, c4_id_raw, c4_id_serde, c4_id_text,
     c4_optional_id_serde, c4_optional_string_serde, c4_string_byte, c4_string_byte_len,
-    c4_string_bytes, c4_string_from_bytes, c4_string_serde, c4_strings_equal, cnv_fn,
-    C4StringValue, C4VType, CnvFn, Value, ValueMap,
+    c4_string_bytes, c4_string_bytes_cow, c4_string_from_bytes, c4_string_serde, c4_strings_equal,
+    cnv_fn, C4StringValue, C4VType, CnvFn, Value, ValueMap,
 };
 pub use crate::vm::{
     active_direct_exec_diagnostic_frames, caller_host_identity, caller_is_temporary_script,
