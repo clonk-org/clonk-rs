@@ -74,21 +74,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --profile test --no-deps -p clonk-game -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
 
-  # Probe: can the full application build natively for MSVC?
+  # The configuration a release ships, built on every push.
   #
-  # Releases currently ship `x86_64-pc-windows-gnu`, cross-compiled from
-  # ubuntu with a `freetype-sys`/zlib include hack, while the job above tests
-  # MSVC — so the tested toolchain is not the shipped one. Moving the release
-  # to a native runner would close that gap, but only if the graphics, font and
-  # audio stacks that `clonk-app` pulls in actually build under MSVC. The
-  # launcher job above covers three leaf crates and proves nothing about them.
-  #
-  # Non-blocking on purpose: this exists to answer the question, not to gate.
+  # This began as a probe asking whether the full application could build
+  # natively for MSVC at all, because releases cross-compiled
+  # `x86_64-pc-windows-gnu` from ubuntu while this workflow tested MSVC — the
+  # tested toolchain was not the shipped one. `release.yml` now builds here
+  # instead, which makes this job the standing proof that it can, and a gate
+  # rather than a question.
   runtime-msvc:
-    name: Runtime builds for MSVC (probe)
+    name: Runtime builds for MSVC
     runs-on: windows-latest
     timeout-minutes: 60
-    continue-on-error: true
     defaults:
       run:
         shell: bash
@@ -105,16 +102,26 @@ jobs:
           shared-key: windows-runtime-msvc
           cache-on-failure: true
 
+      # The release runs the packaging tool *on this runner*, so it has to
+      # build here too — and it is the one crate in the workspace that no job
+      # had ever compiled for Windows.
+      - name: Build the packaging tool
+        run: cargo build --locked -p xtask --features engine-tools --bin xtask-engine-tools
+
       # `cargo build`, not `--all-targets`: the test targets `include_bytes!`
       # real game data from the content submodule, which is not checked out.
-      - name: Build the runtime and launcher for MSVC
+      - name: Build the runtime and launcher as a release ships them
+        env:
+          # Both mirror `release.yml`'s Windows pass exactly; the point of this
+          # job is that they are proven before a release depends on them.
+          CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+          RUSTFLAGS: -C target-feature=+crt-static
         run: |
           # `freetype-sys` hardcodes a RELATIVE `libz-sys/src/zlib` include that
           # does not exist in its published crate, so its bundled libpng only
-          # finds zlib.h where the host happens to ship one. That affects every
-          # Windows toolchain; the mingw cross-build already injects the same
-          # fix as CFLAGS_x86_64_pc_windows_gnu. Resolved dynamically rather
-          # than pinned to a libz-sys version.
+          # finds zlib.h where the host happens to ship one. No Windows
+          # toolchain does. Resolved dynamically rather than pinned to a
+          # libz-sys version.
           cargo fetch --locked
           zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
           if [[ ! -f "$zlib_dir/zlib.h" ]]; then
@@ -124,7 +131,75 @@ jobs:
           export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
           cargo build -p clonk-app -p clonk-game --locked
 
-      - name: Report the toolchain that produced them
+      # MinGW linked the C runtime statically and the shipped binaries needed
+      # nothing installed. MSVC links it dynamically unless told otherwise, and
+      # a missing `vcruntime140.dll` stops the loader before `main`: a system
+      # dialog, no log, and a launcher that never runs. `+crt-static` above is
+      # what prevents that, and it only holds if *every* C dependency compiled
+      # /MT — one that came out /MD would import the DLL by name.
+      - name: Check nothing imports the dynamic C runtime
         run: |
           rustc -vV
-          ls -l target/debug/clonk-app.exe target/debug/clonk-game.exe
+          failed=0
+          for binary in clonk-app clonk-game; do
+            path="target/x86_64-pc-windows-msvc/debug/$binary.exe"
+            ls -l "$path"
+            if grep -qa 'VCRUNTIME140' "$path"; then
+              echo "$path imports VCRUNTIME140; +crt-static did not take" >&2
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+  # `release.yml` compiles this script with the Windows `makensis`, from bash.
+  # Nothing else ever has: it was only ever cross-built from ubuntu, where the
+  # switch prefix, the path form and the payload walk all behave differently.
+  # Compiling it over a stand-in payload costs a minute and covers all three.
+  installer:
+    name: Installer script compiles
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install NSIS
+        run: |
+          choco install nsis --yes --no-progress
+          nsis_dir='/c/Program Files (x86)/NSIS'
+          if [[ ! -x "$nsis_dir/makensis.exe" ]]; then
+            echo "chocolatey installed nsis but $nsis_dir/makensis.exe is missing" >&2
+            exit 1
+          fi
+          echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
+
+      - name: Compile the installer over a stand-in payload
+        run: |
+          # The shape `package --no-archive` stages, not its 326 MB: this
+          # checks that the script compiles, not what it would contain.
+          payload_dir=target/dist/clonk-rust
+          mkdir -p "$payload_dir"/bin "$payload_dir"/planet "$payload_dir"/content
+          echo stand-in > "$payload_dir/bin/clonk-game.exe"
+          echo stand-in > "$payload_dir/bin/clonk-app.exe"
+          echo stand-in > "$payload_dir/planet/System.c4g.txt"
+          echo stand-in > "$payload_dir/content/Objects.txt"
+          echo stand-in > "$payload_dir/README.md"
+
+          payload=$(cygpath -w "$PWD/$payload_dir")
+          outfile=$(cygpath -w "$PWD/target/dist/stand-in-setup.exe")
+          makensis -NOCD \
+            -DVERSION=0.0.0 \
+            -DPAYLOAD="$payload" \
+            -DOUTFILE="$outfile" \
+            scripts/windows-installer.nsi
+
+          if [[ ! -s target/dist/stand-in-setup.exe ]]; then
+            echo "makensis reported success but wrote no installer" >&2
+            exit 1
+          fi
+          ls -l target/dist/stand-in-setup.exe
