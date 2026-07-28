@@ -1649,6 +1649,84 @@ impl Surface {
     }
 }
 
+/// Area ("box") reduction of a tightly packed `Rgba8888` image.
+///
+/// Every source pixel contributes to exactly one destination cell, so features
+/// thinner than the reduction factor survive as a tint instead of aliasing away.
+/// This is deliberately *not* a C++ sampler: neither `CStdDDraw::Blit`
+/// (`src/StdDDraw2.cpp:637-786`), whose GL_LINEAR 2-tap filter reads only two
+/// texels per axis and degenerates into point sampling under heavy
+/// minification, nor `StdBitmap::Scaled` (`src/StdBitmap.cpp:107-128`), which
+/// is outright nearest-neighbour. Use it for offline reductions (save
+/// thumbnails, mip levels) that have no on-screen pixel contract with C++,
+/// never for game rendering.
+///
+/// RGB is averaged in **premultiplied** space and unpremultiplied afterwards,
+/// like a mip generator: transparent texels only lower the resulting opacity
+/// and never drag the colour toward whatever they happen to store.
+///
+/// Returns `None` when either extent is zero or `source` is not exactly
+/// `source_width * source_height * 4` bytes.
+pub fn downsample_rgba_box(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    dest_width: u32,
+    dest_height: u32,
+) -> Option<Vec<u8>> {
+    let bytes_per_pixel = PixelFormat::Rgba8888.bytes_per_pixel();
+    (source_width as usize)
+        .checked_mul(source_height as usize)
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+        .filter(|expected| *expected == source.len() && *expected != 0)?;
+    let destination_bytes = (dest_width as usize)
+        .checked_mul(dest_height as usize)
+        .filter(|pixels| *pixels != 0)
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))?;
+
+    // Split the source into `dest` half-open spans that tile it exactly. When
+    // the requested extent is larger than the source the span collapses to a
+    // single pixel, which reproduces nearest-neighbour magnification.
+    let span = |index: u32, dest_extent: u32, source_extent: u32| {
+        let start = (u64::from(index) * u64::from(source_extent) / u64::from(dest_extent)) as u32;
+        let end =
+            ((u64::from(index) + 1) * u64::from(source_extent) / u64::from(dest_extent)) as u32;
+        (start, end.max(start + 1).min(source_extent))
+    };
+
+    let mut destination = vec![0_u8; destination_bytes];
+    for y in 0..dest_height {
+        let (top, bottom) = span(y, dest_height, source_height);
+        for x in 0..dest_width {
+            let (left, right) = span(x, dest_width, source_width);
+            let mut alpha_sum = 0_u64;
+            let mut premultiplied = [0_u64; 3];
+            for source_y in top..bottom {
+                let row = (source_y as usize) * (source_width as usize) * bytes_per_pixel;
+                for source_x in left..right {
+                    let offset = row + (source_x as usize) * bytes_per_pixel;
+                    let alpha = u64::from(source[offset + 3]);
+                    alpha_sum += alpha;
+                    premultiplied[0] += u64::from(source[offset]) * alpha;
+                    premultiplied[1] += u64::from(source[offset + 1]) * alpha;
+                    premultiplied[2] += u64::from(source[offset + 2]) * alpha;
+                }
+            }
+            let samples = u64::from(right - left) * u64::from(bottom - top);
+            let offset = ((y as usize) * (dest_width as usize) + x as usize) * bytes_per_pixel;
+            if alpha_sum == 0 {
+                continue;
+            }
+            // Round half up on both the unpremultiply and the coverage mean.
+            for (channel, sum) in premultiplied.iter().enumerate() {
+                destination[offset + channel] = ((sum + alpha_sum / 2) / alpha_sum).min(255) as u8;
+            }
+            destination[offset + 3] = ((alpha_sum + samples / 2) / samples).min(255) as u8;
+        }
+    }
+    Some(destination)
+}
+
 impl SurfaceDrawTarget for Surface {
     fn width(&self) -> u32 {
         Surface::width(self)
@@ -2822,5 +2900,67 @@ mod tests {
             snapshot,
             surface.snapshot_region(Rect::new(3, 3, 1, 1)).unwrap()
         );
+    }
+
+    fn opaque_gray_rgba(values: &[u8]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| [*value, *value, *value, 255])
+            .collect()
+    }
+
+    #[test]
+    fn downsample_rgba_box_averages_every_source_pixel_in_the_cell() {
+        // 4x4 -> 2x2: each destination cell is the mean of its own 2x2 block,
+        // unlike a 2-tap bilinear reduction which would discard half the rows
+        // and columns entirely.
+        let source = opaque_gray_rgba(&[
+            0, 10, 20, 30, //
+            40, 50, 60, 70, //
+            80, 90, 100, 110, //
+            120, 130, 140, 150,
+        ]);
+        let reduced = downsample_rgba_box(&source, 4, 4, 2, 2).expect("4x4 reduces to 2x2");
+        assert_eq!(reduced, opaque_gray_rgba(&[25, 45, 105, 125]));
+    }
+
+    #[test]
+    fn downsample_rgba_box_averages_color_in_premultiplied_space() {
+        // One opaque pixel beside three fully transparent ones keeps its colour
+        // and only loses opacity: transparent texels must not drag the averaged
+        // RGB toward their (meaningless) stored colour, exactly as a mip
+        // generator weights each texel by its own alpha.
+        let source = [
+            255, 0, 0, 255, // opaque red
+            0, 255, 0, 0, // transparent, arbitrary stored colour
+            0, 0, 255, 0, //
+            255, 255, 255, 0,
+        ];
+        let reduced = downsample_rgba_box(&source, 2, 2, 1, 1).expect("2x2 reduces to 1x1");
+        assert_eq!(reduced, vec![255, 0, 0, 64]);
+    }
+
+    #[test]
+    fn downsample_rgba_box_rejects_mismatched_input() {
+        assert!(downsample_rgba_box(&[0; 12], 2, 2, 1, 1).is_none());
+        assert!(downsample_rgba_box(&[0; 16], 0, 2, 1, 1).is_none());
+        assert!(downsample_rgba_box(&[0; 16], 2, 2, 1, 0).is_none());
+    }
+
+    #[test]
+    fn downsample_rgba_box_covers_every_source_row_when_extents_do_not_divide() {
+        // 3x1 -> 2x1: the whole-pixel spans tile the source without gaps or
+        // overlap, so cell 0 takes column 0 and cell 1 averages columns 1-2.
+        // No column is skipped, which is what a 2-tap reduction would do.
+        let source = opaque_gray_rgba(&[0, 100, 200]);
+        let reduced = downsample_rgba_box(&source, 3, 1, 2, 1).expect("3x1 reduces to 2x1");
+        assert_eq!(reduced, opaque_gray_rgba(&[0, 150]));
+    }
+
+    #[test]
+    fn downsample_rgba_box_of_fully_transparent_input_is_zeroed() {
+        let source = [7, 8, 9, 0, 10, 11, 12, 0];
+        let reduced = downsample_rgba_box(&source, 2, 1, 1, 1).expect("2x1 reduces to 1x1");
+        assert_eq!(reduced, vec![0, 0, 0, 0]);
     }
 }

@@ -1393,3 +1393,55 @@ impl GameApp {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod save_thumbnail_tests {
+    use super::*;
+    use png::Decoder;
+
+    /// Vertical stripes with a period of four: one white column followed by
+    /// three black ones.
+    fn striped_frame(width: u32, height: u32) -> Vec<u8> {
+        (0..height)
+            .flat_map(|_| 0..width)
+            .flat_map(|x| {
+                let level = if x % 4 == 0 { 255 } else { 0 };
+                [level, level, level, 255]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn save_thumbnail_averages_every_source_pixel_of_the_frame() {
+        // 800x600 -> 200x150 is a 4x reduction, so every destination cell
+        // covers exactly one white and three black columns and must come out
+        // at 255/4. A two-tap bilinear reduction samples only the two middle
+        // columns of each cell — both black — and loses the stripes entirely.
+        let encoded = encode_presented_save_thumbnail(800, 600, &striped_frame(800, 600))
+            .expect("encode area-reduced save thumbnail");
+        let mut reader = Decoder::new(io::Cursor::new(encoded))
+            .read_info()
+            .expect("read save thumbnail header");
+        let mut buffer = vec![0; reader.output_buffer_size()];
+        let info = reader
+            .next_frame(&mut buffer)
+            .expect("decode save thumbnail");
+
+        assert_eq!(
+            (info.width, info.height),
+            (SAVE_THUMBNAIL_WIDTH, SAVE_THUMBNAIL_HEIGHT)
+        );
+        assert!(
+            buffer
+                .chunks_exact(4)
+                .all(|pixel| pixel == [64, 64, 64, 255]),
+            "every thumbnail cell must average its whole 4x4 source block"
+        );
+    }
+
+    #[test]
+    fn save_thumbnail_rejects_a_frame_whose_length_disagrees_with_its_extent() {
+        assert!(encode_presented_save_thumbnail(4, 4, &[0; 60]).is_err());
+        assert!(encode_presented_save_thumbnail(0, 0, &[]).is_err());
+    }
+}

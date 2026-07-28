@@ -2291,24 +2291,18 @@ pub(crate) fn encode_presented_save_thumbnail(
         "save thumbnail source has {} bytes, expected {expected}",
         rgba.len()
     );
-    let image = ImageData::new(width, height, rgba.to_vec());
-    let mut thumbnail = Surface::new(
+    // A 2-tap bilinear sample at >19x minification is point sampling: thin
+    // scenery aliased into noise instead of averaging down to a tint. Average
+    // every source pixel that lands in a destination cell instead.
+    let reduced = clonk_graphics::surface::downsample_rgba_box(
+        rgba,
+        width,
+        height,
         SAVE_THUMBNAIL_WIDTH,
         SAVE_THUMBNAIL_HEIGHT,
-        PixelFormat::Rgba8888,
-    );
-    clonk_frontend::draw_image_bilinear(
-        &mut thumbnail,
-        &GuiRect::new(
-            0.0,
-            0.0,
-            SAVE_THUMBNAIL_WIDTH as f32,
-            SAVE_THUMBNAIL_HEIGHT as f32,
-        ),
-        &image,
-        None,
-    );
-    encode_surface_to_png(&thumbnail)
+    )
+    .context("save thumbnail source is not a valid RGBA frame")?;
+    encode_rgba_png(SAVE_THUMBNAIL_WIDTH, SAVE_THUMBNAIL_HEIGHT, &reduced)
 }
 
 pub(crate) fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
