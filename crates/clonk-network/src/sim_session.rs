@@ -153,6 +153,23 @@ impl ClientProfile {
     }
 }
 
+/// Where a client's PreSend horizon gets its sample.
+///
+/// The two are separated so the harness can measure the shipped behaviour
+/// against the change, rather than only modelling whichever one is current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresendSource {
+    /// C++ `CalcPerformance`: route ping and nothing else
+    /// (src/C4GameControlNetwork.cpp:404-430). Blind to a client that is slow
+    /// rather than distant, because a weak machine has a perfectly healthy ping.
+    Ping,
+    /// The larger of route ping and the lateness actually measured for the tick
+    /// just consumed — arrival against the cadence, the quantity the host
+    /// already records as `ClientPerformanceStats::wait_ms`.
+    #[default]
+    MeasuredLateness,
+}
+
 /// One session to simulate.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -165,8 +182,10 @@ pub struct SessionConfig {
     /// `ControlRate * AsyncMaxWait * 1000 / TargetFPS`, then pack whoever
     /// arrived. Zero disables it, giving C++'s `CNM_Decentral` blocking wait.
     pub async_max_wait_frames: i32,
-    /// Whether clients size PreSend from their own observed delivery time.
+    /// Whether clients size PreSend at all.
     pub presend: bool,
+    /// Which signal they size it from.
+    pub presend_source: PresendSource,
 }
 
 impl SessionConfig {
@@ -191,6 +210,7 @@ impl Default for SessionConfig {
             target_fps: 38,
             async_max_wait_frames: 2,
             presend: true,
+            presend_source: PresendSource::default(),
         }
     }
 }
@@ -522,10 +542,17 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
                 // (`session/api.rs:228`), which is likewise arrival measured
                 // against the cadence rather than against a send time.
                 peer.stamped_at.remove(&tick);
-                let sample = now
+                // Route ping is what C++ measures: a round trip on this link,
+                // entirely independent of whether the machine kept up.
+                let ping_ms = peer.profile.conditions.rtt_ms.min(i32::MAX as u64) as i32;
+                let lateness_ms = now
                     .saturating_sub(CONTROL_PERIOD * tick)
                     .as_millis()
                     .min(i32::MAX as u128) as i32;
+                let sample = match config.presend_source {
+                    PresendSource::Ping => ping_ms,
+                    PresendSource::MeasuredLateness => ping_ms.max(lateness_ms),
+                };
                 peer.estimator.observe(sample);
             }
 

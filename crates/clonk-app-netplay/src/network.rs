@@ -392,6 +392,9 @@ pub struct NetworkControlClock {
     target_fps: i32,
     avg_control_send_time_us: i32,
     control_send_time_ms: Option<i32>,
+    /// Measured lateness of the last consumed control tick; see
+    /// `observe_control_lateness_ms`.
+    control_lateness_ms: Option<i32>,
     target_tick: Option<i32>,
     local_activated: Option<bool>,
     /// Sizes PreSend from the delivery-time tail rather than its mean. See
@@ -409,6 +412,7 @@ impl NetworkControlClock {
             target_fps: DEFAULT_CONTROL_TARGET_FPS,
             avg_control_send_time_us: 0,
             control_send_time_ms: None,
+            control_lateness_ms: None,
             target_tick: None,
             local_activated: None,
             latency: ControlLatencyEstimator::new(),
@@ -477,6 +481,20 @@ impl NetworkControlClock {
         self.control_send_time_ms = Some(control_send_time_ms);
     }
 
+    /// Store how late the consumed control tick actually was — the interval
+    /// between reaching the control tick and the aggregate becoming available.
+    ///
+    /// This is the client-side counterpart of the host's
+    /// `ClientPerformanceStats::wait_ms` and of C++'s
+    /// `C4GameControlClient::AddPerf(pCtrl->getTime() - iWaitStart)`. Unlike
+    /// ping it is measured against the cadence rather than against a send time,
+    /// so it stays independent of the horizon it is used to size: a bigger
+    /// PreSend makes control arrive earlier relative to its slot, which closes
+    /// the loop instead of feeding it.
+    pub fn observe_control_lateness_ms(&mut self, control_lateness_ms: i32) {
+        self.control_lateness_ms = Some(control_lateness_ms.max(0));
+    }
+
     pub fn control_presend(self) -> i32 {
         self.control_presend
     }
@@ -501,21 +519,38 @@ impl NetworkControlClock {
     }
 
     fn update_control_presend(&mut self) -> Option<ControlPreSendChange> {
-        let control_send_time_ms = self.control_send_time_ms.filter(|sample| *sample != 0)?;
-        // Both fields and both expressions are `int32_t` in C++. Preserve
-        // the target's full script-visible range and the platform's two's-
-        // complement arithmetic instead of silently widening extreme values.
-        self.avg_control_send_time_us = self
-            .avg_control_send_time_us
-            .wrapping_mul(149)
-            .wrapping_add(control_send_time_ms.wrapping_mul(1_000))
-            / 150;
+        let ping_sample = self.control_send_time_ms.filter(|sample| *sample != 0);
+        if let Some(control_send_time_ms) = ping_sample {
+            // Both fields and both expressions are `int32_t` in C++. Preserve
+            // the target's full script-visible range and the platform's two's-
+            // complement arithmetic instead of silently widening extreme values.
+            self.avg_control_send_time_us = self
+                .avg_control_send_time_us
+                .wrapping_mul(149)
+                .wrapping_add(control_send_time_ms.wrapping_mul(1_000))
+                / 150;
+        }
         // The C++ average above stays exactly as C++ computes it because it is
         // the script- and dialog-visible ACT field. Only the PreSend decision
         // moves to the tail-aware budget: C++ sizes the horizon so that the
         // *mean* control arrives in time, which leaves every above-mean packet
         // stalling the whole session.
-        self.latency.observe(control_send_time_ms);
+        //
+        // The decision also takes the larger of the route ping and the control
+        // lateness actually measured for the tick just consumed. Ping alone is
+        // blind to a client that is slow rather than distant — a weak machine, a
+        // saturated uplink queue, a host that waited on somebody else — and that
+        // blindness is what silently drops a struggling player's input. Taking
+        // the maximum rather than replacing keeps a punctual client on exactly
+        // C++'s horizon, so the extra input latency is charged only where it
+        // buys something.
+        let sample = match (ping_sample, self.control_lateness_ms) {
+            (Some(ping), Some(lateness)) => ping.max(lateness),
+            (Some(ping), None) => ping,
+            (None, Some(lateness)) => lateness,
+            (None, None) => return None,
+        };
+        self.latency.observe(sample);
         let next = self
             .target_fps
             .wrapping_mul(self.latency.budget_us())
@@ -2919,6 +2954,21 @@ fn build_network_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
+/// What the just-consumed control tick cost, from the two independent signals
+/// PreSend is sized from.
+///
+/// They are kept apart deliberately: a blended "lag" number cannot distinguish
+/// "this player needs a better connection" from "this player needs a better
+/// computer", and the two call for different responses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControlTickCost {
+    /// C++ `CalcPerformance`'s topology-aware route sample, derived from ping.
+    pub send_time_ms: i32,
+    /// Measured interval from reaching the control tick to consuming it, when
+    /// the probe for this tick was still current.
+    pub lateness_ms: Option<i32>,
+}
+
 impl NetworkManager {
     pub fn for_mode(
         mode: NetworkMode,
@@ -4129,10 +4179,31 @@ impl NetworkManager {
         let _ = self.command_tx.blocking_send(command);
     }
 
-    pub fn control_tick_consumed(&self, tick: Tick, client_ids: Vec<ClientId>) -> Option<i32> {
+    pub fn control_tick_consumed(
+        &self,
+        tick: Tick,
+        client_ids: Vec<ClientId>,
+    ) -> Option<ControlTickCost> {
         self.worker.as_ref()?;
         let consumed_at = tokio::time::Instant::now();
-        let control_send_time_ms = self.control_send_time.sample(&client_ids);
+        let send_time_ms = self.control_send_time.sample(&client_ids);
+        // How long the game loop actually waited for this tick: from reaching
+        // the control tick to the aggregate becoming available. The probe is
+        // stamped by `control_tick_reached` on the frame the cadence came round,
+        // so this is arrival measured against the cadence — the same quantity
+        // the host records as `ClientPerformanceStats::wait_ms`, and the one
+        // signal that notices a client which is slow rather than distant.
+        let lateness_ms = self
+            .control_tick_probe
+            .lock()
+            .as_ref()
+            .filter(|probe| probe.tick == tick)
+            .map(|probe| {
+                consumed_at
+                    .saturating_duration_since(probe.reached_at)
+                    .as_millis()
+                    .min(i32::MAX as u128) as i32
+            });
         self.control_performance_tx
             .send(ControlPerformanceEvent::TickConsumed {
                 tick,
@@ -4140,7 +4211,10 @@ impl NetworkManager {
                 client_ids,
             })
             .ok()?;
-        Some(control_send_time_ms)
+        Some(ControlTickCost {
+            send_time_ms,
+            lateness_ms,
+        })
     }
 
     pub fn reset_client_performance(&self) {
@@ -14507,7 +14581,7 @@ Message=Server says Andr\xe9\r\n\
         let (sample, before, after) =
             observed.expect("control consumption must not wait for worker command processing");
         assert_eq!(
-            sample,
+            sample.map(|cost| cost.send_time_ms),
             Some(66),
             "the game thread reads the latest topology snapshot directly"
         );
@@ -14516,7 +14590,7 @@ Message=Server says Andr\xe9\r\n\
         assert!((before..=after).contains(&consumed_at));
 
         let mut clock = NetworkControlClock::new(0, 1);
-        clock.observe_control_send_time_ms(sample.expect("live worker sample"));
+        clock.observe_control_send_time_ms(sample.expect("live worker sample").send_time_ms);
         // 66ms of link is 2 frames at 38 fps, plus C++'s one-frame floor. The
         // ACT average beside it stays C++'s exact 1/150 EWMA of the same sample.
         assert_eq!(
@@ -14580,6 +14654,79 @@ Message=Server says Andr\xe9\r\n\
             saturated.complete_control_frame();
         }
         assert_eq!(saturated.control_presend(), 15);
+    }
+
+    /// A slow *machine* is invisible to ping, and therefore invisible to
+    /// PreSend.
+    ///
+    /// `CalcPerformance` sizes the horizon from `pConn->getPingTime()` alone
+    /// (src/C4GameControlNetwork.cpp:404-430), and `iTargetFPS` is a hardcoded
+    /// constant rather than a measurement, so a client whose frame loop is late
+    /// — healthy ping, late control — never buys itself any headroom. Its input
+    /// then misses the async deadline on essentially every tick and is dropped
+    /// silently. Measured with `cargo xtask chaos`: a Pi-class machine on a
+    /// *good* link leaves the healthy players blocked on 91% of ticks and 10 s
+    /// behind over an 11 s session, while a dial-up link on a good machine costs
+    /// them almost nothing.
+    ///
+    /// C++ already computes the right quantity — `AddPerf(pCtrl->getTime() -
+    /// iWaitStart)`, real per-client control arrival — and spends it only on an
+    /// F7 display string.
+    #[test]
+    fn a_slow_machine_with_a_healthy_ping_still_grows_presend() {
+        let mut ping_only = NetworkControlClock::new(0, 1);
+        ping_only.observe_control_send_time_ms(20);
+        ping_only.calculate_performance();
+        ping_only.complete_control_frame();
+
+        let mut measured = NetworkControlClock::new(0, 1);
+        measured.observe_control_send_time_ms(20);
+        measured.observe_control_lateness_ms(300);
+        measured.calculate_performance();
+        measured.complete_control_frame();
+
+        assert!(
+            measured.control_presend() > ping_only.control_presend(),
+            "a 300ms late tick behind a 20ms ping must widen the horizon: \
+             ping-only chose {}, measured chose {}",
+            ping_only.control_presend(),
+            measured.control_presend()
+        );
+    }
+
+    /// The horizon takes the *larger* of the two estimates, never a replacement.
+    ///
+    /// A client that is never late keeps exactly the horizon C++ would have
+    /// chosen, so this change cannot regress a healthy link no matter how the
+    /// lateness signal behaves. It also means the input-latency cost is charged
+    /// only where it buys something, which is the same rule the envelope
+    /// estimator was accepted under.
+    #[test]
+    fn measured_lateness_never_shrinks_the_horizon_below_the_ping_estimate() {
+        let mut ping_only = NetworkControlClock::new(0, 1);
+        let mut punctual = NetworkControlClock::new(0, 1);
+        for _ in 0..8 {
+            ping_only.observe_control_send_time_ms(300);
+            ping_only.calculate_performance();
+            ping_only.complete_control_frame();
+
+            punctual.observe_control_send_time_ms(300);
+            // Control keeps arriving before the client needs it.
+            punctual.observe_control_lateness_ms(0);
+            punctual.calculate_performance();
+            punctual.complete_control_frame();
+        }
+
+        assert_eq!(
+            punctual.control_presend(),
+            ping_only.control_presend(),
+            "a punctual client must keep the ping-derived horizon exactly"
+        );
+        assert_eq!(
+            punctual.avg_control_send_time(),
+            ping_only.avg_control_send_time(),
+            "and the script-visible ACT must stay C++'s ping-derived average"
+        );
     }
 
     /// The divergence itself: C++ needs 14 identical 300ms samples before

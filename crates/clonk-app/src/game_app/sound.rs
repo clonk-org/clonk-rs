@@ -711,14 +711,17 @@ impl GameApp {
                         let Some(network) = self.network.as_ref() else {
                             return Ok(());
                         };
-                        let control_send_time_ms =
+                        let control_tick_cost =
                             network.control_tick_consumed(tick, active_client_ids);
                         // C++ GetControl::CalcPerformance precedes decoded
                         // Control.Execute. Its flash therefore precedes (and
                         // may be replaced by) a SetPreSend flash in this batch.
                         if let Some(clock) = self.network_control_clock.as_mut() {
-                            if let Some(control_send_time_ms) = control_send_time_ms {
-                                clock.observe_control_send_time_ms(control_send_time_ms);
+                            if let Some(cost) = control_tick_cost {
+                                clock.observe_control_send_time_ms(cost.send_time_ms);
+                                if let Some(lateness_ms) = cost.lateness_ms {
+                                    clock.observe_control_lateness_ms(lateness_ms);
+                                }
                             }
                             if let Some(change) = clock.calculate_performance() {
                                 self.apply_control_presend_change(change)?;

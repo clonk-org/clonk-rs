@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clonk_network::{
     run_control_delivery, run_session, ClientProfile, ControlDeliveryConfig, CpuProfile,
-    LinkConditions, Lookahead, SessionConfig, SessionReport,
+    LinkConditions, Lookahead, PresendSource, SessionConfig, SessionReport,
 };
 
 /// Committed seed corpus. Fixed, never drawn at random: a gate that picks fresh
@@ -150,6 +150,15 @@ fn profiles() -> Vec<Profile> {
 
 impl Profile {
     fn session(&self, seed: u64, ticks: usize) -> SessionConfig {
+        self.session_with(seed, ticks, PresendSource::default())
+    }
+
+    fn session_with(
+        &self,
+        seed: u64,
+        ticks: usize,
+        presend_source: PresendSource,
+    ) -> SessionConfig {
         let mut clients = vec![ClientProfile::healthy(); self.clients];
         if let Some(link) = self.link {
             clients[0].conditions = link;
@@ -161,6 +170,7 @@ impl Profile {
             clients,
             ticks,
             seed,
+            presend_source,
             ..SessionConfig::default()
         }
     }
@@ -244,7 +254,12 @@ impl Coverage {
     }
 }
 
-fn measure(profile: &Profile, ticks: usize, coverage: &mut Coverage) -> ProfileMetrics {
+fn measure(
+    profile: &Profile,
+    ticks: usize,
+    presend_source: PresendSource,
+    coverage: &mut Coverage,
+) -> ProfileMetrics {
     let mut healthy_blocked = Vec::new();
     let mut healthy_drift = Vec::new();
     let mut impaired_drift = Vec::new();
@@ -254,7 +269,7 @@ fn measure(profile: &Profile, ticks: usize, coverage: &mut Coverage) -> ProfileM
     let mut unpublished_total = 0u64;
 
     for seed in SEEDS {
-        let report: SessionReport = run_session(&profile.session(seed, ticks));
+        let report: SessionReport = run_session(&profile.session_with(seed, ticks, presend_source));
 
         for client in report.healthy() {
             healthy_blocked.push((client.blocked_fraction(report.ticks) * 1_000.0).round() as u64);
@@ -442,6 +457,7 @@ fn repo_root() -> Result<PathBuf> {
 
 pub(crate) fn command(args: &[String]) -> Result<()> {
     let mut ticks = DEFAULT_TICKS;
+    let mut presend_source = PresendSource::default();
     let mut mode = "run".to_string();
     let mut json_path: Option<PathBuf> = None;
     let mut only: Option<String> = None;
@@ -469,6 +485,15 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
             "--profile" => {
                 only = Some(iter.next().context("--profile needs a name")?.clone());
             }
+            "--presend" => {
+                presend_source = match iter.next().map(String::as_str) {
+                    Some("ping") => PresendSource::Ping,
+                    Some("measured") => PresendSource::MeasuredLateness,
+                    other => bail!(
+                        "--presend takes `ping` (C++ CalcPerformance) or `measured`, got {other:?}"
+                    ),
+                };
+            }
             _ => {}
         }
     }
@@ -490,11 +515,16 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
     let mut coverage = Coverage::default();
     let metrics: Vec<ProfileMetrics> = selected
         .iter()
-        .map(|profile| measure(profile, ticks, &mut coverage))
+        .map(|profile| measure(profile, ticks, presend_source, &mut coverage))
         .collect();
 
+    let presend_label = match presend_source {
+        PresendSource::Ping => "ping (C++ CalcPerformance)",
+        PresendSource::MeasuredLateness => "measured lateness",
+    };
     println!(
-        "chaos: {} profiles x {} seeds x {ticks} ticks (virtual clock; every number is exact)\n",
+        "chaos: {} profiles x {} seeds x {ticks} ticks, presend from {presend_label} \
+         (virtual clock; every number is exact)\n",
         metrics.len(),
         SEEDS.len()
     );
@@ -538,6 +568,9 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
         "record" => {
             if only.is_some() {
                 bail!("`chaos record` rewrites the whole baseline; drop --profile");
+            }
+            if presend_source != PresendSource::default() {
+                bail!("`chaos record` must use the shipped PreSend source; drop --presend");
             }
             if let Some(parent) = baseline_file.parent() {
                 fs::create_dir_all(parent)

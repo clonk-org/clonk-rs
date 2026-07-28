@@ -356,6 +356,48 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
+- **PreSend is sized from measured control lateness, not from ping alone**
+  (`crates/clonk-app-netplay/src/network.rs`, `observe_control_lateness_ms` and
+  `update_control_presend`; C++ `C4GameControlNetwork::CalcPerformance`,
+  LegacyClonk 7d43b47 src/C4GameControlNetwork.cpp:404-430). Approved
+  2026-07-27.
+  C++ derives the horizon from `pConn->getPingTime()` and nothing else, and
+  `iTargetFPS` is a hardcoded 38 rather than a measurement. A client that is
+  slow rather than *distant* — a weak machine, a saturated uplink queue, a host
+  that waited on somebody else — therefore never buys itself any headroom, and
+  its input misses the async deadline on essentially every tick and is dropped
+  silently. C++ already computes the right quantity in the same function,
+  `AddPerf(pCtrl->getTime() - iWaitStart)`, and spends it only on the F7 "wait
+  N ms" display string.
+  The port keeps that ping sample and takes `max(ping, measured lateness)` for
+  the PreSend decision, where lateness is the interval from reaching the control
+  tick to consuming it — arrival against the cadence, the same quantity the host
+  records as `ClientPerformanceStats::wait_ms`. Taking the maximum rather than
+  replacing means a punctual client keeps exactly C++'s horizon, so the extra
+  input latency is charged only where it buys something. The script- and
+  dialog-visible `avg_control_send_time` (ACT) remains C++'s exact ping-derived
+  1/150 EWMA.
+  Determinism is untouched for the same reason as the entry below: PreSend
+  selects only which tick a client stamps its *own* input for. Every participant
+  still executes that tick at that tick, the wire format is unchanged, and
+  PreSend already varies per client in C++.
+  Measured with `cargo xtask chaos run --presend ping|measured`, 16 committed
+  seeds x 200 ticks x 6 profiles. Healthy-participant blocked ticks and drift,
+  ping -> measured:
+  four good machines 125 -> 0 permille and 919 -> 368 ms;
+  one dial-up link on a good machine 530 -> 10 permille and 3491 -> 529 ms;
+  a Pi 4 on congested hotel wifi 930 -> 440 permille and 8995 -> 2874 ms.
+  The cost is input latency: the median horizon rises from 78 ms to 226 ms on
+  the healthy profile and to ~378 ms on the impaired ones, the latter close to
+  the 1..15 frame clamp. AoE's 0-250 ms "unnoticeable" band therefore covers the
+  healthy case but not the worst ones.
+  Known limit, deliberately not papered over: this does **not** rescue a machine
+  that simply cannot execute ticks fast enough. At `K_sim` 20 a control tick
+  costs 156 ms against a 55 ms period, so no lookahead can help; the healthy
+  players still lose 10 s over an 11 s session because the host pays the full
+  `AsyncMaxWait` budget on every tick before giving up on it. That residual
+  needs adaptive `ControlRate` or demotion, not a wider horizon.
+
 - **PreSend is sized from the delivery-time envelope, not the mean**
   (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;
   C++ `C4GameControlNetwork::CalcPerformance`, LegacyClonk 7d43b47
