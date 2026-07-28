@@ -240,24 +240,12 @@ impl ReplayCrewInfoV1 {
         CrewInfo {
             id: self.id.clone(),
             name: self.name.clone(),
-            death_message: String::new(),
-            core: Default::default(),
             rank: self.rank,
-            rank_name: "Clonk".to_string(),
             experience: self.experience,
-            rounds: 0,
-            physical: clonk_engine::PhysicalInfo::default(),
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
             participation: self.participation,
             in_action: self.in_action,
-            was_in_action: false,
-            in_action_time: 0,
             has_died: self.has_died,
-            extra_data: Vec::new(),
-            portraits: Default::default(),
+            ..Default::default()
         }
     }
 }

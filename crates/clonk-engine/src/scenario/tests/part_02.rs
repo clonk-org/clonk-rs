@@ -1679,24 +1679,12 @@ RandomTeamCount=2
             vec![crate::player_file::CrewInfo {
                 id: "CLNK".to_string(),
                 name: "Retiring crew".to_string(),
-                death_message: String::new(),
-                core: Default::default(),
-                rank: 0,
-                rank_name: "Clonk".to_string(),
-                experience: 0,
                 rounds: 5,
-                physical: Default::default(),
-                death_count: 0,
                 total_playing_time: 3,
-                birthday: 0,
-                age: 0,
-                participation: 1,
                 in_action: true,
                 was_in_action: true,
                 in_action_time: 2,
-                has_died: false,
-                extra_data: Vec::new(),
-                portraits: Default::default(),
+                ..Default::default()
             }],
         );
 

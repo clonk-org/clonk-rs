@@ -49,24 +49,11 @@ fn synchronize_control_checkpoints_live_player_and_crew_time_but_not_replays() {
         vec![player_file::CrewInfo {
             id: "CLNK".to_string(),
             name: "Crew".to_string(),
-            death_message: String::new(),
-            core: CrewInfoCoreFields::default(),
-            rank: 0,
-            rank_name: "Clonk".to_string(),
-            experience: 0,
-            rounds: 0,
-            physical: PhysicalInfo::default(),
-            death_count: 0,
             total_playing_time: 7,
-            birthday: 0,
-            age: 0,
-            participation: 1,
             in_action: true,
             was_in_action: true,
             in_action_time: 10,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: CrewPortraitState::default(),
+            ..Default::default()
         }],
     );
     engine
@@ -91,24 +78,11 @@ fn synchronize_control_checkpoints_live_player_and_crew_time_but_not_replays() {
     let suppressed_crew = player_file::CrewInfo {
         id: "CLNK".to_string(),
         name: "Suppressed Crew".to_string(),
-        death_message: String::new(),
-        core: CrewInfoCoreFields::default(),
-        rank: 0,
-        rank_name: "Clonk".to_string(),
-        experience: 0,
-        rounds: 0,
-        physical: PhysicalInfo::default(),
-        death_count: 0,
         total_playing_time: 17,
-        birthday: 0,
-        age: 0,
-        participation: 1,
         in_action: true,
         was_in_action: true,
         in_action_time: 10,
-        has_died: false,
-        extra_data: Vec::new(),
-        portraits: CrewPortraitState::default(),
+        ..Default::default()
     };
     engine.crew_rosters.insert(4, vec![suppressed_crew.clone()]);
     engine.crew_rosters.insert(5, vec![suppressed_crew]);

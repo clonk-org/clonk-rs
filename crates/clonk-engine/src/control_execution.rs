@@ -7337,24 +7337,12 @@ mod tests {
         let crew = vec![crate::player_file::CrewInfo {
             id: "CLNK".to_string(),
             name: "Ada".to_string(),
-            death_message: String::new(),
-            core: Default::default(),
             rank: 3,
             rank_name: "Captain".to_string(),
             experience: 50,
             rounds: 6,
             physical: crate::PhysicalInfo::default(),
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
-            participation: 1,
-            in_action: false,
-            was_in_action: false,
-            in_action_time: 0,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: Default::default(),
+            ..Default::default()
         }];
         let file = PlayerFile {
             info_core: Default::default(),

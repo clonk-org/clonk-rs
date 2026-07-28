@@ -574,26 +574,9 @@ impl PreparedRealInstalledScenario {
                 pref_control_style: true,
                 pref_auto_context_menu: true,
                 crew: vec![clonk_engine::player_file::CrewInfo {
-                    core: Default::default(),
                     id: "CLNK".to_string(),
                     name: "Clonk".to_string(),
-                    death_message: String::new(),
-                    rank: 0,
-                    rank_name: "Clonk".to_string(),
-                    experience: 0,
-                    rounds: 0,
-                    physical: clonk_engine::PhysicalInfo::default(),
-                    death_count: 0,
-                    total_playing_time: 0,
-                    birthday: 0,
-                    age: 0,
-                    participation: 1,
-                    in_action: false,
-                    was_in_action: false,
-                    in_action_time: 0,
-                    has_died: false,
-                    extra_data: Vec::new(),
-                    portraits: Default::default(),
+                    ..Default::default()
                 }],
             });
             // Their movement timings predate live Game.Parameters and were
