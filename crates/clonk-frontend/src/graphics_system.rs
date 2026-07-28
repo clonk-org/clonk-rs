@@ -3714,16 +3714,22 @@ impl GraphicsSystem {
             if &particle.layer != layer {
                 continue;
             }
-            let Some(definition) = self.particle_sprites.get(&particle.definition_id).cloned()
-            else {
-                continue;
-            };
-            match definition.draw_proc {
-                ParticleDrawProc::Smoke => self.draw_smoke_particle(particle, &definition, gamma),
-                ParticleDrawProc::Std => {
-                    self.draw_std_particle(particle, &definition, target, gamma)
-                }
-            }
+            self.draw_definition_particle(particle, target, gamma);
+        }
+    }
+
+    fn draw_definition_particle(
+        &mut self,
+        particle: &ParticleSnapshot,
+        target: Option<&ObjectSnapshot>,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
+        let Some(definition) = self.particle_sprites.get(&particle.definition_id).cloned() else {
+            return;
+        };
+        match definition.draw_proc {
+            ParticleDrawProc::Smoke => self.draw_smoke_particle(particle, &definition, gamma),
+            ParticleDrawProc::Std => self.draw_std_particle(particle, &definition, target, gamma),
         }
     }
 
