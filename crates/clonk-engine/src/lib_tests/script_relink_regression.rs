@@ -1,7 +1,9 @@
 use super::*;
 
 fn register(engine: &mut Engine, id: &str, source: &str) {
-    engine.register_script_definition(id, id, source).expect("fixture definition registers");
+    engine
+        .register_script_definition(id, id, source)
+        .expect("fixture definition registers");
 }
 
 fn call(engine: &mut Engine, object: ObjectId, function: &str) -> Value {

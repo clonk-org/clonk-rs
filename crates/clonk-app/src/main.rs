@@ -805,8 +805,7 @@ fn main() -> Result<()> {
                                 graphics_duration,
                                 frame_schedule.simulation_interval,
                             );
-                            render_floor
-                                .record_presentation(graphics_started, graphics_duration);
+                            render_floor.record_presentation(graphics_started, graphics_duration);
                             presentation_detail.record_graphics_pass(
                                 app.mode == AppMode::Running && app.auto_frame_skip,
                                 graphics_duration,

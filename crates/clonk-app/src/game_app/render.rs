@@ -2557,8 +2557,7 @@ impl GameApp {
         self.graphics.set_renderer_config(
             self.display_flags.show_player_hud_always,
             self.display_flags.splitscreen_dividers,
-            self.display_flags.fire_particles
-                && self.presentation_detail.draws_fire_particles(),
+            self.display_flags.fire_particles && self.presentation_detail.draws_fire_particles(),
         );
         // C4Viewport suppresses only its gameplay overlays for a film replay;
         // game messages and C4GraphicsSystem-owned chrome remain independent.

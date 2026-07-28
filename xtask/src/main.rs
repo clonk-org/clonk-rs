@@ -1023,7 +1023,10 @@ fn package(options: PackageOptions) -> Result<()> {
     // bundle relocates `planet` and `content` into `Contents/Resources`, and
     // before any platform prefix could reach their entry names.
     if options.components.includes_shared() {
-        for component in [components::ComponentId::Planet, components::ComponentId::Content] {
+        for component in [
+            components::ComponentId::Planet,
+            components::ComponentId::Content,
+        ] {
             let emitted = emit_update_component(component, &package_dir, &components_dir, &paths)?;
             tracing::info!(
                 path = %emitted.path.display(),
@@ -1044,8 +1047,12 @@ fn package(options: PackageOptions) -> Result<()> {
     // The engine component is emitted last on macOS because `Info.plist`,
     // `PkgInfo` and the icon only exist once the bundle has been assembled.
     if options.components.includes_engine() {
-        let emitted =
-            emit_update_component(components::ComponentId::Engine, &staged, &components_dir, &paths)?;
+        let emitted = emit_update_component(
+            components::ComponentId::Engine,
+            &staged,
+            &components_dir,
+            &paths,
+        )?;
         tracing::info!(
             path = %emitted.path.display(),
             sha256 = %emitted.sha256,
@@ -2119,7 +2126,10 @@ mod tests {
     fn package_options_default_to_writing_an_archive() {
         assert_eq!(
             PackageOptions::parse(Vec::new().into_iter()).expect("no arguments parses"),
-            PackageOptions { archive: true, components: ComponentSelection::None }
+            PackageOptions {
+                archive: true,
+                components: ComponentSelection::None
+            }
         );
     }
 
@@ -2130,7 +2140,10 @@ mod tests {
         assert_eq!(
             PackageOptions::parse(["--no-archive".to_string()].into_iter())
                 .expect("--no-archive parses"),
-            PackageOptions { archive: false, components: ComponentSelection::None }
+            PackageOptions {
+                archive: false,
+                components: ComponentSelection::None
+            }
         );
     }
 
@@ -2200,7 +2213,10 @@ mod tests {
 
     #[test]
     fn executables_are_marked_in_both_the_flat_and_bundle_layouts() {
-        assert_eq!(executable_bit_for_component(Path::new("bin/clonk-app")), 0o755);
+        assert_eq!(
+            executable_bit_for_component(Path::new("bin/clonk-app")),
+            0o755
+        );
         assert_eq!(
             executable_bit_for_component(Path::new("Contents/MacOS/clonk-app")),
             0o755

@@ -3322,7 +3322,6 @@ mod tests {
         )
     }
 
-
     struct RepositoryContentResolver {
         root: PathBuf,
     }
@@ -5073,9 +5072,7 @@ mod tests {
     fn no_atlas_completions_match_snapshot_render_state() {
         let snapshot = make_snapshot();
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
-        let make_graphics = || {
-            test_graphics(128, 120, 120, "No-atlas frame")
-        };
+        let make_graphics = || test_graphics(128, 120, 120, "No-atlas frame");
 
         let mut snapshot_render = make_graphics();
         let atlas = snapshot_render.render_frame(&snapshot, &viewports);
@@ -5546,9 +5543,7 @@ mod tests {
     fn gpu_column_landscape_fallback_matches_cpu_reference_pixels() {
         let mut landscape = Landscape::flat(4, 2);
         landscape.set_liquid_column(1, vec![clonk_engine::landscape::LiquidSegment::new(0, 2)]);
-        let make_graphics = || {
-            test_graphics(4, 4, 2, "Column fallback")
-        };
+        let make_graphics = || test_graphics(4, 4, 2, "Column fallback");
 
         let mut cpu = make_graphics();
         assert!(!cpu.draw_ground(0, Some(&landscape), 1.0, None));
@@ -10311,9 +10306,7 @@ mod tests {
     #[test]
     fn observer_scroll_queued_before_projection_moves_the_first_rendered_camera() {
         let snapshot = camera_world_snapshot();
-        let new_graphics = || {
-            test_graphics(100, 80, 80, "Queued observer scroll")
-        };
+        let new_graphics = || test_graphics(100, 80, 80, "Queued observer scroll");
         let input = || {
             ViewportInput::new(
                 OWNER_NONE,
@@ -10353,9 +10346,7 @@ mod tests {
     #[test]
     fn queued_observer_scroll_replaces_a_stale_owned_projection() {
         let snapshot = camera_world_snapshot();
-        let new_graphics = || {
-            test_graphics(100, 80, 80, "Stale observer projection")
-        };
+        let new_graphics = || test_graphics(100, 80, 80, "Stale observer projection");
         let ownerless = || {
             ViewportInput::ownerless(Vector2::new(500, 500), 1.0)
                 .with_physical_camera_identity(42, 0)
@@ -15421,9 +15412,7 @@ mod tests {
 
     #[test]
     fn liquid_animation_cycle_survives_texture_swaps_and_renderer_rebuilds() {
-        let make_graphics = || {
-            test_graphics(1, 1, 1, "Liquid phase")
-        };
+        let make_graphics = || test_graphics(1, 1, 1, "Liquid phase");
         let image = || ImageData::new(1, 1, vec![255, 128, 0, 255]);
         let mut original = make_graphics();
         original.set_liquid_animation(Some(image()));

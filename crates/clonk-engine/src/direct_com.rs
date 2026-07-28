@@ -7741,7 +7741,9 @@ public func Activate(object clonk)
             .register_script_definition("LNKT", "Linekit", linekit_script)
             .expect("linekit registers");
         if actor_has_rock {
-            engine.register_script_definition("ROCK", "Rock", "#strict\n").expect("rock registers");
+            engine
+                .register_script_definition("ROCK", "Rock", "#strict\n")
+                .expect("rock registers");
         }
 
         let mut structure =
@@ -9914,7 +9916,9 @@ public func Activate(object clonk)
     #[test]
     fn line_message_to_deleted_target_only_clears_the_old_message() {
         let mut engine = Engine::new();
-        engine.register_script_definition("TARG", "Target", "#strict\n").expect("target registers");
+        engine
+            .register_script_definition("TARG", "Target", "#strict\n")
+            .expect("target registers");
         let target = engine
             .spawn_object(SpawnConfig::new("TARG"))
             .expect("target spawns");
@@ -11161,7 +11165,9 @@ protected func ContainedControlUpdate()
         for command in [COM_THROW, COM_THROW_D] {
             let mut engine = Engine::new();
             register_clonk(&mut engine, "CLNK", "#strict\n");
-            engine.register_script_definition("HUT1", "Hut", "#strict\n").expect("register");
+            engine
+                .register_script_definition("HUT1", "Hut", "#strict\n")
+                .expect("register");
             engine
                 .register_player(PlayerConfig::new(1, "Test"))
                 .expect("player");
@@ -12464,8 +12470,12 @@ protected func CalcValue(object pInBase)
             "CLNK",
             "#strict\nlocal put_called; protected func Put() { put_called = 1; return(1); }\n",
         );
-        engine.register_script_definition("HUT1", "Hut", "#strict\n").expect("register hut");
-        engine.register_script_definition("FLAG", "Flag", "#strict\n").expect("register flag");
+        engine
+            .register_script_definition("HUT1", "Hut", "#strict\n")
+            .expect("register hut");
+        engine
+            .register_script_definition("FLAG", "Flag", "#strict\n")
+            .expect("register flag");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
             .expect("player");
@@ -12540,7 +12550,9 @@ protected func CalcValue(object pInBase)
         engine
             .register_definition(hut_definition)
             .expect("register hut");
-        engine.register_script_definition("FLAG", "Flag", "#strict\n").expect("register flag");
+        engine
+            .register_script_definition("FLAG", "Flag", "#strict\n")
+            .expect("register flag");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
             .expect("player");
@@ -12663,7 +12675,9 @@ protected func CalcValue(object pInBase)
                 .expect("destination hut compiles"),
             )
             .expect("register destination hut");
-        engine.register_script_definition("FLAG", "Flag", "#strict\n").expect("register flag");
+        engine
+            .register_script_definition("FLAG", "Flag", "#strict\n")
+            .expect("register flag");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
             .expect("player");
@@ -13618,7 +13632,9 @@ public func RecordDestruction(int marker)
     return true;
 }
 "#;
-        engine.register_script_definition("HUT1", "Hut", hut_script).expect("register hut");
+        engine
+            .register_script_definition("HUT1", "Hut", hut_script)
+            .expect("register hut");
         engine
             .register_player(PlayerConfig::new(1, "Seller"))
             .expect("register seller");
@@ -13814,7 +13830,9 @@ protected func Destruction() {{ return sale_base->RecordDestruction({marker}); }
     #[test]
     fn auto_sell_checks_elimination_and_surrender_before_exiting_the_candidate() {
         let mut engine = Engine::new();
-        engine.register_script_definition("HUT1", "Hut", "#strict 2\n").expect("register hut");
+        engine
+            .register_script_definition("HUT1", "Hut", "#strict 2\n")
+            .expect("register hut");
         let mut gold =
             Definition::from_script("GOLD", "Gold", "#strict 2\n").expect("gold compiles");
         gold.set_base_auto_sell(true);
@@ -13872,7 +13890,9 @@ public func BuyThenReplace(object base)
 }
 "#;
         register_clonk(&mut engine, "CLNK", clonk_script);
-        engine.register_script_definition("HUT1", "Hut", "#strict 2\n").expect("register hut");
+        engine
+            .register_script_definition("HUT1", "Hut", "#strict 2\n")
+            .expect("register hut");
         let mut item =
             Definition::from_script("ITEM", "Item", "#strict 2\n").expect("item compiles");
         item.set_value(25);
@@ -13936,7 +13956,9 @@ public func SellThenReplace(object base)
 }
 "#;
         register_clonk(&mut engine, "CLNK", clonk_script);
-        engine.register_script_definition("HUT1", "Hut", "#strict 2\n").expect("register hut");
+        engine
+            .register_script_definition("HUT1", "Hut", "#strict 2\n")
+            .expect("register hut");
         let mut item =
             Definition::from_script("ITEM", "Item", "#strict 2\n").expect("item compiles");
         item.set_value(5);
@@ -15525,7 +15547,9 @@ func ContextUse(menu) { [Use] return 1; }
         engine
             .register_definition(container)
             .expect("register container");
-        engine.register_script_definition("ITEM", "Item", "#strict\n").expect("register item");
+        engine
+            .register_script_definition("ITEM", "Item", "#strict\n")
+            .expect("register item");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
             .expect("player");
@@ -15656,7 +15680,9 @@ func ContextUse(menu) { [Use] return 1; }
         engine
             .register_definition(container)
             .expect("register container");
-        engine.register_script_definition("ITEM", "Item", "#strict\n").expect("register item");
+        engine
+            .register_script_definition("ITEM", "Item", "#strict\n")
+            .expect("register item");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
             .expect("player");
@@ -15968,7 +15994,9 @@ public func ContextConstruction(object caller)
         let mut engine = Engine::new();
         register_builder_clonk(&mut engine, "CLNK", "#strict 2\n");
         for id in ["CXCN", "WOOD", "METL"] {
-            engine.register_script_definition(id, id, "#strict 2\n").expect("definition registers");
+            engine
+                .register_script_definition(id, id, "#strict 2\n")
+                .expect("definition registers");
         }
         let mut elevator = Definition::from_script(
             "ELEV",
@@ -16496,7 +16524,9 @@ public func ContextMagic(object caller)
         hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
         hut.set_auto_context_menu(true);
         engine.register_definition(hut).expect("register hut");
-        engine.register_script_definition("FLAG", "Flag", "#strict\n").expect("register flag");
+        engine
+            .register_script_definition("FLAG", "Flag", "#strict\n")
+            .expect("register flag");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
             .expect("player");
@@ -16979,7 +17009,9 @@ public func ContextMagic(object caller)
         hut.set_category(crate::CATEGORY_STRUCTURE);
         hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
         engine.register_definition(hut).expect("register hut");
-        engine.register_script_definition("FILL", "Filler", "#strict\n").expect("register filler");
+        engine
+            .register_script_definition("FILL", "Filler", "#strict\n")
+            .expect("register filler");
         let mut cargo =
             Definition::from_script("CARG", "Cargo", "#strict\n").expect("cargo compiles");
         cargo.set_category(crate::CATEGORY_OBJECT);
@@ -18302,7 +18334,9 @@ public func Redraw(object item)
         // an otherwise identical stack when APS_Color is not enabled.
         let mut engine = Engine::new();
         register_clonk(&mut engine, "CLNK", "#strict\n");
-        engine.register_script_definition("ROCK", "Rock", "#strict\n").expect("item registers");
+        engine
+            .register_script_definition("ROCK", "Rock", "#strict\n")
+            .expect("item registers");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
             .expect("player");
@@ -19161,7 +19195,9 @@ protected func ControlContents(idTarget) { return(1); }
             ("ENMY", "Enemy"),
             ("EXCL", "Exclusive"),
         ] {
-            engine.register_script_definition(id, name, "#strict\n").expect("register definition");
+            engine
+                .register_script_definition(id, name, "#strict\n")
+                .expect("register definition");
         }
 
         let entrance = engine
@@ -19806,7 +19842,9 @@ protected func ControlDown(pCaller)
 "#;
         let mut engine = Engine::new();
         register_clonk(&mut engine, "CLNK", "#strict\n");
-        engine.register_script_definition("DRCK", "Derrick", vehicle).expect("register derrick");
+        engine
+            .register_script_definition("DRCK", "Derrick", vehicle)
+            .expect("register derrick");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
             .expect("player");

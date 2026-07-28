@@ -18,7 +18,9 @@ fn control(action: u8, objects: Vec<i32>) -> EmMoveObjectControlData {
 }
 
 fn register_definition(engine: &mut Engine, id: &str, script: &str) {
-    engine.register_script_definition(id, id, script).expect("fixture definition registers");
+    engine
+        .register_script_definition(id, id, script)
+        .expect("fixture definition registers");
 }
 
 #[test]

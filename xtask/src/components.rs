@@ -228,7 +228,10 @@ pub fn component_archive_name(
     if component.is_platform_independent() {
         format!("{}-{}.zip", component.name(), short_digest(digest))
     } else {
-        format!("clonk-rust-{version}-{}-{target_triple}.zip", component.name())
+        format!(
+            "clonk-rust-{version}-{}-{target_triple}.zip",
+            component.name()
+        )
     }
 }
 
@@ -272,18 +275,18 @@ pub fn emit_component(
         .with_context(|| format!("failed to stat {}", scratch.display()))?
         .len();
 
-    let final_path =
-        output_dir.join(component_archive_name(component, &digest, version, target_triple));
+    let final_path = output_dir.join(component_archive_name(
+        component,
+        &digest,
+        version,
+        target_triple,
+    ));
     if final_path.exists() {
         std::fs::remove_file(&final_path)
             .with_context(|| format!("failed to replace {}", final_path.display()))?;
     }
-    std::fs::rename(&scratch, &final_path).with_context(|| {
-        format!(
-            "failed to name {} from its digest",
-            final_path.display()
-        )
-    })?;
+    std::fs::rename(&scratch, &final_path)
+        .with_context(|| format!("failed to name {} from its digest", final_path.display()))?;
 
     Ok(EmittedComponent {
         id: component,
@@ -365,7 +368,8 @@ mod tests {
         // Rooting `planet` at `<staged>/planet` is what makes its archive
         // prefix-free, and therefore identical on every platform.
         let staged = staged_layout();
-        let sources = component_sources(ComponentId::Planet, staged.path()).expect("planet sources");
+        let sources =
+            component_sources(ComponentId::Planet, staged.path()).expect("planet sources");
         assert_eq!(sources.root, staged.path().join("planet"));
         assert!(sources.entries.is_none(), "planet is a whole subtree");
     }
@@ -373,10 +377,14 @@ mod tests {
     #[test]
     fn engine_component_sources_name_the_entries_it_owns() {
         let staged = staged_layout();
-        let sources = component_sources(ComponentId::Engine, staged.path()).expect("engine sources");
+        let sources =
+            component_sources(ComponentId::Engine, staged.path()).expect("engine sources");
         assert_eq!(sources.root, staged.path());
         let entries = sources.entries.expect("engine is a subset of the layout");
-        let mut names: Vec<_> = entries.keys().map(|p| p.to_string_lossy().into_owned()).collect();
+        let mut names: Vec<_> = entries
+            .keys()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
         names.sort();
         assert_eq!(names, ["COPYING", "README.md", "bin", "credits.txt"]);
     }
@@ -418,8 +426,15 @@ mod tests {
     }
 
     fn emit(component: ComponentId, staged: &Path, out: &Path, triple: &str) -> EmittedComponent {
-        emit_component(component, staged, out, "0.4.0", triple, &fake_archive_writer)
-            .expect("emit component")
+        emit_component(
+            component,
+            staged,
+            out,
+            "0.4.0",
+            triple,
+            &fake_archive_writer,
+        )
+        .expect("emit component")
     }
 
     #[test]
@@ -429,9 +444,22 @@ mod tests {
         // identical data and no deduplication at all.
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
-        let arm = emit(ComponentId::Content, staged.path(), out.path(), "aarch64-apple-darwin");
-        let win = emit(ComponentId::Content, staged.path(), out.path(), "x86_64-pc-windows-gnu");
-        assert_eq!(arm.sha256, win.sha256, "content must hash the same everywhere");
+        let arm = emit(
+            ComponentId::Content,
+            staged.path(),
+            out.path(),
+            "aarch64-apple-darwin",
+        );
+        let win = emit(
+            ComponentId::Content,
+            staged.path(),
+            out.path(),
+            "x86_64-pc-windows-gnu",
+        );
+        assert_eq!(
+            arm.sha256, win.sha256,
+            "content must hash the same everywhere"
+        );
         assert_eq!(arm.path, win.path, "and therefore carry the same name");
     }
 
@@ -439,9 +467,19 @@ mod tests {
     fn a_shared_component_archive_is_named_from_its_own_digest() {
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
-        let emitted = emit(ComponentId::Content, staged.path(), out.path(), "x86_64-unknown-linux-gnu");
+        let emitted = emit(
+            ComponentId::Content,
+            staged.path(),
+            out.path(),
+            "x86_64-unknown-linux-gnu",
+        );
 
-        let name = emitted.path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = emitted
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(name, format!("content-{}.zip", &emitted.sha256[..32]));
         assert!(emitted.path.exists(), "the digest-named archive exists");
     }
@@ -450,14 +488,30 @@ mod tests {
     fn changing_a_shared_component_changes_its_name() {
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
-        let before = emit(ComponentId::Content, staged.path(), out.path(), "x86_64-unknown-linux-gnu");
+        let before = emit(
+            ComponentId::Content,
+            staged.path(),
+            out.path(),
+            "x86_64-unknown-linux-gnu",
+        );
 
-        fs::write(staged.path().join("content/Objects.c4d/DefCore.txt"), b"edited")
-            .expect("edit content");
-        let after = emit(ComponentId::Content, staged.path(), out.path(), "x86_64-unknown-linux-gnu");
+        fs::write(
+            staged.path().join("content/Objects.c4d/DefCore.txt"),
+            b"edited",
+        )
+        .expect("edit content");
+        let after = emit(
+            ComponentId::Content,
+            staged.path(),
+            out.path(),
+            "x86_64-unknown-linux-gnu",
+        );
 
         assert_ne!(before.sha256, after.sha256);
-        assert_ne!(before.path, after.path, "a changed component needs a new name");
+        assert_ne!(
+            before.path, after.path,
+            "a changed component needs a new name"
+        );
     }
 
     #[test]
@@ -466,34 +520,63 @@ mod tests {
         // store; the four per-triple archives must also stay distinguishable.
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
-        let linux = emit(ComponentId::Engine, staged.path(), out.path(), "x86_64-unknown-linux-gnu");
-        let windows = emit(ComponentId::Engine, staged.path(), out.path(), "x86_64-pc-windows-gnu");
+        let linux = emit(
+            ComponentId::Engine,
+            staged.path(),
+            out.path(),
+            "x86_64-unknown-linux-gnu",
+        );
+        let windows = emit(
+            ComponentId::Engine,
+            staged.path(),
+            out.path(),
+            "x86_64-pc-windows-gnu",
+        );
 
         assert_eq!(
             linux.path.file_name().unwrap().to_string_lossy(),
             "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"
         );
-        assert_ne!(linux.path, windows.path, "per-triple archives must not collide");
+        assert_ne!(
+            linux.path, windows.path,
+            "per-triple archives must not collide"
+        );
     }
 
     #[test]
     fn the_engine_component_excludes_the_shared_subtrees() {
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
-        let emitted = emit(ComponentId::Engine, staged.path(), out.path(), "x86_64-unknown-linux-gnu");
+        let emitted = emit(
+            ComponentId::Engine,
+            staged.path(),
+            out.path(),
+            "x86_64-unknown-linux-gnu",
+        );
 
         let body = fs::read_to_string(&emitted.path).expect("read emitted");
         assert!(body.contains("bin/clonk-app"), "engine ships the binaries");
         assert!(body.contains("COPYING"), "engine ships the documents");
-        assert!(!body.contains("planet/"), "planet belongs to its own component");
-        assert!(!body.contains("content/"), "content belongs to its own component");
+        assert!(
+            !body.contains("planet/"),
+            "planet belongs to its own component"
+        );
+        assert!(
+            !body.contains("content/"),
+            "content belongs to its own component"
+        );
     }
 
     #[test]
     fn emitting_leaves_no_scratch_archive_behind() {
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
-        emit(ComponentId::Planet, staged.path(), out.path(), "x86_64-unknown-linux-gnu");
+        emit(
+            ComponentId::Planet,
+            staged.path(),
+            out.path(),
+            "x86_64-unknown-linux-gnu",
+        );
 
         let leftovers: Vec<_> = fs::read_dir(out.path())
             .expect("read output")

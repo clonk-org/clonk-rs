@@ -57,7 +57,9 @@ fn capture_warnings(run: impl FnOnce()) -> Vec<String> {
 }
 
 fn register(engine: &mut Engine, id: &str, source: &str) {
-    engine.register_script_definition(id, id, source).expect("fixture definition registers");
+    engine
+        .register_script_definition(id, id, source)
+        .expect("fixture definition registers");
 }
 
 #[test]

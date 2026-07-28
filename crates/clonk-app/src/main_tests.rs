@@ -739,8 +739,8 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
         "[General]\nParticipants=Tyler.c4p\nPlayerPath=\n",
     )
     .expect("write config");
-    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-    .expect("initialise app");
+    let mut app =
+        test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("initialise app");
     install_classic_test_assets(&mut app);
 
     let mut definition =
@@ -1879,7 +1879,7 @@ fn default_exact_host_reference() -> (
 
 fn new_menu_app_with_paths(width: u32, height: u32, paths: &AppPaths) -> GameApp {
     let mut app = test_game_app(width, height, AudioOptions::default(), Some(paths))
-    .expect("initialise app with paths");
+        .expect("initialise app with paths");
     wait_for_menu(&mut app);
     app
 }
@@ -2824,26 +2824,26 @@ fn add_secondary_local_player_for_mouse_option_test(app: &mut GameApp) -> i32 {
     secondary
 }
 
-    /// The runtime config every direct command-line app test starts from:
-    /// owner 1, the default player name, no network session and no record.
-    fn test_runtime_config() -> RuntimeConfig {
-        RuntimeConfig {
-            player_owner: 1,
-            player_name: "Player".to_string(),
-            network: None,
-            record_enabled: false,
-        }
+/// The runtime config every direct command-line app test starts from:
+/// owner 1, the default player name, no network session and no record.
+fn test_runtime_config() -> RuntimeConfig {
+    RuntimeConfig {
+        player_owner: 1,
+        player_name: "Player".to_string(),
+        network: None,
+        record_enabled: false,
     }
+}
 
-    /// A `GameApp` on that config. Sites keep their own error handling.
-    fn test_game_app(
-        width: u32,
-        height: u32,
-        audio_options: AudioOptions,
-        paths: Option<&AppPaths>,
-    ) -> Result<GameApp> {
-        GameApp::new(width, height, audio_options, paths, test_runtime_config())
-    }
+/// A `GameApp` on that config. Sites keep their own error handling.
+fn test_game_app(
+    width: u32,
+    height: u32,
+    audio_options: AudioOptions,
+    paths: Option<&AppPaths>,
+) -> Result<GameApp> {
+    GameApp::new(width, height, audio_options, paths, test_runtime_config())
+}
 
 #[test]
 fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {

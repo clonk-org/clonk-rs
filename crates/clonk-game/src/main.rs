@@ -2640,7 +2640,11 @@ mod tests {
         // Shipped groups are directories, so a stale target is removed through
         // the `remove_dir_all` arm rather than `remove_file`.
         fs::create_dir_all(planet_dir.join("System.c4g")).unwrap();
-        fs::write(planet_dir.join("System.c4g").join("C4.c"), b"system payload").unwrap();
+        fs::write(
+            planet_dir.join("System.c4g").join("C4.c"),
+            b"system payload",
+        )
+        .unwrap();
         fs::create_dir_all(planet_dir.join("Graphics.c4g")).unwrap();
         fs::write(
             planet_dir.join("Graphics.c4g").join("Logo.png"),

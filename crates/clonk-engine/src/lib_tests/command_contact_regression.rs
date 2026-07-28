@@ -10,7 +10,9 @@ fn synchronize_control_applies_clearance_only_when_requested() {
     // 9ffa0a5d src/C4Control.cpp:537-550;
     // src/C4Game.cpp:3679-3715; src/C4Object.cpp:3803-3815).
     let mut engine = Engine::with_seed(0);
-    engine.register_script_definition("SYNC", "Sync", "").expect("definition registers");
+    engine
+        .register_script_definition("SYNC", "Sync", "")
+        .expect("definition registers");
     let object = engine
         .spawn_object(SpawnConfig::new("SYNC").with_position(Vector2::new(10, 20)))
         .expect("object spawns");
@@ -200,7 +202,9 @@ fn lazy_host_world_call_object_materializes_only_on_world_access() {
     ));
     engine.set_landscape(landscape);
 
-    engine.register_script_definition("FILL", "Filler", "#strict\n").expect("filler registers");
+    engine
+        .register_script_definition("FILL", "Filler", "#strict\n")
+        .expect("filler registers");
     let mut caller = Definition::from_script(
         "LAZY",
         "Lazy caller",
@@ -290,7 +294,9 @@ protected func QueryWorld()
 #[test]
 fn lazy_host_world_action_callback_seeds_only_caller() {
     let mut engine = Engine::with_seed(0);
-    engine.register_script_definition("FILL", "Filler", "#strict\n").expect("filler registers");
+    engine
+        .register_script_definition("FILL", "Filler", "#strict\n")
+        .expect("filler registers");
     let mut actor = Definition::from_script(
         "ACTR",
         "Action caller",
@@ -462,7 +468,9 @@ fn lazy_host_world_global_effect_without_world_access_copies_nothing() {
     engine
         .register_definition(definition)
         .expect("effect definition registers");
-    engine.register_script_definition("FILL", "Filler", "#strict\n").expect("filler registers");
+    engine
+        .register_script_definition("FILL", "Filler", "#strict\n")
+        .expect("filler registers");
     for x in 0..64 {
         engine
             .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)))
@@ -502,7 +510,9 @@ fn lazy_host_world_contact_materialization_is_deferred_until_query() {
     ));
     engine.set_landscape(landscape);
 
-    engine.register_script_definition("FILL", "Filler", "#strict\n").expect("filler registers");
+    engine
+        .register_script_definition("FILL", "Filler", "#strict\n")
+        .expect("filler registers");
     let mut swimmer = Definition::from_script(
         "SWIM",
         "Contact swimmer",
@@ -748,7 +758,9 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
     // integers costs a full deep clone on the first FindObjects of every
     // script call, which is the hot path while many flames are alive.
     let mut engine = Engine::with_seed(0);
-    engine.register_script_definition("SECT", "Sector", "").expect("definition registers");
+    engine
+        .register_script_definition("SECT", "Sector", "")
+        .expect("definition registers");
     engine.set_landscape(Landscape::flat(100, 100));
     for x in 0..8 {
         engine
@@ -915,7 +927,9 @@ public func Probe()
     )
     .expect("prober compiles");
     prober.set_c4_callback_convention(true);
-    engine.register_definition(prober).expect("prober registers");
+    engine
+        .register_definition(prober)
+        .expect("prober registers");
     let prober = engine
         .spawn_object(SpawnConfig::new("PROB").with_position(Vector2::new(50, 50)))
         .expect("prober spawns");

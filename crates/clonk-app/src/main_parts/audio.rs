@@ -86,7 +86,12 @@ pub(crate) fn framebuffer_backend_attempts(
     requested: Option<pixels::wgpu::Backends>,
 ) -> Vec<pixels::wgpu::Backends> {
     requested.map_or_else(
-        || vec![pixels::wgpu::Backends::PRIMARY, pixels::wgpu::Backends::all()],
+        || {
+            vec![
+                pixels::wgpu::Backends::PRIMARY,
+                pixels::wgpu::Backends::all(),
+            ]
+        },
         |backends| vec![backends],
     )
 }

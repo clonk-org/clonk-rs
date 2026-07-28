@@ -203,7 +203,12 @@ mod tests {
         // With no signature, the recorded hash is the whole integrity story
         // for the payload; an entry without one would be unverifiable.
         for entry in manifest().components {
-            assert_eq!(entry.sha256.len(), 64, "{} needs a full SHA-256", entry.name);
+            assert_eq!(
+                entry.sha256.len(),
+                64,
+                "{} needs a full SHA-256",
+                entry.name
+            );
             assert!(entry.size > 0, "{} needs a size", entry.name);
             assert!(!entry.archive.is_empty(), "{} needs an archive", entry.name);
         }
@@ -218,7 +223,10 @@ mod tests {
             .find(|entry| entry.name == "content")
             .expect("content entry");
         assert_eq!(
-            content.install.get("aarch64-apple-darwin").map(String::as_str),
+            content
+                .install
+                .get("aarch64-apple-darwin")
+                .map(String::as_str),
             Some("Contents/Resources/content")
         );
         assert_eq!(
@@ -240,7 +248,10 @@ mod tests {
             .iter()
             .find(|entry| entry.name == "engine")
             .expect("engine entry");
-        assert!(engine.install.values().all(|destination| destination.is_empty()));
+        assert!(engine
+            .install
+            .values()
+            .all(|destination| destination.is_empty()));
     }
 
     #[test]
