@@ -1,6 +1,6 @@
 //! Client-side core of the in-app updater.
 //!
-//! This crate answers four questions and nothing else:
+//! This crate answers five questions and nothing else:
 //!
 //! * *What did the server publish?* — [`manifest`] parses the document a client
 //!   fetches from `releases/latest/download/manifest.json`.
@@ -10,11 +10,14 @@
 //!   `C4UpdateDlg::IsValidUpdate` (`C4UpdateDlg.cpp:246-260`).
 //! * *Is the payload the one that was promised, and is it safe to unpack?* —
 //!   [`digest`] and [`extract`].
+//! * *How does it get installed without ever breaking the install?* — [`apply`]
+//!   and [`journal`].
 //!
 //! It is deliberately **UI-free and network-free**: no `reqwest`, no `tokio`, no
 //! dialog types. Fetching lives in `clonk-update-net`; presenting lives in
-//! `clonk-app`. `clonk-game` owns *applying* an update and must never link an
-//! HTTP client, which is only possible because this crate stays transport-free.
+//! `clonk-app`. `clonk-game` *drives* the apply, out of its own process so the
+//! binaries being replaced are not the ones running, and must never link an HTTP
+//! client — which is only possible because this crate stays transport-free.
 //!
 //! # Trust model
 //!
@@ -26,6 +29,7 @@
 //! ([`digest::verify_reader`]), and on the extraction guards in [`extract`],
 //! which assume the archive is hostile even after its digest matches.
 
+pub mod apply;
 pub mod decide;
 pub mod digest;
 pub mod extract;
@@ -33,6 +37,12 @@ pub mod journal;
 pub mod manifest;
 pub mod state;
 
+pub use apply::{
+    apply_update, ensure_free_space, required_free_space, resume_interrupted_update,
+    resume_interrupted_update_with, ApplyError, ApplyOutcome, ApplyPlan, FakePlatform,
+    InstallLayout, PlatformCall, PlatformError, PlatformOps, RealPlatform, ResumeOutcome,
+    StagedComponent,
+};
 pub use decide::{
     decide, decide_for_this_build, should_check_for_updates, Decision, PlannedComponent,
     RefusalReason,

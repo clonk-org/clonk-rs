@@ -1147,6 +1147,7 @@ version = "0.3.0"
 dependencies = [
  "clonk-core",
  "clonk-platform",
+ "libc",
  "ring",
  "semver",
  "serde",
@@ -1154,6 +1155,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
+ "windows-sys 0.52.0",
  "zip",
 ]
 
