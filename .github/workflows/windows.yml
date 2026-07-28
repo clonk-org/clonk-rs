@@ -1,0 +1,65 @@
+name: Windows
+
+# The launcher is the Windows entry point (the installer's Start Menu shortcut
+# targets `bin\clonk-game.exe`), but every other job runs on Linux or macOS —
+# where `#[cfg(unix)]` recovery paths hide Windows-only failures. A shipped
+# build was unable to start because `ensure_runtime_asset` fell through to
+# `fs::copy` on the `System.c4g` *directory*, and no test could observe it.
+#
+# Public repositories get standard runners at no cost, so that blind spot is
+# closed here rather than left to manual testing on a real machine.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit or ref to test (defaults to this workflow''s ref).'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  launcher:
+    name: Launcher and platform paths
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # An explicit ref lets this run against an older commit to confirm a
+          # Windows-only regression actually reproduces. Dispatching requires
+          # write access, and this job holds only `contents: read` with no
+          # secrets, so an arbitrary ref grants nothing a push would not.
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-launcher
+          cache-on-failure: true
+
+      # No submodule: these crates' tests build their fixtures in temp
+      # directories, so the 299 MB content checkout would be pure latency.
+      - name: Test the launcher and path resolution
+        run: cargo test -p clonk-game -p clonk-platform -p clonk-core --locked
+
+      - name: Clippy
+        run: cargo clippy --profile test -p clonk-game -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
