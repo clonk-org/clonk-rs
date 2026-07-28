@@ -2153,6 +2153,9 @@
                     score_new: None,
                     custom_evaluation_strings: String::new(),
                     big_icon: Some(invalid),
+                    league_score_old: None,
+                    league_score_gain: None,
+                    league_score_new: None,
                 }],
             ));
         let mut frame = vec![0x3d; 320 * 200 * 4];
@@ -6486,6 +6489,7 @@
                 )
             },
             |player_info_id| (player_info_id == 41).then(|| player_icon.clone()),
+        |_player_info_id| None,
         );
 
         assert_eq!(
@@ -6536,7 +6540,7 @@
             "decoy title".into(),
             &next_mission,
             |_, _| (None, String::new()),
-            |_| None,
+            |_| None, |_player_info_id| None,
         );
         let player = hidden
             .evaluation()
@@ -6608,7 +6612,7 @@
             "Scenario".into(),
             &clonk_engine::NextMissionState::default(),
             |_, _| (None, String::new()),
-            |_| None,
+            |_| None, |_player_info_id| None,
         );
 
         assert_eq!(
@@ -6656,7 +6660,7 @@
             "Scenario".into(),
             &clonk_engine::NextMissionState::default(),
             |_, _| (None, String::new()),
-            |_| None,
+            |_| None, |_player_info_id| None,
         );
         assert_eq!(generated.evaluation().separate_team_ids(), None);
         assert_eq!(

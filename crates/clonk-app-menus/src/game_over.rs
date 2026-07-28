@@ -193,6 +193,68 @@ pub struct EvaluationPlayer {
     pub score_new: Option<i32>,
     pub custom_evaluation_strings: String,
     pub big_icon: Option<ImageData>,
+    /// `C4PlayerInfo::getLeagueScore()` — the league score the player carried
+    /// into this round. `None` is C++'s falsy zero.
+    pub league_score_old: Option<i32>,
+    /// `C4RoundResultsPlayer::GetLeagueScoreGain()`.
+    pub league_score_gain: Option<i32>,
+    /// `C4RoundResultsPlayer::GetLeagueScoreNew()`; `None` is
+    /// `!IsLeagueScoreNewValid()`.
+    pub league_score_new: Option<i32>,
+}
+
+/// Which inline icon `UpdateScoreLabel` prefixes the score with
+/// (src/C4PlayerInfoListBox.cpp:380-413).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvaluationScoreIcon {
+    League,
+    Settlement,
+}
+
+/// `C4PlayerInfoListBox::PlayerListItem::UpdateScoreLabel`'s evaluation branch
+/// (src/C4PlayerInfoListBox.cpp:376-418). League state wins over settlement
+/// state, and a settlement score is suppressed entirely once
+/// `C4RoundResults::SettlementScoreIsHidden()`.
+///
+/// `score_text` is the localized `IDS_TEXT_SCORE` word appended to every
+/// variant.
+pub fn evaluation_score_label(
+    player: &EvaluationPlayer,
+    score_text: &str,
+) -> Option<(EvaluationScoreIcon, String)> {
+    let league_old = player.league_score_old.unwrap_or(0);
+    if player.league_score_old.is_some() || player.league_score_new.is_some() {
+        let text = match (player.league_score_new, player.league_score_gain) {
+            (Some(new), gain) => {
+                let gain = gain.unwrap_or(0);
+                // The league server normally guarantees old + gain == new; a
+                // discrepancy means an admin intervened and is shown in red.
+                let discrepancy = new - (league_old + gain);
+                if discrepancy == 0 {
+                    format!("<c afafaf>{league_old} ({gain:+})</c> {new} {score_text}")
+                } else {
+                    format!(
+                        "<c afafaf>{league_old} ({gain:+})</c><c ff0000>({discrepancy:+})</c> {new} {score_text}"
+                    )
+                }
+            }
+            (None, _) => format!("<c afafaf>({league_old})</c> {score_text}"),
+        };
+        return Some((EvaluationScoreIcon::League, text));
+    }
+    // A hidden settlement score reaches this projection as `score_old < 0`.
+    if player.score_old < 0 {
+        return None;
+    }
+    let text = match player.score_new {
+        Some(new) => format!(
+            "<c afafaf>{} ({:+})</c> {new} {score_text}",
+            player.score_old,
+            new - player.score_old
+        ),
+        None => format!("<c afafaf>({})</c> {score_text}", player.score_old),
+    };
+    Some((EvaluationScoreIcon::Settlement, text))
 }
 
 /// Frozen presentation model for C4GameOverDlg.
@@ -1961,14 +2023,17 @@ impl GameOverState {
                 gamma,
             );
 
-            if player.score_old >= 0 {
-                render_settlement_score(
+            if let Some((_icon, text)) = evaluation_score_label(player, "Score") {
+                render_evaluation_score(
                     surface,
                     resources.fonts,
+                    // `{{Ico:League}}` and `{{Ico:Settlement}}` are separate
+                    // GUI icons in C++; only the settlement facet is in the
+                    // validated evaluation resource set today, so both
+                    // variants draw it.
                     resources.score,
                     player_layout.score_anchor,
-                    player.score_old,
-                    player.score_new,
+                    text.as_str(),
                     gamma,
                 );
             }
@@ -2134,29 +2199,19 @@ fn grayscale_image(image: &ImageData, offset: i32) -> ImageData {
     ImageData::new(image.width(), image.height(), pixels)
 }
 
-fn render_settlement_score(
+fn render_evaluation_score(
     surface: &mut Surface,
     fonts: &ClonkFontSet,
     score_icon: Option<&ImageData>,
     anchor: (i32, i32),
-    score_old: i32,
-    score_new: Option<i32>,
+    text: &str,
     gamma: Option<&GammaRamp>,
 ) {
-    // C4PlayerInfoListBox::UpdateScoreLabel emits Ico:Settlement followed by
+    // C4PlayerInfoListBox::UpdateScoreLabel emits the score icon followed by
     // gray old/gain and white new score. CStdFont scales the inline image to
-    // iGfxLineHgt while preserving aspect (C4PlayerInfoListBox.cpp:404-413;
+    // iGfxLineHgt while preserving aspect (C4PlayerInfoListBox.cpp:376-418;
     // StdFont.cpp:845-896).
-    let text = score_new.map_or_else(
-        || format!("<c afafaf>({score_old})</c> Score"),
-        |score_new| {
-            format!(
-                "<c afafaf>{score_old} ({:+})</c> {score_new} Score",
-                score_new - score_old
-            )
-        },
-    );
-    let text_width = fonts.text.measure(&text, true).0;
+    let text_width = fonts.text.measure(text, true).0;
     let (icon_width, icon_height) = score_icon.map_or((0, 0), |icon| {
         let height = fonts.text.cell_height;
         (
@@ -2188,7 +2243,7 @@ fn render_settlement_score(
         &fonts.text,
         x + icon_advance,
         anchor.1,
-        &text,
+        text,
         Color::opaque(0xff, 0xff, 0xff),
         TextAlign::Left,
         gamma,
@@ -2378,6 +2433,133 @@ mod tests {
                 .flatten()
                 .collect(),
         )
+    }
+
+    // C4PlayerInfoListBox::UpdateScoreLabel's evaluation branch has four exact
+    // variants and a strict precedence: any league state wins over settlement
+    // state, and a hidden settlement score suppresses the label entirely
+    // (src/C4PlayerInfoListBox.cpp:376-418).
+    #[test]
+    fn l183_evaluation_score_label_matches_the_native_league_and_settlement_variants() {
+        let base = EvaluationPlayer {
+            player_info_id: 1,
+            team_id: None,
+            name: "Player".into(),
+            won: false,
+            color_dw: 0,
+            total_playing_time: 0,
+            score_old: 10,
+            score_new: Some(35),
+            custom_evaluation_strings: String::new(),
+            big_icon: None,
+            league_score_old: None,
+            league_score_gain: None,
+            league_score_new: None,
+        };
+
+        // Settlement, new score known.
+        assert_eq!(
+            evaluation_score_label(&base, "Score"),
+            Some((
+                EvaluationScoreIcon::Settlement,
+                "<c afafaf>10 (+25)</c> 35 Score".to_string()
+            ))
+        );
+
+        // Settlement, only the old score known (disconnected player).
+        let old_only = EvaluationPlayer {
+            score_new: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&old_only, "Score"),
+            Some((
+                EvaluationScoreIcon::Settlement,
+                "<c afafaf>(10)</c> Score".to_string()
+            ))
+        );
+
+        // A hidden settlement score reaches the projection as score_old < 0.
+        let hidden = EvaluationPlayer {
+            score_old: -1,
+            score_new: None,
+            ..base.clone()
+        };
+        assert_eq!(evaluation_score_label(&hidden, "Score"), None);
+
+        // League, old + gain == new.
+        let league = EvaluationPlayer {
+            league_score_old: Some(1200),
+            league_score_gain: Some(30),
+            league_score_new: Some(1230),
+            ..base.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&league, "Score"),
+            Some((
+                EvaluationScoreIcon::League,
+                "<c afafaf>1200 (+30)</c> 1230 Score".to_string()
+            )),
+            "league state wins over the settlement score"
+        );
+
+        // League with an admin discrepancy, shown in red.
+        let discrepancy = EvaluationPlayer {
+            league_score_new: Some(1300),
+            ..league.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&discrepancy, "Score"),
+            Some((
+                EvaluationScoreIcon::League,
+                "<c afafaf>1200 (+30)</c><c ff0000>(+70)</c> 1300 Score".to_string()
+            ))
+        );
+        let negative = EvaluationPlayer {
+            league_score_gain: Some(-30),
+            league_score_new: Some(1100),
+            ..league.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&negative, "Score"),
+            Some((
+                EvaluationScoreIcon::League,
+                "<c afafaf>1200 (-30)</c><c ff0000>(-70)</c> 1100 Score".to_string()
+            ))
+        );
+
+        // League score carried in but no new score: old score only.
+        let old_league = EvaluationPlayer {
+            league_score_new: None,
+            league_score_gain: None,
+            ..league.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&old_league, "Score"),
+            Some((
+                EvaluationScoreIcon::League,
+                "<c afafaf>(1200)</c> Score".to_string()
+            ))
+        );
+
+        // A zero league score is falsy in C++, so it does not select the
+        // league branch; the projection maps it to None.
+        let zero_league = EvaluationPlayer {
+            league_score_old: None,
+            league_score_gain: None,
+            league_score_new: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&zero_league, "Score").map(|(icon, _)| icon),
+            Some(EvaluationScoreIcon::Settlement)
+        );
+
+        // The IDS_TEXT_SCORE word is a runtime resource.
+        assert!(evaluation_score_label(&base, "Punkte")
+            .expect("settlement label")
+            .1
+            .ends_with(" Punkte"));
     }
 
     #[test]
@@ -3039,6 +3221,9 @@ mod tests {
             score_new: Some(100),
             custom_evaluation_strings: String::new(),
             big_icon: None,
+            league_score_old: None,
+            league_score_gain: None,
+            league_score_new: None,
         }
     }
 
@@ -3825,6 +4010,9 @@ mod tests {
                 score_new: Some(110),
                 custom_evaluation_strings: String::new(),
                 big_icon: None,
+                league_score_old: None,
+                league_score_gain: None,
+                league_score_new: None,
             }],
         ));
         let layout = state.classic_evaluation_layout(1024, 600, &fonts);

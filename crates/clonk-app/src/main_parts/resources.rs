@@ -5937,6 +5937,10 @@ pub(crate) fn build_game_over_dialog(
     next_mission: &clonk_engine::NextMissionState,
     mut goal_presentation: impl FnMut(&str, bool) -> (Option<ImageData>, String),
     mut player_big_icon: impl FnMut(i32) -> Option<ImageData>,
+    // `C4PlayerInfo::getLeagueScore()` per PlayerInfo ID: the score carried
+    // into this round, which UpdateScoreLabel reads from the live info rather
+    // than from the frozen result (src/C4PlayerInfoListBox.cpp:380-401).
+    mut player_league_score: impl FnMut(i32) -> Option<i32>,
 ) -> GameOverState {
     // C4GameOverDlg freezes C4RoundResults into presentation state; player
     // results are joined through C4PlayerInfo::ID, not the runtime player
@@ -6009,6 +6013,11 @@ pub(crate) fn build_game_over_dialog(
                 .flatten(),
             custom_evaluation_strings: c4_presentation_text(&result.custom_evaluation_strings),
             big_icon: player_big_icon(state.player_info_id),
+            // C++ treats a zero league score as absent (`pInfo->getLeagueScore()`
+            // is used as a boolean at src/C4PlayerInfoListBox.cpp:380).
+            league_score_old: player_league_score(state.player_info_id).filter(|score| *score != 0),
+            league_score_gain: (result.league_score_gain >= 0).then_some(result.league_score_gain),
+            league_score_new: (result.league_score_new >= 0).then_some(result.league_score_new),
         });
     }
     let separate_team_ids =

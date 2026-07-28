@@ -7103,6 +7103,11 @@ impl GameApp {
                 )
             },
             |player_info_id| self.runtime_player_big_icons.get(&player_info_id).cloned(),
+            |player_info_id| {
+                self.control_player_infos
+                    .get(player_info_id)
+                    .map(|info| info.league_score)
+            },
         );
         let network_result = self.snapshot.round_results.network_result;
         let network_result_text =
