@@ -1,6 +1,7 @@
 mod address_packet;
 mod admission;
 mod advertise;
+mod capabilities;
 mod client_bootstrap;
 mod client_mesh;
 mod client_player_resource;
@@ -61,6 +62,10 @@ pub use admission::{
 pub use advertise::{
     discovery_reply_for_packet, encode_host_game_reference_response, encode_reference_response,
     HostGameAdvertiserError, NetworkGameAdvertiser, NetworkGameAdvertiserConfig,
+};
+pub use capabilities::{
+    decode_port_capabilities, encode_port_capabilities, PeerCapabilityRegistry, PortCapabilities,
+    PID_PORT_CAPABILITIES, PORT_CAPABILITY_VERSION,
 };
 pub use clonk_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 pub use control_latency::ControlLatencyEstimator;
