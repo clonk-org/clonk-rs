@@ -819,6 +819,27 @@ impl GameApp {
         self.hydrate_runtime_player_big_icons_unconditionally();
     }
 
+    /// `C4RoundResultsPlayer::EvaluatePlayer` copies `C4Player::BigIcon` into
+    /// the frozen round result while the player is still alive
+    /// (src/C4RoundResults.cpp:52-73,338-344), so an eliminated, retired or
+    /// disconnected player's icon outlives its removal and its player
+    /// resource. Freeze on that same event instead of only when the
+    /// evaluation dialog is constructed.
+    pub(crate) fn freeze_evaluated_player_big_icons(&mut self) {
+        let pending = self
+            .engine
+            .round_results
+            .players
+            .iter()
+            .map(|result| result.player_info_id)
+            .filter(|info_id| {
+                !self.runtime_player_big_icons.contains_key(info_id)
+                    && !self.runtime_player_big_icon_misses.contains(info_id)
+            })
+            .collect::<HashSet<_>>();
+        self.hydrate_player_big_icons(pending);
+    }
+
     fn hydrate_runtime_player_big_icons_unconditionally(&mut self) {
         let pending = self
             .engine
@@ -829,7 +850,10 @@ impl GameApp {
                     && !self.runtime_player_big_icon_misses.contains(info_id)
             })
             .collect::<HashSet<_>>();
+        self.hydrate_player_big_icons(pending);
+    }
 
+    fn hydrate_player_big_icons(&mut self, pending: HashSet<i32>) {
         for info_id in pending {
             let Some(info) = self.control_player_infos.get(info_id).cloned() else {
                 continue;

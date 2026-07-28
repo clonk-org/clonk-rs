@@ -2241,6 +2241,100 @@
         );
     }
 
+    // C4RoundResults::EvaluatePlayer copies C4Player::BigIcon when the player
+    // is evaluated, which for an eliminated or disconnected player happens
+    // inside the simulation, long before the evaluation dialog is built
+    // (src/C4RoundResults.cpp:52-73,338-344; src/C4PlayerList.cpp:241).
+    // Freezing only at dialog construction loses the icon once the player and
+    // its file/resource are gone.
+    #[test]
+    fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
+        let mut app = new_classic_running_sandbox_app();
+        let player_info_id = app
+            .snapshot
+            .players
+            .first()
+            .expect("sandbox player")
+            .player_info_id;
+        let icon = ImageData::new(1, 1, vec![9, 8, 7, 255]);
+        let file_name = "Departed.c4p".to_string();
+        app.control_player_infos.replace_snapshot(
+            player_info_id,
+            [clonk_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: player_info_id,
+                    name: LegacyCString::from_bytes(b"Departed".to_vec())
+                        .expect("fixture player name"),
+                    filename: LegacyCString::from_bytes(file_name.as_bytes().to_vec())
+                        .expect("fixture player filename"),
+                    ..Default::default()
+                }],
+                by_client: 0,
+            }],
+        );
+        app.startup_player_files.insert(
+            0,
+            StartupPlayerFile {
+                path: PathBuf::from(&file_name),
+                file_name,
+                player_file: PlayerFile::default(),
+                render_model: clonk_frontend::startup_plrsel::PlrSelPlayer {
+                    name: "Departed".into(),
+                    activated: true,
+                    big_icon: Some(icon.clone()),
+                    portrait: None,
+                    color_dw: 0,
+                    score: 0,
+                    rounds: 0,
+                    rounds_won: 0,
+                    rounds_lost: 0,
+                    total_playing_time: 0,
+                    comment: String::new(),
+                },
+            },
+        );
+        app.runtime_player_big_icons.clear();
+        app.runtime_player_big_icon_misses.clear();
+
+        // The player is evaluated and retired inside the simulation.
+        app.engine
+            .round_results
+            .players
+            .push(clonk_engine::RoundResultsPlayerState {
+                player_info_id,
+                ..clonk_engine::RoundResultsPlayerState::default()
+            });
+        app.freeze_evaluated_player_big_icons();
+        assert_eq!(
+            app.runtime_player_big_icons.get(&player_info_id),
+            Some(&icon),
+            "evaluation copies the icon while the player still exists"
+        );
+
+        // Its player file and resource then depart, so nothing can supply the
+        // icon any more.
+        app.startup_player_files.clear();
+        app.control_player_infos.replace_snapshot(player_info_id + 1, []);
+        app.snapshot.round_results.players = vec![clonk_engine::RoundResultsPlayerState {
+            player_info_id,
+            ..clonk_engine::RoundResultsPlayerState::default()
+        }];
+
+        app.handle_game_over().expect("show evaluation dialog");
+        assert_eq!(
+            app.game_over_dialog
+                .as_ref()
+                .expect("evaluation dialog")
+                .evaluation()
+                .player_by_info_id(player_info_id)
+                .and_then(|player| player.big_icon.as_ref()),
+            Some(&icon),
+            "the dialog consumes the elimination-time snapshot"
+        );
+    }
+
     #[test]
     fn every_game_over_icon_source_obeys_global_then_overlay_preflight() {
         let mut app = new_game_over_keyboard_app();
