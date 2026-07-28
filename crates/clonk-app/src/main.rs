@@ -361,6 +361,10 @@ fn main() -> Result<()> {
         );
     }
     clonk_logging::install_panic_hook();
+    clonk_logging::log_startup_banner(
+        clonk_core::version::PORT_VERSION,
+        clonk_core::version::ENGINE_VERSION_COMPACT,
+    );
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
             tracing::warn!(

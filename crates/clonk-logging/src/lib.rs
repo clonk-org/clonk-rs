@@ -291,6 +291,23 @@ pub fn init_verbose_with_file_and_capture(
     }
 }
 
+/// Record the build and platform a session ran on, as its first log line.
+///
+/// A log without this is not self-diagnosing: the two version numbers diverge
+/// deliberately, and almost every triage question starts with which build on
+/// which platform. Emitting it once, immediately after install, means every
+/// attached log answers that before the first real event.
+pub fn log_startup_banner(port_version: &str, engine_version: &str) {
+    tracing::info!(
+        port_version,
+        engine_version,
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        debug_assertions = cfg!(debug_assertions),
+        "starting clonk"
+    );
+}
+
 /// Route panics through the log before the process dies.
 ///
 /// The default hook writes straight to stderr, which bypasses the session log
