@@ -5053,8 +5053,12 @@ impl GameApp {
                     self.begin_startup_dialog_fade_in();
                 }
                 self.begin_frontend_music_entry();
-                if self.auto_open_update_dialog {
-                    self.auto_open_update_dialog = false;
+                // Both are consumed unconditionally: C++ applies an incoming
+                // package and then honours a requested check, so neither may
+                // survive into the next boot.
+                let had_incoming = self.incoming_update.take().is_some();
+                let check_requested = std::mem::take(&mut self.update_check_requested);
+                if had_incoming || check_requested {
                     if let Err(err) = self.open_launcher_update_dialog() {
                         tracing::warn!(error = ?err, "failed to open command-line update hand-off");
                     }

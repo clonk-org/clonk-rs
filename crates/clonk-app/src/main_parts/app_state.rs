@@ -533,9 +533,14 @@ pub(crate) struct GameApp {
     /// either its local loader or prepared host, avoiding a race between the
     /// independent workers.
     pub(crate) auto_start_classic_command_line_scenario: bool,
-    /// One-shot launcher/package-manager hand-off for `/update`,
-    /// `clonk:update`, or an incoming `.c4u` package.
-    pub(crate) auto_open_update_dialog: bool,
+    /// A `.c4u` package handed to the process on the command line.
+    ///
+    /// Kept apart from [`Self::update_check_requested`] because C++ applies an
+    /// incoming package and *then* honours a requested check
+    /// (`C4StartupMainDlg::OnShown`, cpp:259-269); they are not alternatives.
+    pub(crate) incoming_update: Option<PathBuf>,
+    /// A one-shot update check requested by `/update` or `clonk:update`.
+    pub(crate) update_check_requested: bool,
     /// Raw window position used by C4GUI-style viewport/menu hit-testing.
     /// Gameplay keeps a separate pointer because C4MouseControl clamps raw
     /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
