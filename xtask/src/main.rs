@@ -98,7 +98,7 @@ fn main() -> Result<()> {
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir>  Describe the emitted update components for in-app updating.\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir> --content-commit <sha> --content-sha256 <hex> --content-size <bytes>  Describe the update components for in-app updating.\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
     );
 }
 
@@ -884,7 +884,7 @@ fn parity_command(args: &[String]) -> Result<()> {
 fn update_manifest_command(args: &[String]) -> Result<()> {
     if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
         tracing::info!(
-            "Usage:\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir>"
+            "Usage:\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir> --content-commit <sha> --content-sha256 <hex> --content-size <bytes>"
         );
         return Ok(());
     }
@@ -941,6 +941,24 @@ const UPDATE_TRIPLE_ALIASES: [(&str, &str); 3] = [
     ("x86_64-apple-darwin", MACOS_UNIVERSAL_TRIPLE),
 ];
 
+/// The repository that builds and publishes the `content` archive.
+///
+/// It is the repository the game data lives in, and the *only* builder of those
+/// bytes. This one used to build them too and re-upload 225 MB on every daily
+/// release; two content-addressed producers would have to agree byte for byte
+/// forever, so it stopped and references the published artifact instead. See
+/// [`components::ComponentId::BUILT`].
+const CONTENT_REPOSITORY: &str = "syb0rg/clonk-rs-content";
+
+/// The asset name that repository publishes.
+const CONTENT_ARCHIVE: &str = "content.zip";
+
+/// The tag naming a content commit's release, which is how the `content`
+/// submodule pin resolves to an artifact with no lookup table in between.
+fn content_release_tag(commit: &str) -> String {
+    format!("content-{commit}")
+}
+
 /// The triple recorded against a shared archive.
 ///
 /// `content` and `planet` are byte-identical everywhere, so `build_manifest`
@@ -969,6 +987,16 @@ struct GenerateManifestOptions {
     /// because the name is part of the client contract — clients fetch
     /// `releases/latest/download/manifest.json` and nothing else.
     out_dir: PathBuf,
+    /// The `content` submodule pin, which names the release in
+    /// [`CONTENT_REPOSITORY`] that publishes the archive this release points at.
+    content_commit: String,
+    /// The digest that release published, as its `content.sha256` sidecar
+    /// records it. Copied rather than recomputed: recomputing would mean
+    /// downloading 225 MB into the publishing job to learn something the
+    /// producer already stated, and a mismatch is caught by the client anyway.
+    content_sha256: String,
+    /// The published asset's size, used for the client's disk-space check.
+    content_size: u64,
 }
 
 impl GenerateManifestOptions {
@@ -977,6 +1005,9 @@ impl GenerateManifestOptions {
         let mut released_at = None;
         let mut components_dir = None;
         let mut out_dir = None;
+        let mut content_commit = None;
+        let mut content_sha256 = None;
+        let mut content_size = None;
 
         let mut index = 0;
         while index < arguments.len() {
@@ -1002,20 +1033,72 @@ impl GenerateManifestOptions {
                 "--released-at" => released_at = Some(value),
                 "--components" => components_dir = Some(PathBuf::from(value)),
                 "--out-dir" => out_dir = Some(PathBuf::from(value)),
+                "--content-commit" => content_commit = Some(value),
+                "--content-sha256" => content_sha256 = Some(value),
+                "--content-size" => content_size = Some(value),
                 other => bail!("unexpected argument `{other}` for `update-manifest generate`"),
             }
         }
 
         // Every field is required: defaulting any of them would publish a
-        // manifest that quietly describes the wrong release.
+        // manifest that quietly describes the wrong release. Resolved in the
+        // order they are documented, so an omitted argument is reported as
+        // itself rather than as whichever check happened to run first.
+        let version = version.ok_or_else(|| missing_manifest_argument("--version"))?;
+        let released_at = released_at.ok_or_else(|| missing_manifest_argument("--released-at"))?;
+        let components_dir =
+            components_dir.ok_or_else(|| missing_manifest_argument("--components"))?;
+        let out_dir = out_dir.ok_or_else(|| missing_manifest_argument("--out-dir"))?;
+
+        // The `content` arguments especially: that archive is not in the
+        // components directory to be missed, so nothing downstream would
+        // notice its absence.
+        let content_commit = content_commit
+            .filter(|commit| is_commit_sha(commit))
+            .ok_or_else(|| {
+                anyhow!(
+                    "`update-manifest generate` needs `--content-commit <40 hex digits>`, the \
+                     `content` submodule pin whose release publishes {CONTENT_ARCHIVE}"
+                )
+            })?;
+        let content_sha256 = content_sha256
+            .filter(|digest| is_sha256_hex(digest))
+            .ok_or_else(|| {
+                anyhow!(
+                    "`update-manifest generate` needs `--content-sha256 <64 hex digits>`; with no \
+                     manifest signature that digest is the whole integrity story for {CONTENT_ARCHIVE}"
+                )
+            })?;
+        let content_size = content_size
+            .and_then(|size| size.parse::<u64>().ok())
+            .filter(|size| *size > 0)
+            .ok_or_else(|| {
+                anyhow!("`update-manifest generate` needs `--content-size <bytes>`, above zero")
+            })?;
+
         Ok(Self {
-            version: version.ok_or_else(|| missing_manifest_argument("--version"))?,
-            released_at: released_at.ok_or_else(|| missing_manifest_argument("--released-at"))?,
-            components_dir: components_dir
-                .ok_or_else(|| missing_manifest_argument("--components"))?,
-            out_dir: out_dir.ok_or_else(|| missing_manifest_argument("--out-dir"))?,
+            version,
+            released_at,
+            components_dir,
+            out_dir,
+            content_commit,
+            content_sha256,
+            content_size,
         })
     }
+}
+
+/// A full Git object name, which is what a submodule pin always is.
+fn is_commit_sha(text: &str) -> bool {
+    text.len() == 40 && text.chars().all(|digit| digit.is_ascii_hexdigit())
+}
+
+/// Lowercase hex SHA-256, the form the manifest records and a client compares.
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .chars()
+            .all(|digit| digit.is_ascii_digit() || matches!(digit, 'a'..='f'))
 }
 
 fn missing_manifest_argument(name: &str) -> anyhow::Error {
@@ -1024,15 +1107,24 @@ fn missing_manifest_argument(name: &str) -> anyhow::Error {
 
 /// Which component an emitted archive is, and which triple it was built for.
 ///
-/// `None` means every triple: `content` and `planet` are prefix-free, so their
-/// bytes are identical on all four. `engine` is the reason the manifest is
-/// keyed by triple at all, and its filename is the only place that triple
-/// survives — the archives arrive in the publishing job as a flat directory.
+/// `None` means every triple: `planet` is prefix-free, so its bytes are
+/// identical on all four. `engine` is the reason the manifest is keyed by
+/// triple at all, and its filename is the only place that triple survives —
+/// the archives arrive in the publishing job as a flat directory.
 fn archive_identity(
     name: &str,
     version: &str,
 ) -> Result<(components::ComponentId, Option<String>)> {
-    components::ComponentId::ALL
+    // A content archive here would be a second builder of bytes that must stay
+    // identical forever, which is exactly what moving the build away removed.
+    if name == CONTENT_ARCHIVE || name.starts_with("content-") {
+        bail!(
+            "`{name}` is a content archive, and content is built and published by \
+             {CONTENT_REPOSITORY}; this release references that artifact rather than \
+             uploading one of its own"
+        );
+    }
+    components::ComponentId::BUILT
         .into_iter()
         .filter(|component| component.is_platform_independent())
         .find(|component| name.starts_with(&format!("{}-", component.name())))
@@ -1204,14 +1296,35 @@ fn serve_retired_triples(
     scanned.iter().cloned().chain(aliased).collect()
 }
 
+/// The `content` entry, describing an archive this repository does not build.
+///
+/// Everything about it comes from the content repository's release: the tag
+/// derives from the submodule pin, and the digest and size are what that
+/// release published. Nothing is recomputed, because recomputing would require
+/// the second builder this arrangement exists to remove.
+fn referenced_content(options: &GenerateManifestOptions) -> manifest::ReferencedComponent {
+    manifest::ReferencedComponent {
+        id: components::ComponentId::Content,
+        source: manifest::ArchiveSource {
+            repo: CONTENT_REPOSITORY.to_string(),
+            tag: content_release_tag(&options.content_commit),
+        },
+        archive: CONTENT_ARCHIVE.to_string(),
+        sha256: options.content_sha256.clone(),
+        size: options.content_size,
+    }
+}
+
 fn generate_update_manifest(options: GenerateManifestOptions) -> Result<()> {
     let scanned = scan_emitted_components(&options.components_dir, &options.version)?;
     let emitted = serve_retired_triples(&scanned);
+    let referenced = [referenced_content(&options)];
     let manifest = manifest::build_manifest(
         &options.version,
         clonk_core::version::ENGINE_VERSION,
         &options.released_at,
         &emitted,
+        &referenced,
         &UPDATE_TARGET_TRIPLES,
     );
     // Checked before anything is written, so a refused manifest leaves no
@@ -1330,7 +1443,9 @@ enum ComponentSelection {
     None,
     /// Just this platform's binaries.
     Engine,
-    /// Binaries plus the platform-independent `planet` and `content`.
+    /// Binaries plus the platform-independent `planet`. Not `content`: that
+    /// archive is published by [`CONTENT_REPOSITORY`], and building a second
+    /// one here is precisely what must not happen.
     All,
 }
 
@@ -1398,12 +1513,13 @@ fn package(options: PackageOptions) -> Result<()> {
 
     // Shared components are emitted from the flat layout, before the macOS
     // bundle relocates `planet` and `content` into `Contents/Resources`, and
-    // before any platform prefix could reach their entry names.
+    // before any platform prefix could reach their entry names. `content` is
+    // not among them: the content repository builds and publishes that archive.
     if options.components.includes_shared() {
-        for component in [
-            components::ComponentId::Planet,
-            components::ComponentId::Content,
-        ] {
+        for component in components::ComponentId::BUILT
+            .into_iter()
+            .filter(|component| component.is_platform_independent())
+        {
             let emitted = emit_update_component(component, &package_dir, &components_dir, &paths)?;
             tracing::info!(
                 path = %emitted.path.display(),
@@ -3130,6 +3246,12 @@ mod tests {
                 "components".to_string(),
                 "--out-dir".to_string(),
                 "release".to_string(),
+                "--content-commit".to_string(),
+                CONTENT_COMMIT_FIXTURE.to_string(),
+                "--content-sha256".to_string(),
+                CONTENT_SHA256_FIXTURE.to_string(),
+                "--content-size".to_string(),
+                "236117973".to_string(),
             ])
             .expect("the release workflow's arguments parse"),
             GenerateManifestOptions {
@@ -3137,6 +3259,9 @@ mod tests {
                 released_at: "2026-07-28T10:00:00Z".to_string(),
                 components_dir: PathBuf::from("components"),
                 out_dir: PathBuf::from("release"),
+                content_commit: CONTENT_COMMIT_FIXTURE.to_string(),
+                content_sha256: CONTENT_SHA256_FIXTURE.to_string(),
+                content_size: 236_117_973,
             }
         );
     }
@@ -3161,9 +3286,84 @@ mod tests {
         );
     }
 
-    /// The five archives a complete release run leaves in
-    /// `target/dist/components`: one engine build per shipped *build*, plus the
-    /// two shared components.
+    #[test]
+    fn a_manifest_without_the_published_content_release_is_refused() {
+        // The content archive is not in the components directory to be found,
+        // so nothing else would notice it missing: the manifest would simply
+        // ship without game data and every client would stop receiving it.
+        for missing in ["--content-commit", "--content-sha256", "--content-size"] {
+            let arguments: Vec<String> = [
+                "--version",
+                "0.4.0",
+                "--released-at",
+                "2026-07-28T10:00:00Z",
+                "--components",
+                "components",
+                "--out-dir",
+                "release",
+                "--content-commit",
+                CONTENT_COMMIT_FIXTURE,
+                "--content-sha256",
+                CONTENT_SHA256_FIXTURE,
+                "--content-size",
+                "236117973",
+            ]
+            .chunks(2)
+            .filter(|pair| pair[0] != missing)
+            .flatten()
+            .map(|argument| argument.to_string())
+            .collect();
+
+            let error = GenerateManifestOptions::parse(&arguments)
+                .expect_err("a manifest that cannot reach content must not be generated");
+            assert!(
+                error.to_string().contains(missing),
+                "error names the missing argument: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_content_release_that_cannot_be_verified_is_refused() {
+        // The recorded digest is the whole integrity story for 225 MB with no
+        // signature behind it. A malformed one fails every client *after* the
+        // download, so it has to fail here instead.
+        for (commit, sha256, size) in [
+            ("not-a-commit", CONTENT_SHA256_FIXTURE, "236117973"),
+            (CONTENT_COMMIT_FIXTURE, "abc", "236117973"),
+            (CONTENT_COMMIT_FIXTURE, &CONTENT_SHA256_FIXTURE[..63], "1"),
+            (CONTENT_COMMIT_FIXTURE, CONTENT_SHA256_FIXTURE, "0"),
+            (CONTENT_COMMIT_FIXTURE, CONTENT_SHA256_FIXTURE, "huge"),
+        ] {
+            assert!(
+                GenerateManifestOptions::parse(&[
+                    "--version".to_string(),
+                    "0.4.0".to_string(),
+                    "--released-at".to_string(),
+                    "2026-07-28T10:00:00Z".to_string(),
+                    "--components".to_string(),
+                    "components".to_string(),
+                    "--out-dir".to_string(),
+                    "release".to_string(),
+                    "--content-commit".to_string(),
+                    commit.to_string(),
+                    "--content-sha256".to_string(),
+                    sha256.to_string(),
+                    "--content-size".to_string(),
+                    size.to_string(),
+                ])
+                .is_err(),
+                "commit {commit:?} / digest {sha256:?} / size {size:?} must be refused"
+            );
+        }
+    }
+
+    /// The four archives a complete release run leaves in
+    /// `target/dist/components`: one engine build per shipped *build*, plus
+    /// `planet`.
+    ///
+    /// `content` is absent because this repository no longer builds it — it is
+    /// referenced from the content repository's own release instead.
     ///
     /// Three engine archives for five shipped triples: macOS ships one
     /// universal build for both of its triples, and Windows serves its retired
@@ -3181,7 +3381,7 @@ mod tests {
 
     /// `(archive name, bytes)`. The digests asserted below were taken from
     /// `shasum -a 256` over these exact strings, not from the code under test.
-    const RELEASE_COMPONENTS_FIXTURE: [(&str, &str); 5] = [
+    const RELEASE_COMPONENTS_FIXTURE: [(&str, &str); 4] = [
         (
             "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
             "linux engine",
@@ -3195,14 +3395,30 @@ mod tests {
             "universal macos engine",
         ),
         (
-            "content-00112233445566778899aabbccddeeff.zip",
-            "shared content",
-        ),
-        (
             "planet-ffeeddccbbaa99887766554433221100.zip",
             "shared planet",
         ),
     ];
+
+    /// The `content` submodule pin the publishing job would resolve.
+    const CONTENT_COMMIT_FIXTURE: &str = "d34d385591134ce6c262b8c9ed53faaa6229cc6b";
+    /// The digest that commit's content release published.
+    const CONTENT_SHA256_FIXTURE: &str =
+        "9cf12dcd98c461a96039ca6ed9be926301ddaf457d572b8a82981fe567819c2b";
+
+    /// The options the publishing job passes, with the content release the
+    /// submodule pin resolves to.
+    fn manifest_options(components_dir: &Path, out_dir: &Path) -> GenerateManifestOptions {
+        GenerateManifestOptions {
+            version: "0.4.0".to_string(),
+            released_at: "2026-07-28T10:00:00Z".to_string(),
+            components_dir: components_dir.to_path_buf(),
+            out_dir: out_dir.to_path_buf(),
+            content_commit: CONTENT_COMMIT_FIXTURE.to_string(),
+            content_sha256: CONTENT_SHA256_FIXTURE.to_string(),
+            content_size: 236_117_973,
+        }
+    }
 
     /// Generates a manifest from `components` and reads back the published
     /// bytes, so the assertions are about the document a client downloads.
@@ -3211,13 +3427,8 @@ mod tests {
         // Nested, because the publishing job writes the manifest beside assets
         // it has only just downloaded.
         let out_dir = out.path().join("release");
-        generate_update_manifest(GenerateManifestOptions {
-            version: "0.4.0".to_string(),
-            released_at: "2026-07-28T10:00:00Z".to_string(),
-            components_dir: components.path().to_path_buf(),
-            out_dir: out_dir.clone(),
-        })
-        .expect("generate the manifest");
+        generate_update_manifest(manifest_options(components.path(), &out_dir))
+            .expect("generate the manifest");
 
         let bytes = fs::read(out_dir.join("manifest.json")).expect("read the manifest");
         serde_json::from_slice(&bytes).expect("the manifest parses")
@@ -3363,33 +3574,78 @@ mod tests {
     }
 
     #[test]
-    fn shared_components_are_offered_to_every_triple_as_the_same_bytes() {
-        // `content` and `planet` are prefix-free and identical everywhere;
-        // only where they unpack differs.
+    fn content_is_referenced_from_the_repository_that_publishes_it() {
+        // This repository no longer builds `content.zip`. It records where the
+        // content repository published it, the digest that release declared,
+        // and its size — so a client fetches the same bytes from the place they
+        // were produced instead of a daily re-upload of unchanged data.
+        let components = release_components_fixture();
+        let content = component_entry(&generated_manifest(&components), "content").clone();
+
+        let linux = &content.targets["x86_64-unknown-linux-gnu"];
+        assert_eq!(linux.archive, "content.zip");
+        let source = linux
+            .source
+            .as_ref()
+            .expect("content must name the release that publishes it");
+        assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+        // The tag names the exact commit the `content` submodule pins, so the
+        // pin resolves to an artifact with no lookup table in between.
+        assert_eq!(source.tag, format!("content-{CONTENT_COMMIT_FIXTURE}"));
+        assert_eq!(linux.sha256, CONTENT_SHA256_FIXTURE);
+        assert_eq!(linux.size, 236_117_973);
+        assert_eq!(linux.install, "content");
+
+        // Prefix-free and identical everywhere; only the destination differs.
+        let macos = &content.targets["aarch64-apple-darwin"];
+        assert_eq!(macos.source, linux.source);
+        assert_eq!(macos.sha256, linux.sha256);
+        assert_eq!(macos.install, "Contents/Resources/content");
+    }
+
+    #[test]
+    fn only_this_repository_s_own_components_omit_a_source() {
+        // Absence is the instruction to resolve against the clonk-rs release,
+        // so an engine archive that grew one would send clients elsewhere.
         let components = release_components_fixture();
         let manifest = generated_manifest(&components);
+        for name in ["engine", "planet"] {
+            assert!(
+                component_entry(&manifest, name)
+                    .targets
+                    .values()
+                    .all(|target| target.source.is_none()),
+                "{name} is built and published here"
+            );
+        }
+    }
 
-        let content = component_entry(&manifest, "content");
-        assert_eq!(
-            content.targets["x86_64-pc-windows-gnu"].archive,
-            "content-00112233445566778899aabbccddeeff.zip"
+    #[test]
+    fn a_content_archive_left_in_the_components_directory_is_refused() {
+        // Uploading one here would restore the second builder this change
+        // exists to remove, and the two would silently drift.
+        let components = release_components_fixture();
+        write_fixture(
+            &components
+                .path()
+                .join("content-00112233445566778899aabb.zip"),
+            b"stale content",
         );
-        assert_eq!(
-            content.targets["aarch64-apple-darwin"].sha256,
-            "150f3319880afbee1efd333db4a6c6d67cc3af240a1b10694762c23a051a37aa"
+
+        let error = scan_emitted_components(components.path(), "0.4.0")
+            .expect_err("this repository must not publish a content archive");
+        assert!(
+            error.to_string().contains(CONTENT_REPOSITORY),
+            "error points at the repository that owns content: {error}"
         );
-        assert_eq!(
-            content.targets["x86_64-unknown-linux-gnu"].sha256,
-            content.targets["aarch64-apple-darwin"].sha256
-        );
-        assert_eq!(
-            content.targets["x86_64-unknown-linux-gnu"].install,
-            "content"
-        );
-        assert_eq!(
-            content.targets["aarch64-apple-darwin"].install,
-            "Contents/Resources/content"
-        );
+    }
+
+    #[test]
+    fn shared_components_are_offered_to_every_triple_as_the_same_bytes() {
+        // `planet` is prefix-free and identical everywhere; only where it
+        // unpacks differs.
+        let components = release_components_fixture();
+        let manifest = generated_manifest(&components);
 
         let planet = component_entry(&manifest, "planet");
         assert_eq!(
@@ -3433,7 +3689,7 @@ mod tests {
             scan_emitted_components(components.path(), "0.4.0")
                 .expect("scan the components")
                 .len(),
-            5
+            4
         );
     }
 
@@ -3465,13 +3721,8 @@ mod tests {
         }
         let out = TempDir::new().expect("temporary output directory");
 
-        let error = generate_update_manifest(GenerateManifestOptions {
-            version: "0.4.0".to_string(),
-            released_at: "2026-07-28T10:00:00Z".to_string(),
-            components_dir: components.path().to_path_buf(),
-            out_dir: out.path().to_path_buf(),
-        })
-        .expect_err("a manifest that strands a platform must not be published");
+        let error = generate_update_manifest(manifest_options(components.path(), out.path()))
+            .expect_err("a manifest that strands a platform must not be published");
 
         // Every Mac triple, not just the one that was not built: the aliases
         // are what the two architecture triples resolve through, so a missing
@@ -3525,13 +3776,8 @@ mod tests {
         );
         let out = TempDir::new().expect("temporary output directory");
 
-        let error = generate_update_manifest(GenerateManifestOptions {
-            version: "0.4.0".to_string(),
-            released_at: "2026-07-28T10:00:00Z".to_string(),
-            components_dir: components.path().to_path_buf(),
-            out_dir: out.path().to_path_buf(),
-        })
-        .expect_err("a triple the release does not ship must not reach the manifest");
+        let error = generate_update_manifest(manifest_options(components.path(), out.path()))
+            .expect_err("a triple the release does not ship must not reach the manifest");
         assert!(
             error.to_string().contains("riscv64gc-unknown-linux-gnu"),
             "error names the unshipped triple: {error}"

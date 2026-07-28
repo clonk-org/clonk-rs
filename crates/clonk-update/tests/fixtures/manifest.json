@@ -14,13 +14,21 @@
       "name": "content",
       "targets": {
         "aarch64-apple-darwin": {
-          "archive": "content-bb.zip",
+          "archive": "content.zip",
+          "source": {
+            "repo": "syb0rg/clonk-rs-content",
+            "tag": "content-bb"
+          },
           "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "size": 250000000,
           "install": "Contents/Resources/content"
         },
         "x86_64-unknown-linux-gnu": {
-          "archive": "content-bb.zip",
+          "archive": "content.zip",
+          "source": {
+            "repo": "syb0rg/clonk-rs-content",
+            "tag": "content-bb"
+          },
           "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "size": 250000000,
           "install": "content"

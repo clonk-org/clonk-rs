@@ -28,10 +28,28 @@ use std::path::Path;
 /// Bumped only when an older client must refuse to read a newer manifest.
 pub const MANIFEST_SCHEMA: u32 = 1;
 
+/// The release an archive is published in, when that is not this repository's.
+///
+/// Mirrored by `clonk_update::ArchiveSource`, which the client reads, and
+/// resolved into a URL by `clonk_update_net::urls` — which refuses anything
+/// here that could leave the release it names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveSource {
+    /// `owner/name` of the GitHub repository holding the release.
+    pub repo: String,
+    /// The release tag inside `repo`.
+    pub tag: String,
+}
+
 /// What one target triple downloads for a component, and where it lands.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TargetArchive {
     pub archive: String,
+    /// Where `archive` was published, when that is not this release. Omitted
+    /// from the serialised document for everything this repository builds, so
+    /// its absence stays the instruction to look in the clonk-rs release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ArchiveSource>,
     pub sha256: String,
     pub size: u64,
     /// Destination relative to the install root. Empty for `engine`, whose
@@ -95,7 +113,27 @@ fn install_destination(component: ComponentId, triple: &str) -> String {
     }
 }
 
-/// Builds a manifest from every emitted archive across all platform passes.
+/// A component this repository references rather than builds.
+///
+/// `content` is the only one: its archive is published by the repository the
+/// game data lives in, and this records what that release declared. Nothing is
+/// recomputed here — the digest is the one the producer published, because
+/// recomputing it would require the very second builder this arrangement
+/// exists to avoid.
+///
+/// Referenced components are offered to every triple, which holds for anything
+/// prefix-free. A platform-specific one would need a `built_for` of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferencedComponent {
+    pub id: ComponentId,
+    pub source: ArchiveSource,
+    pub archive: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// Builds a manifest from every emitted archive across all platform passes,
+/// plus the components published elsewhere.
 ///
 /// `emitted` may contain several `engine` archives — one per triple, produced
 /// on different runners — each keyed by the triple it was built for.
@@ -104,9 +142,28 @@ pub fn build_manifest(
     engine_version: [i32; 5],
     released_at: &str,
     emitted: &[(String, EmittedComponent)],
+    referenced: &[ReferencedComponent],
     triples: &[&str],
 ) -> Manifest {
     let mut by_component: BTreeMap<String, BTreeMap<String, TargetArchive>> = BTreeMap::new();
+
+    for component in referenced {
+        for triple in triples {
+            by_component
+                .entry(component.id.name().to_string())
+                .or_default()
+                .insert(
+                    (*triple).to_string(),
+                    TargetArchive {
+                        archive: component.archive.clone(),
+                        source: Some(component.source.clone()),
+                        sha256: component.sha256.clone(),
+                        size: component.size,
+                        install: install_destination(component.id, triple),
+                    },
+                );
+        }
+    }
 
     for (built_for, component) in emitted {
         let archive = component
@@ -130,6 +187,9 @@ pub fn build_manifest(
                     triple.to_string(),
                     TargetArchive {
                         archive: archive.clone(),
+                        // Built and uploaded here, so the clonk-rs release this
+                        // manifest describes is where it resolves.
+                        source: None,
                         sha256: component.sha256.clone(),
                         size: component.size,
                         install: install_destination(component.id, triple),
@@ -194,16 +254,22 @@ mod tests {
                     size: 18_000_000,
                 },
             ),
-            (
-                "x86_64-unknown-linux-gnu".to_string(),
-                EmittedComponent {
-                    id: ComponentId::Content,
-                    path: PathBuf::from("content-bb.zip"),
-                    sha256: "bb".repeat(32),
-                    size: 250_000_000,
-                },
-            ),
         ]
+    }
+
+    /// `content`, which the content repository publishes and this one only
+    /// points at.
+    fn referenced() -> Vec<ReferencedComponent> {
+        vec![ReferencedComponent {
+            id: ComponentId::Content,
+            source: ArchiveSource {
+                repo: "syb0rg/clonk-rs-content".to_string(),
+                tag: "content-bb".to_string(),
+            },
+            archive: "content.zip".to_string(),
+            sha256: "bb".repeat(32),
+            size: 250_000_000,
+        }]
     }
 
     fn manifest() -> Manifest {
@@ -212,6 +278,7 @@ mod tests {
             [4, 9, 11, 0, 362],
             "2026-07-28T10:00:00Z",
             &emitted(),
+            &referenced(),
             &["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"],
         )
     }
@@ -321,6 +388,40 @@ mod tests {
             engine.targets["aarch64-apple-darwin"].sha256,
             "different builds must not share a digest"
         );
+    }
+
+    #[test]
+    fn a_referenced_component_records_the_release_that_publishes_it() {
+        // Without this the entry would resolve against the clonk-rs release,
+        // where the archive no longer is — a 404 for every client, with the
+        // manifest itself looking perfectly well-formed.
+        let manifest = manifest();
+        let content = manifest
+            .components
+            .iter()
+            .find(|entry| entry.name == "content")
+            .expect("content entry");
+        for target in content.targets.values() {
+            let source = target.source.as_ref().expect("content names its release");
+            assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+            assert_eq!(source.tag, "content-bb");
+            assert_eq!(target.archive, "content.zip");
+        }
+    }
+
+    #[test]
+    fn a_component_built_here_records_no_source() {
+        // Absence is what tells a client to look in the clonk-rs release.
+        let manifest = manifest();
+        let engine = manifest
+            .components
+            .iter()
+            .find(|entry| entry.name == "engine")
+            .expect("engine entry");
+        assert!(engine
+            .targets
+            .values()
+            .all(|target| target.source.is_none()));
     }
 
     #[test]

@@ -16,6 +16,11 @@
 //!    identical on every platform. Their names are their own digests, so a
 //!    platform-dependent prefix would produce four different hashes for
 //!    identical data and defeat deduplication entirely.
+//!
+//! `content` is a component a client fetches but this repository does **not**
+//! build — see [`ComponentId::BUILT`]. It is published by the repository the
+//! game data lives in, so 225 MB of unchanged bytes stop being re-uploaded on
+//! every daily release.
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -33,11 +38,23 @@ pub enum ComponentId {
 }
 
 impl ComponentId {
+    /// Every component a client resolves, whoever produced it.
     pub const ALL: [ComponentId; 3] = [
         ComponentId::Engine,
         ComponentId::Planet,
         ComponentId::Content,
     ];
+
+    /// The components this repository builds.
+    ///
+    /// `content` is missing on purpose. Its archive is content-addressed, so
+    /// two "deterministic zip" implementations would have to agree byte for
+    /// byte forever — the day they drifted, the digest would move without the
+    /// content moving and every install would re-fetch 225 MB. There is
+    /// therefore exactly one builder, and it is `clonk-rs-content`, beside the
+    /// files it is made of. This repository *references* what that release
+    /// published: see `CONTENT_REPOSITORY` in `main.rs`.
+    pub const BUILT: [ComponentId; 2] = [ComponentId::Engine, ComponentId::Planet];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -354,6 +371,25 @@ mod tests {
         }
         assert!(!ComponentId::Engine.claims_top_level("planet"));
         assert!(!ComponentId::Planet.claims_top_level("content"));
+    }
+
+    #[test]
+    fn content_is_referenced_rather_than_built_here() {
+        // There must be exactly one builder of `content.zip`, and it is the
+        // repository the game data lives in. Two deterministic-zip
+        // implementations would have to agree byte for byte forever; the day
+        // they drifted, the digest would move without the content moving and
+        // every install would re-fetch 225 MB.
+        assert_eq!(
+            ComponentId::BUILT,
+            [ComponentId::Engine, ComponentId::Planet],
+            "content is published by the content repository"
+        );
+        // Still a component a client downloads and applies — only the building
+        // moved, so dropping it from `ALL` would stop shipping game data.
+        assert!(ComponentId::ALL.contains(&ComponentId::Content));
+        // And it still ships in the installer, so it must still be claimed.
+        assert!(ComponentId::Content.claims_top_level("content"));
     }
 
     #[test]

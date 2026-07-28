@@ -70,3 +70,39 @@ fn a_shared_component_is_the_same_bytes_everywhere_it_lands() {
     assert_eq!(linux.install, "content");
     assert_eq!(macos.install, "Contents/Resources/content");
 }
+
+#[test]
+fn content_is_resolved_from_the_repository_that_publishes_it() {
+    // `content.zip` is built and published where the game data lives, so the
+    // producer records the release it came from. A client that dropped this
+    // field would resolve the entry against a clonk-rs release that does not
+    // carry the asset — a 404 behind a manifest that parses perfectly.
+    let manifest = Manifest::parse(FIXTURE.as_bytes()).expect("parse");
+    let content = manifest
+        .components
+        .iter()
+        .find(|entry| entry.name == "content")
+        .expect("content entry");
+
+    for (triple, target) in &content.targets {
+        let source = target
+            .source
+            .as_ref()
+            .unwrap_or_else(|| panic!("content/{triple} must name its release"));
+        assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+        assert!(source.tag.starts_with("content-"), "{}", source.tag);
+        assert_eq!(target.archive, "content.zip");
+    }
+
+    // The mirror image: everything this repository builds omits the field, and
+    // that absence is what routes it to the clonk-rs release.
+    let engine = manifest
+        .components
+        .iter()
+        .find(|entry| entry.name == "engine")
+        .expect("engine entry");
+    assert!(engine
+        .targets
+        .values()
+        .all(|target| target.source.is_none()));
+}
