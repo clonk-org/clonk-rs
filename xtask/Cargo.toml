@@ -14,6 +14,7 @@ default-run = "xtask"
 [features]
 default = []
 engine-tools = [
+    "dep:clonk-core",
     "dep:clonk-engine",
     "dep:clonk-network",
     "dep:clonk-logging",
@@ -34,13 +35,17 @@ anyhow = "1"
 image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"], optional = true }
 walkdir = { version = "2", optional = true }
 zip = { version = "0.6", default-features = false, features = ["deflate"], optional = true }
+# Only for `ENGINE_VERSION`, which the update manifest carries so a client can
+# refuse content built for a newer engine.
+clonk-core = { path = "../crates/clonk-core", optional = true }
 clonk-engine = { path = "../crates/clonk-engine", optional = true }
 clonk-network = { path = "../crates/clonk-network", optional = true }
 clonk-logging = { path = "../crates/clonk-logging", optional = true }
 clonk-resources = { path = "../crates/clonk-resources", optional = true }
 tracing = { version = "0.1", optional = true }
-# Already in the lock via rustls; used here for SHA-256 over component archives
-# and Ed25519 over the update manifest, so no new third-party code is pulled in.
+# Already in the lock via rustls; used here for SHA-256 over component
+# archives, so no new third-party code is pulled in. There is no manifest
+# signature — see the trust-model note in `src/manifest.rs`.
 ring = { version = "0.17", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }

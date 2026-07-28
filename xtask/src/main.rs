@@ -61,6 +61,10 @@ fn main() -> Result<()> {
             let tail: Vec<String> = args.collect();
             parity_command(&tail)
         }
+        Some("update-manifest") => {
+            let tail: Vec<String> = args.collect();
+            update_manifest_command(&tail)
+        }
         Some("scenario-sweep") => {
             let tail: Vec<String> = args.collect();
             scenario_sweep_command(&tail)
@@ -79,7 +83,7 @@ fn main() -> Result<()> {
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir>  Describe the emitted update components for in-app updating.\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
     );
 }
 
@@ -855,6 +859,305 @@ fn parity_command(args: &[String]) -> Result<()> {
             other
         ),
     }
+}
+
+/// `cargo xtask update-manifest generate|--help`.
+///
+/// Runs in the publishing job once every platform has built, from the binary
+/// that job downloads rather than a fresh compile: the manifest only describes
+/// bytes that already exist.
+fn update_manifest_command(args: &[String]) -> Result<()> {
+    if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
+        tracing::info!(
+            "Usage:\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir>"
+        );
+        return Ok(());
+    }
+    match args[0].as_str() {
+        "generate" => generate_update_manifest(GenerateManifestOptions::parse(&args[1..])?),
+        other => bail!(
+            "unknown `update-manifest` subcommand `{}` (try `cargo xtask update-manifest --help`)",
+            other
+        ),
+    }
+}
+
+/// The triples a release ships, and therefore the ones every component must
+/// offer an archive for.
+const UPDATE_TARGET_TRIPLES: [&str; 4] = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+];
+
+/// The triple recorded against a shared archive.
+///
+/// `content` and `planet` are byte-identical everywhere, so `build_manifest`
+/// offers them to every triple and never reads this field. Deliberately empty
+/// rather than a real triple: were that ever to change, the manifest would
+/// carry a visibly empty key — which the coverage check below rejects —
+/// instead of quietly claiming `content` was built for Linux alone.
+const SHARED_ARCHIVE_TRIPLE: &str = "";
+
+/// Arguments for `cargo xtask update-manifest generate`.
+///
+/// The version and the release timestamp are passed in rather than read from
+/// the tree or the clock: the manifest must describe the commit that was
+/// built, and the publishing job runs after the builds, on another machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenerateManifestOptions {
+    /// The release version, as the workflow resolved it. Also the version the
+    /// engine archives must carry in their names.
+    version: String,
+    /// RFC 3339, and the client's replay guard: a client refuses a manifest
+    /// older than the one it already applied.
+    released_at: String,
+    /// Where the emitted component archives were downloaded to.
+    components_dir: PathBuf,
+    /// Where to write `manifest.json`. A directory rather than a file path
+    /// because the name is part of the client contract — clients fetch
+    /// `releases/latest/download/manifest.json` and nothing else.
+    out_dir: PathBuf,
+}
+
+impl GenerateManifestOptions {
+    fn parse(arguments: &[String]) -> Result<Self> {
+        let mut version = None;
+        let mut released_at = None;
+        let mut components_dir = None;
+        let mut out_dir = None;
+
+        let mut index = 0;
+        while index < arguments.len() {
+            // Both `--name value` and `--name=value`: the workflow writes the
+            // former, humans reach for the latter.
+            let (name, value) = match arguments[index].split_once('=') {
+                Some((name, value)) => {
+                    index += 1;
+                    (name.to_string(), value.to_string())
+                }
+                None => {
+                    let name = arguments[index].clone();
+                    let value = arguments
+                        .get(index + 1)
+                        .cloned()
+                        .ok_or_else(|| anyhow!("`{name}` needs a value"))?;
+                    index += 2;
+                    (name, value)
+                }
+            };
+            match name.as_str() {
+                "--version" => version = Some(value),
+                "--released-at" => released_at = Some(value),
+                "--components" => components_dir = Some(PathBuf::from(value)),
+                "--out-dir" => out_dir = Some(PathBuf::from(value)),
+                other => bail!("unexpected argument `{other}` for `update-manifest generate`"),
+            }
+        }
+
+        // Every field is required: defaulting any of them would publish a
+        // manifest that quietly describes the wrong release.
+        Ok(Self {
+            version: version.ok_or_else(|| missing_manifest_argument("--version"))?,
+            released_at: released_at.ok_or_else(|| missing_manifest_argument("--released-at"))?,
+            components_dir: components_dir
+                .ok_or_else(|| missing_manifest_argument("--components"))?,
+            out_dir: out_dir.ok_or_else(|| missing_manifest_argument("--out-dir"))?,
+        })
+    }
+}
+
+fn missing_manifest_argument(name: &str) -> anyhow::Error {
+    anyhow!("`update-manifest generate` needs `{name}`")
+}
+
+/// Which component an emitted archive is, and which triple it was built for.
+///
+/// `None` means every triple: `content` and `planet` are prefix-free, so their
+/// bytes are identical on all four. `engine` is the reason the manifest is
+/// keyed by triple at all, and its filename is the only place that triple
+/// survives — the archives arrive in the publishing job as a flat directory.
+fn archive_identity(
+    name: &str,
+    version: &str,
+) -> Result<(components::ComponentId, Option<String>)> {
+    components::ComponentId::ALL
+        .into_iter()
+        .filter(|component| component.is_platform_independent())
+        .find(|component| name.starts_with(&format!("{}-", component.name())))
+        .map(|component| Ok((component, None)))
+        .unwrap_or_else(|| {
+            engine_archive_triple(name, version)
+                .map(|triple| (components::ComponentId::Engine, Some(triple)))
+        })
+}
+
+/// The triple an engine archive was built for, read out of
+/// `clonk-rust-<version>-engine-<triple>.zip`.
+///
+/// The version is matched rather than skipped, so an archive left over from an
+/// earlier release cannot enter this manifest: it would name an asset this
+/// release never uploads, and every client on that triple would fail to fetch.
+fn engine_archive_triple(name: &str, version: &str) -> Result<String> {
+    name.strip_prefix(&format!("clonk-rust-{version}-engine-"))
+        .and_then(|rest| rest.strip_suffix(".zip"))
+        .filter(|triple| !triple.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            if name.contains("-engine-") {
+                anyhow!("`{name}` is an engine archive from another release, not {version}")
+            } else {
+                anyhow!(
+                    "`{name}` matches no update component; refusing to publish a partial manifest"
+                )
+            }
+        })
+}
+
+/// Reads back the component archives a release run emitted, hashing each one
+/// and pairing it with the triple it belongs to.
+///
+/// The digests are recomputed here rather than carried from the build jobs:
+/// the manifest must describe the bytes that are about to be uploaded, not
+/// what a different machine reported writing.
+fn scan_emitted_components(
+    directory: &Path,
+    version: &str,
+) -> Result<Vec<(String, components::EmittedComponent)>> {
+    let mut archives: Vec<PathBuf> = fs::read_dir(directory)
+        .with_context(|| {
+            format!(
+                "failed to read components directory {}",
+                directory.display()
+            )
+        })?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<io::Result<Vec<_>>>()
+        .with_context(|| format!("failed to list {}", directory.display()))?
+        .into_iter()
+        // Only zips claim to be components; the publishing job assembles
+        // release notes and checksums in the same tree.
+        .filter(|path| path.extension().is_some_and(|extension| extension == "zip"))
+        .collect();
+    // Sorted so the manifest does not depend on directory iteration order.
+    archives.sort();
+
+    let scanned = archives
+        .iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // An archive nobody recognises is a hard error: dropping it would
+            // publish a manifest that omits a shipped component, and clients
+            // would never learn the component existed.
+            let (id, triple) = archive_identity(&name, version)?;
+            let size = fs::metadata(path)
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .len();
+            Ok((
+                triple.unwrap_or_else(|| SHARED_ARCHIVE_TRIPLE.to_string()),
+                components::EmittedComponent {
+                    id,
+                    path: path.clone(),
+                    sha256: components::hex_digest(&components::sha256_file(path)?),
+                    size,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if scanned.is_empty() {
+        bail!(
+            "no component archives in {}; a manifest describing nothing would tell every \
+             client there is no update",
+            directory.display()
+        );
+    }
+    Ok(scanned)
+}
+
+/// Refuses a manifest that would leave some client with nothing to fetch.
+///
+/// The publishing job runs this *before* the tag: a release whose macOS pass
+/// never uploaded its engine archive has to fail loudly while the version can
+/// still be re-released, rather than publish a document that silently tells
+/// every Mac there is no engine for it.
+fn verify_every_triple_is_covered(manifest: &manifest::Manifest) -> Result<()> {
+    let missing: Vec<String> = components::ComponentId::ALL
+        .into_iter()
+        .flat_map(|component| {
+            let entry = manifest
+                .components
+                .iter()
+                .find(|entry| entry.name == component.name());
+            UPDATE_TARGET_TRIPLES
+                .into_iter()
+                .filter(move |triple| {
+                    entry.is_none_or(|entry| !entry.targets.contains_key(*triple))
+                })
+                .map(move |triple| format!("{}/{triple}", component.name()))
+        })
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "the update manifest offers nothing for {}; refusing to publish a release those \
+             clients could not complete",
+            missing.join(", ")
+        );
+    }
+
+    // The mirror image: an archive built for a triple this release does not
+    // ship would appear under no other component, so a client reading it could
+    // never assemble a complete install.
+    let unshipped: Vec<String> = manifest
+        .components
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .targets
+                .keys()
+                .filter(|triple| !UPDATE_TARGET_TRIPLES.contains(&triple.as_str()))
+                .map(move |triple| format!("{}/{triple}", entry.name))
+        })
+        .collect();
+    if !unshipped.is_empty() {
+        bail!(
+            "the update manifest describes {}, which this release does not ship for every \
+             component",
+            unshipped.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn generate_update_manifest(options: GenerateManifestOptions) -> Result<()> {
+    let emitted = scan_emitted_components(&options.components_dir, &options.version)?;
+    let manifest = manifest::build_manifest(
+        &options.version,
+        clonk_core::version::ENGINE_VERSION,
+        &options.released_at,
+        &emitted,
+        &UPDATE_TARGET_TRIPLES,
+    );
+    // Checked before anything is written, so a refused manifest leaves no
+    // half-valid document for a later step to pick up.
+    verify_every_triple_is_covered(&manifest)?;
+
+    fs::create_dir_all(&options.out_dir)
+        .with_context(|| format!("failed to create {}", options.out_dir.display()))?;
+    manifest::write_manifest(&options.out_dir, &manifest)?;
+
+    tracing::info!(
+        path = %options.out_dir.join("manifest.json").display(),
+        version = %manifest.version,
+        components = manifest.components.len(),
+        archives = emitted.len(),
+        "wrote update manifest"
+    );
+    Ok(())
 }
 
 fn record_engine_snapshots() -> Result<()> {
@@ -2556,6 +2859,367 @@ mod tests {
                 .exists(),
             "untracked Eke Reloaded content leaked into the package"
         );
+    }
+
+    #[test]
+    fn manifest_options_accept_the_arguments_the_release_workflow_passes() {
+        assert_eq!(
+            GenerateManifestOptions::parse(&[
+                "--version".to_string(),
+                "0.4.0".to_string(),
+                "--released-at".to_string(),
+                "2026-07-28T10:00:00Z".to_string(),
+                "--components".to_string(),
+                "components".to_string(),
+                "--out-dir".to_string(),
+                "release".to_string(),
+            ])
+            .expect("the release workflow's arguments parse"),
+            GenerateManifestOptions {
+                version: "0.4.0".to_string(),
+                released_at: "2026-07-28T10:00:00Z".to_string(),
+                components_dir: PathBuf::from("components"),
+                out_dir: PathBuf::from("release"),
+            }
+        );
+    }
+
+    #[test]
+    fn manifest_options_name_the_argument_they_are_missing() {
+        // Defaulting any of these would publish a manifest that describes a
+        // release other than the one that was built, and every client would
+        // then act on it.
+        let error = GenerateManifestOptions::parse(&[
+            "--version".to_string(),
+            "0.4.0".to_string(),
+            "--components".to_string(),
+            "components".to_string(),
+            "--out-dir".to_string(),
+            "release".to_string(),
+        ])
+        .expect_err("a manifest without a release timestamp must not be generated");
+        assert!(
+            error.to_string().contains("--released-at"),
+            "error names the missing argument: {error}"
+        );
+    }
+
+    /// The six archives a complete release run leaves in
+    /// `target/dist/components`: one engine build per shipped triple, plus the
+    /// two shared components.
+    ///
+    /// Every archive carries different bytes, so a manifest that mixed two of
+    /// them up cannot pass by coincidence.
+    fn release_components_fixture() -> TempDir {
+        let temp = TempDir::new().expect("temporary components directory");
+        for (name, contents) in RELEASE_COMPONENTS_FIXTURE {
+            write_fixture(&temp.path().join(name), contents.as_bytes());
+        }
+        temp
+    }
+
+    /// `(archive name, bytes)`. The digests asserted below were taken from
+    /// `shasum -a 256` over these exact strings, not from the code under test.
+    const RELEASE_COMPONENTS_FIXTURE: [(&str, &str); 6] = [
+        (
+            "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+            "linux engine",
+        ),
+        (
+            "clonk-rust-0.4.0-engine-x86_64-pc-windows-gnu.zip",
+            "windows engine",
+        ),
+        (
+            "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip",
+            "arm64 macos engine",
+        ),
+        (
+            "clonk-rust-0.4.0-engine-x86_64-apple-darwin.zip",
+            "x86_64 macos engine",
+        ),
+        (
+            "content-00112233445566778899aabbccddeeff.zip",
+            "shared content",
+        ),
+        (
+            "planet-ffeeddccbbaa99887766554433221100.zip",
+            "shared planet",
+        ),
+    ];
+
+    /// Generates a manifest from `components` and reads back the published
+    /// bytes, so the assertions are about the document a client downloads.
+    fn generated_manifest(components: &TempDir) -> manifest::Manifest {
+        let out = TempDir::new().expect("temporary output directory");
+        // Nested, because the publishing job writes the manifest beside assets
+        // it has only just downloaded.
+        let out_dir = out.path().join("release");
+        generate_update_manifest(GenerateManifestOptions {
+            version: "0.4.0".to_string(),
+            released_at: "2026-07-28T10:00:00Z".to_string(),
+            components_dir: components.path().to_path_buf(),
+            out_dir: out_dir.clone(),
+        })
+        .expect("generate the manifest");
+
+        let bytes = fs::read(out_dir.join("manifest.json")).expect("read the manifest");
+        serde_json::from_slice(&bytes).expect("the manifest parses")
+    }
+
+    fn component_entry<'a>(
+        manifest: &'a manifest::Manifest,
+        name: &str,
+    ) -> &'a manifest::ComponentEntry {
+        manifest
+            .components
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("manifest has no `{name}` component"))
+    }
+
+    #[test]
+    fn every_triple_resolves_to_its_own_engine_archive() {
+        // The reason the manifest is keyed by triple at all: four different
+        // engine builds ship under one component, and a client has nothing but
+        // this map to tell which of them is its own.
+        let components = release_components_fixture();
+        let engine = component_entry(&generated_manifest(&components), "engine").clone();
+
+        for (triple, expected) in [
+            (
+                "x86_64-unknown-linux-gnu",
+                (
+                    "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+                    "58779b29d498bd1ff0b984a31c41072c1dadb69af13f75fe9360f6c17d7c0b4e",
+                ),
+            ),
+            (
+                "x86_64-pc-windows-gnu",
+                (
+                    "clonk-rust-0.4.0-engine-x86_64-pc-windows-gnu.zip",
+                    "4f5e971ed560a857e53dfa16525c9a7aeb58d02a61a18b75c403f1eae333b7dd",
+                ),
+            ),
+            (
+                "aarch64-apple-darwin",
+                (
+                    "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip",
+                    "7f2056195596313b436e5d52ce95845372aeff5776e16be72b4d7ddf13c52db4",
+                ),
+            ),
+            (
+                "x86_64-apple-darwin",
+                (
+                    "clonk-rust-0.4.0-engine-x86_64-apple-darwin.zip",
+                    "3d866264cd2e8015a19de6086555e710f83aab5a0deb30cbd1c7942474b43908",
+                ),
+            ),
+        ] {
+            let target = engine
+                .targets
+                .get(triple)
+                .unwrap_or_else(|| panic!("engine has no archive for {triple}"));
+            assert_eq!(
+                target.archive, expected.0,
+                "wrong engine archive for {triple}"
+            );
+            // Known-answer digests: the manifest must record the hash of the
+            // bytes on disk, not merely something self-consistent.
+            assert_eq!(
+                target.sha256, expected.1,
+                "wrong engine digest for {triple}"
+            );
+            assert_eq!(
+                target.install, "",
+                "the engine archive carries its own layout"
+            );
+        }
+
+        let digests: std::collections::BTreeSet<&str> = engine
+            .targets
+            .values()
+            .map(|target| target.sha256.as_str())
+            .collect();
+        assert_eq!(
+            digests.len(),
+            4,
+            "four separate builds must not share a digest"
+        );
+    }
+
+    #[test]
+    fn shared_components_are_offered_to_every_triple_as_the_same_bytes() {
+        // `content` and `planet` are prefix-free and identical everywhere;
+        // only where they unpack differs.
+        let components = release_components_fixture();
+        let manifest = generated_manifest(&components);
+
+        let content = component_entry(&manifest, "content");
+        assert_eq!(
+            content.targets["x86_64-pc-windows-gnu"].archive,
+            "content-00112233445566778899aabbccddeeff.zip"
+        );
+        assert_eq!(
+            content.targets["aarch64-apple-darwin"].sha256,
+            "150f3319880afbee1efd333db4a6c6d67cc3af240a1b10694762c23a051a37aa"
+        );
+        assert_eq!(
+            content.targets["x86_64-unknown-linux-gnu"].sha256,
+            content.targets["aarch64-apple-darwin"].sha256
+        );
+        assert_eq!(
+            content.targets["x86_64-unknown-linux-gnu"].install,
+            "content"
+        );
+        assert_eq!(
+            content.targets["aarch64-apple-darwin"].install,
+            "Contents/Resources/content"
+        );
+
+        let planet = component_entry(&manifest, "planet");
+        assert_eq!(
+            planet.targets["x86_64-unknown-linux-gnu"].sha256,
+            "9d91f5cc39abfdeda7c0fc532504b8b9bdcb8db7d14aedeeb9489abfdbf1ecd9"
+        );
+        assert_eq!(planet.targets["x86_64-pc-windows-gnu"].install, "planet");
+    }
+
+    #[test]
+    fn a_generated_manifest_carries_the_release_and_the_engine_tuple() {
+        let components = release_components_fixture();
+        let manifest = generated_manifest(&components);
+
+        assert_eq!(manifest.schema, manifest::MANIFEST_SCHEMA);
+        assert_eq!(manifest.version, "0.4.0");
+        assert_eq!(manifest.released_at, "2026-07-28T10:00:00Z");
+        // The C4XVer tuple, not the release version: a client whose engine is
+        // older must refuse `content` rather than have its definitions pruned.
+        assert_eq!(manifest.engine_version, clonk_core::version::ENGINE_VERSION);
+        assert_eq!(
+            manifest
+                .components
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            ["content", "planet", "engine"],
+            "data first, executables last"
+        );
+    }
+
+    #[test]
+    fn the_component_scan_ignores_everything_that_is_not_an_archive() {
+        // The publishing job assembles release notes and checksums in the same
+        // tree; only the zips are components.
+        let components = release_components_fixture();
+        write_fixture(&components.path().join("SHA256SUMS.txt"), b"sums");
+        write_fixture(&components.path().join("release-notes.md"), b"notes");
+
+        assert_eq!(
+            scan_emitted_components(components.path(), "0.4.0")
+                .expect("scan the components")
+                .len(),
+            6
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_archive_stops_the_manifest() {
+        // Publishing a manifest that omits a shipped component is worse than
+        // failing: clients would never learn the component existed.
+        let components = release_components_fixture();
+        write_fixture(&components.path().join("shaders-0.4.0.zip"), b"new");
+
+        let error = scan_emitted_components(components.path(), "0.4.0")
+            .expect_err("an unmapped archive must fail the manifest");
+        assert!(
+            error.to_string().contains("shaders-0.4.0.zip"),
+            "error names the offending archive: {error}"
+        );
+    }
+
+    #[test]
+    fn a_release_missing_one_platforms_engine_is_refused() {
+        // The macOS build pass uploading nothing must fail the release, not
+        // publish a manifest that tells every Mac there is no engine for it —
+        // before the tag, which is what makes the failure recoverable.
+        let components = TempDir::new().expect("temporary components directory");
+        for (name, contents) in RELEASE_COMPONENTS_FIXTURE {
+            if !name.contains("aarch64-apple-darwin") {
+                write_fixture(&components.path().join(name), contents.as_bytes());
+            }
+        }
+        let out = TempDir::new().expect("temporary output directory");
+
+        let error = generate_update_manifest(GenerateManifestOptions {
+            version: "0.4.0".to_string(),
+            released_at: "2026-07-28T10:00:00Z".to_string(),
+            components_dir: components.path().to_path_buf(),
+            out_dir: out.path().to_path_buf(),
+        })
+        .expect_err("a manifest that strands a platform must not be published");
+
+        assert!(
+            error.to_string().contains("engine/aarch64-apple-darwin"),
+            "error names the component and triple that would be missing: {error}"
+        );
+        assert!(
+            !out.path().join("manifest.json").exists(),
+            "nothing may be written when the manifest is refused"
+        );
+    }
+
+    #[test]
+    fn an_engine_archive_from_another_release_is_refused() {
+        // Artifacts from a re-run or a previous version would name assets this
+        // release never uploads; the client would fetch a 404.
+        let components = release_components_fixture();
+        write_fixture(
+            &components
+                .path()
+                .join("clonk-rust-0.3.9-engine-x86_64-unknown-linux-gnu.zip"),
+            b"stale engine",
+        );
+
+        let error = scan_emitted_components(components.path(), "0.4.0")
+            .expect_err("an archive from another release must fail the manifest");
+        assert!(
+            error.to_string().contains("clonk-rust-0.3.9-engine"),
+            "error names the stale archive: {error}"
+        );
+    }
+
+    #[test]
+    fn an_engine_archive_for_an_unshipped_triple_is_refused() {
+        // Its triple appears under no other component, so a client reading it
+        // could never assemble a complete install.
+        let components = release_components_fixture();
+        write_fixture(
+            &components
+                .path()
+                .join("clonk-rust-0.4.0-engine-riscv64gc-unknown-linux-gnu.zip"),
+            b"unshipped engine",
+        );
+        let out = TempDir::new().expect("temporary output directory");
+
+        let error = generate_update_manifest(GenerateManifestOptions {
+            version: "0.4.0".to_string(),
+            released_at: "2026-07-28T10:00:00Z".to_string(),
+            components_dir: components.path().to_path_buf(),
+            out_dir: out.path().to_path_buf(),
+        })
+        .expect_err("a triple the release does not ship must not reach the manifest");
+        assert!(
+            error.to_string().contains("riscv64gc-unknown-linux-gnu"),
+            "error names the unshipped triple: {error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_components_directory_is_refused() {
+        // A manifest describing nothing reads to every client as "no update",
+        // which is indistinguishable from a healthy release.
+        let empty = TempDir::new().expect("temporary components directory");
+        assert!(scan_emitted_components(empty.path(), "0.4.0").is_err());
     }
 
     #[test]
