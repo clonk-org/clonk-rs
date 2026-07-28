@@ -907,7 +907,9 @@ fn draw_box_dw_unconfigured(
             ),
             [color; 4],
             clonk_graphics::GpuBlend::Normal,
-            gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            clonk_graphics::GpuSolidStyle::with_gamma(
+                gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            ),
         );
         return;
     }

@@ -1585,7 +1585,7 @@ impl RetainedGpuRenderer {
                     alpha_mode,
                     clip,
                     blend,
-                    gamma,
+                    style,
                 } => {
                     validate_primitive_count(*topology, solid.len())?;
                     if solid.is_empty() {
@@ -1609,7 +1609,7 @@ impl RetainedGpuRenderer {
                             for vertex in solid {
                                 if let Some(point) = packed_point_rect(
                                     *vertex,
-                                    fragment_gamma_flag(scene.gamma_mode, *gamma),
+                                    fragment_gamma_flag(scene.gamma_mode, style.gamma),
                                     &projection,
                                 )? {
                                     vertices.extend(point);
@@ -1621,7 +1621,7 @@ impl RetainedGpuRenderer {
                                 vertices.extend(packed_line_fragments(
                                     pair[0],
                                     pair[1],
-                                    fragment_gamma_flag(scene.gamma_mode, *gamma),
+                                    fragment_gamma_flag(scene.gamma_mode, style.gamma),
                                     &projection,
                                 )?);
                             }
@@ -1633,7 +1633,7 @@ impl RetainedGpuRenderer {
                                     packed_solid_vertex(
                                         vertex.position,
                                         vertex.color,
-                                        fragment_gamma_flag(scene.gamma_mode, *gamma),
+                                        fragment_gamma_flag(scene.gamma_mode, style.gamma),
                                         &projection,
                                     )?,
                                 );
@@ -3262,7 +3262,8 @@ fn blend_state(blend: GpuBlend, alpha_mode: GpuSolidAlphaMode) -> wgpu::BlendSta
 mod tests {
     use super::*;
     use clonk_graphics::{
-        Color, GammaRamp, GpuGammaLut, GpuSolidVertex, GpuTextureResource, PixelFormat, Surface,
+        Color, GammaRamp, GpuGammaLut, GpuSolidStyle, GpuSolidVertex, GpuTextureResource,
+        PixelFormat, Surface,
     };
     use clonk_gui::{ImageData, Rect as GuiRect};
     use std::sync::Arc;
@@ -3650,7 +3651,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Replace,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         assert!(matches!(
@@ -3803,7 +3804,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Replace,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         let physical_text = GpuScene {
@@ -3818,7 +3819,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Replace,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         let physical_extent = [8, 6];
@@ -4133,7 +4134,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Replace,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         let scaled_line = render_readback(
@@ -4208,7 +4209,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Replace,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         let negative_diagonal_line_scene = GpuScene {
@@ -4221,7 +4222,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Replace,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
             ..diagonal_line_scene.clone()
         };
@@ -4308,7 +4309,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Normal,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         let frame = render_readback(
@@ -4343,7 +4344,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Normal,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         let translucent_point = render_readback(
@@ -4371,7 +4372,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Additive,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         let additive = render_readback(
@@ -4406,7 +4407,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: None,
                 blend: GpuBlend::Additive,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         let additive_filled = render_readback(
@@ -4452,7 +4453,7 @@ mod tests {
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: Some(Rect::new(1, 1, 2, 1)),
                 blend: GpuBlend::Normal,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
             }],
         };
         let fractional = render_readback(
@@ -4775,7 +4776,7 @@ mod tests {
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Replace,
-            gamma: false,
+            style: GpuSolidStyle::NONE,
         });
         commands.push(GpuCommand::Solid {
             // Producers encode logical pixel centers.  Non-unit W proves the
@@ -4785,7 +4786,7 @@ mod tests {
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Replace,
-            gamma: false,
+            style: GpuSolidStyle::NONE,
         });
 
         GpuScene {

@@ -340,8 +340,27 @@ pub enum GpuCommand {
         alpha_mode: GpuSolidAlphaMode,
         clip: Option<Rect>,
         blend: GpuBlend,
-        gamma: bool,
+        style: GpuSolidStyle,
     },
+}
+
+/// Per-command fragment options for a solid primitive.
+///
+/// Solid draws carry more than one independent fragment decision, and every
+/// one of them has to reach the shader as a vertex flag. Keeping them in one
+/// value means adding another does not touch every construction site.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuSolidStyle {
+    /// Resolve the monitor gamma ramp in the fragment shader.
+    pub gamma: bool,
+}
+
+impl GpuSolidStyle {
+    pub const NONE: Self = Self { gamma: false };
+
+    pub const fn with_gamma(gamma: bool) -> Self {
+        Self { gamma }
+    }
 }
 
 /// Why exact packed-C4 modulation could not be applied to a retained command.
@@ -740,7 +759,7 @@ impl GpuSceneRecorder {
             alpha_mode,
             clip,
             blend,
-            gamma,
+            style,
         } = command
         {
             if let Some(GpuCommand::Solid {
@@ -749,14 +768,14 @@ impl GpuSceneRecorder {
                 alpha_mode: previous_alpha_mode,
                 clip: previous_clip,
                 blend: previous_blend,
-                gamma: previous_gamma,
+                style: previous_style,
             }) = self.commands.last_mut()
             {
                 if *previous_topology == topology
                     && *previous_alpha_mode == alpha_mode
                     && *previous_clip == clip
                     && *previous_blend == blend
-                    && *previous_gamma == gamma
+                    && *previous_style == style
                 {
                     previous.extend(vertices);
                     return;
@@ -768,7 +787,7 @@ impl GpuSceneRecorder {
                 alpha_mode,
                 clip,
                 blend,
-                gamma,
+                style,
             });
             return;
         }
@@ -782,7 +801,7 @@ impl GpuSceneRecorder {
         alpha_mode: GpuSolidAlphaMode,
         clip: Option<Rect>,
         blend: GpuBlend,
-        gamma: bool,
+        style: GpuSolidStyle,
     ) {
         if let Some(GpuCommand::Solid {
             vertices,
@@ -790,14 +809,14 @@ impl GpuSceneRecorder {
             alpha_mode: previous_alpha_mode,
             clip: previous_clip,
             blend: previous_blend,
-            gamma: previous_gamma,
+            style: previous_style,
         }) = self.commands.last_mut()
         {
             if *previous_topology == topology
                 && *previous_alpha_mode == alpha_mode
                 && *previous_clip == clip
                 && *previous_blend == blend
-                && *previous_gamma == gamma
+                && *previous_style == style
             {
                 vertices.push(vertex);
                 return;
@@ -809,7 +828,7 @@ impl GpuSceneRecorder {
             alpha_mode,
             clip,
             blend,
-            gamma,
+            style,
         });
     }
 
@@ -1154,7 +1173,7 @@ mod tests {
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Normal,
-            gamma: false,
+            style: GpuSolidStyle::NONE,
         };
         command
             .apply_packed_c4_modulation(0x80ff_ffff)
@@ -1197,7 +1216,7 @@ mod tests {
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Replace,
-            gamma: false,
+            style: GpuSolidStyle::NONE,
         };
         solid
             .apply_packed_c4_modulation(0x80ff_ffff)
@@ -1300,7 +1319,7 @@ mod tests {
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Normal,
-            gamma: false,
+            style: GpuSolidStyle::NONE,
         };
         command
             .apply_packed_c4_modulation(0x4080_ff40)
@@ -1328,7 +1347,7 @@ mod tests {
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Normal,
-            gamma: false,
+            style: GpuSolidStyle::NONE,
         });
         let before = recorder.commands.clone();
         assert!(matches!(
@@ -1356,7 +1375,7 @@ mod tests {
             GpuSolidAlphaMode::SourceOver,
             None,
             GpuBlend::Normal,
-            false,
+            GpuSolidStyle::NONE,
         );
         recorder.push_solid_vertex(
             vertex,
@@ -1364,7 +1383,7 @@ mod tests {
             GpuSolidAlphaMode::SourceOver,
             None,
             GpuBlend::Normal,
-            false,
+            GpuSolidStyle::NONE,
         );
         recorder.push_solid_vertex(
             vertex,
@@ -1372,7 +1391,7 @@ mod tests {
             GpuSolidAlphaMode::NonSeparate,
             None,
             GpuBlend::Normal,
-            false,
+            GpuSolidStyle::NONE,
         );
         recorder.push(GpuCommand::Solid {
             vertices: vec![vertex],
@@ -1380,7 +1399,7 @@ mod tests {
             alpha_mode: GpuSolidAlphaMode::NonSeparate,
             clip: None,
             blend: GpuBlend::Normal,
-            gamma: false,
+            style: GpuSolidStyle::NONE,
         });
 
         assert_eq!(recorder.commands.len(), 2);

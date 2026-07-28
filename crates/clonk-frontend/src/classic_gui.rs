@@ -986,7 +986,9 @@ pub fn draw_engine_line(
             alpha_mode: clonk_graphics::GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: clonk_graphics::GpuBlend::Normal,
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            style: clonk_graphics::GpuSolidStyle::with_gamma(
+                gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            ),
         });
         return;
     }

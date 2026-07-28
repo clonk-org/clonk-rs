@@ -2,7 +2,8 @@ use crate::clonk_font::CapturedClonkText;
 use crate::color::Color;
 use crate::gpu_scene::{
     GpuBlend, GpuCommand, GpuPrimitiveTopology, GpuSampler, GpuSceneRecorder, GpuSolidAlphaMode,
-    GpuSolidOuterModulation, GpuSolidVertex, GpuTextureId, GpuTextureResource, GpuVertex,
+    GpuSolidOuterModulation, GpuSolidStyle, GpuSolidVertex, GpuTextureId, GpuTextureResource,
+    GpuVertex,
 };
 use crate::snapshot::{checksum_update, SurfaceSnapshot, FNV_OFFSET};
 use std::cell::{Cell, OnceCell};
@@ -716,12 +717,12 @@ impl Surface {
         alpha_mode: GpuSolidAlphaMode,
         clip: Option<Rect>,
         blend: GpuBlend,
-        gamma: bool,
+        style: GpuSolidStyle,
     ) -> bool {
         let Some(scene) = self.gpu_scene.as_mut() else {
             return false;
         };
-        scene.push_solid_vertex(vertex, topology, alpha_mode, clip, blend, gamma);
+        scene.push_solid_vertex(vertex, topology, alpha_mode, clip, blend, style);
         true
     }
 
@@ -989,7 +990,7 @@ impl Surface {
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Replace,
-            gamma: false,
+            style: GpuSolidStyle::NONE,
         }) {
             return;
         }
@@ -1016,7 +1017,7 @@ impl Surface {
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip,
             blend: GpuBlend::Normal,
-            gamma: false,
+            style: GpuSolidStyle::NONE,
         }) {
             return;
         }
@@ -1059,7 +1060,7 @@ impl Surface {
             GpuSolidAlphaMode::SourceOver,
             clip,
             GpuBlend::Replace,
-            false,
+            GpuSolidStyle::NONE,
         ) {
             return Ok(());
         }
@@ -1094,7 +1095,7 @@ impl Surface {
             GpuSolidAlphaMode::SourceOver,
             clip,
             GpuBlend::Normal,
-            false,
+            GpuSolidStyle::NONE,
         ) {
             return Ok(());
         }
@@ -1723,7 +1724,7 @@ impl SurfaceDrawTarget for Surface {
             GpuSolidAlphaMode::NonSeparate,
             clip,
             GpuBlend::Normal,
-            gamma.is_some_and(|ramp| !ramp.is_passthrough()),
+            GpuSolidStyle::with_gamma(gamma.is_some_and(|ramp| !ramp.is_passthrough())),
         ) {
             return Ok(());
         }
@@ -1779,7 +1780,7 @@ impl SurfaceDrawTarget for Surface {
             GpuSolidAlphaMode::SourceOver,
             clip,
             GpuBlend::Normal,
-            gamma.is_some_and(|ramp| !ramp.is_passthrough()),
+            GpuSolidStyle::with_gamma(gamma.is_some_and(|ramp| !ramp.is_passthrough())),
         ) {
             return Ok(());
         }
@@ -1835,7 +1836,7 @@ impl SurfaceDrawTarget for Surface {
             GpuSolidAlphaMode::NonSeparate,
             clip,
             GpuBlend::Additive,
-            gamma.is_some_and(|ramp| !ramp.is_passthrough()),
+            GpuSolidStyle::with_gamma(gamma.is_some_and(|ramp| !ramp.is_passthrough())),
         ) {
             return Ok(());
         }
@@ -2013,7 +2014,7 @@ mod tests {
             topology,
             alpha_mode,
             blend,
-            gamma,
+            style,
             ..
         } = &scene.commands[0]
         else {
@@ -2022,7 +2023,7 @@ mod tests {
         assert_eq!(*topology, GpuPrimitiveTopology::PointList);
         assert_eq!(*alpha_mode, GpuSolidAlphaMode::NonSeparate);
         assert_eq!(*blend, GpuBlend::Normal);
-        assert!(*gamma);
+        assert!(style.gamma);
         assert_eq!(vertices.len(), 1);
         assert_eq!(vertices[0].position, [1.5, 0.5, 1.0]);
         assert_eq!(
@@ -2046,10 +2047,10 @@ mod tests {
         .unwrap();
 
         let scene = finish_gpu_scene(&mut destination);
-        let GpuCommand::Solid { gamma, .. } = &scene.commands[0] else {
+        let GpuCommand::Solid { style, .. } = &scene.commands[0] else {
             panic!("text fragment did not lower to a solid point");
         };
-        assert!(!*gamma);
+        assert!(!style.gamma);
     }
 
     #[test]
@@ -2135,7 +2136,7 @@ mod tests {
             topology,
             alpha_mode,
             blend,
-            gamma,
+            style,
             ..
         } = &scene.commands[1]
         else {
@@ -2144,7 +2145,7 @@ mod tests {
         assert_eq!(*topology, GpuPrimitiveTopology::PointList);
         assert_eq!(*alpha_mode, GpuSolidAlphaMode::NonSeparate);
         assert_eq!(*blend, GpuBlend::Additive);
-        assert!(*gamma);
+        assert!(style.gamma);
         assert_eq!(vertices[0].position, [1.5, 0.5, 1.0]);
         assert_eq!(
             vertices[0].color,

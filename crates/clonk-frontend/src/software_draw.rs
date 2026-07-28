@@ -634,7 +634,7 @@ pub fn draw_color_rect(
                 (left, top, right, bottom),
                 [color; 4],
                 GpuBlend::Normal,
-                gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
             );
             return;
         }
@@ -697,7 +697,7 @@ pub fn draw_color_rect(
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: GpuBlend::Normal,
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
         });
         return;
     }

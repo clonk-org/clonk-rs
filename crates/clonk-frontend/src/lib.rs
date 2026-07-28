@@ -76,10 +76,10 @@ use clonk_engine::{
 };
 use clonk_graphics::{
     stdgl_blit_sampling, BlitSampling, Color, GpuBlend, GpuCommand, GpuOuterModulation,
-    GpuPrimitiveTopology, GpuSampler, GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidVertex,
-    GpuTextureId, GpuTextureResource, GpuVertex, PixelFormat, Point as SurfacePoint,
-    Rect as SurfaceRect, Surface, SurfaceDrawTarget, SurfaceSnapshot as GraphicsSurfaceSnapshot,
-    TextFont, Transform as GraphicsTransform,
+    GpuPrimitiveTopology, GpuSampler, GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidStyle,
+    GpuSolidVertex, GpuTextureId, GpuTextureResource, GpuVertex, PixelFormat,
+    Point as SurfacePoint, Rect as SurfaceRect, Surface, SurfaceDrawTarget,
+    SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont, Transform as GraphicsTransform,
 };
 use clonk_gui::{Rect as GuiRect, Size as GuiSize};
 use rayon::prelude::*;
@@ -3055,7 +3055,7 @@ mod tests {
             command,
             GpuCommand::Solid {
                 topology: GpuPrimitiveTopology::PointList,
-                gamma: false,
+                style: GpuSolidStyle::NONE,
                 ..
             }
         )));
@@ -5428,7 +5428,7 @@ mod tests {
             vertices,
             topology,
             blend,
-            gamma,
+            style,
             ..
         } = &scene.commands[0]
         else {
@@ -5436,7 +5436,7 @@ mod tests {
         };
         assert_eq!(*topology, GpuPrimitiveTopology::TriangleList);
         assert_eq!(*blend, GpuBlend::Normal);
-        assert!(*gamma);
+        assert!(style.gamma);
         assert_eq!(
             vertices.len(),
             6,
@@ -5488,7 +5488,7 @@ mod tests {
                 vertices,
                 topology,
                 blend,
-                gamma,
+                style,
                 ..
             } = command
             else {
@@ -5496,7 +5496,7 @@ mod tests {
             };
             assert_eq!(*topology, GpuPrimitiveTopology::TriangleList);
             assert_eq!(*blend, GpuBlend::Normal);
-            assert!(*gamma);
+            assert!(style.gamma);
             assert_eq!(
                 vertices.len(),
                 36,
@@ -13379,7 +13379,9 @@ mod tests {
         // sheets are never used. The eight sizes are authored on an exact
         // 50/1280 ratio, so selecting by physical width keeps C++'s angular
         // size and every tier stays a 1:1 blit.
-        let hd = |width: u32, scale: f32| CursorAtlas::index_for_tiers(width, scale, CursorTiers::HighDpi);
+        let hd = |width: u32, scale: f32| {
+            CursorAtlas::index_for_tiers(width, scale, CursorTiers::HighDpi)
+        };
 
         // At or below the C++ breakpoint the classic choice is already right.
         for width in [320u32, 640, 799, 800, 1279, 1280] {

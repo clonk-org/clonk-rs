@@ -16,8 +16,8 @@ pub use gamma::GammaRamp;
 pub use gpu_scene::{
     GpuBlend, GpuCommand, GpuGammaLut, GpuGammaMode, GpuOuterModulation, GpuOwnerMask,
     GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSceneRecorder,
-    GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidVertex, GpuTextureFormat, GpuTextureId,
-    GpuTextureResource, GpuVertex,
+    GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidStyle, GpuSolidVertex, GpuTextureFormat,
+    GpuTextureId, GpuTextureResource, GpuVertex,
 };
 pub use sampling::{stdgl_blit_sampling, BlitSampling};
 pub use snapshot::{SnapshotHasher, SurfaceSnapshot};

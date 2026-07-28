@@ -367,7 +367,7 @@ fn draw_object_line_pixel(
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: gpu_blend_for_blit(blit),
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
         });
         return;
     }
@@ -493,7 +493,7 @@ pub(crate) fn draw_object_triangle(
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: gpu_blend_for_blit(blit),
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
         });
         return;
     }
@@ -639,7 +639,7 @@ pub(crate) fn draw_object_line_segment(
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: gpu_blend_for_blit(blit),
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
         });
         let marker = fog.map_or(marker, |fog| fog.color_at_point(marker, start.0, start.1));
         let (marker_color, outer_modulation) = prepared_gpu_solid_color(marker, blit);
@@ -654,7 +654,9 @@ pub(crate) fn draw_object_line_segment(
                 alpha_mode: GpuSolidAlphaMode::SourceOver,
                 clip: surface.clip(),
                 blend: gpu_blend_for_blit(blit),
-                gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                style: GpuSolidStyle::with_gamma(
+                    gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                ),
             });
         }
         return;
@@ -725,7 +727,7 @@ pub(crate) fn draw_pxs_pixel(
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: GpuBlend::Normal,
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
         });
         return;
     }
@@ -787,7 +789,7 @@ pub(crate) fn draw_pxs_line(
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: GpuBlend::Normal,
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
         });
         return;
     }
@@ -1202,7 +1204,9 @@ pub(crate) fn fill_polygon_impl(
                             alpha_mode: GpuSolidAlphaMode::SourceOver,
                             clip: surface.clip(),
                             blend: GpuBlend::Normal,
-                            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                            style: GpuSolidStyle::with_gamma(
+                                gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                            ),
                         });
                         drawn = true;
                         continue;
@@ -1265,7 +1269,7 @@ pub(crate) fn fill_rect_impl(
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: GpuBlend::Normal,
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
         });
         return;
     }
@@ -1284,7 +1288,9 @@ pub(crate) fn fill_rect_impl(
                     alpha_mode: GpuSolidAlphaMode::SourceOver,
                     clip: surface.clip(),
                     blend: GpuBlend::Normal,
-                    gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                    style: GpuSolidStyle::with_gamma(
+                        gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                    ),
                 });
                 continue;
             }

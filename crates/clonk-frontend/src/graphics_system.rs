@@ -874,7 +874,9 @@ impl GraphicsSystem {
                         (left, top, right, bottom),
                         colors,
                         GpuBlend::Normal,
-                        gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                        GpuSolidStyle::with_gamma(
+                            gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                        ),
                     );
                 }
             } else {
@@ -888,7 +890,7 @@ impl GraphicsSystem {
                     ),
                     [color; 4],
                     GpuBlend::Normal,
-                    gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+                    GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
                 );
             }
             return;
@@ -3274,34 +3276,35 @@ impl GraphicsSystem {
         if self.surface.is_gpu_scene_capture_active()
             && fog.as_ref().is_none_or(|(_, sampler)| sampler.is_some())
         {
-            let mut emit =
-                |left: f32, top: f32, right: f32, bottom: f32, fog_modulation: Option<[u32; 4]>| {
-                    let base_top = color_at_y((top / height as f32).clamp(0.0, 1.0));
-                    let base_bottom = color_at_y((bottom / height as f32).clamp(0.0, 1.0));
-                    let mut colors = fog_modulation.map_or(
-                        [base_top, base_top, base_bottom, base_bottom],
-                        |fog| {
-                            [
-                                modulate_surface_color(base_top, fog[0]),
-                                modulate_surface_color(base_top, fog[1]),
-                                modulate_surface_color(base_bottom, fog[2]),
-                                modulate_surface_color(base_bottom, fog[3]),
-                            ]
-                        },
-                    );
-                    if self.advanced_renderer_config.no_box_fades {
-                        let normalized =
-                            normalize_quad_colors([colors[0], colors[2], colors[3], colors[1]]);
-                        colors = [normalized; 4];
-                    }
-                    record_gpu_solid_quad(
-                        &mut self.surface,
-                        (left + offset, top + offset, right + offset, bottom + offset),
-                        colors,
-                        GpuBlend::Normal,
-                        gamma.is_some_and(|gamma| !gamma.is_passthrough()),
-                    );
-                };
+            let mut emit = |left: f32,
+                            top: f32,
+                            right: f32,
+                            bottom: f32,
+                            fog_modulation: Option<[u32; 4]>| {
+                let base_top = color_at_y((top / height as f32).clamp(0.0, 1.0));
+                let base_bottom = color_at_y((bottom / height as f32).clamp(0.0, 1.0));
+                let mut colors =
+                    fog_modulation.map_or([base_top, base_top, base_bottom, base_bottom], |fog| {
+                        [
+                            modulate_surface_color(base_top, fog[0]),
+                            modulate_surface_color(base_top, fog[1]),
+                            modulate_surface_color(base_bottom, fog[2]),
+                            modulate_surface_color(base_bottom, fog[3]),
+                        ]
+                    });
+                if self.advanced_renderer_config.no_box_fades {
+                    let normalized =
+                        normalize_quad_colors([colors[0], colors[2], colors[3], colors[1]]);
+                    colors = [normalized; 4];
+                }
+                record_gpu_solid_quad(
+                    &mut self.surface,
+                    (left + offset, top + offset, right + offset, bottom + offset),
+                    colors,
+                    GpuBlend::Normal,
+                    GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
+                );
+            };
             if let Some((_, Some(sampler))) = fog.as_ref() {
                 for quad in &sampler.quads {
                     let left = quad.x.0 / sampler.source_width * self.surface_width as f32;

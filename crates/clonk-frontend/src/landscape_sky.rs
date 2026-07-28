@@ -104,7 +104,7 @@ pub(crate) fn record_gpu_solid_quad(
     bounds: (f32, f32, f32, f32),
     colors: [Color; 4],
     blend: GpuBlend,
-    gamma: bool,
+    style: GpuSolidStyle,
 ) {
     let (left, top, right, bottom) = bounds;
     let vertex = |x, y, color| GpuSolidVertex {
@@ -126,7 +126,7 @@ pub(crate) fn record_gpu_solid_quad(
         alpha_mode: GpuSolidAlphaMode::SourceOver,
         clip: surface.clip(),
         blend,
-        gamma,
+        style,
     });
 }
 

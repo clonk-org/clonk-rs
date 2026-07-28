@@ -3617,7 +3617,9 @@ fn fill_box_dw_unconfigured(
             ),
             [color; 4],
             clonk_graphics::GpuBlend::Normal,
-            gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            clonk_graphics::GpuSolidStyle::with_gamma(
+                gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            ),
         );
         return;
     }
@@ -3714,7 +3716,9 @@ fn fill_quad_dw(surface: &mut Surface, vtx: &[(i32, i32); 4], clr: u32, gamma: O
             alpha_mode: clonk_graphics::GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: clonk_graphics::GpuBlend::Normal,
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            style: clonk_graphics::GpuSolidStyle::with_gamma(
+                gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            ),
         });
         return;
     }
