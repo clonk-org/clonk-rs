@@ -48,6 +48,7 @@ pub type LoaderSampling = BlitSampling;
 pub struct LoaderRenderConfig {
     application_scale: f32,
     point_filtering: bool,
+    aspect_fill: bool,
 }
 
 impl LoaderRenderConfig {
@@ -59,6 +60,7 @@ impl LoaderRenderConfig {
         Ok(Self {
             application_scale,
             point_filtering,
+            aspect_fill: false,
         })
     }
 
@@ -66,7 +68,16 @@ impl LoaderRenderConfig {
         Self {
             application_scale: 1.0,
             point_filtering,
+            aspect_fill: false,
         }
+    }
+
+    /// Opt-in `Graphics.LoaderAspect`: cover-fit the fullscreen loader image
+    /// instead of C++'s unconditional non-aspect stretch. Off keeps the blit
+    /// bit-identical to `C4Facet::DrawFullScreen` (`C4Facet.cpp:182-192`).
+    pub const fn with_aspect_fill(mut self, aspect_fill: bool) -> Self {
+        self.aspect_fill = aspect_fill;
+        self
     }
 
     pub const fn application_scale(self) -> f32 {
@@ -75,6 +86,10 @@ impl LoaderRenderConfig {
 
     pub const fn point_filtering(self) -> bool {
         self.point_filtering
+    }
+
+    pub const fn aspect_fill(self) -> bool {
+        self.aspect_fill
     }
 
     pub const fn uses_scaling_correction(self) -> bool {
@@ -550,7 +565,8 @@ impl LoaderScreen {
             self.state.progress,
         );
 
-        // 1. fctBackground.DrawFullScreen(cgo): non-aspect stretch.
+        // 1. fctBackground.DrawFullScreen(cgo): non-aspect stretch, unless the
+        // opt-in Graphics.LoaderAspect cover-fit divergence is enabled.
         self.render_background(surface, config, gamma);
 
         // 3. Semi-transparent black progress frame, inclusive endpoints. The
@@ -1424,6 +1440,61 @@ fn draw_surface_facet(
 /// separately clears the target's final row/column before the stretched blit
 /// when its size guard fires (`C4Surface.cpp:137-140,1108-1113`;
 /// `C4Facet.cpp:130-141`).
+/// Source facet for the fullscreen loader blit.
+///
+/// C++ always passes the whole facet and stretches it to the target with no
+/// aspect handling (`C4Facet.cpp:191` calls `Draw(cgo, false)`), so a 4:3
+/// loader on a 16:9 panel is squashed. The opt-in `Graphics.LoaderAspect`
+/// divergence instead centre-crops the source to the target's aspect ratio
+/// (cover). C++'s own `fAspect` mode (`C4Facet.cpp:124-133`) letterboxes, which
+/// would replace distortion with black bars; cover keeps the screen filled and,
+/// for the shipped 3840x2880 loaders on a 16:9 panel, reduces to an unscaled
+/// one-to-one blit.
+fn loader_background_source(
+    source_width: f32,
+    source_height: f32,
+    target_width: f32,
+    target_height: f32,
+    aspect_fill: bool,
+) -> FloatRect {
+    let full = FloatRect {
+        x: 0.0,
+        y: 0.0,
+        width: source_width,
+        height: source_height,
+    };
+    if !aspect_fill
+        || source_width <= 0.0
+        || source_height <= 0.0
+        || target_width <= 0.0
+        || target_height <= 0.0
+    {
+        return full;
+    }
+    // w1 : h1 <=> w2 : h2  =>  w1 * h2 <=> w2 * h1, as in C4Facet::Draw.
+    let source_relative = source_width * target_height;
+    let target_relative = target_width * source_height;
+    if source_relative > target_relative {
+        // Source is relatively wider: keep full height, crop the sides.
+        let width = (source_height * target_width / target_height).min(source_width);
+        FloatRect {
+            x: (source_width - width) * 0.5,
+            width,
+            ..full
+        }
+    } else if source_relative < target_relative {
+        // Source is relatively taller: keep full width, crop top and bottom.
+        let height = (source_width * target_height / target_width).min(source_height);
+        FloatRect {
+            y: (source_height - height) * 0.5,
+            height,
+            ..full
+        }
+    } else {
+        full
+    }
+}
+
 fn draw_loader_background(
     surface: &mut Surface,
     image: &ImageData,
@@ -1459,12 +1530,13 @@ fn draw_loader_background(
             gamma,
         );
     }
-    let source = FloatRect {
-        x: 0.0,
-        y: 0.0,
-        width: image.width() as f32,
-        height: image.height() as f32,
-    }
+    let source = loader_background_source(
+        image.width() as f32,
+        image.height() as f32,
+        target_width as f32,
+        target_height as f32,
+        config.aspect_fill(),
+    )
     .with_scaling_correction(config.uses_scaling_correction());
     let target = LoaderRect {
         x: 0,
@@ -2182,6 +2254,189 @@ mod tests {
         let transition = blackened.get_pixel(1, 0).unwrap();
         assert_eq!(transition.r, transition.g);
         assert_eq!(transition.g, transition.b);
+    }
+
+    /// `C4Facet::DrawFullScreen` guards its edge clear with
+    /// `if (cgo.Wdt > Wdt + 2 || cgo.Hgt > Wdt + 2)` — both comparisons are
+    /// against the *source width* `Wdt` (`C4Facet.cpp:185`). A target taller
+    /// than the source but no wider than `Wdt + 2` therefore gets no clear at
+    /// all. Pinning this keeps the mirror from "fixing" the C++ typo.
+    #[test]
+    fn fullscreen_edge_clear_guard_compares_height_against_source_width() {
+        let prefill = [20, 40, 80, 255];
+        // Fully transparent so nothing is blitted over the clear; only
+        // DrawBoxDw can change a pixel.
+        let transparent = ImageData::new(32, 2, vec![0; 32 * 2 * 4]);
+        let mut wide_source = Surface::new(8, 8, PixelFormat::Rgba8888);
+        wide_source
+            .pixels_mut()
+            .chunks_exact_mut(4)
+            .for_each(|pixel| pixel.copy_from_slice(&prefill));
+        draw_loader_background(
+            &mut wide_source,
+            &transparent,
+            None,
+            LoaderRenderConfig::scale_one(true),
+        );
+        // 8 > 32 + 2 is false for both the width and the height comparison,
+        // even though the target is four times the source height.
+        assert_eq!(wide_source.get_pixel(7, 7), Some(Color::opaque(20, 40, 80)));
+        assert_eq!(wide_source.get_pixel(0, 7), Some(Color::opaque(20, 40, 80)));
+        assert_eq!(wide_source.get_pixel(7, 0), Some(Color::opaque(20, 40, 80)));
+
+        // A narrow source crosses the same `Wdt + 2` threshold and does clear.
+        let narrow = ImageData::new(4, 40, vec![0; 4 * 40 * 4]);
+        let mut narrow_source = Surface::new(8, 8, PixelFormat::Rgba8888);
+        narrow_source
+            .pixels_mut()
+            .chunks_exact_mut(4)
+            .for_each(|pixel| pixel.copy_from_slice(&prefill));
+        draw_loader_background(
+            &mut narrow_source,
+            &narrow,
+            None,
+            LoaderRenderConfig::scale_one(true),
+        );
+        assert_eq!(narrow_source.get_pixel(7, 7), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(narrow_source.get_pixel(0, 7), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(
+            narrow_source.get_pixel(0, 0),
+            Some(Color::opaque(20, 40, 80))
+        );
+    }
+
+    /// Divergence `Graphics.LoaderAspect`: cover-fit the loader instead of
+    /// C++'s unconditional non-aspect stretch (`C4Facet.cpp:191`).
+    #[test]
+    fn loader_aspect_fill_centre_crops_the_source_instead_of_squashing_it() {
+        let background = ImageData::new(
+            2,
+            4,
+            vec![
+                255, 0, 0, 255, 255, 0, 0, 255, // row 0: red
+                0, 255, 0, 255, 0, 255, 0, 255, // row 1: green
+                0, 0, 255, 255, 0, 0, 255, 255, // row 2: blue
+                255, 255, 255, 255, 255, 255, 255, 255, // row 3: white
+            ],
+        );
+        let config = LoaderRenderConfig::scale_one(false);
+        let mut stretched = Surface::new(2, 2, PixelFormat::Rgba8888);
+        draw_loader_background(&mut stretched, &background, None, config);
+
+        let mut cropped = Surface::new(2, 2, PixelFormat::Rgba8888);
+        draw_loader_background(
+            &mut cropped,
+            &background,
+            None,
+            config.with_aspect_fill(true),
+        );
+        // 2:4 source into a 2:2 target crops 1px off the top and bottom, which
+        // makes the remaining 2x2 window an exact one-to-one blit.
+        assert_eq!(cropped.get_pixel(0, 0), Some(Color::opaque(0, 255, 0)));
+        assert_eq!(cropped.get_pixel(1, 0), Some(Color::opaque(0, 255, 0)));
+        assert_eq!(cropped.get_pixel(0, 1), Some(Color::opaque(0, 0, 255)));
+        assert_eq!(cropped.get_pixel(1, 1), Some(Color::opaque(0, 0, 255)));
+        assert_ne!(stretched.pixels(), cropped.pixels());
+        // Default config must stay bit-identical to the C++ stretch.
+        let mut default_path = Surface::new(2, 2, PixelFormat::Rgba8888);
+        draw_loader_background(
+            &mut default_path,
+            &background,
+            None,
+            config.with_aspect_fill(false),
+        );
+        assert_eq!(default_path.pixels(), stretched.pixels());
+    }
+
+    /// Cover-fit, not C++'s letterboxing `fAspect` mode (`C4Facet.cpp:124-133`):
+    /// every target pixel must come from the image, with no black bars.
+    #[test]
+    fn loader_aspect_fill_covers_the_whole_target_without_letterbox_bars() {
+        let background = ImageData::new(8, 2, [30, 90, 150, 255].repeat(16));
+        let mut covered = Surface::new(2, 8, PixelFormat::Rgba8888);
+        draw_loader_background(
+            &mut covered,
+            &background,
+            None,
+            LoaderRenderConfig::scale_one(false).with_aspect_fill(true),
+        );
+        for y in 0..8 {
+            for x in 0..2 {
+                assert_eq!(
+                    covered.get_pixel(x, y),
+                    Some(Color::opaque(30, 90, 150)),
+                    "aspect fill left a bar at ({x}, {y})"
+                );
+            }
+        }
+
+        // A source that already matches the target aspect is untouched.
+        let square = ImageData::new(4, 4, [10, 20, 30, 255].repeat(16));
+        let config = LoaderRenderConfig::scale_one(false);
+        let mut stretched = Surface::new(9, 9, PixelFormat::Rgba8888);
+        let mut filled = Surface::new(9, 9, PixelFormat::Rgba8888);
+        draw_loader_background(&mut stretched, &square, None, config);
+        draw_loader_background(&mut filled, &square, None, config.with_aspect_fill(true));
+        assert_eq!(filled.pixels(), stretched.pixels());
+    }
+
+    /// The shipped `LoaderWatercave1.png` / `LoaderGoldmine1.png` are
+    /// 3840x2880. On a 16:9 panel C++ squashes 2880 rows into 2160; cover-fit
+    /// crops 360 rows off each side instead, which happens to be an unscaled
+    /// blit. A 4:3 panel keeps the (already correct) full-source stretch.
+    #[test]
+    fn loader_aspect_fill_maps_the_shipped_loaders_one_to_one_on_a_16_9_panel() {
+        assert_eq!(
+            loader_background_source(3840.0, 2880.0, 3840.0, 2160.0, true),
+            FloatRect {
+                x: 0.0,
+                y: 360.0,
+                width: 3840.0,
+                height: 2160.0,
+            }
+        );
+        assert_eq!(
+            loader_background_source(3840.0, 2880.0, 3840.0, 2160.0, false),
+            FloatRect {
+                x: 0.0,
+                y: 0.0,
+                width: 3840.0,
+                height: 2880.0,
+            }
+        );
+        // 5:4 panel: relatively taller than 4:3, so the sides are cropped.
+        assert_eq!(
+            loader_background_source(3840.0, 2880.0, 1280.0, 1024.0, true),
+            FloatRect {
+                x: 120.0,
+                y: 0.0,
+                width: 3600.0,
+                height: 2880.0,
+            }
+        );
+        // Exactly 4:3 keeps the whole facet, with no rounding-driven crop.
+        assert_eq!(
+            loader_background_source(3840.0, 2880.0, 1024.0, 768.0, true),
+            FloatRect {
+                x: 0.0,
+                y: 0.0,
+                width: 3840.0,
+                height: 2880.0,
+            }
+        );
+        // Degenerate targets fall back to the full facet rather than dividing
+        // by zero.
+        for (target_width, target_height) in [(0.0, 8.0), (8.0, 0.0)] {
+            assert_eq!(
+                loader_background_source(4.0, 4.0, target_width, target_height, true),
+                FloatRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 4.0,
+                    height: 4.0,
+                }
+            );
+        }
     }
 
     #[test]
