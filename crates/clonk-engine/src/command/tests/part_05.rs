@@ -14,19 +14,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: builder.position,
-            object: objects.get(&builder_id).expect("builder present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&builder_id).expect("builder present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state =
@@ -80,20 +75,7 @@
         )]);
         let definitions = HashMap::new();
         let choose = |objects: &HashMap<ObjectId, CommandObjectSnapshot>| {
-            let ctx = CommandRuntimeContext {
-                landscape: None,
-                frame: 0,
-                position: actor.position,
-                object: &actor,
-                objects,
-                players: &players,
-                definitions: &definitions,
-                structures_need_energy: false,
-                base_buy_enabled: true,
-                base_sell_enabled: true,
-                transfer_zones: &EMPTY_TRANSFER_ZONES,
-                rng: None,
-            };
+            let ctx = command_ctx_at_frame(&actor, objects, &players, &definitions, 0);
             let mut sell =
                 SellState::from_request(&CommandRequest::new(CommandId::Sell)).expect("sell state");
             let mut buy =
@@ -174,20 +156,7 @@
             (3, player(Vec::new())),
         ]);
         let definitions = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut buy =
             BuyState::from_request(&CommandRequest::new(CommandId::Buy)).expect("buy state");
 
@@ -320,19 +289,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state =
@@ -371,19 +335,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 10,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                10,
+            )
         };
 
         let mut state =
@@ -425,19 +384,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 20,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                20,
+            )
         };
 
         let mut state =
@@ -487,18 +441,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 20,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                20,
+            )
         };
 
         let mut state =
@@ -540,18 +490,14 @@
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 20,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                20,
+            )
         };
 
         let mut state =
@@ -655,19 +601,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 30,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                30,
+            )
         };
 
         let mut state =
@@ -786,19 +727,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: attacker.position,
-            object: objects.get(&attacker_id).expect("attacker present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&attacker_id).expect("attacker present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = AttackState::from_request(
@@ -831,19 +767,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: attacker.position,
-            object: objects.get(&attacker_id).expect("attacker present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&attacker_id).expect("attacker present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let parent_request = CommandRequest::new(CommandId::Attack).with_target(Some(target_id));
@@ -1062,19 +993,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: builder.position,
-            object: objects.get(&builder_id).expect("builder present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&builder_id).expect("builder present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = CallState::from_request(
@@ -1159,18 +1085,14 @@
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: crew.position,
-            object: objects.get(&crew_id).expect("crew present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&crew_id).expect("crew present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = ContextState::from_request(
@@ -1226,18 +1148,14 @@
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: crew.position,
-            object: objects.get(&crew_id).expect("crew present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&crew_id).expect("crew present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = ContextState::from_request(
@@ -1271,18 +1189,14 @@
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: crew.position,
-            object: objects.get(&crew_id).expect("crew present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&crew_id).expect("crew present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state =
@@ -1322,18 +1236,14 @@
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: crew.position,
-            object: objects.get(&crew_id).expect("crew present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&crew_id).expect("crew present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut stack = CommandStack::new();
@@ -1375,18 +1285,14 @@
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: crew.position,
-            object: objects.get(&crew_id).expect("crew present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&crew_id).expect("crew present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state =
@@ -1457,18 +1363,15 @@
         let landscape = crate::Landscape::new(200, surface).expect("transfer landscape");
         let ctx = CommandRuntimeContext {
             landscape: Some(&landscape),
-            frame: 0,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
             transfer_zones: &transfer_zones,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let parent_request = CommandRequest::new(CommandId::Transfer).with_target(Some(target_id));
@@ -1561,18 +1464,8 @@
             },
         );
         let ctx = CommandRuntimeContext {
-            frame: 0,
-            position: actor.position,
-            landscape: None,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
             transfer_zones: &transfer_zones,
-            rng: None,
+            ..command_ctx_at_frame(&actor, &objects, &players, &definitions, 0)
         };
         let mut state = TransferState::from_request(
             &CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
@@ -1625,19 +1518,15 @@
         .expect("state created");
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 5,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
             transfer_zones: &transfer_zones,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                5,
+            )
         };
 
         let result = state.step(&ctx);
@@ -1672,19 +1561,15 @@
         );
 
         let ctx_next = CommandRuntimeContext {
-            landscape: None,
-            frame: 6,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
             transfer_zones: &transfer_zones,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                6,
+            )
         };
 
         let follow_up = state.step(&ctx_next);
@@ -1729,19 +1614,14 @@
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = TransferState::from_request(
@@ -1788,21 +1668,7 @@
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: builder.position,
-            object: &builder,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
 
         let mut state = BuildState::from_request(
             &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
@@ -1846,20 +1712,7 @@
 
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: builder.position,
-            object: &builder,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
 
         let mut state = BuildState::from_request(
             &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
@@ -1921,20 +1774,7 @@
         ]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: builder.position,
-            object: &builder,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
         let mut state = BuildState::from_request(
             &CommandRequest::new(CommandId::Build)
                 .with_target(Some(target_id))
@@ -1969,20 +1809,7 @@
         let objects = HashMap::from([(actor_id, actor.clone()), (container_id, container)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut state = ActivateState::from_request(
             &CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
@@ -2063,21 +1890,7 @@
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut state = ActivateState::from_request(
             &CommandRequest::new(CommandId::Activate).with_target(Some(target_id)),
@@ -2117,21 +1930,7 @@
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut state = ActivateState::from_request(
             &CommandRequest::new(CommandId::Activate)
@@ -2174,20 +1973,7 @@
         ]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut state = ActivateState::from_request(
             &CommandRequest::new(CommandId::Activate)
                 .with_target2(Some(container_id))
@@ -2234,21 +2020,7 @@
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut state = ActivateState::from_request(
             &CommandRequest::new(CommandId::Activate).with_target(Some(target_id)),
@@ -2313,20 +2085,7 @@
         ]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -2392,20 +2151,7 @@
         ]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor.position,
-            object: &actor,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut state = ActivateState::from_request(
             &CommandRequest::new(CommandId::Activate)
                 .with_target2(Some(container_id))

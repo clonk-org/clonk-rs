@@ -601,17 +601,8 @@
         );
         let ctx = CommandRuntimeContext {
             landscape: Some(&landscape),
-            frame: 1,
-            position: walker.position,
-            object: &walker,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
             transfer_zones: &transfer_zones,
-            rng: None,
+            ..command_ctx_at_frame(&walker, &objects, &players, &definitions, 1)
         };
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
@@ -675,17 +666,8 @@
         let enabled = {
             let ctx = CommandRuntimeContext {
                 landscape: Some(&landscape),
-                frame: 1,
-                position: mover.position,
-                object: &mover,
-                objects: &objects,
-                players: &players,
-                definitions: &definitions,
-                structures_need_energy: false,
-                base_buy_enabled: true,
-                base_sell_enabled: true,
                 transfer_zones: &transfer_zones,
-                rng: None,
+                ..command_ctx_at_frame(&mover, &objects, &players, &definitions, 1)
             };
             evaluated_move_to(
                 &CommandRequest::new(CommandId::MoveTo)
@@ -722,17 +704,8 @@
         let disabled = {
             let ctx = CommandRuntimeContext {
                 landscape: Some(&landscape),
-                frame: 1,
-                position: mover.position,
-                object: &mover,
-                objects: &objects,
-                players: &players,
-                definitions: &definitions,
-                structures_need_energy: false,
-                base_buy_enabled: true,
-                base_sell_enabled: true,
                 transfer_zones: &transfer_zones,
-                rng: None,
+                ..command_ctx_at_frame(&mover, &objects, &players, &definitions, 1)
             };
             evaluated_move_to(
                 &CommandRequest::new(CommandId::MoveTo)
@@ -1834,19 +1807,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: follower.position,
-            object: objects.get(&follower_id).expect("follower present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&follower_id).expect("follower present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = FollowState::from_request(
@@ -2083,19 +2051,14 @@
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: follower.position,
-            object: objects.get(&follower_id).expect("follower present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&follower_id).expect("follower present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let mut state = FollowState::from_request(
@@ -2391,19 +2354,14 @@
             .expect("Wait queues");
 
         let ctx0 = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                0,
+            )
         };
 
         let result0 = stack.step(&ctx0).expect("Wait executes");
@@ -2414,19 +2372,14 @@
         );
 
         let ctx1 = CommandRuntimeContext {
-            landscape: None,
-            frame: 1,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                1,
+            )
         };
 
         let result1 = stack.step(&ctx1).expect("Wait executes again");
@@ -2439,19 +2392,14 @@
         assert_eq!(action_update.name.as_deref(), Some("Idle"));
 
         let ctx2 = CommandRuntimeContext {
-            landscape: None,
-            frame: 2,
             position: actor.position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                2,
+            )
         };
 
         let result2 = stack.step(&ctx2).expect("Wait interval expires");
