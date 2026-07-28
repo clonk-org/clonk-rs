@@ -60,6 +60,9 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      # `gh run list --workflow` reads the Actions API; without this it fails
+      # with "Resource not accessible by integration".
+      actions: read
     defaults:
       run:
         shell: bash
@@ -78,8 +81,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force }}
         run: |
+          # Tolerate a failing lookup: `set -e` would otherwise kill the step
+          # here, before the force branch below could override anything — which
+          # is precisely when an override is wanted. An unknown conclusion is
+          # treated as not-green, so it still blocks unless forced.
           conclusion=$(gh run list --workflow "Clonk Rust CI" --branch main \
-            --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
+            --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"' \
+            2>/dev/null || echo "unknown")
+          [[ -n "$conclusion" ]] || conclusion="unknown"
           echo "latest Clonk Rust CI on main: $conclusion"
           if [[ "$conclusion" == "success" ]]; then
             exit 0
