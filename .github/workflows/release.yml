@@ -263,7 +263,10 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.release == 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    # The Windows pass is the long pole: a native release build, a 299 MB
+    # submodule checkout and solid-LZMA compression of the whole payload, all
+    # on the slowest runner class.
+    timeout-minutes: 120
     permissions:
       contents: read
     defaults:
@@ -273,9 +276,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: linux and windows
+          - name: linux
             runner: ubuntu-latest
-            artifact: desktop-linux-windows
+            artifact: desktop-linux
+          # Windows used to be cross-compiled from the ubuntu pass with mingw,
+          # because this repository was private and Windows runners billed at
+          # 2x. It is public now, so they are free — and building natively
+          # means the toolchain that is tested (`windows.yml`) is finally the
+          # toolchain that ships.
+          - name: windows
+            runner: windows-latest
+            artifact: desktop-windows
           - name: macos
             runner: macos-latest
             artifact: desktop-macos
@@ -297,17 +308,29 @@ jobs:
           shared-key: release-${{ matrix.artifact }}
           cache-on-failure: true
 
-      - name: Install Linux and Windows build dependencies
+      - name: Install Linux build dependencies
         if: matrix.runner == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             libasound2-dev \
             libudev-dev \
-            pkg-config \
-            mingw-w64 \
-            nsis
-          rustup target add x86_64-pc-windows-gnu
+            pkg-config
+
+      # `makensis` is not on the Windows image. Chocolatey's `nsis` package
+      # runs the upstream installer rather than shimming a binary, so its
+      # directory goes on PATH by hand — which only affects *later* steps,
+      # hence the existence check here rather than a version probe.
+      - name: Install the Windows installer toolchain
+        if: matrix.runner == 'windows-latest'
+        run: |
+          choco install nsis --yes --no-progress
+          nsis_dir='/c/Program Files (x86)/NSIS'
+          if [[ ! -x "$nsis_dir/makensis.exe" ]]; then
+            echo "chocolatey installed nsis but $nsis_dir/makensis.exe is missing" >&2
+            exit 1
+          fi
+          echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
 
       - name: Install macOS cross target
         if: matrix.runner == 'macos-latest'
@@ -320,36 +343,55 @@ jobs:
         run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
 
       # The only pass that emits `planet` and `content`. Their archives are
-      # prefix-free and therefore byte-identical on every triple, so building
-      # them on all four passes would spend the time to produce three exact
-      # duplicates.
+      # prefix-free and therefore byte-identical on every triple, so emitting
+      # them from every pass would spend the time to produce exact duplicates.
       - name: Package Linux
         if: matrix.runner == 'ubuntu-latest'
         run: ./target/release/xtask-engine-tools package --components=all
 
       - name: Package Windows installer
-        if: matrix.runner == 'ubuntu-latest'
+        if: matrix.runner == 'windows-latest'
         env:
-          CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
-          LIBZ_SYS_STATIC: '1'
+          # Named rather than left to the host, so the archive names and the
+          # manifest keys are decided here. It also confines RUSTFLAGS to the
+          # target's own artifacts: with a target requested, cargo does not
+          # pass them to build scripts or proc macros, which are host units
+          # and must keep the CRT their host toolchain expects.
+          CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+          # MSVC links the C runtime dynamically; the mingw cross-build linked
+          # it statically. Without this, a machine with no VC++ redistributable
+          # fails to start the game at all — the loader reports a missing
+          # `vcruntime140.dll` before `main` runs, so nothing is logged and the
+          # launcher never sees it. `windows.yml` builds the same configuration
+          # on every push, which is where the /MT-vs-/MD link is proven.
+          RUSTFLAGS: -C target-feature=+crt-static
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
           # does not exist in its published crate, so its bundled libpng only
-          # finds zlib.h where the host happens to ship one. mingw does not.
-          # Resolved dynamically rather than pinned to a libz-sys version.
+          # finds zlib.h where the host happens to ship one. No Windows
+          # toolchain does. Resolved dynamically rather than pinned to a
+          # libz-sys version.
+          cargo fetch --locked
           zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
           if [[ ! -f "$zlib_dir/zlib.h" ]]; then
             echo "could not locate the vendored zlib headers under $zlib_dir" >&2
             exit 1
           fi
-          export CFLAGS_x86_64_pc_windows_gnu="-I$zlib_dir"
-          ./target/release/xtask-engine-tools package --no-archive --components=engine
+          export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
+          ./target/release/xtask-engine-tools.exe package --no-archive --components=engine
 
+          # Native paths for a native tool: under Git Bash `$PWD` is a POSIX
+          # path makensis cannot resolve, and leaving it to MSYS's implicit
+          # argument rewriting would make the build depend on its heuristics.
+          # The switches keep their `-` prefix for the same reason — `/NOCD`
+          # would be rewritten as a path.
+          payload=$(cygpath -w "$PWD/target/dist/clonk-rust")
+          outfile=$(cygpath -w "$PWD/target/dist/clonk-rust-$VERSION-x86_64-windows-setup.exe")
           makensis -NOCD \
             -DVERSION="$VERSION" \
-            -DPAYLOAD="$PWD/target/dist/clonk-rust" \
-            -DOUTFILE="$PWD/target/dist/clonk-rust-$VERSION-x86_64-windows-setup.exe" \
+            -DPAYLOAD="$payload" \
+            -DOUTFILE="$outfile" \
             scripts/windows-installer.nsi
 
       - name: Package macOS
