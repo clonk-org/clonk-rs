@@ -885,12 +885,32 @@ fn update_manifest_command(args: &[String]) -> Result<()> {
 
 /// The triples a release ships, and therefore the ones every component must
 /// offer an archive for.
-const UPDATE_TARGET_TRIPLES: [&str; 4] = [
+///
+/// Five entries for four builds: `x86_64-pc-windows-gnu` is a retired triple
+/// kept alive by [`UPDATE_TRIPLE_ALIASES`], not a build of its own.
+const UPDATE_TARGET_TRIPLES: [&str; 5] = [
     "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
     "x86_64-pc-windows-gnu",
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
 ];
+
+/// `(retired triple, the triple whose archive it is served)`.
+///
+/// Windows releases were cross-built from Linux as `x86_64-pc-windows-gnu`
+/// until the build moved to a native MSVC runner. A client reports the triple
+/// it was *built* for, so simply swapping the entry would leave every Windows
+/// install that already exists with no entry for itself — told there is no
+/// update, for ever, with nothing to notice it.
+///
+/// Serving those clients the MSVC archive is the migration rather than a
+/// workaround: the `engine` component replaces the executables wholesale, so
+/// applying it turns a gnu install into an MSVC one and the next check reports
+/// the new triple. Only `engine` needs the alias — the shared components are
+/// offered to every triple in [`UPDATE_TARGET_TRIPLES`] already.
+const UPDATE_TRIPLE_ALIASES: [(&str, &str); 1] =
+    [("x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc")];
 
 /// The triple recorded against a shared archive.
 ///
@@ -1134,8 +1154,30 @@ fn verify_every_triple_is_covered(manifest: &manifest::Manifest) -> Result<()> {
     Ok(())
 }
 
+/// Offers each retired triple the archive of the triple that replaced it.
+///
+/// A second entry pointing at the *same* archive, rather than a second build:
+/// nothing is copied or re-hashed, so the release uploads one Windows engine
+/// archive and the manifest names it twice. See [`UPDATE_TRIPLE_ALIASES`].
+fn serve_retired_triples(
+    scanned: &[(String, components::EmittedComponent)],
+) -> Vec<(String, components::EmittedComponent)> {
+    let aliased = scanned.iter().flat_map(|(built_for, component)| {
+        UPDATE_TRIPLE_ALIASES
+            .into_iter()
+            // Shared components already reach every triple; aliasing them
+            // would record the same archive twice under one key.
+            .filter(move |(_, served_by)| {
+                !component.id.is_platform_independent() && served_by == built_for
+            })
+            .map(move |(retired, _)| (retired.to_string(), component.clone()))
+    });
+    scanned.iter().cloned().chain(aliased).collect()
+}
+
 fn generate_update_manifest(options: GenerateManifestOptions) -> Result<()> {
-    let emitted = scan_emitted_components(&options.components_dir, &options.version)?;
+    let scanned = scan_emitted_components(&options.components_dir, &options.version)?;
+    let emitted = serve_retired_triples(&scanned);
     let manifest = manifest::build_manifest(
         &options.version,
         clonk_core::version::ENGINE_VERSION,
@@ -1155,7 +1197,9 @@ fn generate_update_manifest(options: GenerateManifestOptions) -> Result<()> {
         path = %options.out_dir.join("manifest.json").display(),
         version = %manifest.version,
         components = manifest.components.len(),
-        archives = emitted.len(),
+        // The archives that exist, not the manifest entries: an alias adds an
+        // entry without adding a file.
+        archives = scanned.len(),
         "wrote update manifest"
     );
     Ok(())
@@ -2942,7 +2986,7 @@ mod tests {
             "linux engine",
         ),
         (
-            "clonk-rust-0.4.0-engine-x86_64-pc-windows-gnu.zip",
+            "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
             "windows engine",
         ),
         (
@@ -3010,9 +3054,9 @@ mod tests {
                 ),
             ),
             (
-                "x86_64-pc-windows-gnu",
+                "x86_64-pc-windows-msvc",
                 (
-                    "clonk-rust-0.4.0-engine-x86_64-pc-windows-gnu.zip",
+                    "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
                     "4f5e971ed560a857e53dfa16525c9a7aeb58d02a61a18b75c403f1eae333b7dd",
                 ),
             ),
@@ -3060,6 +3104,33 @@ mod tests {
             digests.len(),
             4,
             "four separate builds must not share a digest"
+        );
+    }
+
+    #[test]
+    fn a_windows_gnu_client_is_served_the_msvc_engine_archive() {
+        // Windows shipped as `x86_64-pc-windows-gnu` — cross-built from Linux
+        // with mingw — until the release moved to a native MSVC runner. A
+        // client reports the triple it was *built* for, so dropping the gnu key
+        // would leave every Windows install that already exists with no entry
+        // for itself: told there is no update, for ever, and silently, because
+        // "nothing offered for my triple" is indistinguishable from "up to
+        // date". The `engine` component replaces the executables wholesale, so
+        // handing those clients the MSVC archive is the migration itself.
+        let components = release_components_fixture();
+        let engine = component_entry(&generated_manifest(&components), "engine").clone();
+
+        assert_eq!(
+            engine.targets["x86_64-pc-windows-gnu"].archive,
+            "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+            "a gnu client must be offered the archive that replaced its build"
+        );
+        // The whole target, not just the name: a client verifies the digest it
+        // was given, so an alias that agreed on the filename alone would fail
+        // every gnu install at the integrity check instead of at the manifest.
+        assert_eq!(
+            engine.targets["x86_64-pc-windows-gnu"], engine.targets["x86_64-pc-windows-msvc"],
+            "the retired triple must resolve to the same bytes, not merely the same name"
         );
     }
 
