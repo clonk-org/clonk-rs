@@ -2615,16 +2615,21 @@ mod tests {
             b"graphics payload",
             "graphics group adjacent to binary should match source"
         );
-        assert_eq!(
-            fs::read(&bundle_system).unwrap(),
-            b"system payload",
-            "system group at bundle root should match source"
-        );
-        assert_eq!(
-            fs::read(&bundle_graphics).unwrap(),
-            b"graphics payload",
-            "graphics group at bundle root should match source"
-        );
+        // Only macOS stages beside the `.app`, so only there is there anything
+        // at the bundle root to read back.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                fs::read(&bundle_system).unwrap(),
+                b"system payload",
+                "system group at bundle root should match source"
+            );
+            assert_eq!(
+                fs::read(&bundle_graphics).unwrap(),
+                b"graphics payload",
+                "graphics group at bundle root should match source"
+            );
+        }
     }
 
     #[test]
