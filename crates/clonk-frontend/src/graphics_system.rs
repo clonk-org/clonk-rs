@@ -318,6 +318,9 @@ pub struct GraphicsSystem {
     /// temporarily replaces `surface_width`, but cursor-sheet selection is
     /// resolution-global in C++.
     logical_resolution_width: u32,
+    /// Which sized cursor sheet the resolution selects. `Classic` is the C++
+    /// rule; `HighDpi` is the opt-in remaster ladder.
+    cursor_tiers: CursorTiers,
     /// `Application.GetScale()` / `Config.Graphics.Scale / 100` supplied by
     /// the frame presenter before composition.
     presentation_scale: f32,
@@ -448,6 +451,7 @@ impl GraphicsSystem {
             viewport_y: 0.0,
             viewport_zoom: 1.0,
             logical_resolution_width: surface_width,
+            cursor_tiers: CursorTiers::default(),
             presentation_scale: 1.0,
             point_filtering: false,
             advanced_renderer_config: AdvancedRendererConfig::DEFAULT,
@@ -535,6 +539,19 @@ impl GraphicsSystem {
         self.point_filtering
     }
 
+    pub fn set_cursor_tiers(&mut self, tiers: CursorTiers) {
+        self.cursor_tiers = tiers;
+    }
+
+    /// The sized cursor sheet the current resolution selects.
+    fn selected_cursor_image(&self) -> Option<ImageData> {
+        self.cursor_atlas.image_for_tiers(
+            self.logical_resolution_width,
+            self.presentation_scale,
+            self.cursor_tiers,
+        )
+    }
+
     /// Installs one complete renderer snapshot. Callers replace the value as
     /// a unit, mirroring a native device/resource restore rather than
     /// exposing independently mutable draw flags.
@@ -571,6 +588,13 @@ impl GraphicsSystem {
     pub fn inherit_runtime_sprite_filtering(&mut self, previous: &Self) {
         self.presentation_scale = previous.presentation_scale;
         self.point_filtering = previous.point_filtering;
+    }
+
+    /// Carries the cursor-sheet policy across a viewport rebuild. It is
+    /// configured once at startup, but `GraphicsSystem` is reconstructed on
+    /// every resolution change and scenario start.
+    pub fn inherit_cursor_tiers(&mut self, previous: &Self) {
+        self.cursor_tiers = previous.cursor_tiers;
     }
 
     pub(crate) fn runtime_sprite_blit(
@@ -1110,6 +1134,7 @@ impl GraphicsSystem {
             self.cursor_atlas.as_ref(),
             self.logical_resolution_width,
             self.presentation_scale,
+            self.cursor_tiers,
             self.advanced_renderer_config,
             phase,
             hotspot_phase,
@@ -1125,6 +1150,7 @@ impl GraphicsSystem {
         cursor_atlas: &CursorAtlas,
         logical_resolution_width: u32,
         presentation_scale: f32,
+        cursor_tiers: CursorTiers,
         renderer_config: AdvancedRendererConfig,
         phase: MouseCursorPhase,
         hotspot_phase: MouseCursorPhase,
@@ -1132,9 +1158,11 @@ impl GraphicsSystem {
         native_offset: (i32, i32),
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> bool {
-        let Some(image) =
-            cursor_atlas.image_for_scaled_resolution(logical_resolution_width, presentation_scale)
-        else {
+        let Some(image) = cursor_atlas.image_for_tiers(
+            logical_resolution_width,
+            presentation_scale,
+            cursor_tiers,
+        ) else {
             return false;
         };
         let cell = image.height() as i32;
@@ -1234,6 +1262,7 @@ impl GraphicsSystem {
             self.cursor_atlas.as_ref(),
             self.logical_resolution_width,
             self.presentation_scale,
+            self.cursor_tiers,
             self.advanced_renderer_config,
             MouseCursorPhase::Region,
             MouseCursorPhase::Region,
@@ -1247,6 +1276,7 @@ impl GraphicsSystem {
                 self.cursor_atlas.as_ref(),
                 self.logical_resolution_width,
                 self.presentation_scale,
+                self.cursor_tiers,
                 self.advanced_renderer_config,
                 MouseCursorPhase::Help,
                 MouseCursorPhase::Region,
@@ -1271,9 +1301,7 @@ impl GraphicsSystem {
 
     /// Returns one selected cursor cell's native source-pixel hotspot.
     pub fn mouse_cursor_primary_offset(&self, phase: MouseCursorPhase) -> Option<GuiPoint> {
-        let image = self
-            .cursor_atlas
-            .image_for_scaled_resolution(self.logical_resolution_width, self.presentation_scale)?;
+        let image = self.selected_cursor_image()?;
         let cell = i32::try_from(image.height()).ok()?;
         let source = SourceRect::new(phase.atlas_phase().saturating_mul(cell), 0, cell, cell);
         if !Self::source_within_image(&image, &source) {
@@ -1302,10 +1330,7 @@ impl GraphicsSystem {
         primary_offset: GuiPoint,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> bool {
-        let Some(image) = self
-            .cursor_atlas
-            .image_for_scaled_resolution(self.logical_resolution_width, self.presentation_scale)
-        else {
+        let Some(image) = self.selected_cursor_image() else {
             return false;
         };
         let Ok(cell) = i32::try_from(image.height()) else {
@@ -8153,10 +8178,7 @@ impl GraphicsSystem {
         zoom: f32,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
-        let Some(image) = self
-            .cursor_atlas
-            .image_for_scaled_resolution(self.logical_resolution_width, self.presentation_scale)
-        else {
+        let Some(image) = self.selected_cursor_image() else {
             return;
         };
 

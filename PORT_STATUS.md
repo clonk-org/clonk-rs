@@ -576,6 +576,24 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **The mouse cursor may size itself from the panel's pixel count**
+  (`CursorTiers::HighDpi`, `crates/clonk-frontend/src/viewport.rs`; opt-in
+  `Graphics.HighDpiCursor`, default off). Approved 2026-07-28.
+  `C4GraphicsResource::ReloadResolutionDependentFiles`
+  (src/C4GraphicsResource.cpp:468-491) pins the sheet at index 5 for every
+  width above 1280 and only steps up with `Graphics.Scale`, so a 4K panel at
+  Scale=100 draws a 50px pointer while the shipped 75/100/150/225/338px sheets
+  are never loaded. Those eight sizes are authored on an exact 50/1280 ratio,
+  so selecting by physical width reproduces C++'s angular size at every
+  resolution and each tier stays a 1:1 blit of existing art. Selection is
+  presentation-only — the cell size feeds `C4MouseControl`'s draw offsets
+  (src/C4MouseControl.cpp:333-344), never a control or a game coordinate — so
+  two clients on different tiers stay in lockstep. `Classic` remains the
+  default and keeps the C++ ladder byte-for-byte, pinned by
+  `cursor_atlas_matches_cpp_scale_selection`; the divergence is pinned by
+  `high_dpi_cursor_tiers_climb_the_shipped_ladder_by_physical_width` and
+  `high_dpi_cursor_tiers_reach_the_drawn_cursor_cell`.
+
 - **Guided missiles turn only while a turn key is held, and key-ups are
   synchronized in both control styles**
   (`planet/System.c4g/EkeGuidedMissile.c`, `planet/System.c4g/EkeSftRelease.c`,

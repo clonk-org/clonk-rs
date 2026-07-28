@@ -239,11 +239,11 @@ use clonk_frontend::startup_plrsel::{
 };
 use clonk_frontend::{
     default_owner_color, viewport_edge_scroll, viewport_edge_scroll_at, ActiveViewportProjection,
-    ColorByOwnerMask, CrewNameOverlay, CrewOverlay, CursorAtlas, DefinitionDebugGeometry,
-    DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics,
-    ImageData, InputDispatcher, InventoryOverlay, KeyCode, MainMenuAction, MainMenuItem,
-    MaterialRenderInfo, MaterialTextureSurface, MessageBoardMode, MessageBoardOverlay,
-    MouseCursorPhase, ParticleFacet, ParticleRenderDefinition, PlayerOverlay,
+    ColorByOwnerMask, CrewNameOverlay, CrewOverlay, CursorAtlas, CursorTiers,
+    DefinitionDebugGeometry, DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem,
+    GuiPoint, HudGraphics, ImageData, InputDispatcher, InventoryOverlay, KeyCode, MainMenuAction,
+    MainMenuItem, MaterialRenderInfo, MaterialTextureSurface, MessageBoardMode,
+    MessageBoardOverlay, MouseCursorPhase, ParticleFacet, ParticleRenderDefinition, PlayerOverlay,
     RenderedAudibilityCall, RenderedObjectAudibilityCalls, ScenarioEntry, ScenarioKind,
     SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction, StartupTooltip,
     ViewportEdgeScroll, ViewportInput, ViewportPointer,
@@ -1121,6 +1121,7 @@ impl GameApp {
         // Both values are process-local in C++ and fixed before startup UI.
         let native_config = load_native_config_bytes(paths);
         let advanced_renderer_config = load_advanced_renderer_config(&native_config);
+        let high_dpi_cursor = configured_high_dpi_cursor(&native_config);
         let loader_gamma = load_classic_loader_gamma_from_native(&native_config);
         let gamepads_enabled = configured_gamepads_enabled(&native_config);
         let allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
@@ -1362,6 +1363,11 @@ impl GameApp {
             assets.hud_graphics(),
         );
         graphics.set_advanced_renderer_config(advanced_renderer_config);
+        graphics.set_cursor_tiers(if high_dpi_cursor {
+            CursorTiers::HighDpi
+        } else {
+            CursorTiers::Classic
+        });
         graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         graphics.set_game_palette(assets.game_palette());
         graphics.set_liquid_animation(assets.liquid_animation());
@@ -2161,6 +2167,7 @@ impl GameApp {
         graphics.inherit_debug_draw_state(&self.graphics);
         graphics.inherit_runtime_sprite_filtering(&self.graphics);
         graphics.inherit_advanced_renderer_config(&self.graphics);
+        graphics.inherit_cursor_tiers(&self.graphics);
         graphics.set_particle_sprites(Arc::new(particle_sprite_map(&self.engine)));
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.set_game_palette(game_palette);
@@ -7405,6 +7412,7 @@ impl GameApp {
         graphics.inherit_liquid_animation_cycle(&self.graphics);
         graphics.inherit_runtime_sprite_filtering(&self.graphics);
         graphics.inherit_advanced_renderer_config(&self.graphics);
+        graphics.inherit_cursor_tiers(&self.graphics);
         // Particle definitions live in Game.Particles independently of the
         // viewport (oracle-src-pinned src/C4Particles.cpp:118-189). Rebind
         // their draw resources when entering the running presentation just

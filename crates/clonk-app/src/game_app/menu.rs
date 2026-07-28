@@ -4598,6 +4598,7 @@ impl GameApp {
         graphics.inherit_liquid_animation_cycle(&self.graphics);
         graphics.inherit_runtime_sprite_filtering(&self.graphics);
         graphics.inherit_advanced_renderer_config(&self.graphics);
+        graphics.inherit_cursor_tiers(&self.graphics);
         self.graphics = graphics;
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());

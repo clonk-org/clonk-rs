@@ -13371,6 +13371,115 @@ mod tests {
     }
 
     #[test]
+    fn high_dpi_cursor_tiers_climb_the_shipped_ladder_by_physical_width() {
+        // Deliberate divergence (PORT_STATUS "Deliberate divergences"): C++
+        // pins the sheet at index 5 for every width above 1280 and only steps
+        // up with Graphics.Scale (src/C4GraphicsResource.cpp:474-491), so a
+        // 4K panel at Scale=100 draws a 50px pointer and the shipped 75..338px
+        // sheets are never used. The eight sizes are authored on an exact
+        // 50/1280 ratio, so selecting by physical width keeps C++'s angular
+        // size and every tier stays a 1:1 blit.
+        let hd = |width: u32, scale: f32| CursorAtlas::index_for_tiers(width, scale, CursorTiers::HighDpi);
+
+        // At or below the C++ breakpoint the classic choice is already right.
+        for width in [320u32, 640, 799, 800, 1279, 1280] {
+            assert_eq!(
+                hd(width, 1.0),
+                CursorAtlas::index_for_scaled_resolution(width, 1.0),
+                "width {width} must keep the C++ selection"
+            );
+        }
+
+        // Above it, each shipped cell size takes over at the width where it
+        // matches C++'s 50px-at-1280 ratio.
+        for (width, index) in [
+            (1281u32, 5usize),
+            (1919, 5),
+            (1920, 4),
+            (2559, 4),
+            (2560, 3),
+            (3839, 3),
+            (3840, 2),
+            (5759, 2),
+            (5760, 1),
+            (8652, 1),
+            (8653, 0),
+        ] {
+            assert_eq!(hd(width, 1.0), index, "physical width {width}");
+        }
+
+        // The tier follows physical pixels, so Graphics.Scale cannot shrink
+        // the pointer below its angular size the way the C++ shift does.
+        assert_eq!(hd(1920, 2.0), 2, "3840 physical through a 2x GUI scale");
+        assert_eq!(hd(1280, 3.0), 2, "3840 physical through a 3x GUI scale");
+
+        // Classic selection is untouched by the new policy.
+        assert_eq!(
+            CursorAtlas::index_for_tiers(3840, 1.0, CursorTiers::Classic),
+            5
+        );
+    }
+
+    #[test]
+    fn high_dpi_cursor_tiers_reach_the_drawn_cursor_cell() {
+        // The policy is only worth anything if the selected sheet reaches the
+        // draw path: C4MouseControl derives its `iOffset` from the live cell
+        // size (src/C4MouseControl.cpp:333-344), so the hotspot moves with the
+        // tier.
+        let sheet = |cell: u32| {
+            Some(ImageData::new(
+                cell.saturating_mul(39),
+                cell,
+                vec![255u8; (cell * 39 * cell * 4) as usize],
+            ))
+        };
+        let images = vec![None, None, sheet(150), None, None, sheet(50), None, None];
+        let atlas = Arc::new(CursorAtlas::new(images));
+        let mut graphics = GraphicsSystem::new(
+            3840,
+            8,
+            8,
+            "HD cursor tiers",
+            test_font(),
+            Arc::new(HashMap::new()),
+            Arc::clone(&atlas),
+            empty_hud_graphics(),
+        );
+
+        assert_eq!(
+            graphics.construction_cursor_primary_offset(),
+            Some(GuiPoint::new(25.0, 25.0)),
+            "the default policy keeps C++'s 50px cell at 3840"
+        );
+
+        graphics.set_cursor_tiers(CursorTiers::HighDpi);
+        assert_eq!(
+            graphics.construction_cursor_primary_offset(),
+            Some(GuiPoint::new(75.0, 75.0)),
+            "HighDpi selects the 150px sheet and its hotspot at 3840"
+        );
+
+        // The policy is configured once at startup, but every resolution
+        // change and scenario start builds a fresh GraphicsSystem.
+        let mut rebuilt = GraphicsSystem::new(
+            3840,
+            8,
+            8,
+            "HD cursor tiers rebuilt",
+            test_font(),
+            Arc::new(HashMap::new()),
+            atlas,
+            empty_hud_graphics(),
+        );
+        rebuilt.inherit_cursor_tiers(&graphics);
+        assert_eq!(
+            rebuilt.construction_cursor_primary_offset(),
+            Some(GuiPoint::new(75.0, 75.0)),
+            "a rebuilt viewport must keep the configured cursor policy"
+        );
+    }
+
+    #[test]
     fn cursor_atlas_matches_cpp_scale_selection() {
         let entries = (0u8..8)
             .map(|index| Some(ImageData::new(1, 1, vec![index, 0, 0, 255])))

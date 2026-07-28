@@ -8110,6 +8110,15 @@ pub(crate) fn load_advanced_renderer_config(
     }
 }
 
+/// `Graphics.HighDpiCursor`: opt in to the physical-width cursor ladder. This
+/// has no C++ counterpart — the oracle only grows the pointer with
+/// `Graphics.Scale` — so it defaults off and is recorded as a deliberate
+/// divergence in `PORT_STATUS.md`.
+pub(crate) fn configured_high_dpi_cursor(config: &[u8]) -> bool {
+    clonk_app_netplay::configured_native_boolean(config, "Graphics", "HighDpiCursor")
+        .unwrap_or(false)
+}
+
 pub(crate) fn configured_max_refresh_delay_ms(config: &[u8]) -> u64 {
     u64::try_from(startup_config_integer(
         config,

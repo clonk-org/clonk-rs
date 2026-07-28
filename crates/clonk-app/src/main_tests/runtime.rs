@@ -862,6 +862,16 @@
     }
 
     #[test]
+    fn high_dpi_cursor_defaults_off_and_reads_the_native_boolean() {
+        // Deliberate divergence, so it must stay opt-in: with the key absent
+        // the cursor keeps C4GraphicsResource's sheet choice exactly
+        // (src/C4GraphicsResource.cpp:468-491).
+        assert!(!configured_high_dpi_cursor(b""));
+        assert!(!configured_high_dpi_cursor(b"[Graphics]\nHighDpiCursor=0\n"));
+        assert!(configured_high_dpi_cursor(b"[Graphics]\nHighDpiCursor=1\n"));
+    }
+
+    #[test]
     fn max_refresh_delay_defaults_to_cpp_30_ms_and_honors_positive_config() {
         // Config.Graphics.MaxRefreshDelay defaults to 30, so the native
         // 28 ms game timer remains one 28 ms graphics opportunity instead of

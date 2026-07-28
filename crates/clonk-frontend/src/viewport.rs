@@ -555,6 +555,22 @@ pub(crate) fn scaled_camera_border(border: i32, zoom: f32, output_extent: u32) -
         .clamp(0.0, output_extent as f32) as u32
 }
 
+/// Which sized cursor sheet a display resolution selects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CursorTiers {
+    /// `C4GraphicsResource::ReloadResolutionDependentFiles` exactly: the
+    /// sheet only ever grows with `Graphics.Scale`, never with the panel's
+    /// own pixel count (src/C4GraphicsResource.cpp:468-491).
+    #[default]
+    Classic,
+    /// Remaster divergence: select by physical width so the pointer keeps
+    /// the angular size C++ gives it at 1280 (a 50px cell, 3.90625% of the
+    /// screen width) all the way up the shipped ladder. The eight sized
+    /// sheets are authored at exactly that ratio — 28/40/50/75/100/150/225/338
+    /// px cells — so every tier is an exact 1:1 blit of existing art.
+    HighDpi,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CursorAtlas {
     images: Vec<Option<ImageData>>,
@@ -583,8 +599,47 @@ impl CursorAtlas {
     /// `C4GraphicsResource::ReloadResolutionDependentFiles`
     /// (src/C4GraphicsResource.cpp:468-504).
     pub fn image_for_scaled_resolution(&self, logical_width: u32, scale: f32) -> Option<ImageData> {
-        let index = Self::index_for_scaled_resolution(logical_width, scale);
+        self.image_for_tiers(logical_width, scale, CursorTiers::Classic)
+    }
+
+    pub fn image_for_tiers(
+        &self,
+        logical_width: u32,
+        scale: f32,
+        tiers: CursorTiers,
+    ) -> Option<ImageData> {
+        let index = Self::index_for_tiers(logical_width, scale, tiers);
         self.images.get(index).and_then(Clone::clone)
+    }
+
+    pub(crate) fn index_for_tiers(logical_width: u32, scale: f32, tiers: CursorTiers) -> usize {
+        if tiers == CursorTiers::Classic {
+            return Self::index_for_scaled_resolution(logical_width, scale);
+        }
+        // Physical width at which each sheet's cell first reaches C++'s
+        // 50px-at-1280 ratio: 1920/2560/3840/5760/8653 for the 75/100/150/
+        // 225/338px cells. Below the C++ breakpoint the classic ladder
+        // already tracks the panel, so it is kept verbatim.
+        const LADDER: [(f32, usize); 5] = [
+            (8653.0, 0),
+            (5760.0, 1),
+            (3840.0, 2),
+            (2560.0, 3),
+            (1920.0, 4),
+        ];
+        let scale = if scale.is_finite() {
+            scale.max(f32::EPSILON)
+        } else {
+            1.0
+        };
+        let physical_width = logical_width as f32 * scale;
+        if physical_width <= 1280.0 {
+            return Self::index_for_scaled_resolution(logical_width, scale);
+        }
+        LADDER
+            .iter()
+            .find(|(width, _)| physical_width >= *width)
+            .map_or(5, |&(_, index)| index)
     }
 
     pub(crate) fn index_for_scaled_resolution(logical_width: u32, scale: f32) -> usize {
