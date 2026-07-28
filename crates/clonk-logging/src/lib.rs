@@ -101,17 +101,22 @@ impl Write for ConsoleLogWriter {
         Ok(buf.len())
     }
 
+    /// Commit the buffered event to the shared capture. Buffering until flush
+    /// keeps a single event's bytes contiguous when tracing writes it from a
+    /// worker thread while the application drains on its own.
     fn flush(&mut self) -> io::Result<()> {
+        let pending = std::mem::take(&mut self.pending);
+        self.bytes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend_from_slice(&pending);
         Ok(())
     }
 }
 
 impl Drop for ConsoleLogWriter {
     fn drop(&mut self) {
-        self.bytes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extend_from_slice(&self.pending);
+        let _ = self.flush();
     }
 }
 
