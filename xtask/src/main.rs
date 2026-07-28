@@ -1,5 +1,6 @@
 mod audit;
 mod chaos;
+mod components;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clonk_engine::fixtures::SNAPSHOT_SCENARIOS;
@@ -978,6 +979,10 @@ fn package(options: PackageOptions) -> Result<()> {
     build_runtime_binaries(&paths)?;
     audit_release_dependencies(&paths)?;
     let package_dir = assemble_package_layout(&paths)?;
+    // Runs on the real tree, not a fixture: an entry that belongs to no update
+    // component would ship in the installer but never reach a client updating
+    // in place, and nothing else would notice.
+    components::verify_components_cover_layout(&package_dir)?;
     let output = package_output(&paths.target_triple, options.archive);
 
     // The bundle is the macOS staged layout, so it is assembled even when no
