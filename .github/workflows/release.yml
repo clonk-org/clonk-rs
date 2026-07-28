@@ -343,6 +343,9 @@ jobs:
           fi
           echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
 
+      # The macOS pass ships one universal `.app`, so it builds both
+      # architectures and `lipo`s them together. The runner is arm64, so only
+      # the Intel half needs installing.
       - name: Install macOS cross target
         if: matrix.runner == 'macos-latest'
         run: rustup target add x86_64-apple-darwin
@@ -405,11 +408,42 @@ jobs:
             -DOUTFILE="$outfile" \
             scripts/windows-installer.nsi
 
+      # One pass, not one per architecture: the two builds differ only in ~20 MB
+      # of executables, so a second disk image was ~340 MB of identical game
+      # data. `package` builds both arches and fuses them itself, so this emits
+      # one `.dmg` and one `engine` component for both macOS triples.
       - name: Package macOS
         if: matrix.runner == 'macos-latest'
+        run: ./target/release/xtask-engine-tools package --components=engine
+
+      # `lipo` invalidates the signature of the slices it fuses, so the bundle
+      # is signed afterwards, on the universal binaries. `package` already fails
+      # if `codesign --verify --deep --strict` does; this is the other half —
+      # that the thing it signed is actually fat. A single-arch regression is
+      # invisible on an arm64 runner, and would ship a build no Intel Mac runs.
+      - name: Check the macOS build is universal
+        if: matrix.runner == 'macos-latest'
         run: |
-          ./target/release/xtask-engine-tools package --components=engine
-          CARGO_BUILD_TARGET=x86_64-apple-darwin ./target/release/xtask-engine-tools package --components=engine
+          shopt -s nullglob
+          engines=(target/dist/components/clonk-rust-*-engine-universal-apple-darwin.zip)
+          if [[ ${#engines[@]} -ne 1 ]]; then
+            echo "expected exactly one universal engine component, found ${#engines[@]}" >&2
+            exit 1
+          fi
+          rm -rf target/dist/universal-check
+          unzip -q "${engines[0]}" -d target/dist/universal-check
+          for binary in clonk-app clonk-game; do
+            path="target/dist/universal-check/Contents/MacOS/$binary"
+            info=$(lipo -info "$path")
+            echo "$info"
+            for arch in arm64 x86_64; do
+              case "$info" in
+                *" $arch"*) ;;
+                *) echo "$binary is missing the $arch slice" >&2; exit 1 ;;
+              esac
+            done
+          done
+          rm -rf target/dist/universal-check
 
       - name: Check the artifacts look real
         run: |
@@ -447,6 +481,11 @@ jobs:
             case "$name" in
               content-*)  floor=150000000 ;;
               planet-*)   floor=10000000 ;;
+              # The macOS engine carries two architectures, so its floor is
+              # twice the others'. Still only an empty-container check — that
+              # both slices are really present is what `lipo -info` proves, in
+              # the step above.
+              *-engine-universal-*) floor=10000000 ;;
               *-engine-*) floor=5000000 ;;
               # An archive no rule here recognises is also one the manifest
               # generator refuses, so fail where the log is about it.
