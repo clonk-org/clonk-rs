@@ -419,6 +419,19 @@ fn main() -> Result<()> {
     // Built before the window size is resolved: the event loop is what can be
     // asked about the monitors the window will open on.
     let event_loop = EventLoopBuilder::<NetworkEventWake>::with_user_event().build();
+    if let Some(scale_factor) = event_loop
+        .primary_monitor()
+        .or_else(|| event_loop.available_monitors().next())
+        .map(|monitor| monitor.scale_factor())
+    {
+        if display_options.apply_first_run_display_scale(scale_factor) {
+            tracing::info!(
+                scale_factor,
+                scale_percent = display_options.scale_percent(),
+                "seeded the first-run application scale from the display density"
+            );
+        }
+    }
     let (initial_width, initial_height) = if classic.console {
         // C4Console's GTK shell uses a 320x320 native-pixel default and never
         // inherits the fullscreen game window configuration.

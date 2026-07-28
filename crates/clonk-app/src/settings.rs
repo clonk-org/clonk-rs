@@ -1,4 +1,7 @@
 use clonk_core::std_config::Config;
+use clonk_frontend::startup_options_graphics::{
+    MAX_GRAPHICS_SCALE_PERCENT, MIN_GRAPHICS_SCALE_PERCENT,
+};
 use clonk_platform::AppPaths;
 use std::io::ErrorKind;
 
@@ -349,6 +352,53 @@ mod tests {
     }
 
     #[test]
+    fn first_run_display_scale_follows_the_monitor_density_only_without_a_config() {
+        // Deliberate divergence: C++ always starts at Scale=100, so a 2x
+        // panel gets an 800x600 *device pixel* window with a 14px font
+        // (src/C4Config.cpp:440-441, :480). Seeding the application scale
+        // from the monitor keeps the classic 800x600 logical layout while
+        // giving it the panel's real pixel density — the window covers the
+        // same physical area it did on a 1x display.
+        let mut fresh = DisplayOptions::default();
+        fresh.mark_first_run();
+        assert!(fresh.apply_first_run_display_scale(2.0));
+        assert_eq!(fresh.scale_percent(), 200);
+        assert_eq!(fresh.base_width, 800, "the logical layout is unchanged");
+        assert_eq!(fresh.base_height, 600);
+        assert_eq!(fresh.actual_size(), (1600, 1200));
+
+        // A configuration that exists on disk is the player's choice.
+        let mut configured = DisplayOptions::default();
+        assert!(!configured.apply_first_run_display_scale(2.0));
+        assert_eq!(configured.scale_percent(), 100);
+
+        // Fractional densities round to an integer scale: a non-integer
+        // application scale routes every glyph through a bilinear resample
+        // of the atlas (`requires_resampling`, clonk_fonts.rs:102-113).
+        for (factor, percent) in [(1.0, 100), (1.25, 100), (1.5, 200), (2.0, 200), (3.0, 300)] {
+            let mut options = DisplayOptions::default();
+            options.mark_first_run();
+            options.apply_first_run_display_scale(factor);
+            assert_eq!(options.scale_percent(), percent, "scale factor {factor}");
+        }
+
+        // Beyond the supported range the scale clamps rather than producing
+        // an unreachable Options-dialog value.
+        let mut huge = DisplayOptions::default();
+        huge.mark_first_run();
+        huge.apply_first_run_display_scale(9.0);
+        assert_eq!(huge.scale_percent(), 300);
+
+        // Degenerate factors never disturb the default.
+        for factor in [0.0, -2.0, f64::NAN, f64::INFINITY] {
+            let mut options = DisplayOptions::default();
+            options.mark_first_run();
+            assert!(!options.apply_first_run_display_scale(factor));
+            assert_eq!(options.scale_percent(), 100);
+        }
+    }
+
+    #[test]
     fn l007_display_mode_default_override_and_numeric_persistence_match_cpp() {
         let mut missing_mode = DisplayOptions::default();
         assert_eq!(missing_mode.mode, DisplayMode::Fullscreen);
@@ -463,6 +513,7 @@ mod tests {
             maximized: false,
             position: None,
             dirty: true,
+            first_run: false,
         };
         options.write_config(&mut cfg);
         assert_eq!(cfg.get_in(Some("Graphics"), "ResolutionX"), Some("1371"));
@@ -529,6 +580,7 @@ pub struct DisplayOptions {
     pub maximized: bool,
     pub position: Option<(i32, i32)>,
     dirty: bool,
+    first_run: bool,
 }
 
 impl Default for DisplayOptions {
@@ -543,6 +595,7 @@ impl Default for DisplayOptions {
             maximized: false,
             position: None,
             dirty: false,
+            first_run: false,
         }
     }
 }
@@ -561,6 +614,7 @@ impl DisplayOptions {
                 // during startup. Keep the missing-file case dirty so the
                 // normal shutdown path persists the native fullscreen mode.
                 options.dirty = true;
+                options.first_run = true;
             }
             Err(err) => tracing::warn!(
                 error = %err,
@@ -569,6 +623,42 @@ impl DisplayOptions {
             ),
         }
         options
+    }
+
+    /// Marks a configuration as never having been written to disk.
+    #[cfg(test)]
+    pub fn mark_first_run(&mut self) {
+        self.first_run = true;
+    }
+
+    /// Seeds the application scale from the display's own pixel density, but
+    /// only when no configuration file exists yet.
+    ///
+    /// Deliberate divergence: C++ starts every install at `Scale=100`
+    /// (src/C4Config.cpp:480), which on a 2x panel means an 800x600 *device
+    /// pixel* window and a 14px font. Because `Scale` divides the physical
+    /// extent into the logical layout
+    /// (`logical_size_for`, crates/clonk-scaling/src/lib.rs:12-17), seeding it
+    /// from the monitor keeps the classic 800x600 logical layout and simply
+    /// gives it the panel's real pixel density. The scale is rounded to an
+    /// integer: a fractional application scale sends every glyph through a
+    /// bilinear resample of the native atlas
+    /// (`requires_resampling`, crates/clonk-frontend/src/clonk_fonts.rs:102-113).
+    ///
+    /// Returns whether the scale was changed.
+    pub fn apply_first_run_display_scale(&mut self, scale_factor: f64) -> bool {
+        if !self.first_run || !scale_factor.is_finite() || scale_factor < 1.0 {
+            return false;
+        }
+        let percent = ((scale_factor.round() as i32).saturating_mul(100))
+            .clamp(MIN_GRAPHICS_SCALE_PERCENT, MAX_GRAPHICS_SCALE_PERCENT);
+        if percent == self.scale_percent {
+            return false;
+        }
+        self.scale_percent = percent;
+        self.scale = percent as f32 / 100.0;
+        self.dirty = true;
+        true
     }
 
     /// Window size in output pixels: ResX*Scale truncated like the C++

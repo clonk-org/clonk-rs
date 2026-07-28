@@ -576,6 +576,24 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **A first launch seeds the application scale from the display's density**
+  (`DisplayOptions::apply_first_run_display_scale`,
+  `crates/clonk-app/src/settings.rs`). Approved 2026-07-28. C++ starts every
+  install at `Scale=100` (src/C4Config.cpp:480), which on a 2x panel produces
+  an 800x600 *device pixel* window and a 14px font — the setting a player is
+  most likely to want changed and least likely to find. Because `Scale`
+  divides the physical extent into the logical layout (`logical_size_for`,
+  `crates/clonk-scaling/src/lib.rs:12-17`), seeding it from the monitor keeps
+  the classic 800x600 logical layout exactly and gives it the panel's real
+  pixel density, so the window covers the same physical area it did on a 1x
+  display. It applies only when no configuration file exists — every existing
+  install and every value the player has ever saved is untouched — and rounds
+  to an integer scale because a fractional application scale routes every
+  glyph through a bilinear resample of the native atlas
+  (`requires_resampling`, `crates/clonk-frontend/src/clonk_fonts.rs:102-113`).
+  Presentation-only; pinned by
+  `first_run_display_scale_follows_the_monitor_density_only_without_a_config`.
+
 - **The mouse cursor may size itself from the panel's pixel count**
   (`CursorTiers::HighDpi`, `crates/clonk-frontend/src/viewport.rs`; opt-in
   `Graphics.HighDpiCursor`, default off). Approved 2026-07-28.
