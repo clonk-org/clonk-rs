@@ -2,7 +2,8 @@
 
 use crate::resource_catalog::{
     ChunkSet, ChunkStoreOutcome, PeerStatusOutcome, ResourceCatalog, ResourceCatalogAction,
-    ResourceLoadPoll, ResourceRegistration,
+    ResourceLoadPoll, ResourceRegistration, RESOURCE_MAX_LOAD_PER_PEER_IN_GAME,
+    RESOURCE_MAX_LOAD_PER_PEER_PER_FILE,
 };
 use crate::resource_packet::{
     encode_resource_packet, ResourceChunkAvailability, ResourceChunkRange, ResourceDiscoverPacket,
@@ -1003,4 +1004,70 @@ fn cpp_failed_one_shot_request_rolls_back_without_starting_a_refill_pass() {
         .is_empty());
     assert_eq!(catalog.outstanding_load_count(131), 0);
     assert_eq!(catalog.peer_ids(131), vec![7]);
+}
+
+#[test]
+fn the_per_peer_window_narrows_in_game_and_relaxes_in_the_lobby() {
+    // Bulk and control share one strictly-ordered reliable-UDP stream whenever a
+    // peer has no TCP route, so what can sit ahead of a control packet on that
+    // connection is this cap times the chunk size. Measured through the real
+    // reliable-UDP layer at 80ms/2% loss with a chunk on the same stream: three
+    // outstanding costs control 63.1ms mean / 445ms worst, one costs 53.1ms /
+    // 393ms, against 49.7ms / 80ms with no bulk at all.
+    //
+    // It is not simply one everywhere, because it also divides throughput by
+    // three -- one chunk in flight per round trip turns a multi-megabyte
+    // download into minutes on a 300ms link. The blocking only matters while
+    // there is control to block, so the lobby keeps C++'s three.
+    let mut catalog = ResourceCatalog::new(0);
+    assert_eq!(
+        catalog.max_loads_per_peer(),
+        RESOURCE_MAX_LOAD_PER_PEER_PER_FILE,
+        "a fresh catalog is in the lobby, where a fast join is what matters"
+    );
+
+    catalog.register(ResourceRegistration {
+        resource_id: 40,
+        chunk_count: 50,
+        binary_compatible: false,
+        loading: true,
+    });
+    let status = ResourceStatusPacket {
+        resource_id: 40,
+        chunks: ResourceChunkAvailability {
+            chunk_count: 50,
+            ranges: vec![ResourceChunkRange {
+                start: 0,
+                length: 50,
+            }],
+        },
+    };
+    assert_eq!(
+        catalog.record_peer_status(1, &status),
+        PeerStatusOutcome::Recorded
+    );
+
+    // Three fit in the lobby.
+    for _ in 0..RESOURCE_MAX_LOAD_PER_PEER_PER_FILE {
+        assert!(catalog.schedule_request(40, 1, 0, 100).is_some());
+    }
+    assert_eq!(catalog.schedule_request(40, 1, 0, 100), None);
+
+    // Starting the game narrows the window; a peer already over the new cap is
+    // simply not given more until its outstanding requests drain.
+    catalog.set_max_loads_per_peer(RESOURCE_MAX_LOAD_PER_PEER_IN_GAME);
+    assert_eq!(catalog.max_loads_per_peer(), 1);
+    assert_eq!(catalog.schedule_request(40, 1, 0, 100), None);
+
+    // A fresh peer gets exactly one.
+    assert_eq!(
+        catalog.record_peer_status(2, &status),
+        PeerStatusOutcome::Recorded
+    );
+    assert!(catalog.schedule_request(40, 2, 0, 100).is_some());
+    assert_eq!(
+        catalog.schedule_request(40, 2, 0, 100),
+        None,
+        "in game, one chunk per peer is the whole window"
+    );
 }

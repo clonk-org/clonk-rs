@@ -374,6 +374,207 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
+- **One chunk in flight per peer while a game is running, three in the lobby**
+  (`crates/clonk-network/src/resource_catalog.rs`,
+  `ResourceCatalog::set_max_loads_per_peer`, narrowed at the game-start
+  transition in `session/host_dispatch.rs`; C++
+  `C4NetResMaxLoadPerPeerPerFile` = 3 always). Approved 2026-07-27.
+  This cap, not `C4NetResMaxLoad`, is what governs head-of-line blocking: bulk
+  outstanding *on one connection* is this times the chunk size, and the global
+  cap only spreads work across different peers, which are different connections.
+  Measured through the real reliable-UDP layer at 80 ms / +-20 ms / 2% loss,
+  with a chunk pushed down the same ordered stream as control (8 seeds x 300
+  ticks, `sim::bulk_stream_tests`). Control latency, mean and worst:
+  no bulk at all 49.7 ms / 80 ms;
+  100 KiB x3, C++'s configuration, 110.1 ms / 892 ms;
+  10 KiB x3, this port after the chunk-size entry below, 63.1 ms / 445 ms;
+  10 KiB x1, this entry, 53.1 ms / 393 ms.
+  So the narrower window recovers most of the remaining gap to an unloaded link.
+  It is *not* set to one everywhere, because it also divides transfer throughput
+  by three — a peer can only have one chunk in flight per round trip, and on a
+  300 ms link that turns a multi-megabyte scenario download into minutes. The
+  blocking only costs anything while there is control to block, so the lobby
+  keeps C++'s three, where a fast join is the only thing the player is waiting
+  for. Purely local request scheduling either way: a serving peer cannot tell how
+  many chunks we chose to have outstanding, so this is invisible to a stock C++
+  peer.
+
+- **Drawing has a floor while catching up**
+  (`crates/clonk-app/src/main_parts/app_state.rs`, `apply_render_floor`;
+  `NETWORK_RENDER_FLOOR_FRAMES` = 18). Approved 2026-07-27. No C++ equivalent.
+  C++ thins rendering during catch-up by `(behind + 15) / 20`
+  (C4GameControl.cpp:334-342), so at a large backlog it draws one frame in
+  twenty or worse, and because the port coalesces several simulation frames into
+  one pass, consecutive passes can each decide to draw nothing at all. A
+  recovering client then shows a completely static picture — the same "is it
+  hung?" symptom a silent control stall produces, and the reason LegacyClonk
+  issue #28 reads the way it does.
+  A pass that would draw nothing draws anyway once 18 simulation frames have
+  gone by undrawn: 2 Hz at the 28 ms in-game tick, which is the floor Spring
+  pins while fast-forwarding rather than giving the simulation everything.
+  Counted in frames rather than wall time so the behaviour is deterministic and
+  testable. Applied after the pass has decided, so the per-frame accounting that
+  mirrors C++ is untouched.
+
+- **Adaptive `ControlRate` was investigated and rejected — it cannot help a
+  CPU-bound client.** Not a divergence; recorded so it is not attempted again.
+  Widening the control cadence is the classic Age of Empires answer to a slow
+  participant, and it does not apply to this failure. A control tick costs
+  `ControlRate` simulation frames *and lasts* `ControlRate` frames, so the rate
+  cancels out: a machine whose per-frame cost exceeds the per-frame budget is
+  overloaded at every rate. `ControlRate` buys packet rate and jitter tolerance,
+  both genuinely useful on a narrow link, but not one millisecond of CPU. The
+  only lever that would help is a slower *frame* rate, which slows the game for
+  everyone — precisely the outcome the straggler work exists to avoid.
+  Pinned by `sim_session::control_rate_tests`. Finding it required fixing a
+  fidelity bug in the harness: `control_period` now derives from the rate rather
+  than being hardcoded at rate 2's 55 ms, without which a higher rate measured as
+  strictly worse because the cost per control tick rose while its budget did not.
+
+- **Control redundancy is now per peer, and a lossless link pays nothing**
+  (`crates/clonk-network/src/udp_runtime.rs`, `ReliableUdpPeer::reconsider_redundancy`;
+  extends the fixed-count entry below). Approved 2026-07-27.
+  Each copy is a whole extra datagram, and on a narrow uplink the ~35 bytes of
+  IPv4/UDP/PPP framing per datagram dominate the 10-27 byte control payload: at
+  ControlRate 2 the fixed 3x costs roughly 22 kbit/s per peer per direction, two
+  thirds of a 33.6 kbit/s uplink, to protect a stream that may not be losing
+  anything at all.
+  Each peer now counts the data fragments it sent and the fragments that peer
+  re-asked for — the `Check` missing list is the peer telling us exactly what it
+  lost — and re-decides every 128 fragments. A peer that reported no loss over
+  the window drops to zero extra copies; any loss at all restores the measured
+  default of two extras. A peer that has not been observed yet keeps the default,
+  since the opening datagrams of a session are the ones a stall is most expensive
+  on.
+  The threshold is deliberately "any loss" rather than a congestion-style 2%:
+  the entry below records redundancy paying for itself at 1% loss, so a
+  percentage threshold would switch it off exactly where it was proven to help.
+  The size gate is unchanged, so bulk transfer is still never duplicated.
+  Invisible to a C++ peer for the same reason as the fixed count: the copies are
+  byte-identical and carry the same packet number, so both engines discard the
+  duplicate.
+
+- **The host stops extending the async deadline for a persistent straggler**
+  (`crates/clonk-network/src/session/host_loop.rs`, `force_expired_async_control`;
+  `HostConfig::straggler_patience`, default 4). Approved 2026-07-27. No C++
+  equivalent: C++ has no control-lag drop of any kind, and its only kick is 30 s
+  of unanswered ping.
+  `CNM_Async` bounds the host's wait *per tick*, which is the right answer for a
+  peer that hiccups. It does nothing for a peer that is late on *every* tick — a
+  machine that cannot sustain the cadence — because the host then pays the whole
+  budget (106 ms at defaults) every single tick and every other participant pays
+  it too. Once a client has missed the full budget on four consecutive ticks the
+  host stops waiting for it; it rejoins the waited-for set the moment it
+  delivers. This is the same move C++ already makes for `NCS_Chasing` clients,
+  which `isWaitedFor()` excludes from `AllClientsReady`.
+  Determinism is unaffected for the same reason `CNM_Async` itself is: only the
+  host decides, and it still broadcasts one authoritative aggregate that every
+  participant executes identically.
+  Two details that took measurement to get right, both worth preserving:
+  lateness is counted **only when the full budget actually expired**, never on a
+  fast-path pack, or a client merely in flight when the host gave up on somebody
+  else accumulates marks and is eventually written off itself; and the fast path
+  fires only when **every** client the coordinator is still missing is a known
+  straggler, since "the peer sent it" is not "the host has it".
+  Measured with `cargo xtask chaos`, 16 committed seeds x 200 ticks. Healthy
+  participants, before -> after, against the ping-sized-PreSend baseline this
+  and the entry below replace:
+  one Pi-class machine on a good link 975 -> 0 permille blocked and
+  10348 -> 394 ms drift;
+  the same machine on 33.6k dial-up 970 -> 0 permille and 10384 -> 394 ms;
+  a Pi 4 on congested hotel wifi 930 -> 15 permille and 8995 -> 524 ms;
+  a dial-up link on a good machine 530 -> 5 permille and 3491 -> 447 ms.
+  Every impaired profile now costs the healthy players about what an all-healthy
+  session does (368 ms).
+  The cost is the straggler's input, and it is small: at patience 4 the healthy
+  participants lose 38 inputs out of 4800 and the straggler 1.6% more than
+  before, while an all-healthy session is completely unaffected (65 dropped, the
+  same as with the feature off). Patience 2 buys the same drift but starts
+  costing an all-healthy session input (65 -> 120), because ordinary loss makes a
+  good client miss twice in a row often enough to be written off.
+  What this does **not** fix: the straggler's own experience. It is CPU-bound, so
+  its drift is unchanged at 20.5 s over an 11 s session. Nothing in the network
+  layer can help a machine that cannot execute ticks fast enough; that needs
+  adaptive `ControlRate` or a smaller scenario.
+
+- **Published resources advertise 10 KiB chunks, not 100 KiB**
+  (`crates/clonk-network/src/host_resource_core.rs`, `STOCK_CHUNK_SIZE`; C++
+  `C4NetResChunkSize`, LegacyClonk 7d43b47 src/C4Network2Res.h:27). Approved
+  2026-07-27. OpenClonk's value; LegacyClonk raised it to 100 KiB in `2557ff3d`
+  to "better utilize available upload speed".
+  Chunk size is carried per resource in the core and honoured by whoever
+  downloads it, so this is a local publishing choice rather than a protocol
+  change and a stock C++ peer follows it unmodified.
+  The reason it is worth losing transfer throughput for: resource chunks and
+  control share one **strictly-ordered** reliable-UDP sequence space whenever a
+  peer has no TCP route, which is the ordinary internet-play topology because NAT
+  punch-through is UDP-only and `GetDataConnection` falls back to the message
+  connection. At the 499-byte payload limit a 100 KiB chunk is **206 datagrams**,
+  so it puts 206 sequence numbers ahead of every later control packet, and one
+  lost fragment withholds all of them from the game loop until the repair lands —
+  which proceeds at ten fragment asks per check packet. Three concurrent chunks
+  to one peer queue 618 fragments ahead of control. 10 KiB is 21 datagrams,
+  cutting that head-of-line window by an order of magnitude, and with
+  `RESOURCE_MAX_LOADS` unchanged at C++'s 20 it also drops the maximum
+  outstanding bulk from 2 MB to 200 KB.
+  The existing `reliable_udp_redundant_copies` mitigation does not help here: it
+  is gated at inner packets <= 256 bytes, so it protects control against *loss*
+  and does nothing about control being *queued behind* bulk.
+  Scope: the stock size applies only once a core becomes loadable. C++ decodes an
+  unloadable core by substituting its compiled-in defaults for size, CRC and
+  chunk size alike, so a custom value could not round-trip there and would mean
+  nothing if it did.
+  Not changed, having been examined: the control loop still blocks on a pending
+  player-file resource (`crates/clonk-app/src/game_app/sound.rs:649-687`). That
+  wait is a correctness requirement — the tick carries a `JoinPlayer` that needs
+  the file — and unlike a plain control stall it is already surfaced to the
+  player through `begin_blocking_resource_wait_at` ("player file for %s").
+  `RESOURCE_MAX_LOADS` was likewise left at C++'s 20 rather than OpenClonk's 5,
+  because the swarm behaviour is pinned by tests against C++ and the chunk-size
+  change already carries the benefit.
+
+- **PreSend is sized from measured control lateness, not from ping alone**
+  (`crates/clonk-app-netplay/src/network.rs`, `observe_control_lateness_ms` and
+  `update_control_presend`; C++ `C4GameControlNetwork::CalcPerformance`,
+  LegacyClonk 7d43b47 src/C4GameControlNetwork.cpp:404-430). Approved
+  2026-07-27.
+  C++ derives the horizon from `pConn->getPingTime()` and nothing else, and
+  `iTargetFPS` is a hardcoded 38 rather than a measurement. A client that is
+  slow rather than *distant* — a weak machine, a saturated uplink queue, a host
+  that waited on somebody else — therefore never buys itself any headroom, and
+  its input misses the async deadline on essentially every tick and is dropped
+  silently. C++ already computes the right quantity in the same function,
+  `AddPerf(pCtrl->getTime() - iWaitStart)`, and spends it only on the F7 "wait
+  N ms" display string.
+  The port keeps that ping sample and takes `max(ping, measured lateness)` for
+  the PreSend decision, where lateness is the interval from reaching the control
+  tick to consuming it — arrival against the cadence, the same quantity the host
+  records as `ClientPerformanceStats::wait_ms`. Taking the maximum rather than
+  replacing means a punctual client keeps exactly C++'s horizon, so the extra
+  input latency is charged only where it buys something. The script- and
+  dialog-visible `avg_control_send_time` (ACT) remains C++'s exact ping-derived
+  1/150 EWMA.
+  Determinism is untouched for the same reason as the entry below: PreSend
+  selects only which tick a client stamps its *own* input for. Every participant
+  still executes that tick at that tick, the wire format is unchanged, and
+  PreSend already varies per client in C++.
+  Measured with `cargo xtask chaos run --presend ping|measured`, 16 committed
+  seeds x 200 ticks x 6 profiles. Healthy-participant blocked ticks and drift,
+  ping -> measured:
+  four good machines 125 -> 0 permille and 919 -> 368 ms;
+  one dial-up link on a good machine 530 -> 10 permille and 3491 -> 529 ms;
+  a Pi 4 on congested hotel wifi 930 -> 440 permille and 8995 -> 2874 ms.
+  The cost is input latency: the median horizon rises from 78 ms to 226 ms on
+  the healthy profile and to ~378 ms on the impaired ones, the latter close to
+  the 1..15 frame clamp. AoE's 0-250 ms "unnoticeable" band therefore covers the
+  healthy case but not the worst ones.
+  Known limit, deliberately not papered over: this does **not** rescue a machine
+  that simply cannot execute ticks fast enough. At `K_sim` 20 a control tick
+  costs 156 ms against a 55 ms period, so no lookahead can help; the healthy
+  players still lose 10 s over an 11 s session because the host pays the full
+  `AsyncMaxWait` budget on every tick before giving up on it. That residual
+  needs adaptive `ControlRate` or demotion, not a wider horizon.
+
 - **PreSend is sized from the delivery-time envelope, not the mean**
   (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;
   C++ `C4GameControlNetwork::CalcPerformance`, LegacyClonk 7d43b47

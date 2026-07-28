@@ -10,15 +10,21 @@ name: Release
 # here would never fire an `on: push: tags` workflow.
 
 on:
-  # Weekly, hands-off: if releasable commits landed since the last tag and
-  # main's CI is green, this bumps, tags, builds and publishes with no
-  # interaction. Cadence rather than per-push, because main takes ~40 commits
-  # a day and releasing on each one would mean several releases daily at
-  # ~210 billed minutes apiece.
+  # Daily at 10:00 UTC (05:00 CDT / 04:00 CST): if releasable commits landed
+  # since the last tag and main's CI is green, this bumps, tags, builds and
+  # publishes with no interaction. A cadence rather than per-push, because main
+  # takes ~40 commits a day and releasing on each would mean several releases
+  # daily at ~210 billed minutes apiece. Days with no feat/fix/perf commits
+  # skip cleanly (prepare-release.sh exit 3).
   schedule:
-    - cron: '0 9 * * 1'
+    - cron: '0 10 * * *'
   # Reacts to a `chore: release <version>` commit, which is how the
   # release-prepare pull request publishes when one is used.
+  #
+  # This path deliberately skips the `prepare` job, and with it the CI-green
+  # check: pushing a release commit by hand is the offline escape hatch, for
+  # when CI is broken or unavailable. The auditable equivalent is dispatching
+  # this workflow with force=true.
   push:
     branches: [main]
   workflow_dispatch:
@@ -27,6 +33,11 @@ on:
         description: 'Explicit version (MAJOR.MINOR.PATCH). Leave blank to infer from commits.'
         required: false
         type: string
+      force:
+        description: 'Release even if the latest CI run on main is not green.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -49,11 +60,17 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      # `gh run list --workflow` reads the Actions API; without this it fails
+      # with "Resource not accessible by integration".
+      actions: read
     defaults:
       run:
         shell: bash
     outputs:
       prepared: ${{ steps.bump.outputs.prepared }}
+      # The exact commit to build, tag and release. Everything downstream
+      # pins to this rather than to main's tip, which moves during a build.
+      sha: ${{ steps.bump.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,14 +82,30 @@ jobs:
       - name: Require main's CI to be green
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
         run: |
+          # Tolerate a failing lookup: `set -e` would otherwise kill the step
+          # here, before the force branch below could override anything — which
+          # is precisely when an override is wanted. An unknown conclusion is
+          # treated as not-green, so it still blocks unless forced.
           conclusion=$(gh run list --workflow "Clonk Rust CI" --branch main \
-            --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
+            --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"' \
+            2>/dev/null || echo "unknown")
+          [[ -n "$conclusion" ]] || conclusion="unknown"
           echo "latest Clonk Rust CI on main: $conclusion"
-          if [[ "$conclusion" != "success" ]]; then
-            echo "refusing to release: main's CI is '$conclusion'" >&2
-            exit 1
+          if [[ "$conclusion" == "success" ]]; then
+            exit 0
           fi
+          if [[ "$FORCE" == "true" ]]; then
+            # Deliberate override, recorded in the run log so a forced release
+            # is auditable afterwards rather than indistinguishable from a
+            # green one.
+            echo "::warning::releasing with CI '$conclusion' because force was requested"
+            exit 0
+          fi
+          echo "refusing to release: main's CI is '$conclusion'" >&2
+          echo "re-run this workflow with force=true to override" >&2
+          exit 1
 
       - name: Install native build dependencies
         run: |
@@ -115,52 +148,75 @@ jobs:
           fi
           status=$?
           set -e
-          if [[ "$status" -eq 3 ]]; then
-            echo "no releasable commits since the last tag"
-            echo "prepared=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          elif [[ "$status" -ne 0 ]]; then
+          if [[ "$status" -ne 0 && "$status" -ne 3 ]]; then
             echo "prepare-release.sh failed with status $status" >&2
             exit "$status"
           fi
 
-          version=$(python3 - <<'PY'
+          read_version() {
+            python3 - <<'PY'
           import re
           from pathlib import Path
           text = Path("Cargo.toml").read_text(encoding="utf-8")
           section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
           print(re.search(r'^version = "([^"]+)"$', section.group(1), re.M).group(1))
           PY
-          )
+          }
+          version=$(read_version)
+
+          # Exit 3 is "no releasable commits". That is only a true skip when the
+          # current version is already tagged; if a previous run bumped the
+          # version but its build failed before tagging, the release is still
+          # owed and must not be skipped forever.
+          if [[ "$status" -eq 3 ]]; then
+            if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+              echo "no releasable commits since the last tag"
+              echo "prepared=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "v${version} was prepared earlier but never tagged; releasing it"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "prepared=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- Cargo.toml Cargo.lock CHANGELOG.md
-          git commit -m "chore: release ${version}"
-          git push origin HEAD:main
+          # Re-preparing a version the tree already carries stages nothing;
+          # committing then would fail rather than reuse the existing commit.
+          if git diff --cached --quiet; then
+            echo "tree is already at ${version}; reusing the existing commit"
+          else
+            git commit -m "chore: release ${version}"
+            git push origin HEAD:main
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "prepared=true" >> "$GITHUB_OUTPUT"
 
-  tag:
-    name: Tag and draft
+  resolve:
+    name: Resolve the version
     needs: [prepare]
     # `always()` keeps the push path working, where prepare is skipped.
     if: always() && needs.prepare.result != 'failure' && needs.prepare.outputs.prepared != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Read-only: nothing is tagged or published until the builds have passed.
     permissions:
-      contents: write
+      contents: read
     defaults:
       run:
         shell: bash
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       release: ${{ steps.resolve.outputs.release }}
+      sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # main's tip, not the triggering SHA: on the scheduled path the
-          # release commit was created by the prepare job moments ago.
-          ref: main
+          # The commit prepare just created, or the triggering commit on the
+          # push path. Never `main`, whose tip moves while a build is running.
+          ref: ${{ needs.prepare.outputs.sha || github.sha }}
           fetch-depth: 0
 
       - name: Decide whether this commit releases
@@ -169,10 +225,14 @@ jobs:
           # Via env, never interpolated into the script: a commit subject is
           # attacker-influencable text.
           HEAD_SUBJECT: ${{ github.event.head_commit.message }}
-          DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
+          # Only the push path infers intent from the commit subject. On the
+          # schedule and dispatch paths `head_commit` is absent entirely, and
+          # testing the subject there would reject every scheduled release.
+          EVENT_NAME: ${{ github.event_name }}
+          RESOLVED_SHA: ${{ needs.prepare.outputs.sha || github.sha }}
         run: |
           subject=${HEAD_SUBJECT%%$'\n'*}
-          if [[ "$DISPATCHED" != "true" && "$subject" != "chore: release "* ]]; then
+          if [[ "$EVENT_NAME" == "push" && "$subject" != "chore: release "* ]]; then
             echo "not a release commit: $subject"
             echo "release=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -196,48 +256,12 @@ jobs:
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release=true" >> "$GITHUB_OUTPUT"
-
-      - name: Create the tag and a draft release
-        if: steps.resolve.outputs.release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.resolve.outputs.version }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${VERSION}" -m "v${VERSION}"
-          git push origin "v${VERSION}"
-
-          # Release notes: this version's CHANGELOG.md section, without heading.
-          python3 - "$VERSION" > release-notes.md <<'PY'
-          import sys
-          from pathlib import Path
-
-          version = sys.argv[1]
-          lines = Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
-          start = next(
-              (i for i, line in enumerate(lines) if line.startswith(f"## [{version}]")),
-              None,
-          )
-          if start is None:
-              print(f"Release v{version}.")
-          else:
-              end = next(
-                  (i for i in range(start + 1, len(lines)) if lines[i].startswith("## [")),
-                  len(lines),
-              )
-              print("\n".join(lines[start + 1 : end]).strip())
-          PY
-
-          gh release create "v${VERSION}" \
-            --title "Clonk Rust ${VERSION}" \
-            --notes-file release-notes.md \
-            --draft
+          echo "sha=$RESOLVED_SHA" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.name }}
-    needs: tag
-    if: needs.tag.outputs.release == 'true'
+    needs: resolve
+    if: needs.resolve.outputs.release == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
@@ -258,7 +282,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: v${{ needs.tag.outputs.version }}
+          # The resolved commit, not a tag: no tag exists yet. Nothing is
+          # tagged until these builds have produced real artifacts.
+          ref: ${{ needs.resolve.outputs.sha }}
           # Packaging copies the tracked game data, so the submodule is required.
           # This works only while clonk-rs-content is public.
           submodules: recursive
@@ -302,7 +328,7 @@ jobs:
         env:
           CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
           LIBZ_SYS_STATIC: '1'
-          VERSION: ${{ needs.tag.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
           # does not exist in its published crate, so its bundled libpng only
@@ -357,10 +383,13 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Tags only now, once every platform has produced a real artifact. Tagging
+  # before the builds would strand `vX.Y.Z` on a commit that cannot package —
+  # a tag is permanent, so the version has to be abandoned to recover.
   publish:
-    name: Publish
-    needs: [tag, build]
-    if: needs.tag.outputs.release == 'true'
+    name: Tag and publish
+    needs: [resolve, build]
+    if: needs.resolve.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -371,20 +400,70 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          # The exact commit that was built, so the tag names the tree the
+          # assets came from even if main has moved on during the build.
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: assets
           merge-multiple: true
 
+      - name: Tag the built commit
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Idempotent: a re-run after a partial publish must not fail here.
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "v${VERSION} is already tagged"
+          else
+            git tag -a "v${VERSION}" -m "v${VERSION}"
+            git push origin "v${VERSION}"
+          fi
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.tag.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
+          # Release notes: this version's CHANGELOG.md section, without heading.
+          python3 - "$VERSION" > release-notes.md <<'PY'
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          lines = Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+          start = next(
+              (i for i, line in enumerate(lines) if line.startswith(f"## [{version}]")),
+              None,
+          )
+          if start is None:
+              print(f"Release v{version}.")
+          else:
+              end = next(
+                  (i for i in range(start + 1, len(lines)) if lines[i].startswith("## [")),
+                  len(lines),
+              )
+              print("\n".join(lines[start + 1 : end]).strip())
+          PY
+
           cd assets
           sha256sum clonk-rust-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          gh release upload "v${VERSION}" clonk-rust-* SHA256SUMS.txt --clobber
-          gh release edit "v${VERSION}" --draft=false --latest
+          cd ..
+
+          # Created non-draft with its assets in one step: there is no window
+          # in which an empty release is visible.
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${VERSION}" assets/clonk-rust-* assets/SHA256SUMS.txt --clobber
+            gh release edit "v${VERSION}" --draft=false --latest
+          else
+            gh release create "v${VERSION}" \
+              --title "Clonk Rust ${VERSION}" \
+              --notes-file release-notes.md \
+              --latest \
+              assets/clonk-rust-* assets/SHA256SUMS.txt
+          fi

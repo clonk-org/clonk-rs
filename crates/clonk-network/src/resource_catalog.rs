@@ -12,7 +12,33 @@ use crate::resource_packet::{
 };
 use clonk_engine::NetworkResourceCore;
 
+/// Concurrent chunk requests to one peer for one file (C++
+/// `C4NetResMaxLoadPerPeerPerFile`).
+///
+/// **This, not `RESOURCE_MAX_LOADS`, is the constant that governs head-of-line
+/// blocking.** Resource chunks and control share one strictly-ordered
+/// reliable-UDP sequence space whenever a peer has no TCP route — the ordinary
+/// internet topology, since NAT punch-through is UDP-only; see
+/// `STOCK_CHUNK_SIZE`. The bulk that can sit ahead of a control packet *on a
+/// given connection* is therefore this cap times the chunk size, and nothing
+/// else. The global cap below spreads work across different peers, which are
+/// different connections, so lowering that one does not shrink this window.
+///
+/// This is the *default*; see [`ResourceCatalog::set_max_loads_per_peer`], which
+/// tightens it to one while a game is actually running. C++'s value, kept as the
+/// lobby default because a fast join is what the player is waiting for there and
+/// there is no control traffic to protect yet.
 pub const RESOURCE_MAX_LOAD_PER_PEER_PER_FILE: usize = 3;
+
+/// Concurrent requests to one peer while a game is running.
+///
+/// One chunk in flight is the smallest head-of-line window available without
+/// stopping transfer altogether: 21 datagrams at 10 KiB chunks, against 63 at
+/// the lobby default.
+pub const RESOURCE_MAX_LOAD_PER_PEER_IN_GAME: usize = 1;
+/// Concurrent chunk requests across all resources and peers (C++
+/// `C4NetResMaxLoad`). Bounds aggregate bandwidth, not per-connection latency,
+/// so it is left at C++'s value.
 pub const RESOURCE_MAX_LOADS: usize = 20;
 pub const RESOURCE_LOAD_TIMEOUT_SECONDS: u64 = 60;
 pub const RESOURCE_DELETE_TIME_SECONDS: u64 = 60;
@@ -244,9 +270,36 @@ pub struct ResourceCatalog {
     resources: Vec<ResourceState>,
     last_discover_at: Option<u64>,
     last_status_at: Option<u64>,
+    /// Concurrent requests allowed to one peer for one file. See
+    /// [`RESOURCE_MAX_LOAD_PER_PEER_PER_FILE`] for why this and not the global
+    /// cap is what governs head-of-line blocking, and
+    /// [`ResourceCatalog::set_max_loads_per_peer`] for why it is not constant.
+    max_loads_per_peer: usize,
 }
 
 impl ResourceCatalog {
+    /// Narrows or restores how much bulk may be outstanding to one peer.
+    ///
+    /// Measured through the real reliable-UDP layer at 80 ms / 2% loss, with a
+    /// chunk on the same ordered stream as control: at 10 KiB chunks, three
+    /// outstanding costs control 63.1 ms mean and 445 ms worst, one outstanding
+    /// costs 53.1 ms and 393 ms, against a 49.7 ms / 80 ms baseline with no bulk
+    /// at all. So the tighter cap buys most of the remaining gap back.
+    ///
+    /// It is not simply set to one, because it also divides transfer throughput
+    /// by three: a peer can only have one chunk in flight per round trip, and on
+    /// a 300 ms link that turns a multi-megabyte scenario download into minutes.
+    /// The blocking only matters while there is control to block, so the caller
+    /// tightens this when the game starts running and relaxes it in the lobby,
+    /// where a fast join is what the player is waiting for.
+    pub fn set_max_loads_per_peer(&mut self, max_loads_per_peer: usize) {
+        self.max_loads_per_peer = max_loads_per_peer.max(1);
+    }
+
+    pub fn max_loads_per_peer(&self) -> usize {
+        self.max_loads_per_peer
+    }
+
     pub fn new(local_client_id: i32) -> Self {
         Self {
             local_client_id,
@@ -254,6 +307,7 @@ impl ResourceCatalog {
             resources: Vec::new(),
             last_discover_at: None,
             last_status_at: None,
+            max_loads_per_peer: RESOURCE_MAX_LOAD_PER_PEER_PER_FILE,
         }
     }
 
@@ -801,6 +855,8 @@ impl ResourceCatalog {
         now_seconds: u64,
         refill_on_send_failure: bool,
     ) -> Option<ResourceCatalogAction> {
+        // Read the cap before taking the mutable borrow of the resource.
+        let max_loads_per_peer = self.max_loads_per_peer;
         let resource = self.resource_mut(resource_id)?;
         if !resource.registration.loading
             || resource.outstanding_loads.len() + 1 >= RESOURCE_MAX_LOADS
@@ -812,7 +868,7 @@ impl ResourceCatalog {
             .iter()
             .filter(|load| load.load.peer_id == peer_id)
             .count();
-        if peer_load_count >= RESOURCE_MAX_LOAD_PER_PEER_PER_FILE {
+        if peer_load_count >= max_loads_per_peer {
             return None;
         }
         let available = resource
@@ -985,7 +1041,7 @@ impl ResourceCatalog {
                 .iter()
                 .filter(|load| load.load.peer_id == peer_id)
                 .count()
-                >= RESOURCE_MAX_LOAD_PER_PEER_PER_FILE
+                >= self.max_loads_per_peer
         {
             return 0;
         }

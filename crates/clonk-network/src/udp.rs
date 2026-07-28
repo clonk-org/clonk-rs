@@ -782,7 +782,7 @@ pub fn reliable_udp_packet_kind(wire: &[u8]) -> Option<ReliableUdpPacketKind> {
 /// (`LC_BURST_MS=60`) every copy count measures the same within noise, so the
 /// extra copies are never worse, only sometimes better. A fourth copy adds
 /// almost nothing over the third.
-const REDUNDANT_DATA_PACKET_COPIES: usize = 2;
+pub(crate) const REDUNDANT_DATA_PACKET_COPIES: usize = 2;
 
 /// Inner-packet size at or below which a data packet is sent redundantly.
 ///

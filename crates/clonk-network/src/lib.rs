@@ -1,6 +1,7 @@
 mod address_packet;
 mod admission;
 mod advertise;
+mod capabilities;
 mod client_bootstrap;
 mod client_mesh;
 mod client_player_resource;
@@ -37,6 +38,8 @@ mod resource_transfer_backend;
 mod resync;
 mod search;
 mod session;
+mod sim;
+mod sim_session;
 mod statistics;
 mod stats;
 mod status;
@@ -59,6 +62,10 @@ pub use admission::{
 pub use advertise::{
     discovery_reply_for_packet, encode_host_game_reference_response, encode_reference_response,
     HostGameAdvertiserError, NetworkGameAdvertiser, NetworkGameAdvertiserConfig,
+};
+pub use capabilities::{
+    decode_port_capabilities, encode_port_capabilities, PeerCapabilityRegistry, PortCapabilities,
+    PID_PORT_CAPABILITIES, PORT_CAPABILITY_VERSION,
 };
 pub use clonk_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 pub use control_latency::ControlLatencyEstimator;
@@ -196,8 +203,8 @@ pub use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, OutstandingLoad, PeerStatusOutcome, ResourceCatalog,
     ResourceCatalogAction, ResourceLoadPoll, ResourceRegistration,
     RESOURCE_DISCOVER_INTERVAL_SECONDS, RESOURCE_DISCOVER_TIMEOUT_SECONDS,
-    RESOURCE_LOAD_TIMEOUT_SECONDS, RESOURCE_MAX_LOADS, RESOURCE_MAX_LOAD_PER_PEER_PER_FILE,
-    RESOURCE_STATUS_INTERVAL_SECONDS,
+    RESOURCE_LOAD_TIMEOUT_SECONDS, RESOURCE_MAX_LOADS, RESOURCE_MAX_LOAD_PER_PEER_IN_GAME,
+    RESOURCE_MAX_LOAD_PER_PEER_PER_FILE, RESOURCE_STATUS_INTERVAL_SECONDS,
 };
 pub use resource_file_store::{
     ChunkWriteOutcome, ResourceFileOwnership, ResourceFileStore, ResourceFileStoreError,
@@ -236,6 +243,14 @@ pub use session::{
     HostCommand, HostConfig, HostError, HostEvent, HostHandle, HostJoinSnapshot, HostUdpBinding,
     HostedResourceFile, RuntimeLobbyClientTelemetry, RuntimeNetworkClientState,
     RuntimeNetworkConnection, BROADCAST_CLIENT_ID,
+};
+pub use sim::{
+    mean, percentile, replay_lockstep, run_control_delivery, ControlDeliveryConfig, InFlight, Link,
+    LinkConditions, LinkReport, LockstepPlayout, Lookahead, SimRng, CONTROL_PERIOD, STEP,
+};
+pub use sim_session::{
+    run_session, ClientOutcome, ClientProfile, CpuProfile, PresendSource, SessionConfig,
+    SessionReport, FRAME_INTERVAL,
 };
 pub use statistics::{
     ConnectionRateStatistics, ConnectionStatisticsKey, ConnectionStatisticsRecorder,
