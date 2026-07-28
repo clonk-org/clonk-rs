@@ -556,6 +556,8 @@ pub enum GpuRendererError {
     OwnerMaskNotLowered,
     #[error("landscape liquid animation requires both a mask and a liquid texture")]
     IncompleteLandscapeLiquid,
+    #[error("shader landscape composition inputs are invalid: {0}")]
+    ShaderLandscapeInputs(&'static str),
     #[error("{topology:?} received {vertices} vertices")]
     InvalidPrimitiveVertexCount {
         topology: GpuPrimitiveTopology,
@@ -3491,6 +3493,585 @@ fn blend_state(blend: GpuBlend, alpha_mode: GpuSolidAlphaMode) -> wgpu::BlendSta
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shader landscape composition (`Graphics.ShaderLandscape`)
+// ---------------------------------------------------------------------------
+//
+// The retained CPU composer walks INTEGER landscape-map coordinates and hands
+// them to `compose_material_surface_pixel`, so its finest possible sampling
+// rate is one pattern texel per landscape pixel — shipping higher-resolution
+// material art changes only the tiling period, never the detail. The pipeline
+// below evaluates the identical arithmetic per fragment from an index plane, a
+// precomputed placement-shading plane and a shared pattern atlas, which is what
+// removes that cap.
+//
+// `detail` is the only knob that diverges from C++: at 1 the composed plane is
+// byte-identical to the CPU composer, and at N the plane is N times larger in
+// each axis with the pattern evaluated at 1/N landscape pixel. Because the
+// pattern coordinate is the fine output coordinate, an N-times-larger pattern
+// keeps its world-space tiling period exactly.
+
+/// Slot is populated; an absent slot composes nothing (`Slot::Empty`).
+pub const SHADER_LANDSCAPE_PRESENT: u32 = 1;
+/// Take all three pattern modifiers from blue (`MATERIAL_OVERLAY_MONOCHROME`).
+pub const SHADER_LANDSCAPE_MONOCHROME: u32 = 2;
+/// A secondary (overlay) pattern follows the primary one.
+pub const SHADER_LANDSCAPE_HAS_OVERLAY: u32 = 4;
+/// The primary pattern is a `Surface8`; its atlas texels carry raw indices.
+pub const SHADER_LANDSCAPE_PRIMARY_INDEXED: u32 = 8;
+/// The overlay pattern is a `Surface8`.
+pub const SHADER_LANDSCAPE_OVERLAY_INDEXED: u32 = 16;
+
+/// A placement-shading texel whose darken channel holds this value is
+/// suppressed entirely, mirroring the `own_density == 0` `continue` in the CPU
+/// composer. Real darken amounts never exceed 60.
+pub const SHADER_LANDSCAPE_SUPPRESSED: u8 = 255;
+
+/// The uniform slot table is sized for the 128 texmap entries C4TexMap can
+/// hold. At 64 bytes each that is 8 KiB, inside the 16 KiB downlevel limit.
+pub const SHADER_LANDSCAPE_SLOTS: usize = 128;
+
+/// One texmap slot in the layout `MATERIAL_LANDSCAPE_SHADER` binds.
+///
+/// This mirrors `clonk_frontend`'s `MaterialGpuSlot` field for field; that type
+/// is crate-private, so the layout is restated rather than shared. The frontend
+/// test `packed_material_slot_matches_the_cpu_composer` proves the packing
+/// equals `compose_material_surface_pixel`, and
+/// `shader_landscape_composition_matches_the_cpu_reference` proves this shader
+/// equals the same arithmetic.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShaderLandscapeSlot {
+    /// Material colour triplets 0/1/2 packed as `r | g<<8 | b<<16`, then
+    /// `alpha[0..3]` packed the same way.
+    pub colors: [u32; 4],
+    /// `alpha[3..6]` packed, the primary CPattern zoom, the overlay zoom, and
+    /// the `SHADER_LANDSCAPE_*` flag bits.
+    pub params: [u32; 4],
+    /// Atlas rect of the primary pattern: origin x, origin y, width, height.
+    pub primary: [u32; 4],
+    /// Atlas rect of the secondary (overlay) pattern.
+    pub overlay: [u32; 4],
+}
+
+/// Everything one composition pass reads.
+#[derive(Clone, Copy, Debug)]
+pub struct ShaderLandscapeInputs<'a> {
+    /// Landscape-map extent, i.e. `PixelGrid::width()`/`height()`.
+    pub extent: [u32; 2],
+    /// `PixelGrid::bytes()`, one landscape byte per map pixel.
+    pub index_plane: &'a [u8],
+    /// Interleaved `(lighten, darken)` amounts from `ApplyLighting`, two bytes
+    /// per map pixel. `None` when `shade_materials` is off. Keeping this on the
+    /// CPU is deliberate: the +-8-row placement loop is a C++ mirror and must
+    /// not be re-derived in WGSL.
+    pub shading_plane: Option<&'a [u8]>,
+    /// RGBA pattern atlas. `Surface8` patterns store their index in red.
+    pub atlas: &'a [u8],
+    pub atlas_extent: [u32; 2],
+    pub slots: &'a [ShaderLandscapeSlot],
+    /// 1 reproduces the CPU composer byte for byte; N supersamples the plane.
+    pub detail: u32,
+}
+
+impl ShaderLandscapeInputs<'_> {
+    /// Extent of the composed plane this input set produces.
+    pub fn composed_extent(&self) -> [u32; 2] {
+        [
+            self.extent[0].saturating_mul(self.detail.max(1)),
+            self.extent[1].saturating_mul(self.detail.max(1)),
+        ]
+    }
+
+    fn validate(&self) -> Result<(), GpuRendererError> {
+        let pixels = (self.extent[0] as usize).saturating_mul(self.extent[1] as usize);
+        if self.extent[0] == 0 || self.extent[1] == 0 || self.detail == 0 {
+            return Err(GpuRendererError::ShaderLandscapeInputs("empty extent"));
+        }
+        if self.index_plane.len() < pixels {
+            return Err(GpuRendererError::ShaderLandscapeInputs("short index plane"));
+        }
+        if self
+            .shading_plane
+            .is_some_and(|plane| plane.len() < pixels * 2)
+        {
+            return Err(GpuRendererError::ShaderLandscapeInputs(
+                "short shading plane",
+            ));
+        }
+        let atlas_pixels =
+            (self.atlas_extent[0] as usize).saturating_mul(self.atlas_extent[1] as usize);
+        if atlas_pixels == 0 || self.atlas.len() < atlas_pixels * 4 {
+            return Err(GpuRendererError::ShaderLandscapeInputs("short atlas"));
+        }
+        if self.slots.len() > SHADER_LANDSCAPE_SLOTS {
+            return Err(GpuRendererError::ShaderLandscapeInputs("too many slots"));
+        }
+        Ok(())
+    }
+}
+
+const MATERIAL_LANDSCAPE_SHADER: &str = r#"
+struct Slot {
+    colors: vec4<u32>,
+    params: vec4<u32>,
+    primary: vec4<u32>,
+    overlay: vec4<u32>,
+};
+
+struct SlotTable {
+    slots: array<Slot, 128>,
+};
+
+struct ComposeParams {
+    // x/y: landscape extent. z: detail factor. w: 1 when a shading plane is
+    // bound, otherwise the neutral 1x1 fallback is.
+    config: vec4<u32>,
+};
+
+@group(0) @binding(0) var index_plane: texture_2d<u32>;
+@group(0) @binding(1) var shading_plane: texture_2d<u32>;
+@group(0) @binding(2) var atlas: texture_2d<u32>;
+@group(0) @binding(3) var<uniform> params: ComposeParams;
+@group(0) @binding(4) var<uniform> slot_table: SlotTable;
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    // One oversized triangle covering the whole composed plane.
+    var corners = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0),
+    );
+    return vec4<f32>(corners[index], 0.0, 1.0);
+}
+
+fn triplet(packed: u32, channel: u32) -> u32 {
+    return (packed >> (channel * 8u)) & 0xffu;
+}
+
+// `lighten_material_channel` (materials.rs:163-169).
+fn lighten_channel(channel: u32) -> u32 {
+    if (channel & 0x80u) != 0u {
+        return 255u;
+    }
+    return (channel << 1u) & 0xffu;
+}
+
+struct Pixel {
+    rgb: vec3<u32>,
+    transparency: u32,
+};
+
+fn atlas_texel(rect: vec4<u32>, coordinate: vec2<i32>, zoom: u32) -> vec4<u32> {
+    var sample = coordinate;
+    if zoom != 0u {
+        sample = coordinate / vec2<i32>(i32(zoom));
+    }
+    let tiled = vec2<u32>(sample) % rect.zw;
+    return textureLoad(atlas, vec2<i32>(rect.xy + tiled), 0);
+}
+
+fn apply_pattern(
+    pixel: Pixel,
+    slot: Slot,
+    landscape_pixel: u32,
+    rect: vec4<u32>,
+    zoom: u32,
+    indexed: bool,
+    monochrome: bool,
+    coordinate: vec2<i32>,
+) -> Pixel {
+    var result = pixel;
+    if rect.z == 0u || rect.w == 0u {
+        return result;
+    }
+    let texel = atlas_texel(rect, coordinate, zoom);
+    if indexed {
+        // `apply_indexed_material_pattern` (materials.rs:252-260).
+        let shift = texel.r % 3u;
+        var packed = slot.colors.x;
+        if shift == 1u {
+            packed = slot.colors.y;
+        } else if shift == 2u {
+            packed = slot.colors.z;
+        }
+        result.rgb = vec3<u32>(triplet(packed, 0u), triplet(packed, 1u), triplet(packed, 2u));
+        var alpha = slot.colors.w;
+        if (landscape_pixel & 0xf0u) != 0u {
+            alpha = slot.params.x;
+        }
+        result.transparency = triplet(alpha, shift);
+        return result;
+    }
+    // `apply_material_pattern` (materials.rs:192-204).
+    var modifiers = texel.rgb;
+    if monochrome {
+        modifiers = vec3<u32>(texel.b);
+    }
+    result.rgb = vec3<u32>(
+        lighten_channel((result.rgb.r * modifiers.r) >> 8u),
+        lighten_channel((result.rgb.g * modifiers.g) >> 8u),
+        lighten_channel((result.rgb.b * modifiers.b) >> 8u),
+    );
+    result.transparency = min(result.transparency + (255u - texel.a), 255u);
+    return result;
+}
+
+@fragment
+fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let fine = vec2<i32>(floor(position.xy));
+    let map = fine / vec2<i32>(i32(params.config.z));
+    if map.x < 0 || map.y < 0
+        || u32(map.x) >= params.config.x || u32(map.y) >= params.config.y {
+        return vec4<f32>(0.0);
+    }
+    let landscape_pixel = textureLoad(index_plane, map, 0).r;
+    // Pixel zero is sky (C4Landscape.cpp:2622-2632).
+    if landscape_pixel == 0u {
+        return vec4<f32>(0.0);
+    }
+    let slot = slot_table.slots[landscape_pixel & 0x7fu];
+    let flags = slot.params.w;
+    if (flags & 1u) == 0u {
+        return vec4<f32>(0.0);
+    }
+
+    var shading = vec2<u32>(0u, 0u);
+    if params.config.w != 0u {
+        let sample = textureLoad(shading_plane, map, 0);
+        if sample.g == 255u {
+            // `own_density == 0` leaves the pixel fully transparent.
+            return vec4<f32>(0.0);
+        }
+        shading = vec2<u32>(sample.r, sample.g);
+    }
+
+    var alpha = slot.colors.w;
+    if (landscape_pixel & 0x80u) != 0u {
+        alpha = slot.params.x;
+    }
+    var pixel: Pixel;
+    pixel.rgb = vec3<u32>(
+        triplet(slot.colors.x, 0u),
+        triplet(slot.colors.x, 1u),
+        triplet(slot.colors.x, 2u),
+    );
+    pixel.transparency = triplet(alpha, 0u);
+
+    let monochrome = (flags & 2u) != 0u;
+    pixel = apply_pattern(
+        pixel,
+        slot,
+        landscape_pixel,
+        slot.primary,
+        slot.params.y,
+        (flags & 8u) != 0u,
+        monochrome,
+        fine,
+    );
+    if (flags & 4u) != 0u {
+        pixel = apply_pattern(
+            pixel,
+            slot,
+            landscape_pixel,
+            slot.overlay,
+            slot.params.z,
+            (flags & 16u) != 0u,
+            monochrome,
+            fine,
+        );
+    }
+
+    // `lighten_material_color` then `darken_material_color`, both saturating
+    // (materials.rs:402-414). They are stored separately because the lighten
+    // clamp at 255 is not recoverable from a single signed amount.
+    var rgb = min(pixel.rgb + vec3<u32>(shading.x), vec3<u32>(255u));
+    rgb = select(vec3<u32>(0u), rgb - vec3<u32>(shading.y), rgb >= vec3<u32>(shading.y));
+    return vec4<f32>(
+        f32(rgb.r) / 255.0,
+        f32(rgb.g) / 255.0,
+        f32(rgb.b) / 255.0,
+        f32(255u - pixel.transparency) / 255.0,
+    );
+}
+"#;
+
+/// Renders the landscape material composition per fragment.
+///
+/// Deliberate divergence from C++, opt in through `Graphics.ShaderLandscape`.
+/// With `detail == 1` the composed plane is byte-identical to the retained CPU
+/// composer, so enabling the flag alone changes nothing a player can see; the
+/// detail factor is what lifts the cap.
+#[derive(Debug)]
+pub struct ShaderLandscapeComposer {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl ShaderLandscapeComposer {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let uint_texture = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let uniform = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lc_gpu_shader_landscape_layout"),
+            entries: &[
+                uint_texture(0),
+                uint_texture(1),
+                uint_texture(2),
+                uniform(3),
+                uniform(4),
+            ],
+        });
+        let module = shader(
+            device,
+            "lc_gpu_shader_landscape_shader",
+            MATERIAL_LANDSCAPE_SHADER,
+        );
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("lc_gpu_shader_landscape_pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let targets = [Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("lc_gpu_shader_landscape"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: "vs_main",
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: "fs_main",
+                targets: &targets,
+            }),
+            multiview: None,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+
+    /// Composes into `target`, which must be an `Rgba8Unorm` view of exactly
+    /// `inputs.composed_extent()`.
+    pub fn compose_into(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        inputs: ShaderLandscapeInputs<'_>,
+    ) -> Result<(), GpuRendererError> {
+        inputs.validate()?;
+        let pixels = inputs.extent[0] as usize * inputs.extent[1] as usize;
+        let (_index, index_view) = uint_plane(
+            device,
+            queue,
+            "lc_gpu_shader_landscape_index",
+            wgpu::TextureFormat::R8Uint,
+            inputs.extent,
+            &inputs.index_plane[..pixels],
+            1,
+        );
+        let neutral = [0_u8, 0];
+        let (shading_extent, shading_bytes) = inputs
+            .shading_plane
+            .map_or(([1, 1], &neutral[..]), |plane| {
+                (inputs.extent, &plane[..pixels * 2])
+            });
+        let (_shading, shading_view) = uint_plane(
+            device,
+            queue,
+            "lc_gpu_shader_landscape_shading",
+            wgpu::TextureFormat::Rg8Uint,
+            shading_extent,
+            shading_bytes,
+            2,
+        );
+        let atlas_pixels = inputs.atlas_extent[0] as usize * inputs.atlas_extent[1] as usize;
+        let (_atlas, atlas_view) = uint_plane(
+            device,
+            queue,
+            "lc_gpu_shader_landscape_atlas",
+            wgpu::TextureFormat::Rgba8Uint,
+            inputs.atlas_extent,
+            &inputs.atlas[..atlas_pixels * 4],
+            4,
+        );
+
+        let config: [u32; 4] = [
+            inputs.extent[0],
+            inputs.extent[1],
+            inputs.detail,
+            u32::from(inputs.shading_plane.is_some()),
+        ];
+        let params = uniform_buffer(
+            device,
+            queue,
+            "lc_gpu_shader_landscape_params",
+            u32_bytes(&config),
+        );
+        let mut table = [ShaderLandscapeSlot::default(); SHADER_LANDSCAPE_SLOTS];
+        table[..inputs.slots.len()].copy_from_slice(inputs.slots);
+        let slots = uniform_buffer(
+            device,
+            queue,
+            "lc_gpu_shader_landscape_slots",
+            shader_landscape_slot_bytes(&table),
+        );
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lc_gpu_shader_landscape_bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&index_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shading_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: slots.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lc_gpu_shader_landscape_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: true,
+                },
+            })],
+            depth_stencil_attachment: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+        Ok(())
+    }
+}
+
+fn uint_plane(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    format: wgpu::TextureFormat,
+    extent: [u32; 2],
+    bytes: &[u8],
+    bytes_per_texel: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: extent[0],
+            height: extent[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(extent[0] * bytes_per_texel),
+            rows_per_image: Some(extent[1]),
+        },
+        wgpu::Extent3d {
+            width: extent[0],
+            height: extent[1],
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+fn uniform_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    bytes: &[u8],
+) -> wgpu::Buffer {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: bytes.len() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, bytes);
+    buffer
+}
+
+fn u32_bytes(values: &[u32]) -> &[u8] {
+    // SAFETY: `u32` has no padding and any bit pattern is a valid `u8`.
+    unsafe {
+        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
+    }
+}
+
+fn shader_landscape_slot_bytes(slots: &[ShaderLandscapeSlot]) -> &[u8] {
+    const {
+        assert!(std::mem::size_of::<ShaderLandscapeSlot>() == 64);
+    }
+    // SAFETY: `ShaderLandscapeSlot` is `repr(C)` over `[u32; 4]` arrays and the
+    // size assertion above excludes padding.
+    unsafe { std::slice::from_raw_parts(slots.as_ptr().cast::<u8>(), std::mem::size_of_val(slots)) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4257,6 +4838,517 @@ mod tests {
         liquid: GpuTextureId,
         owner_base: GpuTextureId,
         owner_overlay: GpuTextureId,
+    }
+
+    // -- Shader landscape composition -------------------------------------
+
+    /// Vertical-strip atlas identical to `clonk_frontend::materials`'
+    /// `build_material_atlas`: rects share x=0 and stack by height.
+    fn shader_landscape_atlas() -> ([u32; 2], Vec<u8>, [[u32; 4]; 2]) {
+        let (primary_w, primary_h) = (4_u32, 3_u32);
+        let (indexed_w, indexed_h) = (3_u32, 5_u32);
+        let width = primary_w.max(indexed_w);
+        let height = primary_h + indexed_h;
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        for row in 0..primary_h {
+            for column in 0..primary_w {
+                let index = (row * primary_w + column) as u8;
+                let offset = ((row * width + column) * 4) as usize;
+                pixels[offset] = index.wrapping_mul(37).wrapping_add(3);
+                pixels[offset + 1] = index.wrapping_mul(91).wrapping_add(17);
+                pixels[offset + 2] = index.wrapping_mul(53).wrapping_add(200);
+                pixels[offset + 3] = index.wrapping_mul(29).wrapping_add(11);
+            }
+        }
+        for row in 0..indexed_h {
+            for column in 0..indexed_w {
+                let index = (row * indexed_w + column) as u8;
+                let offset = (((row + primary_h) * width + column) * 4) as usize;
+                pixels[offset] = index.wrapping_mul(7);
+                pixels[offset + 3] = 255;
+            }
+        }
+        (
+            [width, height],
+            pixels,
+            [
+                [0, 0, primary_w, primary_h],
+                [0, primary_h, indexed_w, indexed_h],
+            ],
+        )
+    }
+
+    fn pack_triplet(values: [u8; 3]) -> u32 {
+        u32::from(values[0]) | (u32::from(values[1]) << 8) | (u32::from(values[2]) << 16)
+    }
+
+    fn atlas_texel(
+        atlas: &[u8],
+        atlas_extent: [u32; 2],
+        rect: [u32; 4],
+        x: i32,
+        y: i32,
+        zoom: u32,
+    ) -> [u8; 4] {
+        let sample_x = if zoom == 0 { x } else { x / zoom as i32 };
+        let sample_y = if zoom == 0 { y } else { y / zoom as i32 };
+        let texel_x = rect[0] + (sample_x as u32 % rect[2]);
+        let texel_y = rect[1] + (sample_y as u32 % rect[3]);
+        let offset = ((texel_y * atlas_extent[0] + texel_x) * 4) as usize;
+        [
+            atlas[offset],
+            atlas[offset + 1],
+            atlas[offset + 2],
+            atlas[offset + 3],
+        ]
+    }
+
+    /// CPU mirror of `MATERIAL_LANDSCAPE_SHADER`, written from
+    /// `clonk-frontend/src/materials.rs:163-400`. `clonk_frontend`'s `materials`
+    /// module is crate-private, so this restates that arithmetic instead of
+    /// calling it; the frontend test `packed_material_slot_matches_the_cpu_composer`
+    /// pins the same packing against `compose_material_surface_pixel` itself.
+    fn compose_shader_landscape_reference(
+        slot: &ShaderLandscapeSlot,
+        landscape_pixel: u8,
+        x: i32,
+        y: i32,
+        atlas: &[u8],
+        atlas_extent: [u32; 2],
+    ) -> [u8; 4] {
+        let triplet = |packed: u32, channel: u32| ((packed >> (channel * 8)) & 0xff) as u8;
+        let lighten = |channel: u8| {
+            if channel & 0x80 != 0 {
+                255
+            } else {
+                channel << 1
+            }
+        };
+        let flags = slot.params[3];
+        if flags & SHADER_LANDSCAPE_PRESENT == 0 {
+            return [0; 4];
+        }
+        let base_alpha = if landscape_pixel & 0x80 == 0 {
+            slot.colors[3]
+        } else {
+            slot.params[0]
+        };
+        let mut rgb = [
+            triplet(slot.colors[0], 0),
+            triplet(slot.colors[0], 1),
+            triplet(slot.colors[0], 2),
+        ];
+        let mut transparency = triplet(base_alpha, 0);
+        let monochrome = flags & SHADER_LANDSCAPE_MONOCHROME != 0;
+        let apply =
+            |rect: [u32; 4], zoom: u32, indexed: bool, rgb: &mut [u8; 3], transparency: &mut u8| {
+                if rect[2] == 0 || rect[3] == 0 {
+                    return;
+                }
+                let texel = atlas_texel(atlas, atlas_extent, rect, x, y, zoom);
+                if indexed {
+                    let shift = u32::from(texel[0] % 3);
+                    let packed = slot.colors[shift as usize];
+                    *rgb = [triplet(packed, 0), triplet(packed, 1), triplet(packed, 2)];
+                    let alpha = if landscape_pixel & 0xf0 == 0 {
+                        slot.colors[3]
+                    } else {
+                        slot.params[0]
+                    };
+                    *transparency = triplet(alpha, shift);
+                    return;
+                }
+                let modifiers = if monochrome {
+                    [texel[2]; 3]
+                } else {
+                    [texel[0], texel[1], texel[2]]
+                };
+                for channel in 0..3 {
+                    rgb[channel] = lighten(
+                        ((u16::from(rgb[channel]) * u16::from(modifiers[channel])) >> 8) as u8,
+                    );
+                }
+                *transparency = transparency.saturating_add(255u8.saturating_sub(texel[3]));
+            };
+        apply(
+            slot.primary,
+            slot.params[1],
+            flags & SHADER_LANDSCAPE_PRIMARY_INDEXED != 0,
+            &mut rgb,
+            &mut transparency,
+        );
+        if flags & SHADER_LANDSCAPE_HAS_OVERLAY != 0 {
+            apply(
+                slot.overlay,
+                slot.params[2],
+                flags & SHADER_LANDSCAPE_OVERLAY_INDEXED != 0,
+                &mut rgb,
+                &mut transparency,
+            );
+        }
+        [rgb[0], rgb[1], rgb[2], 255u8.saturating_sub(transparency)]
+    }
+
+    fn shader_landscape_slots() -> Vec<ShaderLandscapeSlot> {
+        let (_, _, rects) = shader_landscape_atlas();
+        let color = [10_u8, 90, 200, 40, 130, 250, 70, 20, 160];
+        let alpha = [0_u8, 30, 60, 90, 120, 200];
+        let colors = [
+            pack_triplet([color[0], color[1], color[2]]),
+            pack_triplet([color[3], color[4], color[5]]),
+            pack_triplet([color[6], color[7], color[8]]),
+            pack_triplet([alpha[0], alpha[1], alpha[2]]),
+        ];
+        let alpha_high = pack_triplet([alpha[3], alpha[4], alpha[5]]);
+        let slot = |primary: [u32; 4], overlay: [u32; 4], primary_zoom, overlay_zoom, flags| {
+            ShaderLandscapeSlot {
+                colors,
+                params: [alpha_high, primary_zoom, overlay_zoom, flags],
+                primary,
+                overlay,
+            }
+        };
+        let mut slots = vec![ShaderLandscapeSlot::default(); SHADER_LANDSCAPE_SLOTS];
+        // 1: plain Surface32, zoom 0, no overlay.
+        slots[1] = slot(rects[0], [0; 4], 0, 2, SHADER_LANDSCAPE_PRESENT);
+        // 2: Surface32 with a zoom-2 Surface32 overlay.
+        slots[2] = slot(
+            rects[0],
+            rects[0],
+            0,
+            2,
+            SHADER_LANDSCAPE_PRESENT | SHADER_LANDSCAPE_HAS_OVERLAY,
+        );
+        // 3: huge-zoom monochrome primary with a Surface32 overlay. The overlay
+        // must NOT be indexed here: an indexed pattern overwrites the running
+        // pixel outright and would hide every monochrome difference.
+        slots[3] = slot(
+            rects[0],
+            rects[0],
+            4,
+            2,
+            SHADER_LANDSCAPE_PRESENT | SHADER_LANDSCAPE_MONOCHROME | SHADER_LANDSCAPE_HAS_OVERLAY,
+        );
+        // 19: monochrome primary with an indexed overlay.
+        slots[19] = slot(
+            rects[0],
+            rects[1],
+            0,
+            2,
+            SHADER_LANDSCAPE_PRESENT
+                | SHADER_LANDSCAPE_MONOCHROME
+                | SHADER_LANDSCAPE_HAS_OVERLAY
+                | SHADER_LANDSCAPE_OVERLAY_INDEXED,
+        );
+        // 4: exact-zoom indexed primary with a Surface32 overlay.
+        slots[4] = slot(
+            rects[1],
+            rects[0],
+            1,
+            1,
+            SHADER_LANDSCAPE_PRESENT
+                | SHADER_LANDSCAPE_HAS_OVERLAY
+                | SHADER_LANDSCAPE_PRIMARY_INDEXED,
+        );
+        // 17: indexed primary, no overlay — exercises the 0xf0 alpha branch.
+        slots[17] = slot(
+            rects[1],
+            [0; 4],
+            0,
+            2,
+            SHADER_LANDSCAPE_PRESENT | SHADER_LANDSCAPE_PRIMARY_INDEXED,
+        );
+        // Slot 5 stays absent so the PRESENT bit is exercised in both states.
+        slots
+    }
+
+    fn shader_landscape_index_plane(extent: [u32; 2]) -> Vec<u8> {
+        const BYTES: [u8; 9] = [0, 1, 2, 3, 4, 0x05, 0x11, 0x81, 0x13];
+        (0..extent[0] * extent[1])
+            .map(|index| BYTES[(index as usize * 5 + index as usize / 7) % BYTES.len()])
+            .collect()
+    }
+
+    fn shader_landscape_shading_plane(extent: [u32; 2]) -> Vec<u8> {
+        (0..extent[0] * extent[1])
+            .flat_map(|index| {
+                let index = index as usize;
+                if index % 23 == 5 {
+                    return [0, SHADER_LANDSCAPE_SUPPRESSED];
+                }
+                [(index % 31) as u8, (index % 17) as u8]
+            })
+            .collect()
+    }
+
+    fn shader_landscape_test_device() -> Option<(tokio::runtime::Runtime, wgpu::Device, wgpu::Queue)>
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime for wgpu adapter discovery");
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+        });
+        let adapter = runtime.block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))?;
+        let (device, queue) = runtime
+            .block_on(adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("lc_gpu_shader_landscape_test_device"),
+                    features: wgpu::Features::empty(),
+                    limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+                },
+                None,
+            ))
+            .expect("request shader landscape test device");
+        Some((runtime, device, queue))
+    }
+
+    fn compose_shader_landscape(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        inputs: ShaderLandscapeInputs<'_>,
+    ) -> Vec<u8> {
+        let extent = inputs.composed_extent();
+        let composer = ShaderLandscapeComposer::new(device);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lc_gpu_shader_landscape_test_target"),
+            size: wgpu::Extent3d {
+                width: extent[0],
+                height: extent[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_shader_landscape_test_encoder"),
+        });
+        composer
+            .compose_into(device, queue, &mut encoder, &view, inputs)
+            .expect("compose landscape materials in the fragment shader");
+        let padded = (extent[0] as usize * 4).div_ceil(256) * 256;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_shader_landscape_test_readback"),
+            size: (padded * extent[1] as usize) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded as u32),
+                    rows_per_image: Some(extent[1]),
+                },
+            },
+            wgpu::Extent3d {
+                width: extent[0],
+                height: extent[1],
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .expect("shader landscape readback callback")
+            .expect("map shader landscape readback");
+        let mapped = slice.get_mapped_range();
+        let row_bytes = extent[0] as usize * 4;
+        (0..extent[1] as usize)
+            .flat_map(|row| mapped[row * padded..row * padded + row_bytes].to_vec())
+            .collect()
+    }
+
+    /// ACCEPTANCE: at detail 1 the fragment composer must be byte-identical to
+    /// the CPU material composition it replaces. Anything else would make
+    /// `Graphics.ShaderLandscape` a silent divergence rather than an opt-in.
+    #[test]
+    fn shader_landscape_composition_matches_the_cpu_reference() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping shader landscape composition readback");
+            return;
+        };
+        let extent = [16_u32, 12_u32];
+        let index_plane = shader_landscape_index_plane(extent);
+        let shading_plane = shader_landscape_shading_plane(extent);
+        let (atlas_extent, atlas, _) = shader_landscape_atlas();
+        let slots = shader_landscape_slots();
+
+        for shading in [None, Some(shading_plane.as_slice())] {
+            let composed = compose_shader_landscape(
+                &device,
+                &queue,
+                ShaderLandscapeInputs {
+                    extent,
+                    index_plane: &index_plane,
+                    shading_plane: shading,
+                    atlas: &atlas,
+                    atlas_extent,
+                    slots: &slots,
+                    detail: 1,
+                },
+            );
+            let mut opaque = 0_usize;
+            for y in 0..extent[1] {
+                for x in 0..extent[0] {
+                    let map_index = (y * extent[0] + x) as usize;
+                    let byte = index_plane[map_index];
+                    let mut expected = if byte == 0 {
+                        [0; 4]
+                    } else {
+                        compose_shader_landscape_reference(
+                            &slots[usize::from(byte & 0x7f)],
+                            byte,
+                            x as i32,
+                            y as i32,
+                            &atlas,
+                            atlas_extent,
+                        )
+                    };
+                    if let Some(plane) = shading {
+                        let (lighten, darken) = (plane[map_index * 2], plane[map_index * 2 + 1]);
+                        if darken == SHADER_LANDSCAPE_SUPPRESSED {
+                            expected = [0; 4];
+                        } else if expected[3] != 0 || expected[..3] != [0, 0, 0] {
+                            for channel in expected.iter_mut().take(3) {
+                                *channel = channel.saturating_add(lighten).saturating_sub(darken);
+                            }
+                        }
+                    }
+                    let offset = map_index * 4;
+                    let actual = [
+                        composed[offset],
+                        composed[offset + 1],
+                        composed[offset + 2],
+                        composed[offset + 3],
+                    ];
+                    assert_eq!(
+                        actual,
+                        expected,
+                        "landscape byte {byte:#04x} at ({x}, {y}), shading {}",
+                        shading.is_some()
+                    );
+                    if actual[3] != 0 {
+                        opaque += 1;
+                    }
+                }
+            }
+            assert!(
+                opaque > 40,
+                "the fixture must compose real material, not an empty plane"
+            );
+        }
+    }
+
+    /// The detail factor supersamples the composed plane without changing which
+    /// map pixels carry material: sky and absent slots stay empty in every
+    /// sub-pixel, while the pattern itself now varies inside one landscape
+    /// pixel — which is exactly the detail the CPU composer cannot express.
+    #[test]
+    fn shader_landscape_detail_supersamples_the_same_terrain() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping shader landscape detail readback");
+            return;
+        };
+        let extent = [16_u32, 12_u32];
+        let index_plane = shader_landscape_index_plane(extent);
+        let (atlas_extent, atlas, _) = shader_landscape_atlas();
+        let slots = shader_landscape_slots();
+        let inputs = |detail| ShaderLandscapeInputs {
+            extent,
+            index_plane: &index_plane,
+            shading_plane: None,
+            atlas: &atlas,
+            atlas_extent,
+            slots: &slots,
+            detail,
+        };
+        let base = compose_shader_landscape(&device, &queue, inputs(1));
+        let detailed = compose_shader_landscape(&device, &queue, inputs(2));
+        assert_eq!(detailed.len(), base.len() * 4);
+        let mut varied = 0_usize;
+        for y in 0..extent[1] {
+            for x in 0..extent[0] {
+                let map_index = (y * extent[0] + x) as usize;
+                let byte = index_plane[map_index];
+                let structural = byte != 0
+                    && slots[usize::from(byte & 0x7f)].params[3] & SHADER_LANDSCAPE_PRESENT != 0;
+                let sub = |sub_x: u32, sub_y: u32| {
+                    let offset = (((y * 2 + sub_y) * extent[0] * 2 + x * 2 + sub_x) * 4) as usize;
+                    [
+                        detailed[offset],
+                        detailed[offset + 1],
+                        detailed[offset + 2],
+                        detailed[offset + 3],
+                    ]
+                };
+                if !structural {
+                    assert_eq!(
+                        base[map_index * 4..map_index * 4 + 4],
+                        [0; 4],
+                        "sky and absent slots stay empty at ({x}, {y})"
+                    );
+                    for sub_y in 0..2 {
+                        for sub_x in 0..2 {
+                            assert_eq!(
+                                sub(sub_x, sub_y),
+                                [0; 4],
+                                "detail must not paint sky at ({x}, {y})"
+                            );
+                        }
+                    }
+                    continue;
+                }
+                if sub(0, 0) != sub(1, 0) || sub(0, 0) != sub(0, 1) {
+                    varied += 1;
+                }
+            }
+        }
+        assert!(
+            varied > 0,
+            "detail 2 must sample the pattern inside a landscape pixel"
+        );
+    }
+
+    #[test]
+    fn shader_landscape_rejects_a_short_index_plane() {
+        let inputs = ShaderLandscapeInputs {
+            extent: [4, 4],
+            index_plane: &[0; 8],
+            shading_plane: None,
+            atlas: &[0; 4],
+            atlas_extent: [1, 1],
+            slots: &[],
+            detail: 1,
+        };
+        assert!(matches!(
+            inputs.validate(),
+            Err(GpuRendererError::ShaderLandscapeInputs("short index plane"))
+        ));
     }
 
     #[test]

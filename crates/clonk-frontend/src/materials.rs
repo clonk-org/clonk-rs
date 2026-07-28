@@ -399,6 +399,318 @@ pub(crate) fn compose_material_surface_pixel(
     )
 }
 
+// ---------------------------------------------------------------------------
+// GPU-facing packing of the same composition
+// ---------------------------------------------------------------------------
+//
+// `compose_material_surface_pixel` above walks INTEGER landscape-map
+// coordinates, so the finest sampling rate the retained CPU composer can ever
+// reach is one pattern texel per landscape pixel. Evaluating the identical
+// arithmetic per fragment lifts that cap, but only if the shader receives the
+// per-texmap-slot parameters in a form it can index. The types below are that
+// form, plus a reference evaluator written in the same integer arithmetic the
+// shader uses, so the packing can be proven equal to the CPU composer without a
+// GPU present.
+
+/// Slot is populated. Absent slots draw nothing, mirroring `Slot::Empty` in the
+/// CPU composer.
+pub(crate) const MATERIAL_GPU_PRESENT: u32 = 1;
+/// `MATERIAL_OVERLAY_MONOCHROME`: take all three pattern modifiers from blue.
+pub(crate) const MATERIAL_GPU_MONOCHROME: u32 = 2;
+/// A secondary (overlay) pattern follows the primary one.
+pub(crate) const MATERIAL_GPU_HAS_OVERLAY: u32 = 4;
+/// The primary pattern is a `Surface8`; its atlas texels carry raw indices.
+pub(crate) const MATERIAL_GPU_PRIMARY_INDEXED: u32 = 8;
+/// The overlay pattern is a `Surface8`.
+pub(crate) const MATERIAL_GPU_OVERLAY_INDEXED: u32 = 16;
+
+/// Where one material pattern lives inside the shared pattern atlas. Shipped
+/// patterns range 32x32..256x256, so every slot carries its own size — the
+/// modulo tiling in `apply_material_pattern` is per pattern, not per atlas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MaterialAtlasRect {
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    /// `Surface8` patterns store their palette index in the atlas red channel.
+    pub(crate) indexed: bool,
+}
+
+/// One texmap slot in the layout the landscape fragment shader binds as a
+/// uniform array. Four `vec4<u32>` keep the std140 stride at 64 bytes, so all
+/// 128 slots fit inside the 16 KiB downlevel uniform-binding limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub(crate) struct MaterialGpuSlot {
+    /// `MaterialRenderInfo::color` triplets 0/1/2 packed as `r | g<<8 | b<<16`,
+    /// then `alpha[0..3]` packed the same way.
+    pub(crate) colors: [u32; 4],
+    /// `alpha[3..6]` packed, the primary CPattern zoom, the overlay zoom, and
+    /// the `MATERIAL_GPU_*` flag bits.
+    pub(crate) params: [u32; 4],
+    pub(crate) primary: [u32; 4],
+    pub(crate) overlay: [u32; 4],
+}
+
+fn pack_triplet(values: &[u8], offset: usize) -> u32 {
+    u32::from(values[offset])
+        | (u32::from(values[offset + 1]) << 8)
+        | (u32::from(values[offset + 2]) << 16)
+}
+
+fn unpack_triplet(packed: u32, channel: u32) -> u8 {
+    ((packed >> (channel * 8)) & 0xff) as u8
+}
+
+/// Mirrors the zoom/monochrome selection in `compose_material_surface_pixel`
+/// (materials.rs:359-382) once, at pack time, so the shader never has to know
+/// the `MATERIAL_OVERLAY_*` bit meanings.
+pub(crate) fn pack_material_gpu_slot(
+    material: &MaterialRenderInfo,
+    primary: MaterialAtlasRect,
+    overlay: Option<MaterialAtlasRect>,
+) -> MaterialGpuSlot {
+    let primary_zoom = if material.overlay_type & MATERIAL_OVERLAY_HUGE_ZOOM != 0 {
+        4
+    } else if material.overlay_type & MATERIAL_OVERLAY_EXACT != 0 {
+        1
+    } else {
+        0
+    };
+    let overlay_zoom = if material.overlay_type & MATERIAL_OVERLAY_EXACT != 0 {
+        1
+    } else {
+        2
+    };
+    let mut flags = MATERIAL_GPU_PRESENT;
+    if material.overlay_type & MATERIAL_OVERLAY_MONOCHROME != 0 {
+        flags |= MATERIAL_GPU_MONOCHROME;
+    }
+    if primary.indexed {
+        flags |= MATERIAL_GPU_PRIMARY_INDEXED;
+    }
+    if let Some(overlay) = overlay.filter(|rect| rect.width != 0 && rect.height != 0) {
+        flags |= MATERIAL_GPU_HAS_OVERLAY;
+        if overlay.indexed {
+            flags |= MATERIAL_GPU_OVERLAY_INDEXED;
+        }
+    }
+    let rect = |rect: MaterialAtlasRect| [rect.x, rect.y, rect.width, rect.height];
+    MaterialGpuSlot {
+        colors: [
+            pack_triplet(&material.color, 0),
+            pack_triplet(&material.color, 3),
+            pack_triplet(&material.color, 6),
+            pack_triplet(&material.alpha, 0),
+        ],
+        params: [
+            pack_triplet(&material.alpha, 3),
+            primary_zoom,
+            overlay_zoom,
+            flags,
+        ],
+        primary: rect(primary),
+        overlay: rect(overlay.unwrap_or_default()),
+    }
+}
+
+/// A single RGBA pattern atlas. `Surface8` patterns occupy the red channel.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MaterialAtlasView<'a> {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) pixels: &'a [u8],
+}
+
+impl MaterialAtlasView<'_> {
+    fn texel(&self, rect: [u32; 4], x: i32, y: i32, zoom: u32) -> Option<[u8; 4]> {
+        if rect[2] == 0 || rect[3] == 0 {
+            return None;
+        }
+        // C++ CPattern applies its own zoom to the LANDSCAPE coordinate before
+        // the pattern modulo (materials.rs:184-186), which is why shipping a
+        // larger pattern only changes the tiling period today.
+        let sample_x = if zoom == 0 { x } else { x / zoom as i32 };
+        let sample_y = if zoom == 0 { y } else { y / zoom as i32 };
+        let texel_x = rect[0] + (sample_x as u32 % rect[2]);
+        let texel_y = rect[1] + (sample_y as u32 % rect[3]);
+        let offset = ((texel_y * self.width + texel_x) * 4) as usize;
+        self.pixels
+            .get(offset..offset + 4)
+            .map(|slice| [slice[0], slice[1], slice[2], slice[3]])
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_gpu_pattern(
+    pixel: &mut MaterialPixel,
+    slot: &MaterialGpuSlot,
+    landscape_pixel: u8,
+    rect: [u32; 4],
+    zoom: u32,
+    indexed: bool,
+    monochrome: bool,
+    x: i32,
+    y: i32,
+    atlas: MaterialAtlasView<'_>,
+) {
+    let Some(texel) = atlas.texel(rect, x, y, zoom) else {
+        return;
+    };
+    if indexed {
+        // Mirrors `apply_indexed_material_pattern` (materials.rs:252-260): the
+        // index selects one of the three material colour triplets outright
+        // rather than modulating the running pixel.
+        let shift = u32::from(texel[0] % 3);
+        let packed = slot.colors[shift as usize];
+        pixel.red = unpack_triplet(packed, 0);
+        pixel.green = unpack_triplet(packed, 1);
+        pixel.blue = unpack_triplet(packed, 2);
+        let alpha = if landscape_pixel & 0xf0 == 0 {
+            slot.colors[3]
+        } else {
+            slot.params[0]
+        };
+        pixel.transparency = unpack_triplet(alpha, shift);
+        return;
+    }
+    // Mirrors `apply_material_pattern` (materials.rs:192-204).
+    let modifiers = if monochrome {
+        [texel[2]; 3]
+    } else {
+        [texel[0], texel[1], texel[2]]
+    };
+    pixel.red =
+        lighten_material_channel(((u16::from(pixel.red) * u16::from(modifiers[0])) >> 8) as u8);
+    pixel.green =
+        lighten_material_channel(((u16::from(pixel.green) * u16::from(modifiers[1])) >> 8) as u8);
+    pixel.blue =
+        lighten_material_channel(((u16::from(pixel.blue) * u16::from(modifiers[2])) >> 8) as u8);
+    pixel.transparency = pixel
+        .transparency
+        .saturating_add(255u8.saturating_sub(texel[3]));
+}
+
+/// Reference evaluation of a packed slot, written in the integer arithmetic the
+/// WGSL landscape shader uses. Proven equal to `compose_material_surface_pixel`
+/// by `packed_material_slot_matches_the_cpu_composer`.
+pub(crate) fn compose_material_gpu_slot(
+    slot: &MaterialGpuSlot,
+    landscape_pixel: u8,
+    x: i32,
+    y: i32,
+    atlas: MaterialAtlasView<'_>,
+) -> Color {
+    let flags = slot.params[3];
+    if flags & MATERIAL_GPU_PRESENT == 0 {
+        return Color::transparent();
+    }
+    let base_alpha = if landscape_pixel & 0x80 == 0 {
+        slot.colors[3]
+    } else {
+        slot.params[0]
+    };
+    let mut pixel = MaterialPixel {
+        red: unpack_triplet(slot.colors[0], 0),
+        green: unpack_triplet(slot.colors[0], 1),
+        blue: unpack_triplet(slot.colors[0], 2),
+        transparency: unpack_triplet(base_alpha, 0),
+    };
+    let monochrome = flags & MATERIAL_GPU_MONOCHROME != 0;
+    apply_gpu_pattern(
+        &mut pixel,
+        slot,
+        landscape_pixel,
+        slot.primary,
+        slot.params[1],
+        flags & MATERIAL_GPU_PRIMARY_INDEXED != 0,
+        monochrome,
+        x,
+        y,
+        atlas,
+    );
+    if flags & MATERIAL_GPU_HAS_OVERLAY != 0 {
+        apply_gpu_pattern(
+            &mut pixel,
+            slot,
+            landscape_pixel,
+            slot.overlay,
+            slot.params[2],
+            flags & MATERIAL_GPU_OVERLAY_INDEXED != 0,
+            monochrome,
+            x,
+            y,
+            atlas,
+        );
+    }
+    Color::new(
+        pixel.red,
+        pixel.green,
+        pixel.blue,
+        255u8.saturating_sub(pixel.transparency),
+    )
+}
+
+/// Lays every registered pattern out in one vertical strip. A strip needs no
+/// packing heuristic and keeps each rect's origin independent of its
+/// neighbours, which is all the per-slot modulo tiling requires.
+pub(crate) fn build_material_atlas(
+    patterns: &[MaterialPatternRef<'_>],
+) -> (u32, u32, Vec<u8>, Vec<MaterialAtlasRect>) {
+    let width = patterns
+        .iter()
+        .map(|pattern| match pattern {
+            MaterialPatternRef::Surface32(image) => image.width(),
+            MaterialPatternRef::Surface8 { width, .. } => *width,
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut rects = Vec::with_capacity(patterns.len());
+    let mut pixels: Vec<u8> = Vec::new();
+    let mut origin_y = 0;
+    for pattern in patterns {
+        let (pattern_width, pattern_height, indexed) = match pattern {
+            MaterialPatternRef::Surface32(image) => (image.width(), image.height(), false),
+            MaterialPatternRef::Surface8 { width, height, .. } => (*width, *height, true),
+        };
+        rects.push(MaterialAtlasRect {
+            x: 0,
+            y: origin_y,
+            width: pattern_width,
+            height: pattern_height,
+            indexed,
+        });
+        for row in 0..pattern_height {
+            let start = pixels.len();
+            pixels.resize(start + width as usize * 4, 0);
+            for column in 0..pattern_width {
+                let destination = start + column as usize * 4;
+                match pattern {
+                    MaterialPatternRef::Surface32(image) => {
+                        let source = ((row * image.width() + column) * 4) as usize;
+                        if let Some(texel) = image.pixels().get(source..source + 4) {
+                            pixels[destination..destination + 4].copy_from_slice(texel);
+                        }
+                    }
+                    MaterialPatternRef::Surface8 { indices, .. } => {
+                        let source = (row * pattern_width + column) as usize;
+                        pixels[destination] = indices.get(source).copied().unwrap_or(0);
+                        pixels[destination + 3] = 255;
+                    }
+                }
+            }
+        }
+        origin_y += pattern_height;
+    }
+    if pixels.is_empty() {
+        pixels.resize(width as usize * 4, 0);
+        origin_y = 1;
+    }
+    (width, origin_y, pixels, rects)
+}
+
 pub(crate) fn lighten_material_color(color: &mut Color, amount: i32) {
     let amount = amount.clamp(0, 255) as u8;
     color.r = color.r.saturating_add(amount);
@@ -411,4 +723,110 @@ pub(crate) fn darken_material_color(color: &mut Color, amount: i32) {
     color.r = color.r.saturating_sub(amount);
     color.g = color.g.saturating_sub(amount);
     color.b = color.b.saturating_sub(amount);
+}
+
+#[cfg(test)]
+mod gpu_slot_tests {
+    use super::*;
+
+    fn surface32_pattern() -> ImageData {
+        // Deliberately non-square so a wrong modulo shows up as a mismatch.
+        let (width, height) = (4_u32, 3_u32);
+        let pixels = (0..width * height)
+            .flat_map(|index| {
+                let index = index as u8;
+                [
+                    index.wrapping_mul(37).wrapping_add(3),
+                    index.wrapping_mul(91).wrapping_add(17),
+                    index.wrapping_mul(53).wrapping_add(200),
+                    index.wrapping_mul(29).wrapping_add(11),
+                ]
+            })
+            .collect();
+        ImageData::new(width, height, pixels)
+    }
+
+    fn surface8_pattern() -> MaterialTextureSurface {
+        MaterialTextureSurface::surface8(3, 5, (0..15u8).map(|index| index * 7).collect())
+    }
+
+    /// The packed slot plus the shared atlas must reproduce
+    /// `compose_material_surface_pixel` exactly; anything less makes a shader
+    /// composer a divergence rather than a lift of the detail cap.
+    #[test]
+    fn packed_material_slot_matches_the_cpu_composer() {
+        let image = surface32_pattern();
+        let indexed = surface8_pattern();
+        let primary_refs = [
+            MaterialPatternRef::Surface32(&image),
+            MaterialPatternRef::from(&indexed),
+        ];
+        let (atlas_width, atlas_height, atlas_pixels, rects) = build_material_atlas(&primary_refs);
+        let atlas = MaterialAtlasView {
+            width: atlas_width,
+            height: atlas_height,
+            pixels: &atlas_pixels,
+        };
+
+        let color = [10, 90, 200, 40, 130, 250, 70, 20, 160];
+        let alpha = [0, 30, 60, 90, 120, 200];
+        let overlay_types = [
+            0,
+            MATERIAL_OVERLAY_EXACT,
+            MATERIAL_OVERLAY_HUGE_ZOOM,
+            MATERIAL_OVERLAY_MONOCHROME,
+            MATERIAL_OVERLAY_HUGE_ZOOM | MATERIAL_OVERLAY_MONOCHROME,
+        ];
+        let mut compared = 0_usize;
+        for overlay_type in overlay_types {
+            let material = MaterialRenderInfo::new(color, alpha, None, overlay_type, 50);
+            for (primary_index, primary) in primary_refs.iter().enumerate() {
+                for overlay_index in [None, Some(0), Some(1)] {
+                    let overlay = overlay_index.map(|index| primary_refs[index]);
+                    let slot = pack_material_gpu_slot(
+                        &material,
+                        rects[primary_index],
+                        overlay_index.map(|index| rects[index]),
+                    );
+                    for landscape_pixel in [1_u8, 0x21, 0x81, 0xff] {
+                        for y in 0..11 {
+                            for x in 0..11 {
+                                let expected = compose_material_surface_pixel(
+                                    &material,
+                                    landscape_pixel,
+                                    x,
+                                    y,
+                                    *primary,
+                                    overlay,
+                                );
+                                let actual =
+                                    compose_material_gpu_slot(&slot, landscape_pixel, x, y, atlas);
+                                assert_eq!(
+                                    actual, expected,
+                                    "overlay_type {overlay_type}, primary {primary_index}, \
+                                     overlay {overlay_index:?}, pixel {landscape_pixel:#04x} \
+                                     at ({x}, {y})"
+                                );
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 3000, "the sweep must cover the tiling period");
+    }
+
+    /// An unpopulated slot draws nothing, mirroring `Slot::Empty`.
+    #[test]
+    fn absent_material_slot_composes_nothing() {
+        let atlas_pixels = [0_u8; 4];
+        let atlas = MaterialAtlasView {
+            width: 1,
+            height: 1,
+            pixels: &atlas_pixels,
+        };
+        let composed = compose_material_gpu_slot(&MaterialGpuSlot::default(), 1, 0, 0, atlas);
+        assert_eq!(composed, Color::transparent());
+    }
 }

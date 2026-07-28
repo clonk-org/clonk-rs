@@ -825,3 +825,171 @@ impl LiquidAnimationCycle {
             .sum()
     }
 }
+
+/// Precomputed `ApplyLighting` placement shading, two bytes per landscape map
+/// pixel: the lighten amount then the total darken amount.
+///
+/// The +-8-row loop in `C4Landscape::ApplyLighting`
+/// (src/C4Landscape.cpp:2816-2872) is a bit-exact C++ mirror, so a fragment
+/// composer must consume it rather than re-derive it. Two channels are
+/// required, not one: `LightenClrBy` saturates at 255 before `DarkenClrBy`
+/// runs, and a channel that clamped high cannot be recovered from a single
+/// signed amount. `SHADING_PLANE_SUPPRESSED` in the darken channel encodes the
+/// `if (!iOwnDens) continue;` case, which leaves the pixel fully transparent.
+pub(crate) const SHADING_PLANE_SUPPRESSED: u8 = 255;
+
+pub(crate) fn placement_shading_plane(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    placements: &[i32; 128],
+    border_state: (i32, i32, bool, bool, Option<u8>),
+) -> Vec<u8> {
+    // Same border rules as the retained CPU composer's local `byte_with_border`
+    // (C4Landscape::GetPix/GetPlacement).
+    let byte_with_border = |x: i32, y: i32| {
+        let (left_open, right_open, top_open, bottom_open, vehicle) = border_state;
+        let border = |is_open: bool| is_open.then_some(0).or(vehicle);
+        if x < 0 {
+            return border(y < left_open);
+        }
+        if x as u32 >= width {
+            return border(y < right_open);
+        }
+        if y < 0 {
+            return border(top_open);
+        }
+        if y as u32 >= height {
+            return border(bottom_open);
+        }
+        bytes.get(y as usize * width as usize + x as usize).copied()
+    };
+    let placement_at = |x: i32, y: i32| {
+        byte_with_border(x, y).map_or(0, |byte| placements[usize::from(byte & 0x7f)])
+    };
+    let mut plane = vec![0_u8; (width as usize * height as usize).saturating_mul(2)];
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            let offset = (y as usize * width as usize + x as usize) * 2;
+            let Some(byte) = byte_with_border(x, y).filter(|byte| *byte != 0) else {
+                continue;
+            };
+            let own_density = placements[usize::from(byte & 0x7f)];
+            if own_density == 0 {
+                plane[offset + 1] = SHADING_PLANE_SUPPRESSED;
+                continue;
+            }
+            let own_density =
+                (2 * own_density + placement_at(x - 1, y) + placement_at(x + 1, y)) / 4;
+            let window = |step: i32| {
+                (1..=8)
+                    .map(|offset| placement_at(x, y + step * offset))
+                    .sum::<i32>()
+            };
+            let mut lighten = 0;
+            let mut darken = 0;
+            let compare_density = window(-1) / 8;
+            if own_density > compare_density {
+                lighten = (2 * (own_density - compare_density)).min(30);
+            } else if own_density < compare_density && own_density < 30 {
+                darken = (2 * (compare_density - own_density)).min(30);
+            }
+            let compare_density = window(1) / 8;
+            if own_density > compare_density {
+                darken += (2 * (own_density - compare_density)).min(30);
+            }
+            plane[offset] = lighten.clamp(0, 254) as u8;
+            plane[offset + 1] = darken.clamp(0, 254) as u8;
+        }
+    }
+    plane
+}
+
+#[cfg(test)]
+mod placement_shading_tests {
+    use super::*;
+
+    const WIDTH: u32 = 3;
+    const HEIGHT: u32 = 20;
+    /// Open on every side so the landscape border reads as sky.
+    const OPEN: (i32, i32, bool, bool, Option<u8>) = (i32::MAX, i32::MAX, true, true, None);
+
+    fn placements(entries: &[(usize, i32)]) -> [i32; 128] {
+        let mut placements = [0; 128];
+        for &(index, placement) in entries {
+            placements[index] = placement;
+        }
+        placements
+    }
+
+    fn shading_at(plane: &[u8], x: u32, y: u32) -> (u8, u8) {
+        let offset = (y as usize * WIDTH as usize + x as usize) * 2;
+        (plane[offset], plane[offset + 1])
+    }
+
+    /// C4Landscape.cpp:2856-2871 — a pixel whose eight rows above and below
+    /// hold the same placement is neither lightened nor darkened.
+    #[test]
+    fn uniform_material_receives_no_placement_shading() {
+        let bytes = vec![1_u8; (WIDTH * HEIGHT) as usize];
+        let plane = placement_shading_plane(
+            &bytes,
+            WIDTH,
+            HEIGHT,
+            &placements(&[(1, 70)]),
+            (0, 0, false, false, Some(1)),
+        );
+        assert_eq!(shading_at(&plane, 1, 10), (0, 0));
+    }
+
+    /// A single dense row against sky lightens from above AND darkens from
+    /// below in the same pixel — the case a single signed channel cannot carry,
+    /// because `LightenClrBy` clamps at 255 before `DarkenClrBy` subtracts.
+    #[test]
+    fn an_isolated_row_both_lightens_and_darkens() {
+        let mut bytes = vec![0_u8; (WIDTH * HEIGHT) as usize];
+        for x in 0..WIDTH as usize {
+            bytes[10 * WIDTH as usize + x] = 1;
+        }
+        let plane = placement_shading_plane(&bytes, WIDTH, HEIGHT, &placements(&[(1, 70)]), OPEN);
+        assert_eq!(shading_at(&plane, 1, 10), (30, 30));
+    }
+
+    /// C4Landscape.cpp:2862-2865 — light material beneath heavy material is
+    /// darkened, and only when its own density is below 30.
+    #[test]
+    fn light_material_under_heavy_material_darkens() {
+        let mut bytes = vec![0_u8; (WIDTH * HEIGHT) as usize];
+        for y in 0..HEIGHT as usize {
+            for x in 0..WIDTH as usize {
+                bytes[y * WIDTH as usize + x] = if y < 10 { 1 } else { 2 };
+            }
+        }
+        let plane = placement_shading_plane(
+            &bytes,
+            WIDTH,
+            HEIGHT,
+            &placements(&[(1, 70), (2, 5)]),
+            (0, 0, false, false, Some(2)),
+        );
+        assert_eq!(shading_at(&plane, 1, 10), (0, 30));
+    }
+
+    /// C4Landscape.cpp:2851 — `if (!iOwnDens) continue;` leaves the pixel
+    /// untouched, i.e. fully transparent in the composed plane.
+    #[test]
+    fn zero_placement_material_is_suppressed() {
+        let bytes = vec![1_u8; (WIDTH * HEIGHT) as usize];
+        let plane = placement_shading_plane(&bytes, WIDTH, HEIGHT, &placements(&[]), OPEN);
+        assert_eq!(shading_at(&plane, 1, 10), (0, SHADING_PLANE_SUPPRESSED));
+    }
+
+    /// Sky carries no shading; the composer never reaches the placement branch
+    /// for it (C4Landscape.cpp:2841-2845).
+    #[test]
+    fn sky_carries_no_placement_shading() {
+        let bytes = vec![0_u8; (WIDTH * HEIGHT) as usize];
+        let plane = placement_shading_plane(&bytes, WIDTH, HEIGHT, &placements(&[(1, 70)]), OPEN);
+        assert!(plane.iter().all(|value| *value == 0));
+    }
+}
