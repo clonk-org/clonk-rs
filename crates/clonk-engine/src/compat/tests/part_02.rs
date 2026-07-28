@@ -4,24 +4,10 @@
 
     #[test]
     fn resort_queues_explicit_context_and_global_category_work() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(2),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+            "Dummy")],
+        );
         let (result, outcome) = with_object_host_context_with_world(world.clone(), || {
             assert_eq!(resort(&[])?, Value::Nil);
             assert_eq!(resort(&[Value::Object(2)])?, Value::Nil);

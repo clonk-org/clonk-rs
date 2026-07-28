@@ -1455,24 +1455,11 @@ protected func Death()
 
     #[test]
     fn get_energy_reads_world_when_target_provided() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(55),
             "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            33_000,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        )
+            .with_energy(33_000)]);
         let args = [object_reference_value(ObjectId::new(55))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_energy(&args));
 

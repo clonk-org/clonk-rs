@@ -1091,6 +1091,96 @@ pub enum PlayerCommand {
 }
 
 impl HostWorldObject {
+    /// Scope overrides for the test fixtures, which build every world object
+    /// from one shared default and then state only what they exercise.
+    #[cfg(test)]
+    pub(crate) fn with_status(mut self, status: ObjectStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_name(mut self, action_name: impl Into<String>) -> Self {
+        self.action_name = action_name.into();
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_target(mut self, target: Option<ObjectId>) -> Self {
+        self.action_target = target;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_target2(mut self, target: Option<ObjectId>) -> Self {
+        self.action_target2 = target;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_procedure(mut self, procedure: Option<String>) -> Self {
+        self.action_procedure = procedure;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_owner(mut self, owner: i32) -> Self {
+        self.owner = owner;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_energy(mut self, energy: i32) -> Self {
+        self.energy = energy;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_position(mut self, position: Vector2) -> Self {
+        self.position = position;
+        // `with_category` derives the raw fixed pair from the pixel pair, and
+        // the fixed values are the authority everywhere downstream.
+        self.fixed_position = FixedVec2::from_ints(position.x, position.y);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_velocity(mut self, velocity: Vector2) -> Self {
+        self.velocity = velocity;
+        self.fixed_velocity = FixedVec2::from_ints(velocity.x, velocity.y);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_construction(mut self, construction: i32) -> Self {
+        self.construction = construction.max(0);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_data(mut self, action_data: i32) -> Self {
+        self.action_data = action_data;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_action_ticks(mut self, action_ticks: i32) -> Self {
+        self.action_ticks = action_ticks;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_container(mut self, container: Option<ObjectId>) -> Self {
+        self.container = container;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_vertices(mut self, vertices: Vec<ObjectVertex>) -> Self {
+        self.vertices = vertices;
+        self
+    }
+
     pub(crate) fn with_move_to_range(mut self, move_to_range: i32) -> Self {
         self.move_to_range = move_to_range;
         self

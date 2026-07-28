@@ -1397,24 +1397,9 @@ func ProbeDrawDefMap() {
         let objects = crew
             .iter()
             .map(|(id, status)| {
-                HostWorldObject::new(
-                    ObjectId::new(*id),
-                    "CLNK",
-                    *status,
-                    "Idle",
-                    None,
-                    None,
-                    None,
-                    4,
-                    100,
-                    crate::FULL_CON,
-                    Vector2::ZERO,
-                    Vector2::ZERO,
-                    Vec::new(),
-                    0,
-                    0,
-                    None,
-                )
+                fixture_world_object(ObjectId::new(*id), "CLNK")
+                    .with_status(*status)
+                    .with_owner(4)
             })
             .collect::<Vec<_>>();
         let player = PlayerState {
@@ -1527,24 +1512,10 @@ func ProbeDrawDefMap() {
             cursor: Some(cursor),
             ..PlayerState::default()
         };
-        let object = HostWorldObject::new(
-            cursor,
-            "CLNK",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            0,
-            100,
-            crate::FULL_CON,
-            Vector2::new(306, 271),
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let object = fixture_world_object(cursor, "CLNK")
+            .with_action_name("Walk")
+            .with_owner(0)
+            .with_position(Vector2::new(306, 271));
         let world = HostWorldContext::from_objects_with_players(vec![object], vec![player]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             get_player_val(&[Value::String("ViewX".into()), Value::Int(0), Value::Int(0)])

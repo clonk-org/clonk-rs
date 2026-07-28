@@ -600,24 +600,7 @@
                 .iter()
                 .map(|(id, _)| DefinitionId::from(*id))
                 .collect();
-            HostWorldObject::new(
-                ObjectId::new(id),
-                definition,
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )
+            fixture_world_object(ObjectId::new(id), definition)
             .with_full_state(Rc::new(state))
         };
         let world = HostWorldContext::from_objects([
@@ -821,24 +804,8 @@ func Missing() { return ComponentAll(0, WOOD); }
             let objects: Vec<HostWorldObject> = crew_ids
                 .iter()
                 .map(|&id| {
-                    HostWorldObject::new(
-                        ObjectId::new(id),
-                        "Clonk",
-                        ObjectStatus::Normal,
-                        "Idle",
-                        None,
-                        None,
-                        None,
-                        1,
-                        100,
-                        crate::FULL_CON,
-                        Vector2::ZERO,
-                        Vector2::ZERO,
-                        Vec::new(),
-                        0,
-                        0,
-                        None,
-                    )
+                    fixture_world_object(ObjectId::new(id), "Clonk")
+                        .with_owner(1)
                     .with_crew_disabled(disabled.contains(&id))
                 })
                 .collect();
@@ -919,42 +886,10 @@ func Missing() { return ComponentAll(0, WOOD); }
     fn get_crew_returns_nth_crew_member() {
         let crew_ids = [101_u64, 202_u64];
         let objects = vec![
-            HostWorldObject::new(
-                ObjectId::new(crew_ids[0]),
-                "Clonk",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                1,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
-            HostWorldObject::new(
-                ObjectId::new(crew_ids[1]),
-                "Clonk",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                1,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+            fixture_world_object(ObjectId::new(crew_ids[0]), "Clonk")
+                .with_owner(1),
+            fixture_world_object(ObjectId::new(crew_ids[1]), "Clonk")
+                .with_owner(1),
         ];
         let mut player = PlayerState::default();
         player.id = 1;
@@ -982,24 +917,8 @@ func Missing() { return ComponentAll(0, WOOD); }
     #[test]
     fn get_crew_returns_nil_for_out_of_range_index() {
         let crew_ids = [700_u64];
-        let objects = vec![HostWorldObject::new(
-            ObjectId::new(crew_ids[0]),
-            "Clonk",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            3,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )];
+        let objects = vec![fixture_world_object(ObjectId::new(crew_ids[0]), "Clonk")
+            .with_owner(3)];
         let mut player = PlayerState::default();
         player.id = 3;
         player.crew = vec![ObjectId::new(crew_ids[0])];
@@ -1026,24 +945,8 @@ func Missing() { return ComponentAll(0, WOOD); }
         let objects = crew_ids
             .iter()
             .map(|id| {
-                HostWorldObject::new(
-                    ObjectId::new(*id),
-                    "Clonk",
-                    ObjectStatus::Normal,
-                    "Idle",
-                    None,
-                    None,
-                    None,
-                    2,
-                    100,
-                    crate::FULL_CON,
-                    Vector2::ZERO,
-                    Vector2::ZERO,
-                    Vec::new(),
-                    0,
-                    0,
-                    None,
-                )
+                fixture_world_object(ObjectId::new(*id), "Clonk")
+                    .with_owner(2)
             })
             .collect::<Vec<_>>();
         let mut player = PlayerState::default();
@@ -2172,24 +2075,7 @@ public func Trigger()
     fn set_transfer_zone_registers_command_for_active_object() {
         let args = [Value::Int(2), Value::Int(3), Value::Int(5), Value::Int(7)];
         let world = HostWorldContext::with_landscape(
-            vec![HostWorldObject::new(
-                ObjectId::new(1),
-                "ZoneTester",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )],
+            vec![fixture_world_object(ObjectId::new(1), "ZoneTester")],
             None,
             HashMap::new(),
             Vec::new(),
@@ -2236,24 +2122,7 @@ public func Trigger()
     #[test]
     fn set_transfer_zone_with_zero_size_clears_existing() {
         let world = HostWorldContext::with_landscape(
-            vec![HostWorldObject::new(
-                ObjectId::new(1),
-                "ZoneTester",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )],
+            vec![fixture_world_object(ObjectId::new(1), "ZoneTester")],
             None,
             HashMap::new(),
             Vec::new(),

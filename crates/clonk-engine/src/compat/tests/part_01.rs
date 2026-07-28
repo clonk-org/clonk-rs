@@ -39,6 +39,31 @@
         idle_object_context_with_vertices(&[])
     }
 
+    /// A world object carrying the scope defaults these tests share: alive
+    /// and normal, Idle, unowned, full energy and construction, at rest at
+    /// the origin with no vertices and no container. Sites state only the
+    /// channel they exercise, through the type's own builders.
+    fn fixture_world_object(id: ObjectId, definition: impl Into<String>) -> HostWorldObject {
+        HostWorldObject::new(
+            id,
+            definition,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+    }
+
     #[test]
     fn cpp_add_func_argument_extraction_canonicalizes_scalar_and_pointer_slots() {
         let raw_bool = Value::from_c4_bool_raw(2);
@@ -1060,24 +1085,8 @@
     }
 
     fn scenario_section_world_object(id: u64, status: ObjectStatus) -> HostWorldObject {
-        HostWorldObject::new(
-            ObjectId::new(id),
-            "TEST",
-            status,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        fixture_world_object(ObjectId::new(id), "TEST")
+            .with_status(status)
     }
 
     #[test]
@@ -2517,24 +2526,10 @@ global func PreInitializePlayer(int player)
         // FnSetObjectOrder (C4Script.cpp:5090-5111): nil pSortObj defaults
         // to the caller, nil pObjBeforeOrAfter and self-pairs return false,
         // and a valid request records fSortAfter without sorting inline.
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(2),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+            "Dummy")],
+        );
         let (result, outcome) = with_object_host_context_with_world(world, || {
             assert_eq!(
                 set_object_order(&[Value::Object(2), Value::Nil, Value::Bool(true)])?,
@@ -2558,24 +2553,7 @@ global func PreInitializePlayer(int player)
     }
 
     fn resort_order_world_object(id: u64, definition: &str) -> HostWorldObject {
-        HostWorldObject::new(
-            ObjectId::new(id),
-            definition,
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        fixture_world_object(ObjectId::new(id), definition)
     }
 
     #[test]

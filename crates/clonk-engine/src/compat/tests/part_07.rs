@@ -634,24 +634,11 @@ func Probe(state) {
         state.status = status;
         state.action = crate::ActionState::new("Work");
         state.action.data = initial_data;
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            status,
-            "Work",
-            None,
-            None,
-            Some(procedure.to_string()),
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            initial_data,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_status(status)
+            .with_action_name("Work")
+            .with_action_procedure(Some(procedure.to_string()))
+            .with_action_data(initial_data)
         .with_full_state(Rc::new(state));
         let world = HostWorldContext::from_objects([target])
             .with_definition_metadata(Rc::new(HashMap::from([(
@@ -784,24 +771,9 @@ func Probe(state) {
             Vec::new(),
         );
         state.action = crate::ActionState::new("Walk");
-        let target = HostWorldObject::new(
-            clonk,
-            "CLNK",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            Some("walk".into()),
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(clonk, "CLNK")
+            .with_action_name("Walk")
+            .with_action_procedure(Some("walk".into()))
         .with_full_state(Rc::new(state));
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -970,24 +942,9 @@ func Probe(state) {
 
     #[test]
     fn get_action_data_reads_world_context() {
-        let other = HostWorldObject::new(
-            ObjectId::new(23),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            77,
-            0,
-            None,
-        );
+        let other = fixture_world_object(ObjectId::new(23), "Dummy")
+            .with_action_name("Walk")
+            .with_action_data(77);
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = ValueMap::new();
@@ -1131,24 +1088,12 @@ func Probe(state) {
 
     #[test]
     fn get_procedure_reads_world_context() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(42),
             "Dummy",
-            ObjectStatus::Normal,
-            "Swim",
-            None,
-            None,
-            Some("swim".to_string()),
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        )
+            .with_action_name("Swim")
+            .with_action_procedure(Some("swim".to_string()))]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(42));
@@ -1174,24 +1119,8 @@ func Probe(state) {
 
     #[test]
     fn get_action_reads_other_object_from_world() {
-        let other = HostWorldObject::new(
-            ObjectId::new(99),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let other = fixture_world_object(ObjectId::new(99), "Dummy")
+            .with_action_name("Walk");
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
             let mut target = ValueMap::new();
@@ -1205,24 +1134,11 @@ func Probe(state) {
 
     #[test]
     fn get_action_uses_world_without_context() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(7),
             "Dummy",
-            ObjectStatus::Normal,
-            "Dig",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        )
+            .with_action_name("Dig")]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(7));
@@ -1303,24 +1219,9 @@ func Probe(state) {
 
     #[test]
     fn get_act_time_reads_world_context() {
-        let other = HostWorldObject::new(
-            ObjectId::new(23),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Walk",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            12,
-            None,
-        );
+        let other = fixture_world_object(ObjectId::new(23), "Dummy")
+            .with_action_name("Walk")
+            .with_action_ticks(12);
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = ValueMap::new();
@@ -1367,24 +1268,10 @@ func Probe(state) {
         // nil without either (C4Script.cpp:4445-4449). The object's live
         // vertices and construction/rotation are deliberately irrelevant.
         let other_id = ObjectId::new(2);
-        let other = HostWorldObject::new(
-            other_id,
-            "OTHR",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::new(10, 50),
-            Vector2::ZERO,
-            vec![ObjectVertex::new(0, 900)],
-            0,
-            0,
-            None,
-        );
+        let other = fixture_world_object(other_id, "OTHR")
+            .with_energy(0)
+            .with_position(Vector2::new(10, 50))
+            .with_vertices(vec![ObjectVertex::new(0, 900)]);
         let definitions = Rc::new(HashMap::from([
             (
                 DefinitionId::from("SELF"),
@@ -1582,24 +1469,12 @@ func Probe(state) {
         state.container = Some(container);
         state.action.target2 = Some(resolved_target);
         state.layer = Some(layer);
-        let world_object = HostWorldObject::new(
-            target,
-            "SELF",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            Some(resolved_target),
-            None,
-            OWNER_NONE,
-            0,
-            FULL_CON,
-            state.position,
-            state.velocity,
-            Vec::new(),
-            0,
-            0,
-            Some(container),
-        )
+        let world_object = fixture_world_object(target, "SELF")
+            .with_action_target2(Some(resolved_target))
+            .with_energy(0)
+            .with_position(state.position)
+            .with_velocity(state.velocity)
+            .with_container(Some(container))
         .with_compiler_fields(
             12,
             -9,
@@ -1618,24 +1493,8 @@ func Probe(state) {
             },
         )
         .with_full_state(Rc::new(state));
-        let default_world_object = HostWorldObject::new(
-            default_target,
-            "SELF",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        );
+        let default_world_object = fixture_world_object(default_target, "SELF")
+            .with_energy(0);
         let mut reset_state = crate::preview_spawn_state(
             Vector2::new(3, 4),
             OWNER_NONE,
@@ -1646,24 +1505,11 @@ func Probe(state) {
             Vec::new(),
         );
         reset_state.container = Some(container);
-        let reset_world_object = HostWorldObject::new(
-            reset_target,
-            "SELF",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            FULL_CON,
-            reset_state.position,
-            reset_state.velocity,
-            Vec::new(),
-            0,
-            0,
-            Some(container),
-        )
+        let reset_world_object = fixture_world_object(reset_target, "SELF")
+            .with_energy(0)
+            .with_position(reset_state.position)
+            .with_velocity(reset_state.velocity)
+            .with_container(Some(container))
         .with_compiler_fields(
             0,
             0,
@@ -2055,24 +1901,9 @@ func Probe(state) {
         let vertices: Vec<ObjectVertex> = (0..29)
             .map(|index| ObjectVertex::new(index, -index))
             .collect();
-        let target = HostWorldObject::new(
-            target_id,
-            "LINE",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            vertices.clone(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "LINE")
+            .with_energy(0)
+            .with_vertices(vertices.clone())
         .with_full_state(Rc::new(crate::preview_spawn_state(
             Vector2::ZERO,
             OWNER_NONE,
@@ -2276,24 +2107,9 @@ func Probe(state) {
     fn remove_vertex_mutates_an_explicit_foreign_target() {
         let target_id = ObjectId::new(2);
         let vertices = distinct_shape_vertices();
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            0,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            vertices.clone(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_energy(0)
+            .with_vertices(vertices.clone())
         .with_full_state(Rc::new(crate::preview_spawn_state(
             Vector2::ZERO,
             OWNER_NONE,

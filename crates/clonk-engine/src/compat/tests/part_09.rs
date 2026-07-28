@@ -674,26 +674,10 @@ public func Probe(object carrier)
             );
             state.action = crate::ActionState::new("Walk");
             state.ocf = cached_ocf;
-            HostWorldObject::new(
-                id,
-                definition,
-                ObjectStatus::Normal,
-                "Walk",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )
-            .with_ocf(cached_ocf)
-            .with_full_state(Rc::new(state))
+            fixture_world_object(id, definition)
+                .with_action_name("Walk")
+                .with_ocf(cached_ocf)
+                .with_full_state(Rc::new(state))
         };
 
         let build_script = |probe: bool, reject_body: Option<&str>| {
@@ -902,24 +886,9 @@ public func Probe(object carrier)
         );
         target_state.status = target_status;
         target_state.action.target = Some(target_id);
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            target_status,
-            "Idle",
-            Some(target_id),
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_status(target_status)
+            .with_action_target(Some(target_id))
         .with_full_state(Rc::new(target_state));
 
         let mut holder_state = crate::preview_spawn_state(
@@ -937,24 +906,8 @@ public func Probe(object carrier)
         holder_commands
             .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(target_id)))
             .expect("holder command is valid");
-        let holder = HostWorldObject::new(
-            holder_id,
-            "HOLD",
-            ObjectStatus::Normal,
-            "Idle",
-            Some(target_id),
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let holder = fixture_world_object(holder_id, "HOLD")
+            .with_action_target(Some(target_id))
         .with_full_state(Rc::new(holder_state))
         .with_commands(holder_commands.command_views())
         .with_command_stack(holder_commands.snapshot());
@@ -1209,24 +1162,11 @@ public func Probe(object carrier)
 
     #[test]
     fn get_owner_reads_world_when_target_provided() {
-        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+        let world = HostWorldContext::from_objects(vec![fixture_world_object(
             ObjectId::new(7),
             "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            42,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )]);
+        )
+            .with_owner(42)]);
         let args = [object_reference_value(ObjectId::new(7))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_owner(&args));
 
@@ -1365,24 +1305,8 @@ func ChangeAndProbe()
             crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         );
-        let target = HostWorldObject::new(
-            target_id,
-            "TARG",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            owner,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "TARG")
+            .with_owner(owner)
         .with_full_state(Rc::new(target_state));
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -1659,24 +1583,7 @@ func ChangeAndProbe()
             Vec::new(),
         );
         state.alive = alive;
-        let target = HostWorldObject::new(
-            target_id,
-            "CLNK",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(target_id, "CLNK")
         .with_alive(alive)
         .with_full_state(Rc::new(state));
         HostWorldContext::from_objects(vec![target])
@@ -1829,24 +1736,8 @@ func ChangeAndProbe()
             crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         ));
-        let target = HostWorldObject::new(
-            ObjectId::new(7),
-            "Dummy",
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            1,
-            100,
-            crate::FULL_CON,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            Vec::new(),
-            0,
-            0,
-            None,
-        )
+        let target = fixture_world_object(ObjectId::new(7), "Dummy")
+            .with_owner(1)
         .with_full_state(target_state);
         let world = HostWorldContext::from_objects_with_players(
             [target],
