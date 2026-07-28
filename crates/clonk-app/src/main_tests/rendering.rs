@@ -626,6 +626,38 @@
     }
 
     #[test]
+    fn framebuffer_backends_widen_to_gl_before_giving_up() {
+        use pixels::wgpu::Backends;
+
+        // `Backends::PRIMARY` is VULKAN | METAL | DX12 | BROWSER_WEBGPU — it
+        // contains no GL/GLES at all. That is right on desktop (the GL backend
+        // probes for libEGL and logs noise on macOS) but on a Raspberry Pi it
+        // is the difference between running and aborting at startup, because a
+        // board without a usable Vulkan driver produces no adapter and
+        // `PixelsBuilder::build` then fails out of `main`.
+        let attempts = framebuffer_backend_attempts(None);
+        assert_eq!(
+            attempts.first().copied(),
+            Some(Backends::PRIMARY),
+            "the desktop-clean set is still tried first"
+        );
+        assert!(
+            attempts
+                .last()
+                .is_some_and(|backends| backends.contains(Backends::GL)),
+            "a board with only GLES must still get an adapter attempt"
+        );
+        assert!(attempts.len() >= 2);
+
+        // An explicit WGPU_BACKEND is an instruction, not a hint: never widen
+        // past what the operator asked for.
+        assert_eq!(
+            framebuffer_backend_attempts(Some(Backends::VULKAN)),
+            vec![Backends::VULKAN],
+        );
+    }
+
+    #[test]
     fn a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent() {
         // On hardware that cannot hold the tick budget, one application pass
         // drains the whole clamped backlog before the event loop ever gets a

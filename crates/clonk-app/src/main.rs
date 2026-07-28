@@ -460,21 +460,7 @@ fn main() -> Result<()> {
     }
 
     let size = enforce_min_size(window.inner_size());
-    let surface = SurfaceTexture::new(size.width, size.height, &window);
-    // Restrict wgpu to the primary backends: the GL backend probes for libEGL,
-    // which does not exist on macOS, and logs a spurious "Unable to open
-    // libEGL" before falling back to Metal.
-    let mut pixels = PixelsBuilder::new(size.width, size.height, surface)
-        .wgpu_backend(
-            pixels::wgpu::util::backend_bits_from_env().unwrap_or(pixels::wgpu::Backends::PRIMARY),
-        )
-        // StdGLCtx::PageFlip calls SDL_GL_SwapWindow without ever selecting
-        // a swap interval. Do not make drawable acquisition serialize the
-        // independently scheduled simulation and graphics timers behind an
-        // implicit FIFO-vsync wait that the C++ application does not request.
-        .enable_vsync(false)
-        .build()
-        .context("failed to create pixel framebuffer")?;
+    let mut pixels = build_framebuffer(&window, size)?;
     let mut retained_gpu_renderer = gpu_renderer::RetainedGpuRenderer::new(
         pixels.device(),
         pixels.queue(),
