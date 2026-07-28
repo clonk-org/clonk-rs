@@ -954,23 +954,53 @@ impl PackageOptions {
     }
 }
 
+/// What `package` writes once the payload has been staged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageOutput {
+    /// The staged tree only; the caller wraps it (the Windows installer does).
+    StagedOnly,
+    Archive,
+    DiskImage,
+}
+
+fn package_output(target_triple: &str, archive: bool) -> PackageOutput {
+    if !archive {
+        return PackageOutput::StagedOnly;
+    }
+    if target_triple.contains("apple-darwin") {
+        return PackageOutput::DiskImage;
+    }
+    PackageOutput::Archive
+}
+
 fn package(options: PackageOptions) -> Result<()> {
     let paths = WorkspacePaths::detect()?;
     build_runtime_binaries(&paths)?;
     audit_release_dependencies(&paths)?;
     let package_dir = assemble_package_layout(&paths)?;
-    if paths.target_triple.contains("apple-darwin") {
-        let app_dir = assemble_macos_app_bundle(&paths, &package_dir)?;
-        let image = create_dmg(&paths, &app_dir)?;
-        tracing::info!(path = %image.display(), "packaged Rust port");
-        return Ok(());
+    let output = package_output(&paths.target_triple, options.archive);
+
+    // The bundle is the macOS staged layout, so it is assembled even when no
+    // disk image is requested.
+    let staged = if paths.target_triple.contains("apple-darwin") {
+        assemble_macos_app_bundle(&paths, &package_dir)?
+    } else {
+        package_dir
+    };
+
+    match output {
+        PackageOutput::StagedOnly => {
+            tracing::info!(path = %staged.display(), "staged Rust port without an archive");
+        }
+        PackageOutput::DiskImage => {
+            let image = create_dmg(&paths, &staged)?;
+            tracing::info!(path = %image.display(), "packaged Rust port");
+        }
+        PackageOutput::Archive => {
+            let archive = create_archive(&paths, &staged)?;
+            tracing::info!(path = %archive.display(), "packaged Rust port");
+        }
     }
-    if !options.archive {
-        tracing::info!(path = %package_dir.display(), "staged Rust port without an archive");
-        return Ok(());
-    }
-    let archive = create_archive(&paths, &package_dir)?;
-    tracing::info!(path = %archive.display(), "packaged Rust port");
     Ok(())
 }
 
@@ -1921,6 +1951,32 @@ mod tests {
             PackageOptions::parse(["--no-archive".to_string()].into_iter())
                 .expect("--no-archive parses"),
             PackageOptions { archive: false }
+        );
+    }
+
+    #[test]
+    fn no_archive_stops_after_staging_on_every_platform() {
+        // The macOS branch used to return before the `--no-archive` check ran,
+        // so the flag was silently ignored and a disk image was always built.
+        assert_eq!(
+            package_output("aarch64-apple-darwin", false),
+            PackageOutput::StagedOnly
+        );
+        assert_eq!(
+            package_output("x86_64-pc-windows-gnu", false),
+            PackageOutput::StagedOnly
+        );
+    }
+
+    #[test]
+    fn packaging_produces_a_disk_image_on_macos_and_an_archive_elsewhere() {
+        assert_eq!(
+            package_output("x86_64-apple-darwin", true),
+            PackageOutput::DiskImage
+        );
+        assert_eq!(
+            package_output("x86_64-unknown-linux-gnu", true),
+            PackageOutput::Archive
         );
     }
 
