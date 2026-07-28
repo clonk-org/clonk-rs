@@ -42,10 +42,7 @@ global func Step(state, frame, random)
 fn setup_engine(object_count: usize) -> Engine {
     let mut engine = Engine::with_seed(black_box(12345));
     engine
-        .register_definition(
-            Definition::from_script("Bouncer", "Bouncer", BOUNCER_SCRIPT)
-                .expect("benchmark definition compiles"),
-        )
+        .register_script_definition("Bouncer", "Bouncer", BOUNCER_SCRIPT)
         .expect("definition registers");
     engine.set_landscape(Landscape::flat(512, 96));
 

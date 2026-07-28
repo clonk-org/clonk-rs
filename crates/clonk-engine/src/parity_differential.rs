@@ -482,10 +482,7 @@ protected func Destruction()
         .expect("fixture registers");
     if geometry_break {
         engine
-            .register_definition(
-                Definition::from_script("CEND", "CONNECT endpoint", "#strict\n")
-                    .expect("endpoint fixture compiles"),
-            )
+            .register_script_definition("CEND", "CONNECT endpoint", "#strict\n")
             .expect("endpoint fixture registers");
     }
     let mut action = ActionState::new("Connect");
@@ -2348,16 +2345,10 @@ func Trigger(object pOther) {
             .register_player(PlayerConfig::new(1, "P1"))
             .expect("killer differential player registers");
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("killer differential caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("killer differential caller registers");
         engine
-            .register_definition(
-                Definition::from_script("OTHR", "Other", "#strict\n")
-                    .expect("killer differential target compiles"),
-            )
+            .register_script_definition("OTHR", "Other", "#strict\n")
             .expect("killer differential target registers");
         let caller_id = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))

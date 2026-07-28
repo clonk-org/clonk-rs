@@ -1,13 +1,10 @@
-use clonk_engine::{Definition, Engine, SpawnConfig};
+use clonk_engine::{Engine, SpawnConfig};
 use clonk_script::Value;
 
 fn call_probe(id: &str, script: &str) -> Value {
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script(id, "Set builtin probe", script)
-                .expect("probe script compiles"),
-        )
+        .register_script_definition(id, "Set builtin probe", script)
         .expect("probe definition registers");
     let object = engine
         .spawn_object(SpawnConfig::new(id))

@@ -309,10 +309,7 @@ fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() 
         )
         .expect("gate definition registers");
     engine
-        .register_definition(
-            Definition::from_script("ACTR", "Transfer actor", "")
-                .expect("actor definition compiles"),
-        )
+        .register_script_definition("ACTR", "Transfer actor", "")
         .expect("actor definition registers");
 
     let gate = engine
@@ -400,10 +397,7 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
         )
         .expect("gate definition registers");
     engine
-        .register_definition(
-            Definition::from_script("ZTRA", "Restored transfer actor", "")
-                .expect("actor definition compiles"),
-        )
+        .register_script_definition("ZTRA", "Restored transfer actor", "")
         .expect("actor definition registers");
 
     let gate = engine
@@ -547,10 +541,7 @@ fn transfer_direct_callback_uses_the_c4_bool_low_word() {
         )
         .expect("gate definition registers");
     engine
-        .register_definition(
-            Definition::from_script("ABOL", "Raw-bool actor", "")
-                .expect("actor definition compiles"),
-        )
+        .register_script_definition("ABOL", "Raw-bool actor", "")
         .expect("actor definition registers");
 
     // C4VBool stores a machine word but C4Value::getBool reads its signed
@@ -598,10 +589,7 @@ fn activate_entrance_uses_full_c4_value_truthiness() {
         )
         .expect("entrance definition registers");
     engine
-        .register_definition(
-            Definition::from_script("ACBE", "Entrance caller", "")
-                .expect("caller definition compiles"),
-        )
+        .register_script_definition("ACBE", "Entrance caller", "")
         .expect("caller definition registers");
 
     let raw = 1usize.checked_shl(32).unwrap_or(0);
@@ -648,10 +636,7 @@ fn restored_legacy_entrance_result_does_not_fail_callback_replacement() {
         )
         .expect("entrance definition registers");
     engine
-        .register_definition(
-            Definition::from_script("ZENA", "Restored entrance caller", "")
-                .expect("caller definition compiles"),
-        )
+        .register_script_definition("ZENA", "Restored entrance caller", "")
         .expect("caller definition registers");
 
     let entrance = engine
@@ -945,9 +930,7 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
     engine
-        .register_definition(
-            Definition::from_script("GATE", "Transfer gate", "").expect("gate definition compiles"),
-        )
+        .register_script_definition("GATE", "Transfer gate", "")
         .expect("gate definition registers");
     let mut mover_definition = Definition::from_script(
         "PFMR",
@@ -1103,9 +1086,7 @@ fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
     let mut engine = Engine::with_seed(2);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
     engine
-        .register_definition(
-            Definition::from_script("GATE", "Transfer gate", "").expect("gate definition compiles"),
-        )
+        .register_script_definition("GATE", "Transfer gate", "")
         .expect("gate definition registers");
     let mut effect_definition = Definition::from_script(
         "FXRM",
@@ -1216,11 +1197,7 @@ fn effect_batch_threads_callback_final_contents_order() {
     // order before the deferred Rust batch folds authoritatively.
     let mut engine = Engine::with_seed(17);
     for id in ["BOX_", "HOLD", "ROCK", "GOLD", "PSTL"] {
-        engine
-            .register_definition(
-                Definition::from_script(id, id, "#strict\n").expect("definition compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition(id, id, "#strict\n").expect("definition registers");
     }
     let mut actor_definition = Definition::from_script(
         "FXCO",
@@ -1361,16 +1338,8 @@ fn effect_batch_threads_dig_contents_shape_and_layer() {
     engine.set_materials(materials);
     engine.set_landscape(pixel_landscape(2, 1, vec![1, 1]));
 
-    engine
-        .register_definition(
-            Definition::from_script("LAYR", "Layer", "").expect("layer definition compiles"),
-        )
-        .expect("layer definition registers");
-    engine
-        .register_definition(
-            Definition::from_script("GEM_", "Gem", "").expect("gem definition compiles"),
-        )
-        .expect("gem definition registers");
+    engine.register_script_definition("LAYR", "Layer", "").expect("layer definition registers");
+    engine.register_script_definition("GEM_", "Gem", "").expect("gem definition registers");
     let mut digger = Definition::from_script(
         "FXDG",
         "Effect digger",
@@ -1472,9 +1441,7 @@ fn construction_zone_clear_is_visible_to_immediate_initialize() {
     let mut engine = Engine::with_seed(3);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
     engine
-        .register_definition(
-            Definition::from_script("GATE", "Transfer gate", "").expect("gate definition compiles"),
-        )
+        .register_script_definition("GATE", "Transfer gate", "")
         .expect("gate definition registers");
     let mut lifecycle_definition = Definition::from_script(
         "PFLC",

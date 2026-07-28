@@ -102,11 +102,7 @@ public func Order(id def, int x, int y)
         ..PhysicalInfo::default()
     });
     engine.register_definition(caller).expect("CALR registers");
-    engine
-        .register_definition(
-            Definition::from_script("CNKT", "Conkit", "#strict 2\n").expect("kit compiles"),
-        )
-        .expect("CNKT registers");
+    engine.register_script_definition("CNKT", "Conkit", "#strict 2\n").expect("CNKT registers");
     let caller = engine
         .spawn_object(SpawnConfig::new("CALR").with_position(Vector2::new(0, 0)))
         .expect("caller spawns");

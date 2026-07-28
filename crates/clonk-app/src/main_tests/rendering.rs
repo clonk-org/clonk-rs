@@ -4207,10 +4207,7 @@
             .expect("sandbox cursor remains live")
             .position;
         app.engine
-            .register_definition(
-                Definition::from_script("MREG", "Mouse region fixture", "#strict\n")
-                    .expect("region fixture compiles"),
-            )
+            .register_script_definition("MREG", "Mouse region fixture", "#strict\n")
             .expect("register region fixture");
         let container = app
             .engine

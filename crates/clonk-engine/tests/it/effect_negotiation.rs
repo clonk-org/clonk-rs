@@ -38,10 +38,7 @@ global func FxBirthGlobalStart(object target, int number, int temp)
 
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("BORN", "Construction effect target", script)
-                .expect("construction effect script compiles"),
-        )
+        .register_script_definition("BORN", "Construction effect target", script)
         .expect("construction effect definition registers");
 
     let object = engine
@@ -182,10 +179,7 @@ func FxStartDeniedStop() { ++iDeniedStops; }
 
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("FXCK", "Effect checker", script)
-                .expect("effect checker script compiles"),
-        )
+        .register_script_definition("FXCK", "Effect checker", script)
         .expect("effect checker definition registers");
 
     let denied = engine
@@ -383,10 +377,7 @@ func FxUpperStart(object target, int number, int temp)
 
     let mut engine = Engine::with_seed(7);
     engine
-        .register_definition(
-            Definition::from_script("FXRM", "Inline effect remover", script)
-                .expect("effect remover script compiles"),
-        )
+        .register_script_definition("FXRM", "Inline effect remover", script)
         .expect("effect remover definition registers");
     let target = engine
         .spawn_object(SpawnConfig::new("FXRM"))
@@ -478,10 +469,7 @@ func FxUpperStop(object target, int number, int reason, bool temp)
 
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("FXTR", "Temp-removed effect killer", script)
-                .expect("effect killer script compiles"),
-        )
+        .register_script_definition("FXTR", "Temp-removed effect killer", script)
         .expect("effect killer definition registers");
     let target = engine
         .spawn_object(SpawnConfig::new("FXTR"))

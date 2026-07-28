@@ -1783,10 +1783,7 @@ fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double
             .expect("item definition remains")
             .set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
         engine
-            .register_definition(
-                Definition::from_script("NOPU", "No put", "#strict")
-                    .expect("no-put target compiles"),
-            )
+            .register_script_definition("NOPU", "No put", "#strict")
             .expect("no-put target registers");
         engine
             .register_player(PlayerConfig::new(1, "PutTake owner"))

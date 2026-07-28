@@ -1,4 +1,4 @@
-use clonk_engine::{Definition, Engine, ObjectId, SpawnConfig};
+use clonk_engine::{Engine, ObjectId, SpawnConfig};
 use clonk_script::Value;
 
 const TYPED_CALLEE: &str = r#"
@@ -46,22 +46,13 @@ fn call(engine: &mut Engine, object_id: ObjectId, function: &str, args: Vec<Valu
 fn fixture() -> (Engine, ObjectId, ObjectId, ObjectId) {
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("TARG", "NONSTRICT typed callee", TYPED_CALLEE)
-                .expect("callee compiles"),
-        )
+        .register_script_definition("TARG", "NONSTRICT typed callee", TYPED_CALLEE)
         .expect("callee registers");
     engine
-        .register_definition(
-            Definition::from_script("STRC", "strict-3 caller", STRICT_CALLER)
-                .expect("strict caller compiles"),
-        )
+        .register_script_definition("STRC", "strict-3 caller", STRICT_CALLER)
         .expect("strict caller registers");
     engine
-        .register_definition(
-            Definition::from_script("NSTR", "NONSTRICT caller", NONSTRICT_CALLER)
-                .expect("NONSTRICT caller compiles"),
-        )
+        .register_script_definition("NSTR", "NONSTRICT caller", NONSTRICT_CALLER)
         .expect("NONSTRICT caller registers");
 
     let strict = engine

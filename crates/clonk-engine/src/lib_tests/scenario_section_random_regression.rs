@@ -107,10 +107,7 @@ fn synthetic_section_without_a_group_uses_its_explicit_object_fallback() {
 
     let mut engine = Engine::with_seed(3);
     engine
-        .register_definition(
-            Definition::from_script("SYNO", "Synthetic object", "")
-                .expect("synthetic definition compiles"),
-        )
+        .register_script_definition("SYNO", "Synthetic object", "")
         .expect("synthetic definition registers");
     engine.configure_scenario_sections(&[section("main", 80, true), next]);
     engine.set_landscape(vehicle_section_landscape(80, 40));

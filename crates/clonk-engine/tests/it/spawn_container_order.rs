@@ -1,4 +1,4 @@
-use clonk_engine::{Definition, Engine, SpawnConfig};
+use clonk_engine::{Engine, SpawnConfig};
 use clonk_script::Value;
 
 const CREATOR_SCRIPT: &str = r#"#strict
@@ -25,16 +25,11 @@ fn enter_binds_a_container_created_after_its_content() {
     let mut engine = Engine::new();
     for (id, name) in [("CNTT", "Contained object"), ("BOXX", "Container")] {
         engine
-            .register_definition(
-                Definition::from_script(id, name, "#strict\n").expect("fixture script compiles"),
-            )
+            .register_script_definition(id, name, "#strict\n")
             .expect("fixture definition registers");
     }
     engine
-        .register_definition(
-            Definition::from_script("MAKR", "Creator", CREATOR_SCRIPT)
-                .expect("creator script compiles"),
-        )
+        .register_script_definition("MAKR", "Creator", CREATOR_SCRIPT)
         .expect("creator registers");
     let creator = engine
         .spawn_object(SpawnConfig::new("MAKR"))
@@ -99,9 +94,7 @@ fn scenario_script_enter_binds_a_container_created_after_its_content() {
     let mut engine = Engine::new();
     for (id, name) in [("CNTT", "Contained object"), ("BOXX", "Container")] {
         engine
-            .register_definition(
-                Definition::from_script(id, name, "#strict\n").expect("fixture script compiles"),
-            )
+            .register_script_definition(id, name, "#strict\n")
             .expect("fixture definition registers");
     }
     engine

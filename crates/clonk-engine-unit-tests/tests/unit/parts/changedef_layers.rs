@@ -157,11 +157,7 @@ func Burst() {
         let water = materials.id_of("Water").expect("water material exists");
         let mut engine = Engine::with_seed(17);
         engine.set_materials(materials);
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
-            )
-            .expect("caller registers");
+        engine.register_script_definition("CALL", "Caller", script).expect("caller registers");
         let caller = engine
             .spawn_object(
                 SpawnConfig::new("CALL")
@@ -227,11 +223,7 @@ func Burst() {
         let water = materials.id_of("Water").expect("water material exists");
         let mut engine = Engine::with_seed(29);
         engine.set_materials(materials);
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
-            )
-            .expect("caller registers");
+        engine.register_script_definition("CALL", "Caller", script).expect("caller registers");
         let caller = engine
             .spawn_object(
                 SpawnConfig::new("CALL")
@@ -336,10 +328,7 @@ protected func Initialize() {
 "#;
         let mut engine = Engine::with_seed(17);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let mut spark =
             Definition::from_script("SPRK", "Spark", spark_script).expect("spark compiles");
@@ -479,11 +468,7 @@ func Burst() {
 }
 "#;
         let mut engine = Engine::with_seed(29);
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
-            )
-            .expect("caller registers");
+        engine.register_script_definition("CALL", "Caller", script).expect("caller registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
             .expect("caller spawns");
@@ -518,11 +503,7 @@ func Burst() {
 }
 "#;
         let mut engine = Engine::with_seed(41);
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
-            )
-            .expect("caller registers");
+        engine.register_script_definition("CALL", "Caller", script).expect("caller registers");
         let mut cast = Definition::from_script("ROTA", "Rotating", "").expect("cast compiles");
         cast.set_rotateable(1);
         engine.register_definition(cast).expect("cast registers");
@@ -568,11 +549,7 @@ func Burst() {
 }
 "#;
         let mut engine = Engine::with_seed(43);
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
-            )
-            .expect("caller registers");
+        engine.register_script_definition("CALL", "Caller", script).expect("caller registers");
         let mut grow = Definition::from_script("GROW", "Growing", "").expect("grow compiles");
         grow.set_shape_rect(Some(DefinitionRect::new(-2, -2, 5, 5)));
         grow.set_stretch_growth(true);
@@ -622,16 +599,10 @@ protected func Initialize() {
 "#;
         let mut engine = Engine::with_seed(47);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         engine
-            .register_definition(
-                Definition::from_script("GONE", "Removed", removed_script)
-                    .expect("removed compiles"),
-            )
+            .register_script_definition("GONE", "Removed", removed_script)
             .expect("removed registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
@@ -834,9 +805,7 @@ func Probe() {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let mut hut = simple_definition("HUTX");
         hut.set_grab(2);
@@ -924,9 +893,7 @@ func Probe() {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let mut heavy = simple_definition("HEVY");
         heavy.set_mass(100);
@@ -1003,9 +970,7 @@ func Probe(pLayer) {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         engine
             .register_definition(simple_definition("OTHR"))
@@ -1329,16 +1294,9 @@ func Trigger(object pOther) {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
-        engine
-            .register_definition(
-                Definition::from_script("OTHR", "Other", "#strict\n").expect("other compiles"),
-            )
-            .expect("other registers");
+        engine.register_script_definition("OTHR", "Other", "#strict\n").expect("other registers");
         let caller_id = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
             .expect("caller spawns");
@@ -1395,16 +1353,9 @@ func Trigger(object direct, object inactive, object grandchild) {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles"),
-            )
-            .expect("item registers");
+        engine.register_script_definition("ITEM", "Item", "#strict\n").expect("item registers");
         let caller_id = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
             .expect("caller spawns");
@@ -1511,16 +1462,9 @@ func ProbeMaterializedCaches() {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles"),
-            )
-            .expect("item registers");
+        engine.register_script_definition("ITEM", "Item", "#strict\n").expect("item registers");
         let caller_id = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
             .expect("caller spawns");
@@ -1652,11 +1596,7 @@ global func ApplyLayer(object pLayer, object pTarget) {
 }
 "#;
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles"),
-            )
-            .expect("item registers");
+        engine.register_script_definition("ITEM", "Item", "#strict\n").expect("item registers");
         engine
             .install_scenario_script_with_convention("Scenario", scenario_script, true)
             .expect("scenario installs");
@@ -1791,11 +1731,7 @@ func Trigger() {
 }
 "#;
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
-            )
-            .expect("caller registers");
+        engine.register_script_definition("CALL", "Caller", script).expect("caller registers");
         let id = engine
             .spawn_object(SpawnConfig::new("CALL"))
             .expect("caller spawns");
@@ -1843,11 +1779,7 @@ func Trigger() {
 }
 "#;
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
-            )
-            .expect("caller registers");
+        engine.register_script_definition("CALL", "Caller", script).expect("caller registers");
         let mut item =
             Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles");
         item.set_blit_mode(2);
@@ -5019,10 +4951,7 @@ protected func Destruction()
             .register_definition(power_line)
             .expect("register shipped PWRL definition");
         engine
-            .register_definition(
-                Definition::from_script("ANCR", "Line anchor", "#strict\n")
-                    .expect("compile anchor definition"),
-            )
+            .register_script_definition("ANCR", "Line anchor", "#strict\n")
             .expect("register anchor definition");
 
         let mut pixels = vec![0_u8; 12 * 10];
@@ -5115,10 +5044,7 @@ protected func Destruction()
                 .register_definition(power_line)
                 .expect("register shipped PWRL definition");
             engine
-                .register_definition(
-                    Definition::from_script("ANCR", "Line anchor", "#strict\n")
-                        .expect("compile anchor definition"),
-                )
+                .register_script_definition("ANCR", "Line anchor", "#strict\n")
                 .expect("register anchor definition");
 
             let grid = landscape::PixelGrid::new(

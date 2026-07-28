@@ -10,6 +10,19 @@ impl Engine {
         &self.global_effects
     }
 
+    /// Compile `source` into a definition and register it in one step.
+    ///
+    /// Callers overwhelmingly want exactly this pair; spelling it out invited
+    /// a `from_script` whose result was registered against a different id.
+    pub fn register_script_definition(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        source: &str,
+    ) -> Result<(), EngineError> {
+        self.register_definition(Definition::from_script(id, name, source)?)
+    }
+
     pub fn register_definition(&mut self, definition: Definition) -> Result<(), EngineError> {
         let id = definition.id().to_string();
         if self.definitions.contains_key(&id) {

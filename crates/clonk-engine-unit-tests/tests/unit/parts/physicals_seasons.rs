@@ -5334,9 +5334,7 @@ func Activate(inMat, inLength, inStrength)
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FXL1", "Lightning", script).expect("definition builds"),
-            )
+            .register_script_definition("FXL1", "Lightning", script)
             .expect("definition registers");
 
         assert!(
@@ -5419,23 +5417,12 @@ func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gam
 "#;
 
         let mut engine = Engine::with_seed(9);
+        engine.register_script_definition("LAYR", "Layer", "#strict\n").expect("layer registers");
         engine
-            .register_definition(
-                Definition::from_script("LAYR", "Layer", "#strict\n")
-                    .expect("layer compiles"),
-            )
-            .expect("layer registers");
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         engine
-            .register_definition(
-                Definition::from_script("FXL1", "Lightning", lightning_script)
-                    .expect("lightning compiles"),
-            )
+            .register_script_definition("FXL1", "Lightning", lightning_script)
             .expect("lightning registers");
         let layer = engine
             .spawn_object(SpawnConfig::new("LAYR"))
@@ -5520,10 +5507,7 @@ func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gam
             "#strict\nfunc Trigger() { return(LaunchLightning()); }\n";
         let mut engine = Engine::with_seed(9);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL"))
@@ -5555,11 +5539,7 @@ func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gam
         "#;
 
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("FXV1", "Volcano", script).expect("definition builds"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("FXV1", "Volcano", script).expect("definition registers");
         engine.set_landscape(Landscape::flat(64, 40));
         let mut environment = engine.environment();
         environment.volcano = 100;
@@ -5657,16 +5637,10 @@ func Activate(x, y, size, material) {
         landscape.set_world_height(500);
         engine.set_landscape(landscape);
         engine
-            .register_definition(
-                Definition::from_script("FXV1", "Volcano", volcano_script)
-                    .expect("volcano compiles"),
-            )
+            .register_script_definition("FXV1", "Volcano", volcano_script)
             .expect("volcano registers");
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
 
         let caller = engine
@@ -5735,10 +5709,7 @@ func Trigger() { return(LaunchVolcano(12)); }
         landscape.set_world_height(300);
         engine.set_landscape(landscape);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
@@ -5786,16 +5757,10 @@ func Activate(unexpected) {
             .register_definition(simple_definition("LAYR"))
             .expect("layer registers");
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         engine
-            .register_definition(
-                Definition::from_script("FXQ1", "Earthquake", earthquake_script)
-                    .expect("earthquake compiles"),
-            )
+            .register_script_definition("FXQ1", "Earthquake", earthquake_script)
             .expect("earthquake registers");
         let layer = engine
             .spawn_object(SpawnConfig::new("LAYR"))
@@ -5863,10 +5828,7 @@ func Trigger() {
 "#;
         let mut engine = Engine::with_seed(9);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("Tutorial06-shaped call compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL"))
@@ -5897,10 +5859,7 @@ func Trigger() {
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FXQ1", "Earthquake", script)
-                    .expect("definition builds"),
-            )
+            .register_script_definition("FXQ1", "Earthquake", script)
             .expect("definition registers");
         engine.set_landscape(Landscape::flat(64, 40));
         let mut environment = engine.environment();

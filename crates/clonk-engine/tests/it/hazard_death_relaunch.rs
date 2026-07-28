@@ -1,5 +1,5 @@
 use crate::support::real_scenario::{join_local_player, load_installed_scenario};
-use clonk_engine::{Definition, SpawnConfig};
+use clonk_engine::SpawnConfig;
 use clonk_script::Value;
 
 const KILL_PROBE: &str = r#"#strict
@@ -27,11 +27,7 @@ fn hazard_death_relaunch_enters_the_holder_created_after_the_clonk() {
     let victim = engine
         .crew_cursor(victim_owner)
         .expect("AH - Predator joins a HazardClonk");
-    engine
-        .register_definition(
-            Definition::from_script("KILP", "Kill probe", KILL_PROBE).expect("probe compiles"),
-        )
-        .expect("probe registers");
+    engine.register_script_definition("KILP", "Kill probe", KILL_PROBE).expect("probe registers");
     let probe = engine
         .spawn_object(SpawnConfig::new("KILP"))
         .expect("probe spawns");

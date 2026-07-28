@@ -24,10 +24,7 @@ fn call_probe_result(
     engine.set_landscape(landscape);
     engine.set_physics(physics);
     engine
-        .register_definition(
-            Definition::from_script("TFLT", "SimFlight probe", script)
-                .expect("probe script compiles"),
-        )
+        .register_script_definition("TFLT", "SimFlight probe", script)
         .expect("probe definition registers");
     let object = engine
         .spawn_object(SpawnConfig::new("TFLT").with_position(Vector2::new(1, 1)))
@@ -265,10 +262,7 @@ protected func Probe()
         .register_definition(child)
         .expect("child definition registers");
     engine
-        .register_definition(
-            Definition::from_script("CALL", "Pending rotation caller", script)
-                .expect("caller compiles"),
-        )
+        .register_script_definition("CALL", "Pending rotation caller", script)
         .expect("caller definition registers");
     let caller = engine
         .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
@@ -654,12 +648,7 @@ fn sim_flight_uses_vehicle_solid_mask_density() {
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(30, 30));
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
-    engine
-        .register_definition(
-            Definition::from_script("TFLT", "SimFlight probe", script)
-                .expect("probe script compiles"),
-        )
-        .expect("probe registers");
+    engine.register_script_definition("TFLT", "SimFlight probe", script).expect("probe registers");
     let mut platform =
         Definition::from_script("PLAT", "Vehicle mask", "#strict\n").expect("mask compiles");
     platform.set_category(CATEGORY_STATIC_BACK);

@@ -14,10 +14,7 @@ fn idle_crew(id: &str, name: &str, experience: i32) -> player_file::CrewInfo {
 fn empty_id_get_idle_excludes_no_standard_crew_definitions() {
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("STND", "Standard crew", "")
-                .expect("standard definition compiles"),
-        )
+        .register_script_definition("STND", "Standard crew", "")
         .expect("standard definition registers");
     let mut excluded =
         Definition::from_script("SPEC", "Special crew", "").expect("special definition compiles");

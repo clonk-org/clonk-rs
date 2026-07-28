@@ -3045,10 +3045,7 @@
             )
             .expect("register definition");
         app.engine
-            .register_definition(
-                Definition::from_script("PHST", "Portrait host", "")
-                    .expect("compile host definition"),
-            )
+            .register_script_definition("PHST", "Portrait host", "")
             .expect("register host definition");
         let viewed_owner = app.local_owner + 1;
         app.engine
@@ -3248,11 +3245,7 @@
                 Definition::from_resource(&flag_resource).expect("compile real FLAG definition"),
             )
             .expect("register FLAG");
-        engine
-            .register_definition(
-                Definition::from_script("ROCK", "Rock", "").expect("compile ROCK definition"),
-            )
-            .expect("register ROCK");
+        engine.register_script_definition("ROCK", "Rock", "").expect("register ROCK");
 
         let crew_id = ObjectId::new(1);
         let flag_a = ObjectId::new(2);
@@ -6062,10 +6055,7 @@
             )
             .expect("spawn secondary crew");
         app.engine
-            .register_definition(
-                Definition::from_script("MSRG", "Secondary mouse region", "#strict\n")
-                    .expect("region fixture compiles"),
-            )
+            .register_script_definition("MSRG", "Secondary mouse region", "#strict\n")
             .expect("register region fixture");
         let container = app
             .engine
@@ -6352,11 +6342,7 @@
         });
 
         for id in ["MWA1", "MWA2", "MWA3"] {
-            app.engine
-                .register_definition(
-                    Definition::from_script(id, id, "#strict\n").expect("item compiles"),
-                )
-                .expect("item registers");
+            app.engine.register_script_definition(id, id, "#strict\n").expect("item registers");
         }
         for crew in [primary_crew, secondary_crew] {
             for id in ["MWA1", "MWA2", "MWA3"] {

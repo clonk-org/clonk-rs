@@ -38,11 +38,7 @@ global func GetCustomComponents(object builder)
         ("PLAI", "Plain recipe", GLOBAL_ONLY_SCRIPT),
         ("BULD", "Builder", BUILDER_SCRIPT),
     ] {
-        engine
-            .register_definition(
-                Definition::from_script(id, name, script).expect("definition compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition(id, name, script).expect("definition registers");
     }
 
     let custom = engine

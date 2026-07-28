@@ -10,11 +10,7 @@
         global func Ask() { return GetCommand(); }
         "#;
         let mut engine = Engine::with_seed(9);
-        engine
-            .register_definition(
-                Definition::from_script("Actor", "Actor", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("Actor", "Actor", script).expect("definition registers");
         let id = engine
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
@@ -59,11 +55,7 @@
         }
         "#;
         let mut engine = Engine::with_seed(11);
-        engine
-            .register_definition(
-                Definition::from_script("Actor", "Actor", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("Actor", "Actor", script).expect("definition registers");
         let id = engine
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
@@ -108,16 +100,9 @@ public func Consume() { RemoveObject(); return(7); }
 "#;
         let mut engine = Engine::with_seed(3);
         engine
-            .register_definition(
-                Definition::from_script("HOLD", "Holder", holder_script)
-                    .expect("holder compiles"),
-            )
+            .register_script_definition("HOLD", "Holder", holder_script)
             .expect("holder registers");
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
-            )
-            .expect("item registers");
+        engine.register_script_definition("ITEM", "Item", item_script).expect("item registers");
 
         let holder = engine
             .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
@@ -186,11 +171,7 @@ public func Poke(pClonk) {
             HashMap::from([("Rise".to_string(), ActionSpec::default().with_length(10))]),
         );
         engine.register_definition(holder).expect("holder registers");
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
-            )
-            .expect("item registers");
+        engine.register_script_definition("ITEM", "Item", item_script).expect("item registers");
 
         let holder_id = engine
             .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
@@ -247,16 +228,9 @@ public func Tag(pClonk) { LocalN("iFromItem", pClonk) = 7; return(1); }
 "#;
         let mut engine = Engine::with_seed(3);
         engine
-            .register_definition(
-                Definition::from_script("HOLD", "Holder", holder_script)
-                    .expect("holder compiles"),
-            )
+            .register_script_definition("HOLD", "Holder", holder_script)
             .expect("holder registers");
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
-            )
-            .expect("item registers");
+        engine.register_script_definition("ITEM", "Item", item_script).expect("item registers");
 
         let holder = engine
             .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
@@ -318,16 +292,9 @@ public func Boot() {
 public func ReadDir(pClonk) { return(GetDir(pClonk)); }
 "#;
         let mut engine = Engine::with_seed(3);
+        engine.register_script_definition("Actr", "Actor", actor_script).expect("actor registers");
         engine
-            .register_definition(
-                Definition::from_script("Actr", "Actor", actor_script).expect("actor compiles"),
-            )
-            .expect("actor registers");
-        engine
-            .register_definition(
-                Definition::from_script("HELP", "Helper", helper_script)
-                    .expect("helper compiles"),
-            )
+            .register_script_definition("HELP", "Helper", helper_script)
             .expect("helper registers");
         let id = engine
             .spawn_object(
@@ -366,10 +333,7 @@ public func Stash(pItem, pBox) { Enter(pBox, pItem); return(1); }
 "#;
         let mut engine = Engine::with_seed(3);
         engine
-            .register_definition(
-                Definition::from_script("HOLD", "Holder", holder_script)
-                    .expect("holder compiles"),
-            )
+            .register_script_definition("HOLD", "Holder", holder_script)
             .expect("holder registers");
         engine
             .register_definition(simple_definition("ITEM"))
@@ -741,16 +705,8 @@ public func Make(pClonk) {
 }
 "#;
         let mut engine = Engine::with_seed(3);
-        engine
-            .register_definition(
-                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
-            )
-            .expect("item registers");
+        engine.register_script_definition("Actr", "Actor", script).expect("actor registers");
+        engine.register_script_definition("ITEM", "Item", item_script).expect("item registers");
         engine
             .register_definition(simple_definition("MARK"))
             .expect("marker registers");
@@ -929,10 +885,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
 "#;
         let mut engine = Engine::with_seed(143);
         engine
-            .register_definition(
-                Definition::from_script("NEG", "Negative interval", script)
-                    .expect("definition compiles"),
-            )
+            .register_script_definition("NEG", "Negative interval", script)
             .expect("definition registers");
         let id = engine
             .spawn_object(SpawnConfig::new("NEG").with_category(CATEGORY_OBJECT))
@@ -1873,10 +1826,7 @@ func ScenarioHelper() { return 73; }
 "#;
         let mut engine = Engine::with_seed(17);
         engine
-            .register_definition(
-                Definition::from_script("GEVL", "Global eval caller", definition_script)
-                    .expect("definition compiles"),
-            )
+            .register_script_definition("GEVL", "Global eval caller", definition_script)
             .expect("definition registers");
         engine
             .install_scenario_script_with_convention("Scenario", scenario_script, true)
@@ -4562,11 +4512,7 @@ func FxPulseTimer(pThis, iNumber) {
 func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
 "#;
         let mut engine = Engine::with_seed(11);
-        engine
-            .register_definition(
-                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("Actr", "Actor", script).expect("actor registers");
         let id = engine
             .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
             .expect("spawn succeeds");
@@ -4609,11 +4555,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
 }
 "#;
         let mut engine = Engine::with_seed(11);
-        engine
-            .register_definition(
-                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("Actr", "Actor", script).expect("actor registers");
         let id = engine
             .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
             .expect("actor spawns");

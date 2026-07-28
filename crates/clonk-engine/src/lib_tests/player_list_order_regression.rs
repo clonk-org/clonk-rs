@@ -392,11 +392,7 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
     engine
         .register_definition(crew_definition)
         .expect("crew definition registers");
-    engine
-        .register_definition(
-            Definition::from_script("OWND", "Owned", "").expect("owned definition compiles"),
-        )
-        .expect("owned definition registers");
+    engine.register_script_definition("OWND", "Owned", "").expect("owned definition registers");
     engine
         .load_scenario_script_with_convention(
             "AbortCallbacks",

@@ -1730,9 +1730,7 @@
             .register_definition(clonk_definition)
             .expect("register Clonk definition");
         engine
-            .register_definition(
-                Definition::from_script("Balloon", "Balloon", "").expect("Balloon definition"),
-            )
+            .register_script_definition("Balloon", "Balloon", "")
             .expect("register Balloon definition");
         let overlay = collect_player_overlays(
             &mut engine,

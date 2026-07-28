@@ -30,10 +30,7 @@ func Read(object target)
 "#;
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("ENTR", "Entrance probe", script)
-                .expect("entrance probe compiles"),
-        )
+        .register_script_definition("ENTR", "Entrance probe", script)
         .expect("entrance probe registers");
     let caller = engine
         .spawn_object(SpawnConfig::new("ENTR"))
@@ -75,10 +72,7 @@ func Open(object target)
 "#;
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("ENTR", "Entrance setter", script)
-                .expect("entrance setter compiles"),
-        )
+        .register_script_definition("ENTR", "Entrance setter", script)
         .expect("entrance setter registers");
     let caller = engine
         .spawn_object(SpawnConfig::new("ENTR"))
@@ -104,10 +98,7 @@ func Open(object target)
 fn scenario_set_entrance_updates_explicit_targets_without_context_object() {
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("ENTR", "Entrance target", "#strict 3")
-                .expect("entrance target compiles"),
-        )
+        .register_script_definition("ENTR", "Entrance target", "#strict 3")
         .expect("entrance target registers");
     let target = engine
         .spawn_object(SpawnConfig::new("ENTR"))

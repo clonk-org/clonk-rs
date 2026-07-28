@@ -964,10 +964,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         let mut engine = Engine::with_seed(23);
         engine.set_materials(materials);
         engine
-            .register_definition(
-                Definition::from_script(FIRE_DEFINITION_ID, "Fire", "")
-                    .expect("FLAM definition compiles"),
-            )
+            .register_script_definition(FIRE_DEFINITION_ID, "Fire", "")
             .expect("FLAM definition registers");
         let blocking_flame = engine
             .spawn_object(
@@ -2763,10 +2760,7 @@ func ReadWind()
 "#;
         let mut engine = Engine::with_seed(17);
         engine
-            .register_definition(
-                Definition::from_script("WIND", "Wind probe", script)
-                    .expect("wind probe compiles"),
-            )
+            .register_script_definition("WIND", "Wind probe", script)
             .expect("wind probe registers");
 
         // Keep nonzero scenario variation so the legacy runtime-field

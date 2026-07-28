@@ -232,16 +232,10 @@ func Probe() {
         // that reversed list (C4AulParse.cpp:1456; C4AulLink.cpp:66-111).
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("INCA", "A", "public func Foo() { return(1); }")
-                    .expect("A compiles"),
-            )
+            .register_script_definition("INCA", "A", "public func Foo() { return(1); }")
             .expect("A registers");
         engine
-            .register_definition(
-                Definition::from_script("INCB", "B", "public func Foo() { return(2); }")
-                    .expect("B compiles"),
-            )
+            .register_script_definition("INCB", "B", "public func Foo() { return(2); }")
             .expect("B registers");
         engine
             .register_definition(
@@ -272,10 +266,7 @@ func Probe() {
     fn last_sibling_include_inherits_to_the_first() {
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("INCA", "A", "public func Foo() { return(1); }")
-                    .expect("A compiles"),
-            )
+            .register_script_definition("INCA", "A", "public func Foo() { return(1); }")
             .expect("A registers");
         engine
             .register_definition(
@@ -369,11 +360,7 @@ func Probe() {
             "#strict\npublic func Foo() { hits=hits+1; _inherited(); return(hits); }";
         let mut engine = Engine::with_seed(0);
         for (id, name) in [("INCA", "A"), ("INCB", "B")] {
-            engine
-                .register_definition(
-                    Definition::from_script(id, name, identical).expect("include compiles"),
-                )
-                .expect("include registers");
+            engine.register_script_definition(id, name, identical).expect("include registers");
         }
         engine
             .register_definition(
@@ -417,19 +404,13 @@ func Probe() {
         ];
         let mut engine = Engine::with_seed(0);
         for id in ["DOOR", "CXEC"] {
-            engine
-                .register_definition(
-                    Definition::from_script(id, id, "#strict\n").expect("stub compiles"),
-                )
-                .expect("stub registers");
+            engine.register_script_definition(id, id, "#strict\n").expect("stub registers");
         }
         for (id, relative) in scripts {
             let source = std::fs::read(content.join(relative)).expect("shipped script reads");
             let source = String::from_utf8_lossy(&source);
             engine
-                .register_definition(
-                    Definition::from_script(id, id, &source).expect("shipped script compiles"),
-                )
+                .register_script_definition(id, id, &source)
                 .expect("shipped definition registers");
         }
         engine.resolve_includes().expect("shipped includes resolve");
@@ -3064,10 +3045,7 @@ func RecruitmentCount() { return recruitments; }
             .register_player(PlayerConfig::new(0, "Script-created crew"))
             .expect("player registers");
         engine
-            .register_definition(
-                Definition::from_script("DRVR", "Driver", driver_script)
-                    .expect("driver compiles"),
-            )
+            .register_script_definition("DRVR", "Driver", driver_script)
             .expect("driver registers");
         let mut crew =
             Definition::from_script("CREW", "Crew", crew_script).expect("crew compiles");
@@ -4050,11 +4028,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         global func Invalid() { return ScrollContents(false); }
         "#;
         let mut engine = Engine::with_seed(3);
-        engine
-            .register_definition(
-                Definition::from_script("CHES", "Chest", script).expect("script compiles"),
-            )
-            .expect("chest registers");
+        engine.register_script_definition("CHES", "Chest", script).expect("chest registers");
         engine
             .register_definition(simple_definition("ITEM"))
             .expect("item registers");
@@ -4122,11 +4096,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         global func Poke(target) { return ScrollContents(target); }
         "#;
         let mut engine = Engine::with_seed(5);
-        engine
-            .register_definition(
-                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("ACTR", "Actor", script).expect("actor registers");
         engine
             .register_definition(simple_definition("CHES"))
             .expect("chest registers");
@@ -4182,11 +4152,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         global func Pick() { return ShiftContents(0, 0, REVR); }
         "#;
         let mut engine = Engine::with_seed(3);
-        engine
-            .register_definition(
-                Definition::from_script("Ches", "Ches", script).expect("script compiles"),
-            )
-            .expect("chest registers");
+        engine.register_script_definition("Ches", "Ches", script).expect("chest registers");
         engine
             .register_definition(simple_definition("SWRD"))
             .expect("sword registers");
@@ -4275,15 +4241,9 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         func Selection(container) { selected = container; return true; }
         "#;
         let mut engine = Engine::with_seed(17);
+        engine.register_script_definition("CHES", "Chest", chest_script).expect("chest registers");
         engine
-            .register_definition(
-                Definition::from_script("CHES", "Chest", chest_script).expect("chest compiles"),
-            )
-            .expect("chest registers");
-        engine
-            .register_definition(
-                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
-            )
+            .register_script_definition("ITEM", "Item", item_script)
             .expect("ordinary item registers");
         let mut color_stack = simple_definition("PASS");
         color_stack.set_allow_picture_stack(APS_COLOR);
@@ -4436,11 +4396,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         global func Cycle() { return ShiftContents(); }
         "#;
         let mut engine = Engine::with_seed(5);
-        engine
-            .register_definition(
-                Definition::from_script("Ches", "Ches", script).expect("script compiles"),
-            )
-            .expect("chest registers");
+        engine.register_script_definition("Ches", "Ches", script).expect("chest registers");
         engine
             .register_definition(simple_definition("REVR"))
             .expect("revolver registers");
@@ -4487,11 +4443,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         global func Poke() { return ShiftContents(FindObject(CHES)); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("Actr", "Actor", script).expect("actor registers");
         engine
             .register_definition(simple_definition("CHES"))
             .expect("chest registers");
@@ -4549,11 +4501,7 @@ func Cycle() { return ShiftContents(0, 0, 0, 1); }
 func ControlContents(selected_id) { iSeen = selected_id; return 1; }
 "#;
         let mut engine = Engine::with_seed(11);
-        engine
-            .register_definition(
-                Definition::from_script("CHES", "Chest", script).expect("script compiles"),
-            )
-            .expect("chest registers");
+        engine.register_script_definition("CHES", "Chest", script).expect("chest registers");
         engine
             .register_definition(simple_definition("SWRD"))
             .expect("sword registers");
@@ -4615,16 +4563,8 @@ local iSel;
 func Selection(pFrom) { iSel = 1; return 1; }
 "#;
         let mut engine = Engine::with_seed(13);
-        engine
-            .register_definition(
-                Definition::from_script("CHES", "Chest", chest_script).expect("script compiles"),
-            )
-            .expect("chest registers");
-        engine
-            .register_definition(
-                Definition::from_script("SWRD", "Sword", sword_script).expect("script compiles"),
-            )
-            .expect("sword registers");
+        engine.register_script_definition("CHES", "Chest", chest_script).expect("chest registers");
+        engine.register_script_definition("SWRD", "Sword", sword_script).expect("sword registers");
         engine
             .register_definition(simple_definition("REVR"))
             .expect("revolver registers");
@@ -4711,11 +4651,7 @@ public func Probe(pOther) {
 }
 "#;
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(
-                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("Actr", "Actor", script).expect("actor registers");
         engine
             .register_definition(simple_definition("Targ"))
             .expect("target registers");
@@ -4771,14 +4707,10 @@ public func Query(pA) {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("Opnr", "Opener", opener_script).expect("script compiles"),
-            )
+            .register_script_definition("Opnr", "Opener", opener_script)
             .expect("opener registers");
         engine
-            .register_definition(
-                Definition::from_script("Prob", "Prober", prober_script).expect("script compiles"),
-            )
+            .register_script_definition("Prob", "Prober", prober_script)
             .expect("prober registers");
         let opener = engine
             .spawn_object(SpawnConfig::new("Opnr").with_category(CATEGORY_OBJECT))
@@ -4828,11 +4760,7 @@ public func Break(pOther) {
 }
 "#;
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(
-                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("Actr", "Actor", script).expect("actor registers");
         engine
             .register_definition(simple_definition("Targ"))
             .expect("target registers");
@@ -4882,11 +4810,7 @@ public func Boot() {
 }
 "#;
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(
-                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("Actr", "Actor", script).expect("actor registers");
         let id = engine
             .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
             .expect("actor spawns");
@@ -4919,11 +4843,7 @@ public func Boot() {
 func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
 "#;
         let mut engine = Engine::with_seed(17);
-        engine
-            .register_definition(
-                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("ACTR", "Actor", script).expect("actor registers");
         let mut victim_definition = simple_definition("VCTM");
         victim_definition.set_physical(PhysicalInfo {
             energy: 50_000,
@@ -4964,11 +4884,7 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
 func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
 "#;
         let mut engine = Engine::with_seed(23);
-        engine
-            .register_definition(
-                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("ACTR", "Actor", script).expect("actor registers");
         let mut victim_definition = simple_definition("VCTM");
         victim_definition.set_physical(PhysicalInfo {
             energy: 10_000,
@@ -5036,12 +4952,7 @@ public func Detonate() {
         engine
             .register_definition(simple_definition("FXID"))
             .expect("effect definition registers");
-        engine
-            .register_definition(
-                Definition::from_script("BOOM", "Bomb", script)
-                    .expect("bare native Explode script compiles"),
-            )
-            .expect("bomb registers");
+        engine.register_script_definition("BOOM", "Bomb", script).expect("bomb registers");
         let bomb = engine
             .spawn_object(
                 SpawnConfig::new("BOOM")
@@ -5101,11 +5012,7 @@ protected func Activate() { activated = 1; return true; }
             ("FXID", "Explosion effect", effect_script),
             ("LAYR", "Layer", "#strict 3\n"),
         ] {
-            engine
-                .register_definition(
-                    Definition::from_script(id, name, script).expect("definition compiles"),
-                )
-                .expect("definition registers");
+            engine.register_script_definition(id, name, script).expect("definition registers");
         }
         let layer = engine
             .spawn_object(SpawnConfig::new("LAYR").with_position(Vector2::new(500, 500)))
@@ -5294,10 +5201,7 @@ protected func Construction() {
             )
             .expect("Blast particle registers");
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let mut shield_definition = simple_definition("SHLD");
         shield_definition.set_contain_blast(1);
@@ -5376,11 +5280,7 @@ protected func Activate() { RemoveObject(FindObject(SHLD)); return true; }
             ("FXID", "Explosion effect", effect_script),
             ("TARG", "Target", "#strict 3\n"),
         ] {
-            engine
-                .register_definition(
-                    Definition::from_script(id, name, script).expect("definition compiles"),
-                )
-                .expect("definition registers");
+            engine.register_script_definition(id, name, script).expect("definition registers");
         }
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(300, 300)))
@@ -5446,11 +5346,7 @@ protected func Activate() { FindObject(CALL)->Mark(10); return true; }
             ("FXID", "Explosion effect", effect_script),
             ("TARG", "Target", "#strict 3\n"),
         ] {
-            engine
-                .register_definition(
-                    Definition::from_script(id, name, script).expect("definition compiles"),
-                )
-                .expect("definition registers");
+            engine.register_script_definition(id, name, script).expect("definition registers");
         }
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(300, 300)))
@@ -5527,11 +5423,7 @@ protected func Construction() {
             ("FLAM", "Fire", flam_script),
             ("TARG", "Target", "#strict 3\n"),
         ] {
-            engine
-                .register_definition(
-                    Definition::from_script(id, name, script).expect("definition compiles"),
-                )
-                .expect("definition registers");
+            engine.register_script_definition(id, name, script).expect("definition registers");
         }
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(300, 300)))
@@ -5584,10 +5476,7 @@ func Detonate() { var no_container; return BlastObjects(50, 50, 20, no_container
             .register_player(PlayerConfig::new(7, "Blaster"))
             .expect("player registers");
         engine
-            .register_definition(
-                Definition::from_script("BLST", "Blaster", caller_script)
-                    .expect("bare BlastObjects script compiles"),
-            )
+            .register_script_definition("BLST", "Blaster", caller_script)
             .expect("caller registers");
 
         let mut victim_definition = simple_definition("VCTM");
@@ -5701,11 +5590,7 @@ func Detonate() { var no_container; return BlastObjects(50, 50, 20, no_container
 func Zap() { return BlastObject(12, FindObject(VCTM)); }
 "#;
         let mut engine = Engine::with_seed(23);
-        engine
-            .register_definition(
-                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("ACTR", "Actor", script).expect("actor registers");
         let mut victim_definition = simple_definition("VCTM");
         victim_definition.set_physical(PhysicalInfo {
             energy: 10_000,
@@ -5755,11 +5640,7 @@ local iResult;
 func Trigger() { iResult = AddEffect("Foo"); return(1); }
 "#;
         let mut engine = Engine::with_seed(5);
-        engine
-            .register_definition(
-                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("ACTR", "Actor", script).expect("actor registers");
         let actor = engine
             .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
             .expect("actor spawns");
@@ -6079,9 +5960,7 @@ func Damage(int iChange, int iCausedBy) { iDamageCalls = iDamageCalls + 1; retur
             )
             .expect("actor registers");
         engine
-            .register_definition(
-                Definition::from_script("VCTM", "Victim", victim_script).expect("victim compiles"),
-            )
+            .register_script_definition("VCTM", "Victim", victim_script)
             .expect("victim registers");
         let actor = engine
             .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
@@ -6242,11 +6121,7 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
 func ZapAs() { return DoEnergy(-10, FindObject(VCTM), 0, 0, 8); }
 "#;
         let mut engine = Engine::with_seed(29);
-        engine
-            .register_definition(
-                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("ACTR", "Actor", script).expect("actor registers");
         let mut victim_definition = simple_definition("VCTM");
         victim_definition.set_physical(PhysicalInfo {
             energy: 100_000,
@@ -6305,15 +6180,9 @@ local iBy;
 func Damage(iChange, iCausedBy) { iSaw = iChange; iBy = iCausedBy; return 1; }
 "#;
         let mut engine = Engine::with_seed(31);
+        engine.register_script_definition("ACTR", "Actor", actor_script).expect("actor registers");
         engine
-            .register_definition(
-                Definition::from_script("ACTR", "Actor", actor_script).expect("script compiles"),
-            )
-            .expect("actor registers");
-        engine
-            .register_definition(
-                Definition::from_script("VCTM", "Victim", victim_script).expect("script compiles"),
-            )
+            .register_script_definition("VCTM", "Victim", victim_script)
             .expect("victim registers");
         let actor = engine
             .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
@@ -6356,11 +6225,7 @@ func Damage(iChange, iCausedBy) { iSaw = iChange; iBy = iCausedBy; return 1; }
 func Hit() { return Punch(FindObject(VCTM), 5); }
 "#;
         let mut engine = Engine::with_seed(37);
-        engine
-            .register_definition(
-                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
-            )
-            .expect("actor registers");
+        engine.register_script_definition("ACTR", "Actor", script).expect("actor registers");
         let mut victim_definition = simple_definition("VCTM");
         victim_definition.set_physical(PhysicalInfo {
             energy: 50_000,

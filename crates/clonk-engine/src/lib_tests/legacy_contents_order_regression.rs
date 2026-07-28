@@ -48,11 +48,7 @@ fn native_compiled_defaults_are_distinct_from_generic_loaded_fixtures() {
 fn compiled_contents_keep_saved_order_and_cpp_duplicate_repair() {
     let mut engine = Engine::new();
     for id in ["CONT", "ITEM"] {
-        engine
-            .register_definition(
-                Definition::from_script(id, id, "").expect("fixture definition compiles"),
-            )
-            .expect("fixture definition registers");
+        engine.register_script_definition(id, id, "").expect("fixture definition registers");
     }
     let parent = engine
         .spawn_object(SpawnConfig::new("CONT").with_id(ObjectId::new(1)))
@@ -85,11 +81,7 @@ fn compiled_contents_keep_saved_order_and_cpp_duplicate_repair() {
 #[test]
 fn deferred_legacy_containment_preserves_mutual_cycles() {
     let mut engine = Engine::new();
-    engine
-        .register_definition(
-            Definition::from_script("CYCL", "Cycle", "").expect("fixture definition compiles"),
-        )
-        .expect("fixture definition registers");
+    engine.register_script_definition("CYCL", "Cycle", "").expect("fixture definition registers");
     let first = engine
         .spawn_object(SpawnConfig::new("CYCL").with_id(ObjectId::new(1)))
         .expect("first object spawns");

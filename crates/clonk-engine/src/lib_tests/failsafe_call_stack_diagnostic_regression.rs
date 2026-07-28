@@ -68,10 +68,7 @@ public func Lone() { return MissingFromLone(); }
 "#;
     let mut engine = Engine::with_seed(47);
     engine
-        .register_definition(
-            Definition::from_script("STAK", "Stack fixture", script)
-                .expect("stack fixture compiles"),
-        )
+        .register_script_definition("STAK", "Stack fixture", script)
         .expect("stack fixture registers");
     let object = engine
         .spawn_object(SpawnConfig::new("STAK"))

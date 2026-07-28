@@ -620,11 +620,7 @@
         }
         "#;
         let mut engine = Engine::new();
-        engine
-            .register_definition(
-                Definition::from_script("MENU", "Menu", script).expect("menu compiles"),
-            )
-            .expect("menu registers");
+        engine.register_script_definition("MENU", "Menu", script).expect("menu registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");

@@ -214,16 +214,10 @@ func ResortSwapRankProbe(object pLeft, object pRight)
         engine.set_landscape(Landscape::flat(200, 200));
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         engine
-            .register_definition(
-                Definition::from_script("RLOG", "Resort logger", ORDER_FUNC_RESORT_SCRIPT)
-                    .expect("resort logger compiles"),
-            )
+            .register_script_definition("RLOG", "Resort logger", ORDER_FUNC_RESORT_SCRIPT)
             .expect("resort logger registers");
         engine
-            .register_definition(
-                Definition::from_script("RSRT", "Resort target", "#strict 2\n")
-                    .expect("resort target compiles"),
-            )
+            .register_script_definition("RSRT", "Resort target", "#strict 2\n")
             .expect("resort target registers");
 
         let logger = engine
@@ -5873,10 +5867,7 @@ func Probe(removed, fresh, reduced, already_nil,
             let script = script_template.replace("{strict}", &strict.to_string());
             let mut engine = Engine::new();
             engine
-                .register_definition(
-                    Definition::from_script(id, "Map nil removal", &script)
-                        .expect("map fixture compiles"),
-                )
+                .register_script_definition(id, "Map nil removal", &script)
                 .expect("map fixture registers");
             let object = engine
                 .spawn_object(SpawnConfig::new(id))

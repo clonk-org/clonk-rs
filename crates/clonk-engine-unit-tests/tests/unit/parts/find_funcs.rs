@@ -20,15 +20,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
 
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
@@ -82,15 +76,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
 
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
@@ -147,15 +135,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -219,20 +201,10 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
-        engine
-            .register_definition(
-                Definition::from_script("VICT", "Victim", "").expect("victim compiles"),
-            )
-            .expect("victim registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
+        engine.register_script_definition("VICT", "Victim", "").expect("victim registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -293,15 +265,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -362,11 +328,7 @@
             ("PROB", "Probe", probe_script),
             ("COUN", "Counter", counter_script),
         ] {
-            engine
-                .register_definition(
-                    Definition::from_script(id, name, script).expect("definition compiles"),
-                )
-                .expect("definition registers");
+            engine.register_script_definition(id, name, script).expect("definition registers");
         }
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
@@ -429,15 +391,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -467,9 +423,7 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
@@ -501,15 +455,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -546,9 +494,7 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
@@ -588,15 +534,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -658,15 +598,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -728,15 +662,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -797,15 +725,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -859,15 +781,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -923,15 +839,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -990,15 +900,9 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
-            )
+            .register_script_definition("FNDR", "Finder", finder_script)
             .expect("finder registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
@@ -1042,9 +946,7 @@
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("TSTD", "Test", def_script).expect("script compiles"),
-            )
+            .register_script_definition("TSTD", "Test", def_script)
             .expect("definition registers");
         let loaded = engine.install_global_scripts(&[(
             "System.c4g/Test.c".to_string(),
@@ -1130,11 +1032,7 @@
         }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("TSTD", "Test", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("TSTD", "Test", script).expect("definition registers");
         let id = engine
             .spawn_object(SpawnConfig::new("TSTD"))
             .expect("object spawns");
@@ -1169,11 +1067,7 @@
         }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("TSTD", "Test", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("TSTD", "Test", script).expect("definition registers");
         let id = engine
             .spawn_object(SpawnConfig::new("TSTD"))
             .expect("object spawns");
@@ -1205,11 +1099,7 @@
         func MissingWrite() { GlobalN("missing") = 1; }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("TSTD", "Test", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("TSTD", "Test", script).expect("definition registers");
         let id = engine
             .spawn_object(SpawnConfig::new("TSTD"))
             .expect("object spawns");
@@ -1247,10 +1137,7 @@
             )
             .expect("writer registers");
         engine
-            .register_definition(
-                Definition::from_script("READ", "Reader", "func Read() { return Global(8); }")
-                    .expect("reader compiles"),
-            )
+            .register_script_definition("READ", "Reader", "func Read() { return Global(8); }")
             .expect("reader registers");
         let writer = engine
             .spawn_object(SpawnConfig::new("WRTR"))
@@ -1302,16 +1189,10 @@
         "#;
         let register = |engine: &mut Engine| {
             engine
-                .register_definition(
-                    Definition::from_script("WRTR", "Writer", writer_script)
-                        .expect("writer compiles"),
-                )
+                .register_script_definition("WRTR", "Writer", writer_script)
                 .expect("writer registers");
             engine
-                .register_definition(
-                    Definition::from_script("READ", "Reader", reader_script)
-                        .expect("reader compiles"),
-                )
+                .register_script_definition("READ", "Reader", reader_script)
                 .expect("reader registers");
             engine
                 .register_definition(simple_definition("TARG"))
@@ -1414,9 +1295,7 @@
         "#;
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("HOLD", "Holder", old_script).expect("old script compiles"),
-            )
+            .register_script_definition("HOLD", "Holder", old_script)
             .expect("old holder registers");
         engine
             .register_definition(simple_definition("TARG"))
@@ -1440,9 +1319,7 @@
         state.objects.retain(|object| object.snapshot.id != target);
         let mut restored = Engine::with_seed(0);
         restored
-            .register_definition(
-                Definition::from_script("HOLD", "Holder", new_script).expect("new script compiles"),
-            )
+            .register_script_definition("HOLD", "Holder", new_script)
             .expect("new holder registers");
         restored
             .register_definition(simple_definition("TARG"))
@@ -1492,10 +1369,7 @@
         "#;
         let register = |engine: &mut Engine| {
             engine
-                .register_definition(
-                    Definition::from_script("HOLD", "Holder", holder_script)
-                        .expect("holder compiles"),
-                )
+                .register_script_definition("HOLD", "Holder", holder_script)
                 .expect("holder registers");
             engine
                 .register_definition(simple_definition("TARG"))
@@ -1871,11 +1745,7 @@ public func RemoveCaptain(int player)
         }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CAMR", "Camera", script).expect("camera compiles"),
-            )
-            .expect("camera registers");
+        engine.register_script_definition("CAMR", "Camera", script).expect("camera registers");
         engine
             .register_definition(simple_definition("TARG"))
             .expect("target registers");
@@ -2032,10 +1902,7 @@ public func RemoveCaptain(int player)
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("HOLD", "Holder", old_script)
-                    .expect("old holder compiles"),
-            )
+            .register_script_definition("HOLD", "Holder", old_script)
             .expect("old holder registers");
         let holder = engine
             .spawn_object(SpawnConfig::new("HOLD"))
@@ -2048,10 +1915,7 @@ public func RemoveCaptain(int player)
 
         let mut restored = Engine::with_seed(0);
         restored
-            .register_definition(
-                Definition::from_script("HOLD", "Holder", new_script)
-                    .expect("new holder compiles"),
-            )
+            .register_script_definition("HOLD", "Holder", new_script)
             .expect("new holder registers");
         restored.restore_state(&state).expect("state restores");
 
@@ -2155,12 +2019,7 @@ public func RemoveCaptain(int player)
         }
         "#;
         let register = |engine: &mut Engine| {
-            engine
-                .register_definition(
-                    Definition::from_script("HOLD", "Holder", script)
-                        .expect("holder compiles"),
-                )
-                .expect("holder registers");
+            engine.register_script_definition("HOLD", "Holder", script).expect("holder registers");
             engine
                 .register_definition(simple_definition("TARG"))
                 .expect("target registers");
@@ -2210,12 +2069,7 @@ public func RemoveCaptain(int player)
         func Read() { return [Global(3), GlobalN("named")]; }
         "#;
         let register = |engine: &mut Engine| {
-            engine
-                .register_definition(
-                    Definition::from_script("HOLD", "Holder", script)
-                        .expect("holder compiles"),
-                )
-                .expect("holder registers");
+            engine.register_script_definition("HOLD", "Holder", script).expect("holder registers");
         };
 
         let mut saved = Engine::with_seed(7);
@@ -2302,10 +2156,7 @@ public func RemoveCaptain(int player)
     fn rejected_duplicate_definition_does_not_leak_globals() {
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("TSTD", "First", "func Probe() { return 1; }")
-                    .expect("first script compiles"),
-            )
+            .register_script_definition("TSTD", "First", "func Probe() { return 1; }")
             .expect("first definition registers");
 
         let duplicate = Definition::from_script(
@@ -2394,9 +2245,7 @@ func Trigger() {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("TSTD", "Test", def_script).expect("script compiles"),
-            )
+            .register_script_definition("TSTD", "Test", def_script)
             .expect("definition registers");
         let loaded = engine.install_global_scripts(&[(
             "System.c4g/Test.c".to_string(),
@@ -2452,15 +2301,9 @@ func Trigger() {
         let mut landscape = Landscape::flat_with_material(17, 40, Some(oil));
         landscape.set_world_height(80);
         engine.set_landscape(landscape);
+        engine.register_script_definition("FLAM", "Fire", "#strict\n").expect("flam registers");
         engine
-            .register_definition(
-                Definition::from_script("FLAM", "Fire", "#strict\n").expect("flam compiles"),
-            )
-            .expect("flam registers");
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
 
         let id = engine
@@ -2509,15 +2352,9 @@ func Trigger() {
 }
 "#;
         let mut engine = Engine::with_seed(0);
+        engine.register_script_definition("BLST", "Blast", "#strict\n").expect("blast registers");
         engine
-            .register_definition(
-                Definition::from_script("BLST", "Blast", "#strict\n").expect("blast compiles"),
-            )
-            .expect("blast registers");
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
 
         let id = engine
@@ -2575,17 +2412,9 @@ func Trigger() {
             Definition::from_script("SITE", "Site", site_script).expect("site compiles");
         site.set_shape_rect(Some(DefinitionRect::new(-10, -20, 20, 40)));
         engine.register_definition(site).expect("site registers");
+        engine.register_script_definition("CHLD", "Child", "#strict\n").expect("child registers");
         engine
-            .register_definition(
-                Definition::from_script("CHLD", "Child", "#strict\n")
-                    .expect("child compiles"),
-            )
-            .expect("child registers");
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
 
         let caller = engine
@@ -2632,9 +2461,7 @@ func Trigger() {
 "#;
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
 
         let id = engine
@@ -2679,9 +2506,7 @@ func Trigger() {
             .register_player(PlayerConfig::new(1, "P1"))
             .expect("player registers");
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
 
         let id = engine
@@ -2814,20 +2639,11 @@ func Trigger() {
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CLLR", "Caller", caller_script)
             .expect("caller registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
-        engine
-            .register_definition(
-                Definition::from_script("OTHR", "Namespace", namespace_script)
-                    .expect("namespace compiles"),
-            )
+            .register_script_definition("OTHR", "Namespace", namespace_script)
             .expect("namespace registers");
         assert_eq!(
             engine.install_global_scripts(&[(
@@ -2966,16 +2782,10 @@ func Trigger() {
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         engine
-            .register_definition(
-                Definition::from_script("RVIV", "Revive", revive_script)
-                    .expect("revive compiles"),
-            )
+            .register_script_definition("RVIV", "Revive", revive_script)
             .expect("revive registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL"))
@@ -3035,15 +2845,9 @@ func Trigger() {
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CLLR", "Caller", caller_script)
             .expect("caller registers");
-        engine
-            .register_definition(
-                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
-            )
-            .expect("probe registers");
+        engine.register_script_definition("PROB", "Probe", probe_script).expect("probe registers");
         assert_eq!(
             engine.install_global_scripts(&[(
                 "System.c4g/ObjectCall.c".to_string(),
@@ -3127,15 +2931,10 @@ func Trigger() {
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CLLR", "Caller", caller_script)
             .expect("caller registers");
         engine
-            .register_definition(
-                Definition::from_script("FCTY", "Factory", factory_script)
-                    .expect("factory compiles"),
-            )
+            .register_script_definition("FCTY", "Factory", factory_script)
             .expect("factory registers");
         let caller = engine
             .spawn_object(SpawnConfig::new("CLLR"))
@@ -3177,9 +2976,7 @@ func Trigger() {
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CLLR", "Caller", caller_script)
             .expect("caller registers");
         engine
             .install_scenario_script(
@@ -3408,9 +3205,7 @@ func Trigger() {
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CLLR", "Caller", caller_script)
             .expect("caller registers");
         let mut goal_def =
             Definition::from_script("GOAL", "Goal", listener_script).expect("goal compiles");
@@ -3425,9 +3220,7 @@ func Trigger() {
             .register_definition(rule_def)
             .expect("rule registers");
         engine
-            .register_definition(
-                Definition::from_script("PLAI", "Plain", listener_script).expect("plain compiles"),
-            )
+            .register_script_definition("PLAI", "Plain", listener_script)
             .expect("plain registers");
         engine
             .install_scenario_script(
@@ -3513,11 +3306,7 @@ func Trigger() {
         // a later plain object, deactivates a later environment object, and
         // creates a marker (mutating the object list during the walk).
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("MARK", "Marker", "").expect("marker compiles"),
-            )
-            .expect("marker registers");
+        engine.register_script_definition("MARK", "Marker", "").expect("marker registers");
 
         let mut promoted = Definition::from_script(
             "PROM",
@@ -3682,9 +3471,7 @@ func Trigger() {
 
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let mut rule =
             Definition::from_script("RULE", "Rule", rule_script).expect("rule compiles");
@@ -3777,11 +3564,7 @@ func Trigger() {
         }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
-            )
-            .expect("caller registers");
+        engine.register_script_definition("CALL", "Caller", script).expect("caller registers");
         engine
             .register_player(PlayerConfig::new(1, "Alice"))
             .expect("Alice registers");
@@ -3893,20 +3676,13 @@ func Trigger() {
         ]);
         engine.set_team_home_base_rule(true);
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let mut rule =
             Definition::from_script("RULE", "Rule", rule_script).expect("rule compiles");
         rule.set_category(1 << 19); // C4D_Rule
         engine.register_definition(rule).expect("rule registers");
-        engine
-            .register_definition(
-                Definition::from_script("BRCK", "Brick", "").expect("brick compiles"),
-            )
-            .expect("brick registers");
+        engine.register_script_definition("BRCK", "Brick", "").expect("brick registers");
 
         engine
             .register_player(
@@ -4304,11 +4080,7 @@ func Trigger() {
         func ReadMenu() { return GetMenu(this()); }
         "#;
         let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
-            .expect("definition registers");
+        engine.register_script_definition("CLNK", "Clonk", script).expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
@@ -4405,16 +4177,10 @@ func Trigger() {
         "#;
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("TRGT", "Target", target_script)
-                    .expect("target compiles"),
-            )
+            .register_script_definition("TRGT", "Target", target_script)
             .expect("target registers");
         engine
-            .register_definition(
-                Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
+            .register_script_definition("CALL", "Caller", caller_script)
             .expect("caller registers");
         let target = engine
             .spawn_object(SpawnConfig::new("TRGT"))

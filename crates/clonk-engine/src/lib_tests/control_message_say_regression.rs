@@ -3,15 +3,10 @@ use super::*;
 fn say_engine() -> (Engine, ObjectId, ObjectId) {
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("VIEW", "View object", "").expect("view definition compiles"),
-        )
+        .register_script_definition("VIEW", "View object", "")
         .expect("view definition registers");
     engine
-        .register_definition(
-            Definition::from_script("CURS", "Cursor object", "")
-                .expect("cursor definition compiles"),
-        )
+        .register_script_definition("CURS", "Cursor object", "")
         .expect("cursor definition registers");
     let view = engine
         .spawn_object(SpawnConfig::new("VIEW"))

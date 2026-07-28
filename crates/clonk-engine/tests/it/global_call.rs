@@ -1,4 +1,4 @@
-use clonk_engine::{Definition, Engine, SpawnConfig, Vector2};
+use clonk_engine::{Engine, SpawnConfig, Vector2};
 use clonk_script::Value;
 
 #[test]
@@ -29,10 +29,7 @@ func ProbeGlobalWrapper() { return global->ProbeGlobalFrame(); }
 "#;
     let mut engine = Engine::new();
     engine
-        .register_definition(
-            Definition::from_script("GLOB", "Global-call probe", script)
-                .expect("global-call probe compiles"),
-        )
+        .register_script_definition("GLOB", "Global-call probe", script)
         .expect("global-call probe registers");
     let object = engine
         .spawn_object(SpawnConfig::new("GLOB").with_position(Vector2::new(42, 100)))
