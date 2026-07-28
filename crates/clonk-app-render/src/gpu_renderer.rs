@@ -262,6 +262,20 @@ fn gamma_channel(channel: u32, value: f32) -> f32 {
     return f32(sample) / 65535.0;
 }
 
+// Interleaved gradient noise (Jimenez 2014), remapped to a triangular PDF
+// spanning one 8-bit step. Adding it before the framebuffer quantizes turns
+// a hard band boundary into a stochastic one; the mean is unchanged, so the
+// dithered gradient is closer to the exact ramp than the banded one is.
+fn dither_offset(position: vec2<f32>) -> f32 {
+    let uniform_noise = fract(52.9829189 * fract(dot(position, vec2<f32>(0.06711056, 0.00583715))));
+    let triangular = select(
+        1.0 - sqrt(2.0 - 2.0 * uniform_noise),
+        sqrt(2.0 * uniform_noise) - 1.0,
+        uniform_noise < 0.5,
+    );
+    return triangular / 255.0;
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var rgb = input.color.rgb;
@@ -271,6 +285,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             gamma_channel(1u, rgb.g),
             gamma_channel(2u, rgb.b),
         );
+    }
+    if input.flags.y > 0.5 {
+        rgb = clamp(rgb + vec3<f32>(dither_offset(input.position.xy)), vec3<f32>(0.0), vec3<f32>(1.0));
     }
     return vec4<f32>(rgb, input.color.a);
 }
@@ -1634,6 +1651,7 @@ impl RetainedGpuRenderer {
                                         vertex.position,
                                         vertex.color,
                                         fragment_gamma_flag(scene.gamma_mode, style.gamma),
+                                        style.dither,
                                         &projection,
                                     )?,
                                 );
@@ -1982,13 +2000,14 @@ fn packed_solid_vertex(
     position: [f32; 3],
     color: [f32; 4],
     gamma: bool,
+    dither: bool,
     projection: &DrawProjection,
 ) -> Result<PackedVertex, GpuRendererError> {
     Ok(PackedVertex {
         clip: clip_position(position, projection)?,
         uv: [0.0, 0.0],
         data0: color,
-        data1: [flag(gamma), 0.0, 0.0, 0.0],
+        data1: [flag(gamma), flag(dither), 0.0, 0.0],
         data2: [0.0; 4],
     })
 }
@@ -3466,6 +3485,37 @@ mod tests {
                 .expect("outside right point")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn solid_triangle_vertices_carry_gamma_and_dither_in_separate_flag_channels() {
+        // The solid shader reads its fragment options out of `data1`. Gamma
+        // owns channel 0; the dither must land in its own channel so the two
+        // stay independently switchable.
+        let presentation = GpuPresentation {
+            physical_extent: [6, 4],
+            scale: 1.0,
+            crop_top: 0,
+        };
+        let projection = draw_projection(None, [6, 4], &presentation)
+            .expect("valid presentation")
+            .expect("clip intersects the framebuffer");
+        let flags = |gamma: bool, dither: bool| {
+            packed_solid_vertex(
+                [1.0, 1.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                gamma,
+                dither,
+                &projection,
+            )
+            .expect("pack one solid vertex")
+            .data1
+        };
+
+        assert_eq!(flags(false, false), [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(flags(true, false), [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(flags(false, true), [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(flags(true, true), [1.0, 1.0, 0.0, 0.0]);
     }
 
     #[test]

@@ -395,6 +395,7 @@ fn graphics(config: &Config) -> AdvancedConfigSection {
         bool_row(config, section, "NoAlphaAdd", false),
         bool_row(config, section, "PointFiltering", false),
         bool_row(config, section, "HighDpiCursor", false),
+        bool_row(config, section, "SkyDither", false),
         bool_row(config, section, "NoBoxFades", false),
         bool_row(config, section, "NoAcceleration", false),
         i32_row(config, section, "TexIndent", 0),

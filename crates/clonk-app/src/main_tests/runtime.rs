@@ -872,6 +872,15 @@
     }
 
     #[test]
+    fn sky_dither_defaults_off_and_reads_the_native_boolean() {
+        // C++ draws the sky fade as a plain interpolated quad, so the
+        // byte-exact gradient has to stay the default.
+        assert!(!configured_sky_dither(b""));
+        assert!(!configured_sky_dither(b"[Graphics]\nSkyDither=0\n"));
+        assert!(configured_sky_dither(b"[Graphics]\nSkyDither=1\n"));
+    }
+
+    #[test]
     fn max_refresh_delay_defaults_to_cpp_30_ms_and_honors_positive_config() {
         // Config.Graphics.MaxRefreshDelay defaults to 30, so the native
         // 28 ms game timer remains one 28 ms graphics opportunity instead of

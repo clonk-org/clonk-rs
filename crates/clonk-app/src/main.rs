@@ -1137,6 +1137,7 @@ impl GameApp {
         let native_config = load_native_config_bytes(paths);
         let advanced_renderer_config = load_advanced_renderer_config(&native_config);
         let high_dpi_cursor = configured_high_dpi_cursor(&native_config);
+        let sky_dither = configured_sky_dither(&native_config);
         let loader_gamma = load_classic_loader_gamma_from_native(&native_config);
         let gamepads_enabled = configured_gamepads_enabled(&native_config);
         let allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
@@ -1383,6 +1384,7 @@ impl GameApp {
         } else {
             CursorTiers::Classic
         });
+        graphics.set_sky_dither(sky_dither);
         graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         graphics.set_game_palette(assets.game_palette());
         graphics.set_liquid_animation(assets.liquid_animation());

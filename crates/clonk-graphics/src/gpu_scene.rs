@@ -353,13 +353,27 @@ pub enum GpuCommand {
 pub struct GpuSolidStyle {
     /// Resolve the monitor gamma ramp in the fragment shader.
     pub gamma: bool,
+    /// Break up the 8-bit quantization of an interpolated colour with a
+    /// sub-LSB noise offset. Only a real gradient asks for this; a flat fill
+    /// has no banding to hide.
+    pub dither: bool,
 }
 
 impl GpuSolidStyle {
-    pub const NONE: Self = Self { gamma: false };
+    pub const NONE: Self = Self {
+        gamma: false,
+        dither: false,
+    };
 
     pub const fn with_gamma(gamma: bool) -> Self {
-        Self { gamma }
+        Self {
+            gamma,
+            ..Self::NONE
+        }
+    }
+
+    pub const fn dithered(self, dither: bool) -> Self {
+        Self { dither, ..self }
     }
 }
 

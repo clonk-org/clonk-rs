@@ -576,6 +576,23 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **The sky gradient may be dithered below the 8-bit step**
+  (`GpuSolidStyle::dither` + `SOLID_SHADER`, `crates/clonk-app-render`; opt-in
+  `Graphics.SkyDither`, default off). Approved 2026-07-28. C++ emits the sky
+  fade as one interpolated quad into an 8-bit target, so the number of visible
+  bands equals the channel delta spread over the viewport height: the shipped
+  default fade `RGB(28,64,152)→RGB(192,196,252)` spans 100 blue steps, i.e. a
+  band every ~22 rows at 2160p, and it gets strictly worse as panels grow. The
+  divergence adds interleaved-gradient noise on a triangular PDF spanning one
+  step before the framebuffer quantizes; the mean is unchanged, so the result
+  is closer to the exact ramp than the banded output. It is set only on a quad
+  whose corner colours actually differ (`no_box_fades` flattens its quad first)
+  and only on the sky path, and it is presentation-only. Pinned by
+  `sky_dither_marks_a_real_gradient_only_when_enabled`,
+  `solid_triangle_vertices_carry_gamma_and_dither_in_separate_flag_channels`,
+  and `sky_dither_defaults_off_and_reads_the_native_boolean`; the default path
+  stays byte-identical under `gpu_renderer_matches_cpu_reference_frame`.
+
 - **A first launch seeds the application scale from the display's density**
   (`DisplayOptions::apply_first_run_display_scale`,
   `crates/clonk-app/src/settings.rs`). Approved 2026-07-28. C++ starts every

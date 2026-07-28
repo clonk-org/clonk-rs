@@ -5409,6 +5409,44 @@ mod tests {
     }
 
     #[test]
+    fn sky_dither_marks_a_real_gradient_only_when_enabled() {
+        // The shipped default sky fade RGB(28,64,152)->RGB(192,196,252) spans
+        // 100 blue steps, so on a 2160-row viewport 8-bit interpolation lands
+        // a visible band every ~22 rows. The dither is sub-LSB noise, but it
+        // still moves bytes away from C++, so it stays opt-in — and a flat
+        // fill has no banding to hide.
+        let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
+        let dithered = |enabled: bool, top: Color, bottom: Color| {
+            let mut graphics = test_graphics(8, 6, 12, "sky dither");
+            graphics.set_sky_dither(enabled);
+            graphics.begin_gpu_scene_capture();
+            graphics.fill_vertical_gradient(top, bottom, 1.0, Some(&gamma));
+            let scene = graphics
+                .finish_gpu_scene_capture(&gamma)
+                .expect("GPU capture remains active");
+            let GpuCommand::Solid { style, .. } = &scene.commands[0] else {
+                panic!("sky gradient did not lower to solid triangles");
+            };
+            style.dither
+        };
+
+        let top = Color::opaque(28, 64, 152);
+        let bottom = Color::opaque(192, 196, 252);
+        assert!(
+            dithered(true, top, bottom),
+            "an enabled gradient sky must ask for dithering"
+        );
+        assert!(
+            !dithered(false, top, bottom),
+            "the C++ byte-exact gradient stays the default"
+        );
+        assert!(
+            !dithered(true, top, top),
+            "a flat sky has no interpolation to dither"
+        );
+    }
+
+    #[test]
     fn gpu_capture_lowers_sky_gradient_to_one_gamma_solid_draw() {
         let mut graphics = test_graphics(8, 6, 12, "GPU Gradient");
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);

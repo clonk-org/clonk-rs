@@ -8119,6 +8119,13 @@ pub(crate) fn configured_high_dpi_cursor(config: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// `Graphics.SkyDither`: opt in to sub-LSB dithering of the sky gradient.
+/// C++ emits the fade as a plain interpolated quad, so this defaults off and
+/// is recorded as a deliberate divergence in `PORT_STATUS.md`.
+pub(crate) fn configured_sky_dither(config: &[u8]) -> bool {
+    clonk_app_netplay::configured_native_boolean(config, "Graphics", "SkyDither").unwrap_or(false)
+}
+
 pub(crate) fn configured_max_refresh_delay_ms(config: &[u8]) -> u64 {
     u64::try_from(startup_config_integer(
         config,

@@ -318,6 +318,8 @@ pub struct GraphicsSystem {
     /// temporarily replaces `surface_width`, but cursor-sheet selection is
     /// resolution-global in C++.
     logical_resolution_width: u32,
+    /// Opt-in sub-LSB dither for the interpolated sky gradient.
+    sky_dither: bool,
     /// Which sized cursor sheet the resolution selects. `Classic` is the C++
     /// rule; `HighDpi` is the opt-in remaster ladder.
     cursor_tiers: CursorTiers,
@@ -451,6 +453,7 @@ impl GraphicsSystem {
             viewport_y: 0.0,
             viewport_zoom: 1.0,
             logical_resolution_width: surface_width,
+            sky_dither: false,
             cursor_tiers: CursorTiers::default(),
             presentation_scale: 1.0,
             point_filtering: false,
@@ -539,6 +542,10 @@ impl GraphicsSystem {
         self.point_filtering
     }
 
+    pub fn set_sky_dither(&mut self, dither: bool) {
+        self.sky_dither = dither;
+    }
+
     pub fn set_cursor_tiers(&mut self, tiers: CursorTiers) {
         self.cursor_tiers = tiers;
     }
@@ -595,6 +602,7 @@ impl GraphicsSystem {
     /// every resolution change and scenario start.
     pub fn inherit_cursor_tiers(&mut self, previous: &Self) {
         self.cursor_tiers = previous.cursor_tiers;
+        self.sky_dither = previous.sky_dither;
     }
 
     pub(crate) fn runtime_sprite_blit(
@@ -3276,6 +3284,7 @@ impl GraphicsSystem {
         if self.surface.is_gpu_scene_capture_active()
             && fog.as_ref().is_none_or(|(_, sampler)| sampler.is_some())
         {
+            let sky_dither = self.sky_dither;
             let mut emit = |left: f32,
                             top: f32,
                             right: f32,
@@ -3297,12 +3306,16 @@ impl GraphicsSystem {
                         normalize_quad_colors([colors[0], colors[2], colors[3], colors[1]]);
                     colors = [normalized; 4];
                 }
+                // Only an actual vertical interpolation bands; `no_box_fades`
+                // has already flattened its quad to one colour by here.
+                let interpolated = colors[0] != colors[2] || colors[1] != colors[3];
                 record_gpu_solid_quad(
                     &mut self.surface,
                     (left + offset, top + offset, right + offset, bottom + offset),
                     colors,
                     GpuBlend::Normal,
-                    GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
+                    GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough()))
+                        .dithered(sky_dither && interpolated),
                 );
             };
             if let Some((_, Some(sampler))) = fog.as_ref() {
