@@ -2,7 +2,12 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use lewton::inside_ogg::OggStreamReader;
-use minimp3::{Decoder as Mp3Decoder, Error as Mp3Error};
+use symphonia_bundle_mp3::{MpaDecoder, MpaReader};
+use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+use symphonia_core::codecs::CodecParameters;
+use symphonia_core::errors::Error as SymphoniaError;
+use symphonia_core::formats::{FormatOptions, FormatReader};
+use symphonia_core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use thiserror::Error;
 
 use crate::wav::WavStream;
@@ -137,7 +142,10 @@ impl MusicDecoder {
         let retry_data = data.clone();
         retry_mpeg_layer3_candidates(data.as_ref(), original_error, move |offset| {
             Ok(Self::Pcm(Box::new(PcmStream::new(
-                PcmSource::Mp3(Mp3MusicStream::new_at(retry_data.clone(), offset)?),
+                PcmSource::Mp3(Box::new(Mp3MusicStream::new_at(
+                    retry_data.clone(),
+                    offset,
+                )?)),
                 output_sample_rate,
             )?)))
         })
@@ -154,7 +162,7 @@ impl MusicDecoder {
                 output_sample_rate,
             )?))),
             AudioFormat::Mp3 => Ok(Self::Pcm(Box::new(PcmStream::new(
-                PcmSource::Mp3(Mp3MusicStream::new(data)?),
+                PcmSource::Mp3(Box::new(Mp3MusicStream::new(data)?)),
                 output_sample_rate,
             )?))),
             AudioFormat::Midi => Ok(Self::Midi(crate::fluidsynth::MidiStream::new(
@@ -318,7 +326,7 @@ impl PcmStream {
 enum PcmSource {
     Wav(WavStream),
     Ogg(Box<OggMusicStream>),
-    Mp3(Mp3MusicStream),
+    Mp3(Box<Mp3MusicStream>),
     Tracker(Box<crate::tracker::TrackerStream>),
 }
 
@@ -438,8 +446,86 @@ impl OggMusicStream {
     }
 }
 
+/// symphonia's MPEG-audio demuxer paired with its decoder, bound to the first
+/// audio track in the stream. Both the whole-file and the streaming MP3 paths
+/// pull packets through this, so they share one notion of frame and error.
+struct MpegAudioDecoder<'s> {
+    reader: MpaReader<'s>,
+    decoder: MpaDecoder,
+    track_id: u32,
+}
+
+impl<'s> MpegAudioDecoder<'s> {
+    fn open(source: Box<dyn MediaSource + 's>) -> Result<Self, AudioDecodeError> {
+        let stream = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
+        let reader = MpaReader::try_new(stream, FormatOptions::default())
+            .map_err(|_| AudioDecodeError::Mp3DecoderError("empty MP3 data"))?;
+        let (track_id, params) = reader
+            .tracks()
+            .iter()
+            .find_map(|track| match track.codec_params.as_ref() {
+                Some(CodecParameters::Audio(params)) => Some((track.id, params.clone())),
+                _ => None,
+            })
+            .ok_or(AudioDecodeError::Mp3DecoderError("empty MP3 data"))?;
+        let decoder = MpaDecoder::try_new(&params, &AudioDecoderOptions::default())
+            .map_err(|_| AudioDecodeError::Mp3DecoderError("failed to decode MP3 frame"))?;
+        Ok(Self {
+            reader,
+            decoder,
+            track_id,
+        })
+    }
+
+    /// Decode the next audio packet into `packet` as interleaved 16-bit samples,
+    /// reporting its sample rate and channel count. `None` ends the stream.
+    fn next_packet(
+        &mut self,
+        packet: &mut Vec<i16>,
+    ) -> Result<Option<(u32, usize)>, AudioDecodeError> {
+        loop {
+            let source_packet = match self.reader.next_packet() {
+                Ok(Some(source_packet)) => source_packet,
+                Ok(None) => return Ok(None),
+                // A stream that stops mid-frame ends there rather than failing,
+                // matching how C4AudioSystemSdl tolerates truncated music.
+                Err(SymphoniaError::IoError(error))
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(None);
+                }
+                Err(_) => {
+                    return Err(AudioDecodeError::Mp3DecoderError(
+                        "failed to decode MP3 frame",
+                    ));
+                }
+            };
+            if source_packet.track_id != self.track_id {
+                continue;
+            }
+            let decoded = match self.decoder.decode(&source_packet) {
+                Ok(decoded) => decoded,
+                // Skip a corrupt frame instead of truncating the stream, the
+                // way minimp3's frame search resynchronised past damage.
+                Err(SymphoniaError::DecodeError(_)) => continue,
+                Err(_) => {
+                    return Err(AudioDecodeError::Mp3DecoderError(
+                        "failed to decode MP3 frame",
+                    ));
+                }
+            };
+            let spec = decoded.spec();
+            let (sample_rate, channels) = (spec.rate(), spec.channels().count());
+            decoded.copy_to_vec_interleaved(packet);
+            return Ok(Some((sample_rate, channels)));
+        }
+    }
+}
+
+/// Pull-based MP3 music. Only the current packet's PCM is retained, so memory
+/// stays flat no matter how long the track runs.
 struct Mp3MusicStream {
-    decoder: Mp3Decoder<Cursor<Arc<[u8]>>>,
+    decoder: MpegAudioDecoder<'static>,
     sample_rate: u32,
     channels: usize,
     packet: Vec<i16>,
@@ -457,7 +543,7 @@ impl Mp3MusicStream {
         let mut cursor = Cursor::new(data);
         cursor.set_position(offset as u64);
         let mut stream = Self {
-            decoder: Mp3Decoder::new(cursor),
+            decoder: MpegAudioDecoder::open(Box::new(cursor))?,
             sample_rate: 0,
             channels: 0,
             packet: Vec::new(),
@@ -472,30 +558,22 @@ impl Mp3MusicStream {
     }
 
     fn load_packet(&mut self) -> Result<bool, AudioDecodeError> {
-        let frame = match self.decoder.next_frame() {
-            Ok(frame) => frame,
-            Err(Mp3Error::Eof) => return Ok(false),
-            Err(_) => {
-                return Err(AudioDecodeError::Mp3DecoderError(
-                    "failed to decode MP3 frame",
-                ));
-            }
+        let Some((sample_rate, channels)) = self.decoder.next_packet(&mut self.packet)? else {
+            return Ok(false);
         };
-        let sample_rate = u32::try_from(frame.sample_rate)
-            .ok()
-            .filter(|rate| *rate != 0)
-            .ok_or(AudioDecodeError::InvalidData("MP3 sample rate is zero"))?;
+        if sample_rate == 0 {
+            return Err(AudioDecodeError::InvalidData("MP3 sample rate is zero"));
+        }
         if self.sample_rate != 0 && self.sample_rate != sample_rate {
             return Err(AudioDecodeError::InvalidData(
                 "MP3 sample rate changes within stream",
             ));
         }
-        if frame.channels == 0 {
+        if channels == 0 {
             return Err(AudioDecodeError::InvalidData("MP3 channel count is zero"));
         }
         self.sample_rate = sample_rate;
-        self.channels = frame.channels;
-        self.packet = frame.data;
+        self.channels = channels;
         self.packet_offset = 0;
         #[cfg(test)]
         {
@@ -660,14 +738,13 @@ fn decode_ogg(data: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
 }
 
 fn decode_mp3(data: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
-    let cursor = Cursor::new(data);
-    let mut decoder = Mp3Decoder::new(cursor);
+    let mut decoder = MpegAudioDecoder::open(Box::new(Cursor::new(data)))?;
     let mut frames = Vec::new();
     let mut sample_rate: Option<u32> = None;
-    while let Ok(frame) = decoder.next_frame() {
-        sample_rate.get_or_insert(frame.sample_rate as u32);
-        let channel_count = frame.channels;
-        let packet_frames = convert_interleaved_i16_to_stereo(&frame.data, channel_count)?;
+    let mut packet = Vec::new();
+    while let Some((packet_rate, channel_count)) = decoder.next_packet(&mut packet)? {
+        sample_rate.get_or_insert(packet_rate);
+        let packet_frames = convert_interleaved_i16_to_stereo(&packet, channel_count)?;
         frames.extend(packet_frames);
     }
 
@@ -748,6 +825,38 @@ mod tests {
         frame[13..22].copy_from_slice(b"LAME3.100");
         frame[53..62].copy_from_slice(b"LAME3.100");
         frame
+    }
+
+    /// The pull-based music path and the whole-file path run the same demuxer
+    /// and decoder, so they must agree sample for sample. A decoder swap that
+    /// desynchronised them would otherwise only show up as audible drift.
+    #[test]
+    fn mp3_streaming_matches_whole_file_decode() {
+        let data = silent_mpeg_layer3_frame().repeat(4);
+        let decoded = decode_audio(&data).expect("whole-file MP3 decode");
+        assert_eq!(decoded.sample_rate, 8_000);
+        assert!(!decoded.frames.is_empty(), "fixture decoded to no audio");
+        assert!(
+            decoded.frames.iter().flatten().all(|sample| *sample == 0.0),
+            "silent fixture decoded to non-silent PCM"
+        );
+
+        let source: Arc<[u8]> = Arc::from(data.into_boxed_slice());
+        let mut music =
+            MusicStream::open(source, decoded.sample_rate).expect("MP3 music stream opens");
+        let mut streamed = Vec::new();
+        let mut output = [[0.0_f32; 2]; 64];
+        loop {
+            let count = music.read_frames(&mut output).expect("MP3 stream reads");
+            if count == 0 {
+                break;
+            }
+            streamed.extend_from_slice(&output[..count]);
+        }
+        assert_eq!(
+            streamed, decoded.frames,
+            "streamed MP3 PCM diverged from the whole-file decode"
+        );
     }
 
     fn mono_pcm16_wav(sample_rate: u32, samples: &[i16]) -> Vec<u8> {

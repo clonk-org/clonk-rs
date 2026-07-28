@@ -1704,7 +1704,8 @@ impl GameApp {
             boot_loading,
             auto_start_sandbox: false,
             auto_start_classic_command_line_scenario: false,
-            auto_open_update_dialog: false,
+            incoming_update: None,
+            update_check_requested: false,
             ingame_gui_pointer: None,
             ingame_pointer: None,
             ingame_mouse_help: false,
@@ -1840,8 +1841,8 @@ impl GameApp {
                 .transpose()?;
         }
         self.apply_classic_game_option_overrides();
-        self.auto_open_update_dialog =
-            classic.update_requested || classic.incoming_update.is_some();
+        self.incoming_update = classic.incoming_update.clone();
+        self.update_check_requested = classic.update_requested;
 
         if let Some(screen) = classic.startup_screen.as_deref() {
             tracing::warn!(
