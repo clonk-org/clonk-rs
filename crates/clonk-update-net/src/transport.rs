@@ -673,6 +673,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn the_trait_can_be_faked_and_used_as_an_object() {
+        // The point of the trait: callers that own decision and apply logic
+        // depend on `&dyn UpdateTransport`, so their tests script faults —
+        // truncation, cancellation, a 404 — without a socket in sight. If this
+        // stops compiling, every one of those callers is forced onto the real
+        // network.
+        struct Faulty;
+
+        impl UpdateTransport for Faulty {
+            fn fetch_manifest(&self, _url: &str) -> Result<Vec<u8>, TransportError> {
+                Ok(b"{\"schema\":1}".to_vec())
+            }
+
+            fn download(
+                &self,
+                _url: &str,
+                _into: &Path,
+                progress: &mut dyn FnMut(u64, u64) -> bool,
+            ) -> Result<u64, TransportError> {
+                progress(1, 2).then_some(1).ok_or(TransportError::Cancelled)
+            }
+        }
+
+        let transport: &dyn UpdateTransport = &Faulty;
+        assert_eq!(
+            transport
+                .fetch_manifest("https://example.invalid/manifest.json")
+                .expect("the fake answers"),
+            b"{\"schema\":1}"
+        );
+        assert!(matches!(
+            transport.download(
+                "https://example.invalid/c.zip",
+                Path::new("c.zip"),
+                &mut |_, _| { false }
+            ),
+            Err(TransportError::Cancelled)
+        ));
+    }
+
     #[tokio::test]
     async fn blocking_inside_an_async_runtime_is_refused_rather_than_panicking() {
         // `Runtime::block_on` panics when it is nested. The updater is called
