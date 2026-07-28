@@ -15,7 +15,11 @@ use tracing_subscriber::util::{SubscriberInitExt, TryInitError};
 use tracing_subscriber::{fmt, EnvFilter};
 
 static INITIALIZED: OnceLock<()> = OnceLock::new();
-const DEFAULT_DEPENDENCY_FILTER: &str = "wgpu_core::device=warn";
+/// Graphics, windowing and event-loop crates log per-frame detail below `warn`
+/// that would bury our own output. This is applied ahead of any user directive
+/// so a more specific one — `LC_LOG=info,wgpu_hal=debug` — still wins.
+const DEFAULT_DEPENDENCY_FILTER: &str =
+    "wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,winit=warn,calloop=warn,mio=warn";
 /// Target of the panic hook. Deliberately not the script target: a Rust panic
 /// is not content output and has no business on the in-game message board.
 const PANIC_LOG_TARGET: &str = "panic";
@@ -365,9 +369,9 @@ fn open_session_log(log_path: &Path) -> io::Result<File> {
 fn env_filter(default_level: &'static str) -> EnvFilter {
     let lc_log = std::env::var("LC_LOG").ok();
     let rust_log = std::env::var("RUST_LOG").ok();
-    explicit_filter_directive(lc_log.as_deref(), rust_log.as_deref())
-        .map(EnvFilter::new)
-        .unwrap_or_else(|| EnvFilter::new(format!("{default_level},{DEFAULT_DEPENDENCY_FILTER}")))
+    let requested =
+        explicit_filter_directive(lc_log.as_deref(), rust_log.as_deref()).unwrap_or(default_level);
+    EnvFilter::new(format!("{DEFAULT_DEPENDENCY_FILTER},{requested}"))
 }
 
 fn init_with_default_level(default_level: &'static str) {
