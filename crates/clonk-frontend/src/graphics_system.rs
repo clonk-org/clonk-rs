@@ -7338,7 +7338,10 @@ impl GraphicsSystem {
         // including for a logically identity overlay. It is therefore always
         // non-exact in PerformBlt. Retain the established straight rasterizer
         // for a logical identity; its half-pixel geometry is tracked by L030.
-        let source = FloatSourceRect::scaled(source_rect, 1.0);
+        // The ActMap facet stays in unscaled coordinates, so the source
+        // rectangle carries the source graphics' Scale exactly like every
+        // other facet-drawn overlay mode (C4DefGraphics.cpp:826).
+        let source = FloatSourceRect::scaled(source_rect, sprite.graphics_scale);
         let (source, sampling) = self.runtime_sprite_blit(
             source,
             (facet.width as f32 * zoom, facet.height as f32 * zoom),

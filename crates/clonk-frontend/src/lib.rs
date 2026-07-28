@@ -6996,6 +6996,103 @@ mod tests {
     }
 
     #[test]
+    fn action_overlay_scales_its_source_by_the_source_definition_scale() {
+        // C4GraphicsOverlay::Draw hands pSourceGfx->pDef->Scale to
+        // C4Facet::DrawT for every facet-drawn overlay mode
+        // (src/C4DefGraphics.cpp:826), and DrawT multiplies only the source
+        // rectangle by it, leaving the destination at the unscaled facet
+        // extent (src/C4Facet.cpp:79-81). MODE_Action takes its facet
+        // straight from the ActMap entry (src/C4DefGraphics.cpp:810), which
+        // stays in unscaled coordinates, so a Scale=200 sheet must be read
+        // at twice those coordinates.
+        let red = Color::opaque(200, 40, 40);
+        let green = Color::opaque(0, 200, 0);
+        let mut pixels = [red.r, red.g, red.b, red.a].repeat(16 * 16);
+        for y in 0..8 {
+            for x in 8..16 {
+                let base = (y * 16 + x) * 4;
+                pixels[base..base + 4].copy_from_slice(&[green.r, green.g, green.b, green.a]);
+            }
+        }
+        let sprite = DefinitionSprite {
+            graphics_scale: 2.0,
+            image: ImageData::new(16, 16, pixels),
+            actions: HashMap::from([(
+                "Wave".to_string(),
+                DefinitionActionGraphics {
+                    facet: Some(clonk_engine::DefinitionActionFacet {
+                        x: 4,
+                        y: 0,
+                        width: 4,
+                        height: 4,
+                        target_x: 0,
+                        target_y: 0,
+                    }),
+                    length: Some(1),
+                    ..DefinitionActionGraphics::default()
+                },
+            )]),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "HdOverlay".to_string();
+        object.position = Vector2::new(8, 4);
+        object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
+            .with_definition(Some("HdOverlay".to_string()))
+            .with_action(Some("Wave".to_string()))];
+
+        let background = Color::opaque(10, 10, 10);
+        let mut graphics = GraphicsSystem::new(
+            16,
+            8,
+            8,
+            "HD action overlay",
+            test_font(),
+            Arc::new(HashMap::from([(sprite_map_key("HdOverlay", None), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(background);
+        graphics.draw_object_overlays(
+            &object,
+            &[],
+            &[],
+            OWNER_NONE,
+            None,
+            8.0,
+            4.0,
+            1.0,
+            0.0,
+            None,
+            None,
+        );
+
+        // The 4x4 ActMap facet at (4,0) reads (8,0,8,8) from the 2x sheet —
+        // the green half — into a 4x4 destination centred on the object,
+        // covering x 6..9 and y 2..5.
+        for (x, y) in [(6u32, 2u32), (9, 2), (6, 5), (9, 5)] {
+            assert_eq!(
+                graphics.surface().get_pixel(x, y),
+                Some(green),
+                "MODE_Action must read its facet through the source definition's Scale"
+            );
+        }
+        assert_eq!(
+            graphics.surface().get_pixel(10, 4),
+            Some(background),
+            "the source scale must not enlarge the destination facet"
+        );
+    }
+
+    #[test]
     fn parallax_action_overlay_ignores_viewport_scroll() {
         // C4Object::Draw resolves its output origin through TargetPos before
         // the face draw (src/C4Object.cpp:2271), and C4GraphicsOverlay::Draw
