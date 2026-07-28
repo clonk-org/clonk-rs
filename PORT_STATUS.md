@@ -419,6 +419,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Open gap (found 2026-07-28, not closed): **point and line raster width does
+  not track world zoom.** `DrawProjection::line_width` is
+  `presentation.scale` alone (`draw_projection`,
+  `crates/clonk-app-render/src/gpu_renderer.rs`), and `rounded_raster_width`
+  turns that into the physical point/line footprint. Because a world vertex's
+  *position* is projected through the same application scale, a PXS point is
+  exactly one world pixel at every `Graphics.Scale` — which is why the
+  "rain is a scatter of single dead pixels at 4K" reading is a symptom of the
+  world being small on a large panel, not of the point size. It becomes a real
+  defect the moment viewport zoom is unpinned from 1.0: the world would
+  magnify while rain, spray, dug-material sparks and every debug line stayed
+  at the unzoomed width. Any zoom work must add the zoom term here, and the
+  frontend must then stop being the only place that knows the zoom.
+
 - Open gap (found 2026-07-27, not closed): **scenario load is ~half the
   process cost and is unoptimized.** `ClonkMars/03_Chaos` takes 13.8-15.7 s to
   load on the reference machine — roughly two minutes on a Pi 4 — and 99% of
