@@ -177,13 +177,16 @@ impl<'a> MakeWriter<'a> for ConsoleLogCapture {
     }
 }
 
-/// The level prefix `C4LogSystem`'s `LogLevelPrefixFormatterFlag` writes ahead
-/// of every GUI line (`src/C4Log.cpp:44-76`).
+/// The severity marker shown ahead of a GUI line. These sinks have no room for
+/// a level column, so the marker is the only thing separating a diagnostic from
+/// the content text around it; every level except `INFO` therefore carries one.
 fn level_prefix(level: Level) -> &'static str {
     match level {
         Level::ERROR => "ERROR: ",
         Level::WARN => "WARNING: ",
-        Level::INFO | Level::DEBUG | Level::TRACE => "",
+        Level::INFO => "",
+        Level::DEBUG => "DEBUG: ",
+        Level::TRACE => "TRACE: ",
     }
 }
 
