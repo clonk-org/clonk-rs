@@ -216,6 +216,36 @@ mod tests {
         )
     }
 
+    /// Path of the fixture that binds this producer to the client that reads it.
+    const SHARED_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../crates/clonk-update/tests/fixtures/manifest.json"
+    );
+
+    #[test]
+    fn the_producer_emits_the_shared_schema_fixture_byte_for_byte() {
+        // `xtask` writes manifests and `clonk-update` reads them, but the two
+        // types are hand-mirrored across crates. This fixture is the only thing
+        // binding them: a field renamed on either side fails here or in
+        // `clonk-update`'s counterpart test, instead of silently shipping a
+        // manifest no client can parse.
+        let expected = std::fs::read(SHARED_FIXTURE).expect("read shared fixture");
+        let actual = manifest().to_bytes().expect("serialise");
+        assert_eq!(
+            String::from_utf8_lossy(&actual),
+            String::from_utf8_lossy(&expected),
+            "producer output drifted from the shared fixture; if this change is \
+             intended, re-run the ignored regenerator and update the client test"
+        );
+    }
+
+    #[test]
+    #[ignore = "regenerates the shared schema fixture"]
+    fn regenerate_shared_schema_fixture() {
+        let bytes = manifest().to_bytes().expect("serialise");
+        std::fs::write(SHARED_FIXTURE, bytes).expect("write fixture");
+    }
+
     #[test]
     fn manifest_bytes_are_stable_across_runs() {
         // A client caches by digest, so iteration-order dependence would look

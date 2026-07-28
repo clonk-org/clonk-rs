@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "version": "0.4.0",
+  "engine_version": [
+    4,
+    9,
+    11,
+    0,
+    362
+  ],
+  "released_at": "2026-07-28T10:00:00Z",
+  "components": [
+    {
+      "name": "content",
+      "targets": {
+        "aarch64-apple-darwin": {
+          "archive": "content-bb.zip",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 250000000,
+          "install": "Contents/Resources/content"
+        },
+        "x86_64-unknown-linux-gnu": {
+          "archive": "content-bb.zip",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 250000000,
+          "install": "content"
+        }
+      }
+    },
+    {
+      "name": "engine",
+      "targets": {
+        "aarch64-apple-darwin": {
+          "archive": "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "size": 18000000,
+          "install": ""
+        },
+        "x86_64-unknown-linux-gnu": {
+          "archive": "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 24000000,
+          "install": ""
+        }
+      }
+    }
+  ]
+}
