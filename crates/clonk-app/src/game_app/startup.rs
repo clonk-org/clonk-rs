@@ -3056,6 +3056,24 @@ impl GameApp {
         }
     }
 
+    /// Name the new-player dialog starts from. `C4PlayerInfoCore::Default`
+    /// hardcodes the German "Neuling" (C4InfoCore.cpp:69) and C++ shows it to
+    /// English players too; "Neuling" is rank 0 of `IDS_RANKS_PLAYER`, so take
+    /// the seed from the localized ladder instead. Deliberate presentation-only
+    /// divergence: the `Player.txt` omit-if-equal write default and the
+    /// missing-`Name=` read fallback both stay "Neuling", so the file still
+    /// round-trips byte-identically with C++.
+    pub(crate) fn new_player_default_name(&self) -> String {
+        const FALLBACK: &str = "Novice";
+        let ladder = self.runtime_resource_text("IDS_RANKS_PLAYER", FALLBACK);
+        ladder
+            .split('|')
+            .next()
+            .filter(|rank| !rank.is_empty())
+            .unwrap_or(FALLBACK)
+            .to_string()
+    }
+
     pub(crate) fn new_startup_player_properties_controller(
         &self,
         color_index: usize,
@@ -3065,6 +3083,7 @@ impl GameApp {
 
         let color_index = color_index % 8;
         let player = PlayerFile {
+            name: self.new_player_default_name(),
             pref_color: color_index as i32,
             pref_color_dw: PLAYER_COLORS[color_index],
             pref_control: 0,

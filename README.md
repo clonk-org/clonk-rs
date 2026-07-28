@@ -40,8 +40,8 @@ By default, the command writes
 `target/dist/clonk-rust-<version>-<target-triple>.zip` (or the equivalent path
 beneath `CARGO_TARGET_DIR`). The archive contains the `clonk-game` launcher,
 the `clonk-app` runtime, the pinned content submodule — base packs plus the
-authorized Eke Reloaded and ClonkMars packs — credits, and project, content,
-and Rust dependency notices. The legacy
+authorized Eke Reloaded and ClonkMars packs — credits, and the project and
+content notices. The legacy
 `c4group` update utility is optional: packaged builds run without it, while a
 copy installed alongside the game is still probed and a broken executable is
 reported before startup.
@@ -61,12 +61,27 @@ The next version comes from the Conventional Commit subjects since the last
 `version.workspace` and nothing is published to a registry — so releases are a
 single tag, not one per crate.
 
-The script bumps that version, refreshes `Cargo.lock`, regenerates
-`licenses/RUST_THIRD_PARTY_LICENSES.txt` (required: the root manifest feeds the
-notice fingerprint, so a bump without it fails `cargo xtask package`), and
-prepends a [`CHANGELOG.md`](CHANGELOG.md) section. It stops there; review the
-result, run the gates, then commit, tag and build the archives with
-`cargo xtask package` on each platform.
+The script bumps that version, refreshes `Cargo.lock` and prepends a
+[`CHANGELOG.md`](CHANGELOG.md) section, then stops. It exits 3 when no
+releasable commits have landed, which is how the scheduled release skips a
+quiet day.
+
+Releases otherwise run themselves: the `Release` workflow fires daily at 10:00
+UTC and, when `Clonk Rust CI` on `main` is green and releasable commits exist,
+bumps, tags, builds all four platform assets and publishes them.
+
+To release without waiting on CI — because it is red, timed out, or
+unavailable — either dispatch `Release` with **force** ticked, which records
+the override in the run log, or push a release commit by hand:
+
+```sh
+scripts/prepare-release.sh
+git commit -am "chore: release <version>"
+git push
+```
+
+The hand-pushed path skips the CI check by design. To build assets without
+releasing anything, run `cargo xtask package` locally on each platform.
 
 See [`AGENTS.md`](AGENTS.md) for engineering constraints,
 [`PORT_STATUS.md`](PORT_STATUS.md) for parity status, and
@@ -92,17 +107,13 @@ The Rust source packages in this Cargo workspace are available under the ISC
 license in [`COPYING`](COPYING), as declared by their Cargo metadata. That
 declaration does **not** relicense the bundled game data: graphics, audio,
 scripts, text, and other assets under [`planet/`](planet/) and the
-[`content/`](content/) submodule remain under their own `COPYING` files and
-the terms collected in [`licenses/`](licenses/), including the Clonk content
-license.
+[`content/`](content/) submodule remain under their own `COPYING` files,
+including the Clonk content license carried by the content submodule.
 
 The Eke Reloaded and ClonkMars packs inside the content submodule are
 redistributed under the specific permission and attribution terms recorded in
 [`THIRD_PARTY_GAME_CONTENT.md`](THIRD_PARTY_GAME_CONTENT.md), not under the
 source or general content licenses.
 
-Third-party Rust dependencies retain their own licenses, collected in
-[`licenses/RUST_THIRD_PARTY_LICENSES.txt`](licenses/RUST_THIRD_PARTY_LICENSES.txt).
-After changing dependencies or Cargo features, regenerate that committed
-notice with `scripts/generate-rust-dependency-notices.sh`; packaging rejects a
-notice that no longer matches the release dependency inputs.
+Third-party Rust dependencies retain their own licenses, as declared by their
+Cargo metadata.

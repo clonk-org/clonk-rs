@@ -65,3 +65,19 @@ commit_parsers = [
   { message = "^chore", skip = true },
   { message = "^Merge", skip = true },
 ]
+
+[bump]
+# The port is deliberately pre-1.0: 1.0.0 would claim a stability and parity
+# level it has not reached. Without this, a single `feat!:` commit bumps
+# 0.1.0 straight to 1.0.0 (verified). Keep the leading zero and let a breaking
+# change move the minor instead; reaching 1.0 stays a deliberate act, done by
+# passing the version explicitly to scripts/prepare-release.sh.
+breaking_always_bump_major = false
+
+# Features move the minor while the major is zero: 0.1.0 -> 0.2.0.
+features_always_bump_minor = true
+
+# Note: any unreleased commit produces at least a patch bump, including
+# docs/ci/chore-only ranges. `no_increment_regex` was measured to have no
+# effect on that, so it is deliberately not set. Releases are cut by running
+# scripts/prepare-release.sh, so the maintainer decides when a bump is earned.

@@ -5529,11 +5529,10 @@ Entrance=1,2,,4
             }
             checked += expected.len();
         }
-        // The census tracks whatever the content submodule currently ships, so
-        // it moves whenever content does; 85 was the count before the packs that
-        // added the ClonkMars and EkeReloaded portraits. The assertion earns its
-        // keep by catching a *silent* loss of portraits from the loader, not by
-        // pinning a particular content revision.
+        // 85 before Queron 3 and the Metal & Magic packs it depends on were
+        // vendored; those add 34 more. The per-directory assertion above is the
+        // real check — this census only guards against the walk silently
+        // covering less content than it should.
         assert_eq!(checked, 119, "recursive shipped portrait census changed");
     }
 

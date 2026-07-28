@@ -4,16 +4,11 @@ set -euo pipefail
 # Prepare a release.
 #
 # Works out the next version from Conventional Commit subjects, bumps the
-# single workspace version, refreshes the lockfile, regenerates the
-# third-party dependency notice, and writes CHANGELOG.md.
+# single workspace version, refreshes the lockfile and writes CHANGELOG.md.
 #
 # There is one version for the whole workspace: every crate inherits
 # `version.workspace = true` and the workspace sets `publish = false`, so
 # nothing reaches a registry and per-crate versions would carry no signal.
-#
-# The notice regeneration is not optional. The workspace version lives in the
-# root Cargo.toml, which is an input to the dependency-notice fingerprint, so a
-# bump without it leaves `cargo xtask package` failing on a stale notice.
 #
 # This deliberately stops before committing, tagging or pushing: the release
 # archives are built locally with `cargo xtask package` (packaging needs the
@@ -23,6 +18,8 @@ set -euo pipefail
 # Usage:
 #   scripts/prepare-release.sh              # version inferred from commits
 #   scripts/prepare-release.sh 1.2.3        # explicit version
+#
+# Exit codes: 0 prepared, 3 nothing to release, anything else a failure.
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
@@ -85,9 +82,11 @@ print(found.group(1))
 PY
 )
 
+# Exit 3 specifically means "no releasable commits", distinct from a genuine
+# failure, so automation can skip quietly without masking a broken script.
 if [[ "$current" == "$version" ]]; then
     echo "workspace version is already $version; nothing to prepare" >&2
-    exit 1
+    exit 3
 fi
 
 echo "preparing release: $current -> $version"
@@ -118,9 +117,6 @@ PY
 # Keep Cargo.lock's workspace-member versions in step with the manifest.
 cargo update --workspace --offline
 
-# Must follow the version bump: the root manifest feeds the notice fingerprint.
-bash "$script_dir/generate-rust-dependency-notices.sh"
-
 "$tool" --config "$repo_root/cliff.toml" --tag "v$version" --unreleased \
     --prepend "$repo_root/CHANGELOG.md"
 
@@ -128,7 +124,7 @@ cat <<EOF
 
 prepared $version. Nothing has been committed, tagged or pushed.
 
-  changed: Cargo.toml, Cargo.lock, licenses/RUST_THIRD_PARTY_LICENSES.txt, CHANGELOG.md
+  changed: Cargo.toml, Cargo.lock, CHANGELOG.md
 
 next:
   1. review the changelog and the version bump

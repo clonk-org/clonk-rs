@@ -2431,7 +2431,9 @@
 
         let controller = app.new_startup_player_properties_controller(7, 4);
         let player = controller.player();
-        assert_eq!(player.name, "Neuling");
+        // No language table is installed here, so both seeds come from their
+        // English fallbacks rather than C++'s hardcoded German "Neuling".
+        assert_eq!(player.name, "Novice");
         assert_eq!(controller.comment(), "I'm new.");
         assert_eq!(player.pref_color, 7);
         assert_eq!(player.pref_color_dw, 0xf08050);
@@ -2448,6 +2450,48 @@
         assert!(controller
             .big_icon_preview()
             .is_some_and(|image| { image.width() <= 64 && image.height() <= 64 }));
+    }
+
+    #[test]
+    fn new_player_dialog_seeds_the_name_from_the_localized_first_player_rank() {
+        // C4PlayerInfoCore::Default hardcodes the German "Neuling"
+        // (C4InfoCore.cpp:69) and C++ seeds the new-player dialog from it even
+        // for English players. "Neuling" is rank 0 of IDS_RANKS_PLAYER, whose
+        // shipped English ladder starts "Novice" (LanguageUS.txt:1280), so seed
+        // the edit box from the localized ladder rather than showing German on
+        // the first screen a new player sees. The Player.txt write default and
+        // the missing-`Name=` read fallback stay "Neuling" for file parity.
+        let mut app = new_menu_app(320, 240);
+        app.startup_tooltip_resources.insert(
+            "IDS_RANKS_PLAYER".to_string(),
+            "Novice|Beginner|Adept".to_string(),
+        );
+
+        assert_eq!(
+            app.new_startup_player_properties_controller(0, 0)
+                .player()
+                .name,
+            "Novice"
+        );
+    }
+
+    #[test]
+    fn new_player_dialog_still_seeds_neuling_from_the_german_rank_ladder() {
+        // The English seed must not be hardcoded: a DE language pack ships
+        // "Neuling" as rank 0 (LanguageDE.txt:1279), so a German-configured
+        // player keeps exactly the C++ wording.
+        let mut app = new_menu_app(320, 240);
+        app.startup_tooltip_resources.insert(
+            "IDS_RANKS_PLAYER".to_string(),
+            "Neuling|Anfänger|Tunichtgut".to_string(),
+        );
+
+        assert_eq!(
+            app.new_startup_player_properties_controller(0, 0)
+                .player()
+                .name,
+            "Neuling"
+        );
     }
 
     #[test]

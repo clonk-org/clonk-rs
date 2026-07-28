@@ -1,0 +1,420 @@
+name: Release
+
+# Tags, builds and publishes a release when a `chore: release <version>` commit
+# lands on main — normally by merging the pull request that `release-prepare.yml`
+# opened.
+#
+# Tagging, building and publishing are three jobs in ONE workflow rather than
+# separate workflows joined by a tag push, because GitHub does not trigger
+# workflows from events created with the built-in GITHUB_TOKEN: a tag pushed
+# here would never fire an `on: push: tags` workflow.
+
+on:
+  # Daily at 10:00 UTC (05:00 CDT / 04:00 CST): if releasable commits landed
+  # since the last tag and main's CI is green, this bumps, tags, builds and
+  # publishes with no interaction. A cadence rather than per-push, because main
+  # takes ~40 commits a day and releasing on each would mean several releases
+  # daily at ~210 billed minutes apiece. Days with no feat/fix/perf commits
+  # skip cleanly (prepare-release.sh exit 3).
+  schedule:
+    - cron: '0 10 * * *'
+  # Reacts to a `chore: release <version>` commit, which is how the
+  # release-prepare pull request publishes when one is used.
+  #
+  # This path deliberately skips the `prepare` job, and with it the CI-green
+  # check: pushing a release commit by hand is the offline escape hatch, for
+  # when CI is broken or unavailable. The auditable equivalent is dispatching
+  # this workflow with force=true.
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version (MAJOR.MINOR.PATCH). Leave blank to infer from commits.'
+        required: false
+        type: string
+      force:
+        description: 'Release even if the latest CI run on main is not green.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Prepare the version
+    # Only the scheduled and manual paths bump. The push path is reacting to a
+    # release commit that already exists.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      # `gh run list --workflow` reads the Actions API; without this it fails
+      # with "Resource not accessible by integration".
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      prepared: ${{ steps.bump.outputs.prepared }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Nothing here reviews the code, so refuse to release a tree whose own
+      # CI is failing. `Clonk Rust CI` runs on every push to main, so its
+      # latest conclusion is an accurate verdict on what is about to ship.
+      - name: Require main's CI to be green
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          # Tolerate a failing lookup: `set -e` would otherwise kill the step
+          # here, before the force branch below could override anything — which
+          # is precisely when an override is wanted. An unknown conclusion is
+          # treated as not-green, so it still blocks unless forced.
+          conclusion=$(gh run list --workflow "Clonk Rust CI" --branch main \
+            --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"' \
+            2>/dev/null || echo "unknown")
+          [[ -n "$conclusion" ]] || conclusion="unknown"
+          echo "latest Clonk Rust CI on main: $conclusion"
+          if [[ "$conclusion" == "success" ]]; then
+            exit 0
+          fi
+          if [[ "$FORCE" == "true" ]]; then
+            # Deliberate override, recorded in the run log so a forced release
+            # is auditable afterwards rather than indistinguishable from a
+            # green one.
+            echo "::warning::releasing with CI '$conclusion' because force was requested"
+            exit 0
+          fi
+          echo "refusing to release: main's CI is '$conclusion'" >&2
+          echo "re-run this workflow with force=true to override" >&2
+          exit 1
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-prepare
+          cache-on-failure: true
+
+      - name: Cache git-cliff
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/release-tools
+          key: git-cliff-${{ runner.os }}-${{ hashFiles('scripts/prepare-release.sh') }}
+
+      # prepare-release.sh runs `cargo update --offline`, which needs the
+      # registry present. On a cold runner cache it would otherwise fail.
+      - name: Populate the cargo registry
+        run: cargo fetch --locked
+
+      - name: Bump and commit
+        id: bump
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          # Exit 3 means "no releasable commits"; any other non-zero is a real
+          # failure and must not be mistaken for a quiet skip.
+          set +e
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            scripts/prepare-release.sh "$REQUESTED_VERSION"
+          else
+            scripts/prepare-release.sh
+          fi
+          status=$?
+          set -e
+          if [[ "$status" -eq 3 ]]; then
+            echo "no releasable commits since the last tag"
+            echo "prepared=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [[ "$status" -ne 0 ]]; then
+            echo "prepare-release.sh failed with status $status" >&2
+            exit "$status"
+          fi
+
+          version=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("Cargo.toml").read_text(encoding="utf-8")
+          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
+          print(re.search(r'^version = "([^"]+)"$', section.group(1), re.M).group(1))
+          PY
+          )
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore: release ${version}"
+          git push origin HEAD:main
+          echo "prepared=true" >> "$GITHUB_OUTPUT"
+
+  tag:
+    name: Tag and draft
+    needs: [prepare]
+    # `always()` keeps the push path working, where prepare is skipped.
+    if: always() && needs.prepare.result != 'failure' && needs.prepare.outputs.prepared != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      release: ${{ steps.resolve.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # main's tip, not the triggering SHA: on the scheduled path the
+          # release commit was created by the prepare job moments ago.
+          ref: main
+          fetch-depth: 0
+
+      - name: Decide whether this commit releases
+        id: resolve
+        env:
+          # Via env, never interpolated into the script: a commit subject is
+          # attacker-influencable text.
+          HEAD_SUBJECT: ${{ github.event.head_commit.message }}
+          DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          subject=${HEAD_SUBJECT%%$'\n'*}
+          if [[ "$DISPATCHED" != "true" && "$subject" != "chore: release "* ]]; then
+            echo "not a release commit: $subject"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("Cargo.toml").read_text(encoding="utf-8")
+          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
+          print(re.search(r'^version = "([^"]+)"$', section.group(1), re.M).group(1))
+          PY
+          )
+
+          # Idempotent: re-running on the same commit must not double-release.
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "v${version} already tagged; nothing to do"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create the tag and a draft release
+        if: steps.resolve.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin "v${VERSION}"
+
+          # Release notes: this version's CHANGELOG.md section, without heading.
+          python3 - "$VERSION" > release-notes.md <<'PY'
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          lines = Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+          start = next(
+              (i for i, line in enumerate(lines) if line.startswith(f"## [{version}]")),
+              None,
+          )
+          if start is None:
+              print(f"Release v{version}.")
+          else:
+              end = next(
+                  (i for i in range(start + 1, len(lines)) if lines[i].startswith("## [")),
+                  len(lines),
+              )
+              print("\n".join(lines[start + 1 : end]).strip())
+          PY
+
+          gh release create "v${VERSION}" \
+            --title "Clonk Rust ${VERSION}" \
+            --notes-file release-notes.md \
+            --draft
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: tag
+    if: needs.tag.outputs.release == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux and windows
+            runner: ubuntu-latest
+            artifact: desktop-linux-windows
+          - name: macos
+            runner: macos-latest
+            artifact: desktop-macos
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ needs.tag.outputs.version }}
+          # Packaging copies the tracked game data, so the submodule is required.
+          # This works only while clonk-rs-content is public.
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-${{ matrix.artifact }}
+          cache-on-failure: true
+
+      - name: Install Linux and Windows build dependencies
+        if: matrix.runner == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config \
+            mingw-w64 \
+            nsis
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: Install macOS cross target
+        if: matrix.runner == 'macos-latest'
+        run: rustup target add x86_64-apple-darwin
+
+      # Built natively first and then invoked directly. Running
+      # `cargo run -p xtask` with CARGO_BUILD_TARGET set would build the tool
+      # *for the target* and fail to execute it.
+      - name: Build the packaging tool
+        run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
+
+      - name: Package Linux
+        if: matrix.runner == 'ubuntu-latest'
+        run: ./target/release/xtask-engine-tools package
+
+      - name: Package Windows installer
+        if: matrix.runner == 'ubuntu-latest'
+        env:
+          CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
+          LIBZ_SYS_STATIC: '1'
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
+          # does not exist in its published crate, so its bundled libpng only
+          # finds zlib.h where the host happens to ship one. mingw does not.
+          # Resolved dynamically rather than pinned to a libz-sys version.
+          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
+          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
+            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
+            exit 1
+          fi
+          export CFLAGS_x86_64_pc_windows_gnu="-I$zlib_dir"
+          ./target/release/xtask-engine-tools package --no-archive
+
+          makensis -NOCD \
+            -DVERSION="$VERSION" \
+            -DPAYLOAD="$PWD/target/dist/clonk-rust" \
+            -DOUTFILE="$PWD/target/dist/clonk-rust-$VERSION-x86_64-windows-setup.exe" \
+            scripts/windows-installer.nsi
+
+      - name: Package macOS
+        if: matrix.runner == 'macos-latest'
+        run: |
+          ./target/release/xtask-engine-tools package
+          CARGO_BUILD_TARGET=x86_64-apple-darwin ./target/release/xtask-engine-tools package
+
+      - name: Check the artifacts look real
+        run: |
+          shopt -s nullglob
+          assets=(target/dist/clonk-rust-*.zip target/dist/clonk-rust-*.dmg target/dist/clonk-rust-*.exe)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "packaging produced no assets" >&2
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            size=$(wc -c < "$asset")
+            # The payload is ~240 MB of game data; anything tiny means the
+            # packaging silently produced an empty container.
+            if [[ "$size" -lt 100000000 ]]; then
+              echo "$asset is only $size bytes" >&2
+              exit 1
+            fi
+            echo "ok $(basename "$asset") $size bytes"
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/dist/clonk-rust-*.zip
+            target/dist/clonk-rust-*.dmg
+            target/dist/clonk-rust-*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs: [tag, build]
+    if: needs.tag.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          cd assets
+          sha256sum clonk-rust-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "v${VERSION}" clonk-rust-* SHA256SUMS.txt --clobber
+          gh release edit "v${VERSION}" --draft=false --latest
