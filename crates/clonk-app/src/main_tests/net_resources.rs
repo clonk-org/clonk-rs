@@ -1849,7 +1849,7 @@
         }
         Arc::make_mut(&mut assets.hud_graphics).captain = None;
         app.ingame_menu
-            .replace(app.local_owner, Some(IngameMenuState::surrender_menu()));
+            .replace(app.local_owner, Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())));
         app.scoreboard_initial_reconcile_pending = true;
         let before = runtime_global_ui_snapshot(&app);
         let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -3668,7 +3668,7 @@
             menu.local_owner,
             Some(IngameMenuState::options_menu(
                 &menu.option_flags(menu.local_owner),
-                1,
+                1, &IngameMenuLabels::default(),
             )),
         );
         menu.apply_ingame_menu_action(MenuAction::ToggleMusic)

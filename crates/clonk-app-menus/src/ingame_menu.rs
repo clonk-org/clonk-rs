@@ -346,16 +346,228 @@ impl UpperBoardMode {
             UpperBoardMode::Mini => UpperBoardMode::Hide,
         }
     }
+}
 
-    /// `IDS_MNU_UPPERBOARD_*` (C4MainMenu.cpp:606-623).
-    fn label(self) -> &'static str {
-        match self {
-            UpperBoardMode::Hide => "Off",
-            UpperBoardMode::Full => "Normal",
-            UpperBoardMode::Small => "Small",
-            UpperBoardMode::Mini => "Minimal at bottom",
+/// Every `LoadResStr` value the in-game main-menu subtree draws
+/// (C4MainMenu.cpp:59-732; C4Player.cpp:1801). C++ resolves each one against
+/// the active language table at page-construction time, so a language change
+/// reaches the menus through the next `Activate*`/refill.
+///
+/// `Default` reproduces the shipped `LanguageUS.txt` values verbatim, which is
+/// what C4ResStrTable falls back to for a missing key, so the pure
+/// constructors and their presentation tests stay usable without a table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IngameMenuLabels {
+    pub main_caption: String,
+    pub observer_caption: String,
+    pub goals: String,
+    pub goals_info: String,
+    pub rules: String,
+    pub rules_info: String,
+    pub view: String,
+    pub view_info: String,
+    pub attack_page: String,
+    pub attack_page_info: String,
+    pub select_team: String,
+    pub select_team_info: String,
+    pub join_team: String,
+    pub new_player: String,
+    pub new_player_info: String,
+    pub new_player_item: String,
+    pub no_player_files: String,
+    pub savegame: String,
+    pub savegame_info: String,
+    pub options: String,
+    pub options_info: String,
+    pub disconnect: String,
+    pub disconnect_host_info: String,
+    pub disconnect_client_info: String,
+    pub disconnect_client_caption: String,
+    pub disconnect_server_caption: String,
+    pub surrender: String,
+    pub surrender_info: String,
+    pub surrender_caption: String,
+    pub abort: String,
+    pub abort_info: String,
+    pub attack: String,
+    pub no_attack: String,
+    pub attack_hostile: String,
+    pub attack_friendly: String,
+    pub attack_not: String,
+    pub attack_info: String,
+    pub free_view: String,
+    pub free_view_info: String,
+    pub follow_view: String,
+    pub sound: String,
+    pub music: String,
+    pub mouse_control: String,
+    pub display: String,
+    pub player_names: String,
+    pub player_names_info: String,
+    pub clonk_names: String,
+    pub clonk_names_info: String,
+    pub portraits: String,
+    pub show_commands: String,
+    pub show_command_keys: String,
+    pub upper_board: String,
+    pub upper_board_off: String,
+    pub upper_board_normal: String,
+    pub upper_board_small: String,
+    pub upper_board_mini: String,
+    pub fps: String,
+    pub clock: String,
+    pub white_chat: String,
+    pub white_chat_info: String,
+    pub yes: String,
+    pub no: String,
+}
+
+impl Default for IngameMenuLabels {
+    fn default() -> Self {
+        Self {
+            main_caption: "Player Menu".to_string(),
+            observer_caption: "Observer Menu".to_string(),
+            goals: "Goals".to_string(),
+            goals_info: "The round ends when all goals are fulfilled.".to_string(),
+            rules: "Rules".to_string(),
+            rules_info: "Rules for this round.".to_string(),
+            view: "View".to_string(),
+            view_info: "Select view mode.".to_string(),
+            attack_page: "Attack".to_string(),
+            attack_page_info: "Order your clonks to attack other players.".to_string(),
+            select_team: "Select team".to_string(),
+            select_team_info: "Allows you to join a different team.".to_string(),
+            join_team: "Join team %s".to_string(),
+            new_player: "Join player".to_string(),
+            new_player_info:
+                "Have another player join the game (player files from the working directory)."
+                    .to_string(),
+            new_player_item: "Join player: %s".to_string(),
+            no_player_files: "No additional player files available.".to_string(),
+            savegame: "Save game".to_string(),
+            savegame_info: "Save this game so it can be resumed later.".to_string(),
+            options: "Options".to_string(),
+            options_info: "Change program options.".to_string(),
+            disconnect: "Disconnect".to_string(),
+            disconnect_host_info: "Kick certain clients from the game.".to_string(),
+            disconnect_client_info: "Disconnect the game from the host.".to_string(),
+            disconnect_client_caption: "Disconnect client".to_string(),
+            disconnect_server_caption: "Disconnect from host?".to_string(),
+            surrender: "Surrender".to_string(),
+            surrender_info: "Leave the game with evaluation.".to_string(),
+            surrender_caption: "Are you sure?".to_string(),
+            abort: "Abort round".to_string(),
+            abort_info: "Abort the round without evaluation.".to_string(),
+            attack: "Attack %s".to_string(),
+            no_attack: "Don't attack %s".to_string(),
+            attack_hostile: "hostile ".to_string(),
+            attack_friendly: "friendly ".to_string(),
+            attack_not: "not ".to_string(),
+            attack_info: "%s is currently %sand will %sbe attacked.".to_string(),
+            free_view: "free view".to_string(),
+            free_view_info: "Freely scroll around the map.".to_string(),
+            follow_view: "Follow view of player %s.".to_string(),
+            sound: "Sound".to_string(),
+            music: "Music".to_string(),
+            mouse_control: "Mouse control".to_string(),
+            display: "Display".to_string(),
+            player_names: "Player names".to_string(),
+            player_names_info: "Displays player names above enemy clonks.".to_string(),
+            clonk_names: "Clonk names".to_string(),
+            clonk_names_info: "Displays clonk names above enemy clonks.".to_string(),
+            portraits: "Portraits".to_string(),
+            show_commands: "Commands".to_string(),
+            show_command_keys: "Keys".to_string(),
+            upper_board: "Title board".to_string(),
+            upper_board_off: "Off".to_string(),
+            upper_board_normal: "Normal".to_string(),
+            upper_board_small: "Small".to_string(),
+            upper_board_mini: "Minimal at bottom".to_string(),
+            fps: "FPS Display".to_string(),
+            clock: "Clock".to_string(),
+            white_chat: "White Chat".to_string(),
+            // C4ResStrTable rewrites the table's `\n` escape as CRLF
+            // (src/C4ResStrTable.cpp:44-50), so the frozen fallback carries it too.
+            white_chat_info: "Displays messages in the ingame chat in white and only the sender in player color.\r\nMay improve readability.".to_string(),
+            yes: "Yes".to_string(),
+            no: "No".to_string(),
         }
     }
+}
+
+impl IngameMenuLabels {
+    /// `IDS_MNU_UPPERBOARD_*` (C4MainMenu.cpp:606-623). An out-of-range mode
+    /// renders `???`, which cannot happen through `UpperBoardMode`.
+    fn upper_board_mode(&self, mode: UpperBoardMode) -> &str {
+        match mode {
+            UpperBoardMode::Hide => &self.upper_board_off,
+            UpperBoardMode::Full => &self.upper_board_normal,
+            UpperBoardMode::Small => &self.upper_board_small,
+            UpperBoardMode::Mini => &self.upper_board_mini,
+        }
+    }
+
+    /// `text = IDS_MNU_UPPERBOARD + ": " + modeName` (C4MainMenu.cpp:601-623).
+    fn upper_board_caption(&self, mode: UpperBoardMode) -> String {
+        format!("{}: {}", self.upper_board, self.upper_board_mode(mode))
+    }
+
+    fn hostility_caption(&self, name: &str, hostile: bool) -> String {
+        let template = if hostile {
+            &self.attack
+        } else {
+            &self.no_attack
+        };
+        substitute_resource_arguments(template, &[name])
+    }
+
+    /// `IDS_MENU_ATTACKINFO` with the `hostile `/`friendly ` and `not `
+    /// fragments, each of which carries its own trailing space in the native
+    /// table (C4MainMenu.cpp:154-166).
+    fn hostility_info(&self, name: &str, hostile: bool, opponent_hostile: bool) -> String {
+        let relation = if opponent_hostile {
+            &self.attack_hostile
+        } else {
+            &self.attack_friendly
+        };
+        let negation = if hostile {
+            ""
+        } else {
+            self.attack_not.as_str()
+        };
+        substitute_resource_arguments(&self.attack_info, &[name, relation, negation])
+    }
+}
+
+/// C4ResStrTable substitutes positional `%s` arguments in order. Arguments are
+/// inserted verbatim, so a literal placeholder inside a player or team name
+/// cannot consume the next slot.
+fn substitute_resource_arguments(template: &str, arguments: &[&str]) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut remainder = template;
+    let mut arguments = arguments.iter();
+    while let Some(placeholder) = remainder.find('%') {
+        output.push_str(&remainder[..placeholder]);
+        let rest = &remainder[placeholder..];
+        let mut characters = rest.chars();
+        characters.next();
+        match characters.next() {
+            Some('s' | 'd' | 'i') => match arguments.next() {
+                Some(argument) => output.push_str(argument),
+                None => output.push_str(&rest[..2]),
+            },
+            Some('%') => output.push('%'),
+            Some(_) => output.push_str(&rest[..2]),
+            None => {
+                output.push('%');
+                remainder = "";
+                break;
+            }
+        }
+        remainder = &rest[2..];
+    }
+    output.push_str(remainder);
+    output
 }
 
 /// Display toggles and renderer flags, with defaults from
@@ -578,7 +790,11 @@ impl IngameMenuState {
         self.player
     }
 
-    fn team_items(teams: &[TeamSelectionEntry], switching: bool) -> Vec<MenuItem> {
+    fn team_items(
+        teams: &[TeamSelectionEntry],
+        switching: bool,
+        labels: &IngameMenuLabels,
+    ) -> Vec<MenuItem> {
         teams
             .iter()
             .map(|team| {
@@ -590,18 +806,26 @@ impl IngameMenuState {
                     } else {
                         MenuAction::SelectTeam(team.id)
                     },
-                    Some(&format!("Join team {}", team.caption)),
+                    Some(&substitute_resource_arguments(
+                        &labels.join_team,
+                        &[&team.caption],
+                    )),
                 )
             })
             .collect()
     }
 
-    fn team_menu(teams: &[TeamSelectionEntry], switching: bool, return_to_main: bool) -> Self {
+    fn team_menu(
+        teams: &[TeamSelectionEntry],
+        switching: bool,
+        return_to_main: bool,
+        labels: &IngameMenuLabels,
+    ) -> Self {
         let mut menu = Self::new(
             MenuPage::TeamSelection,
-            "Select team",
+            labels.select_team.clone(),
             MenuSymbol::GuiIcon(ICO_TEAM),
-            Self::team_items(teams, switching),
+            Self::team_items(teams, switching, labels),
             false,
             return_to_main.then_some(MenuAction::ActivateMain),
         );
@@ -620,10 +844,15 @@ impl IngameMenuState {
     /// page. `C4Menu::Execute` runs this for every active menu whenever
     /// `Game.iTick35` wraps (C4Menu.cpp:990-1000), so membership captions and
     /// the generated-team row follow live joins and switches.
-    pub fn refill_team(&mut self, teams: &[TeamSelectionEntry], switching: bool) {
+    pub fn refill_team(
+        &mut self,
+        teams: &[TeamSelectionEntry],
+        switching: bool,
+        labels: &IngameMenuLabels,
+    ) {
         debug_assert_eq!(self.page, MenuPage::TeamSelection);
         let previous_count = self.items.len();
-        self.items = Self::team_items(teams, switching);
+        self.items = Self::team_items(teams, switching, labels);
         if self.selection >= self.items.len() {
             self.selection = self.items.len().saturating_sub(1);
             self.time_on_selection = 0;
@@ -653,132 +882,133 @@ impl IngameMenuState {
     ///
     /// C++ resolves each team's `IconSpec`, then falls back to a colorized
     /// crew for occupied teams or the team GUI icon for empty teams.
-    pub fn team_selection_menu(teams: &[TeamSelectionEntry]) -> Self {
-        Self::team_menu(teams, false, false)
+    pub fn team_selection_menu(teams: &[TeamSelectionEntry], labels: &IngameMenuLabels) -> Self {
+        Self::team_menu(teams, false, false, labels)
     }
 
     /// `ActivateMenuTeamSelection(true)` while the player is still in
     /// `PS_TeamSelection`: keep `TeamSel:<id>` actions, but install the
     /// back-to-main close command (C4Player.cpp:1762-1771).
-    pub fn team_selection_menu_from_main(teams: &[TeamSelectionEntry]) -> Self {
-        Self::team_menu(teams, false, true)
+    pub fn team_selection_menu_from_main(
+        teams: &[TeamSelectionEntry],
+        labels: &IngameMenuLabels,
+    ) -> Self {
+        Self::team_menu(teams, false, true, labels)
     }
 
     /// Mid-round `C4Player::ActivateMenuTeamSelection(true)`: the same team
     /// rows dispatch `TeamSwitch:<id>`, and closing returns to the main page
     /// (C4Player.cpp:1762-1771; C4MainMenu.cpp:175-232,909-918).
-    pub fn team_switch_menu(teams: &[TeamSelectionEntry]) -> Self {
-        Self::team_menu(teams, true, true)
+    pub fn team_switch_menu(teams: &[TeamSelectionEntry], labels: &IngameMenuLabels) -> Self {
+        Self::team_menu(teams, true, true, labels)
     }
 
     /// `C4MainMenu::ActivateMain` (C4MainMenu.cpp:643-715). Returns `None`
     /// when no entry applies (`if (GetItemCount() == 0) Close(false)`).
-    pub fn main_menu(cond: &MainMenuConditions) -> Option<Self> {
+    pub fn main_menu(cond: &MainMenuConditions, labels: &IngameMenuLabels) -> Option<Self> {
         let mut items = Vec::new();
         // Goals + Rules (player menu only, C4MainMenu.cpp:659-665)
         if cond.has_player {
             items.push(MenuItem::new(
-                "Goals",
+                labels.goals.clone(),
                 MenuSymbol::Menu(4),
                 MenuAction::ActivateGoals,
-                Some("The round ends when all goals are fulfilled."),
+                Some(&labels.goals_info),
             ));
             items.push(MenuItem::new(
-                "Rules",
+                labels.rules.clone(),
                 MenuSymbol::Menu(5),
                 MenuAction::ActivateRules,
-                Some("Rules for this round."),
+                Some(&labels.rules_info),
             ));
         }
         // Observer menu in free viewport (C4MainMenu.cpp:666-670)
         if !cond.has_player {
             items.push(MenuItem::new(
-                "View",
+                labels.view.clone(),
                 MenuSymbol::GuiIcon(ICO_VIEW),
                 MenuAction::ActivateObserver,
-                Some("Select view mode."),
+                Some(&labels.view_info),
             ));
         }
         // Hostility (C4MainMenu.cpp:671-676)
         if cond.has_player && cond.player_count > 1 {
             items.push(MenuItem::new(
-                "Attack",
+                labels.attack_page.clone(),
                 MenuSymbol::Menu(7),
                 MenuAction::ActivateHostility,
-                Some("Order your clonks to attack other players."),
+                Some(&labels.attack_page_info),
             ));
         }
         // Team change (C4MainMenu.cpp:677-682)
         if cond.has_player && cond.team_switch_allowed {
             items.push(MenuItem::new(
-                "Select team",
+                labels.select_team.clone(),
                 MenuSymbol::GuiIcon(ICO_TEAM),
                 MenuAction::ActivateTeamSelection,
-                Some("Allows you to join a different team."),
+                Some(&labels.select_team_info),
             ));
         }
         // Player join (C4MainMenu.cpp:683-687)
         if cond.player_count < cond.max_players && !cond.is_league {
             items.push(MenuItem::new(
-                "Join player",
+                labels.new_player.clone(),
                 MenuSymbol::PlayerColor,
                 MenuAction::ActivateNewPlayer,
-                Some(
-                    "Have another player join the game (player files from the working directory).",
-                ),
+                Some(&labels.new_player_info),
             ));
         }
         // Save game (C4MainMenu.cpp:688-692)
         if cond.has_player && (!cond.network_enabled || cond.network_host) {
             items.push(MenuItem::new(
-                "Save game",
+                labels.savegame.clone(),
                 MenuSymbol::Menu(0),
                 MenuAction::ActivateSavegame,
-                Some("Save this game so it can be resumed later."),
+                Some(&labels.savegame_info),
             ));
         }
         // Options (C4MainMenu.cpp:693-694)
         items.push(MenuItem::new(
-            "Options",
+            labels.options.clone(),
             MenuSymbol::Options(0),
             MenuAction::ActivateOptions,
-            Some("Change program options."),
+            Some(&labels.options_info),
         ));
         // Disconnect (C4MainMenu.cpp:695-704)
         if cond.network_enabled {
             if cond.network_host && cond.network_has_clients {
                 items.push(MenuItem::new(
-                    "Disconnect",
+                    labels.disconnect.clone(),
                     MenuSymbol::GuiIcon(ICO_DISCONNECT),
                     MenuAction::ActivateHostDisconnect,
-                    Some("Kick certain clients from the game."),
+                    Some(&labels.disconnect_host_info),
                 ));
             }
             if !cond.network_host {
                 items.push(MenuItem::new(
-                    "Disconnect",
+                    labels.disconnect.clone(),
                     MenuSymbol::GuiIcon(ICO_DISCONNECT),
                     MenuAction::ActivateClientDisconnect,
-                    Some("Disconnect the game from the host."),
+                    Some(&labels.disconnect_client_info),
                 ));
             }
         }
         // Surrender (C4MainMenu.cpp:705-707)
         if cond.has_player {
             items.push(MenuItem::new(
-                "Surrender",
+                labels.surrender.clone(),
                 MenuSymbol::GuiIcon(ICO_SURRENDER),
                 MenuAction::ActivateSurrender,
-                Some("Leave the game with evaluation."),
+                Some(&labels.surrender_info),
             ));
         }
         // Abort (C4MainMenu.cpp:708-710)
         if cond.is_fullscreen {
             items.push(MenuItem::new(
-                "Abort round",
+                labels.abort.clone(),
                 MenuSymbol::GuiIcon(ICO_EXIT),
                 MenuAction::Abort,
-                Some("Abort the round without evaluation."),
+                Some(&labels.abort_info),
             ));
         }
         // No empty menus (C4MainMenu.cpp:711-712)
@@ -790,9 +1020,9 @@ impl IngameMenuState {
         Some(Self::new(
             MenuPage::Main,
             if cond.has_player {
-                "Player Menu"
+                labels.main_caption.clone()
             } else {
-                "Observer Menu"
+                labels.observer_caption.clone()
             },
             MenuSymbol::OkCancel(1, 1),
             items,
@@ -801,31 +1031,21 @@ impl IngameMenuState {
         ))
     }
 
-    fn hostility_items(entries: &[HostilityEntry]) -> Vec<MenuItem> {
+    fn hostility_items(entries: &[HostilityEntry], labels: &IngameMenuLabels) -> Vec<MenuItem> {
         entries
             .iter()
             .map(|entry| {
-                let caption = if entry.hostile {
-                    format!("Attack {}", entry.name)
-                } else {
-                    format!("Don't attack {}", entry.name)
-                };
-                let relation = if entry.opponent_hostile {
-                    "hostile"
-                } else {
-                    "friendly"
-                };
-                let not_attacked = if entry.hostile { "" } else { "not " };
                 MenuItem::new(
-                    caption,
+                    labels.hostility_caption(&entry.name, entry.hostile),
                     MenuSymbol::Hostility {
                         opponent: entry.opponent,
                         hostile: entry.hostile,
                     },
                     MenuAction::ToggleHostility(entry.opponent),
-                    Some(&format!(
-                        "{} is currently {} and will {}be attacked.",
-                        entry.name, relation, not_attacked
+                    Some(&labels.hostility_info(
+                        &entry.name,
+                        entry.hostile,
+                        entry.opponent_hostile,
                     )),
                 )
             })
@@ -834,12 +1054,12 @@ impl IngameMenuState {
 
     /// `C4MainMenu::ActivateHostility` and its first refill
     /// (C4MainMenu.cpp:138-168,717-732).
-    pub fn hostility_menu(entries: &[HostilityEntry]) -> Self {
+    pub fn hostility_menu(entries: &[HostilityEntry], labels: &IngameMenuLabels) -> Self {
         let mut menu = Self::new(
             MenuPage::Hostility,
-            "Attack",
+            labels.attack_page.clone(),
             MenuSymbol::Menu(7),
-            Self::hostility_items(entries),
+            Self::hostility_items(entries, labels),
             true,
             Some(MenuAction::ActivateMain),
         );
@@ -850,10 +1070,10 @@ impl IngameMenuState {
     /// Native `ClearItems(false)` + `AdjustSelection` refill. Keeping the
     /// menu instance preserves its permanent state, dragged position,
     /// selection timer and numeric selection across the Tick35 rebuild.
-    pub fn refill_hostility(&mut self, entries: &[HostilityEntry]) {
+    pub fn refill_hostility(&mut self, entries: &[HostilityEntry], labels: &IngameMenuLabels) {
         debug_assert_eq!(self.page, MenuPage::Hostility);
         let previous_count = self.items.len();
-        self.items = Self::hostility_items(entries);
+        self.items = Self::hostility_items(entries, labels);
         if self.selection >= self.items.len() {
             self.selection = self.items.len().saturating_sub(1);
             self.time_on_selection = 0;
@@ -875,25 +1095,32 @@ impl IngameMenuState {
     /// (C4MainMenu.cpp:235-273,950-961): Free first, then each visible
     /// runtime player in player-list order. The page is non-permanent, so
     /// Enter closes it before dispatching the selected `Observe:*` action.
-    pub fn observer_menu(players: &[ObserverPlayerEntry], current_target: ObserverTarget) -> Self {
+    pub fn observer_menu(
+        players: &[ObserverPlayerEntry],
+        current_target: ObserverTarget,
+        labels: &IngameMenuLabels,
+    ) -> Self {
         let mut items = Vec::with_capacity(players.len() + 1);
         items.push(MenuItem::new(
-            "free view",
+            labels.free_view.clone(),
             MenuSymbol::GuiIcon(ICO_STAR),
             MenuAction::Observe(ObserverTarget::Free),
-            Some("Freely scroll around the map."),
+            Some(&labels.free_view_info),
         ));
         items.extend(players.iter().map(|player| {
             MenuItem::new(
                 player.name.clone(),
                 MenuSymbol::PlayerColor,
                 MenuAction::Observe(ObserverTarget::Player(player.id)),
-                Some(&format!("Follow view of player {}.", player.name)),
+                Some(&substitute_resource_arguments(
+                    &labels.follow_view,
+                    &[&player.name],
+                )),
             )
         }));
         let mut menu = Self::new(
             MenuPage::Observer,
-            "View",
+            labels.view.clone(),
             MenuSymbol::GuiIcon(ICO_VIEW),
             items,
             false,
@@ -909,16 +1136,16 @@ impl IngameMenuState {
     }
 
     /// `C4MainMenu::ActivateOptions` (C4MainMenu.cpp:553-580).
-    pub fn options_menu(flags: &OptionFlags, selection: usize) -> Self {
+    pub fn options_menu(flags: &OptionFlags, selection: usize, labels: &IngameMenuLabels) -> Self {
         let mut items = vec![
             MenuItem::new(
-                "Sound",
+                labels.sound.clone(),
                 MenuSymbol::Options(17 + u8::from(flags.sound)),
                 MenuAction::ToggleSound,
                 None,
             ),
             MenuItem::new(
-                "Music",
+                labels.music.clone(),
                 MenuSymbol::Options(1 + u8::from(flags.music)),
                 MenuAction::ToggleMusic,
                 None,
@@ -926,21 +1153,21 @@ impl IngameMenuState {
         ];
         if flags.mouse_shown {
             items.push(MenuItem::new(
-                "Mouse control",
+                labels.mouse_control.clone(),
                 MenuSymbol::Options(11 + u8::from(flags.mouse)),
                 MenuAction::ToggleMouseControl,
                 None,
             ));
         }
         items.push(MenuItem::new(
-            "Display",
+            labels.display.clone(),
             MenuSymbol::Menu(8),
             MenuAction::ActivateDisplay,
             None,
         ));
         let mut menu = Self::new(
             MenuPage::Options,
-            "Options",
+            labels.options.clone(),
             MenuSymbol::Options(0),
             items,
             true,
@@ -951,34 +1178,34 @@ impl IngameMenuState {
     }
 
     /// `C4MainMenu::ActivateDisplay` (C4MainMenu.cpp:582-641).
-    pub fn display_menu(flags: &DisplayFlags, selection: usize) -> Self {
+    pub fn display_menu(flags: &DisplayFlags, selection: usize, labels: &IngameMenuLabels) -> Self {
         let mut items = vec![
             MenuItem::new(
-                "Player names",
+                labels.player_names.clone(),
                 MenuSymbol::Options(7 + u8::from(flags.player_names)),
                 MenuAction::Display(DisplayToggle::PlayerNames),
-                Some("Displays player names above enemy clonks."),
+                Some(&labels.player_names_info),
             ),
             MenuItem::new(
-                "Clonk names",
+                labels.clonk_names.clone(),
                 MenuSymbol::Options(9 + u8::from(flags.clonk_names)),
                 MenuAction::Display(DisplayToggle::ClonkNames),
-                Some("Displays clonk names above enemy clonks."),
+                Some(&labels.clonk_names_info),
             ),
             MenuItem::new(
-                "Portraits",
+                labels.portraits.clone(),
                 MenuSymbol::Options(13 + u8::from(flags.portraits)),
                 MenuAction::Display(DisplayToggle::Portraits),
                 None,
             ),
             MenuItem::new(
-                "Commands",
+                labels.show_commands.clone(),
                 MenuSymbol::Options(19 + u8::from(flags.show_commands)),
                 MenuAction::Display(DisplayToggle::ShowCommands),
                 None,
             ),
             MenuItem::new(
-                "Keys",
+                labels.show_command_keys.clone(),
                 MenuSymbol::Options(21 + u8::from(flags.show_command_keys)),
                 MenuAction::Display(DisplayToggle::ShowCommandKeys),
                 None,
@@ -986,33 +1213,33 @@ impl IngameMenuState {
         ];
         if flags.is_fullscreen {
             items.push(MenuItem::new(
-                format!("Title board: {}", flags.upper_board.label()),
+                labels.upper_board_caption(flags.upper_board),
                 MenuSymbol::Options(3 + u8::from(flags.upper_board != UpperBoardMode::Hide)),
                 MenuAction::Display(DisplayToggle::UpperBoard),
                 None,
             ));
             items.push(MenuItem::new(
-                "FPS Display",
+                labels.fps.clone(),
                 MenuSymbol::Options(5 + u8::from(flags.fps)),
                 MenuAction::Display(DisplayToggle::Fps),
                 None,
             ));
             items.push(MenuItem::new(
-                "Clock",
+                labels.clock.clone(),
                 MenuSymbol::Options(15 + u8::from(flags.clock)),
                 MenuAction::Display(DisplayToggle::Clock),
                 None,
             ));
             items.push(MenuItem::new(
-                "White Chat",
+                labels.white_chat.clone(),
                 MenuSymbol::Options(3 + u8::from(flags.white_chat)),
                 MenuAction::Display(DisplayToggle::WhiteChat),
-                Some("Displays messages in the ingame chat in white and only the sender in player color.\nMay improve readability."),
+                Some(&labels.white_chat_info),
             ));
         }
         let mut menu = Self::new(
             MenuPage::Display,
-            "Display",
+            labels.display.clone(),
             MenuSymbol::Menu(8),
             items,
             true,
@@ -1024,26 +1251,26 @@ impl IngameMenuState {
 
     /// `C4MainMenu::ActivateSavegame` (C4MainMenu.cpp:422-500): ten slots,
     /// each captioned IDS_MENU_CPSAVEGAME with the slot-number icon.
-    pub fn savegame_menu(slots: &[SaveSlotState; 10]) -> Self {
+    pub fn savegame_menu(slots: &[SaveSlotState; 10], labels: &IngameMenuLabels) -> Self {
         let items = slots
             .iter()
             .enumerate()
             .map(|(index, slot)| {
                 let number = (index + 1) as u8;
                 MenuItem::new(
-                    "Save game",
+                    labels.savegame.clone(),
                     MenuSymbol::SaveSlot {
                         slot: number,
                         free: slot.free,
                     },
                     MenuAction::SaveSlot(number),
-                    Some("Save this game so it can be resumed later."),
+                    Some(&labels.savegame_info),
                 )
             })
             .collect();
         Self::new(
             MenuPage::Savegame,
-            "Save game",
+            labels.savegame.clone(),
             MenuSymbol::Menu(0),
             items,
             true,
@@ -1052,19 +1279,24 @@ impl IngameMenuState {
     }
 
     /// `C4MainMenu::ActivateSurrender` (C4MainMenu.cpp:538-551).
-    pub fn surrender_menu() -> Self {
+    pub fn surrender_menu(labels: &IngameMenuLabels) -> Self {
         Self::new(
             MenuPage::Surrender,
-            "Surrender",
+            labels.surrender_caption.clone(),
             MenuSymbol::GuiIcon(ICO_SURRENDER),
             vec![
                 MenuItem::new(
-                    "Yes",
+                    labels.yes.clone(),
                     MenuSymbol::OkCancel(3, 0),
                     MenuAction::Surrender,
                     None,
                 ),
-                MenuItem::new("No", MenuSymbol::OkCancel(1, 0), MenuAction::NoOp, None),
+                MenuItem::new(
+                    labels.no.clone(),
+                    MenuSymbol::OkCancel(1, 0),
+                    MenuAction::NoOp,
+                    None,
+                ),
             ],
             false,
             Some(MenuAction::ActivateMain),
@@ -1072,14 +1304,24 @@ impl IngameMenuState {
     }
 
     /// `C4MainMenu::ActivateClient` (C4MainMenu.cpp:522-536).
-    pub fn client_disconnect_menu() -> Self {
+    pub fn client_disconnect_menu(labels: &IngameMenuLabels) -> Self {
         Self::new(
             MenuPage::ClientDisconnect,
-            "Disconnect from server",
+            labels.disconnect_server_caption.clone(),
             MenuSymbol::GuiIcon(ICO_DISCONNECT),
             vec![
-                MenuItem::new("Yes", MenuSymbol::OkCancel(3, 0), MenuAction::Part, None),
-                MenuItem::new("No", MenuSymbol::OkCancel(1, 0), MenuAction::NoOp, None),
+                MenuItem::new(
+                    labels.yes.clone(),
+                    MenuSymbol::OkCancel(3, 0),
+                    MenuAction::Part,
+                    None,
+                ),
+                MenuItem::new(
+                    labels.no.clone(),
+                    MenuSymbol::OkCancel(1, 0),
+                    MenuAction::NoOp,
+                    None,
+                ),
             ],
             false,
             Some(MenuAction::ActivateMain),
@@ -1089,7 +1331,10 @@ impl IngameMenuState {
     /// `C4MainMenu::ActivateHost` (C4MainMenu.cpp:502-518). Every registered
     /// client is selectable, including host ID zero (whose command is a
     /// deliberate no-op), and the permanent page stays open after commands.
-    pub fn host_disconnect_menu(clients: &[HostDisconnectClientEntry]) -> Self {
+    pub fn host_disconnect_menu(
+        clients: &[HostDisconnectClientEntry],
+        labels: &IngameMenuLabels,
+    ) -> Self {
         let items = clients
             .iter()
             .map(|client| {
@@ -1110,7 +1355,7 @@ impl IngameMenuState {
             .collect();
         Self::new(
             MenuPage::HostDisconnect,
-            "Disconnect client",
+            labels.disconnect_client_caption.clone(),
             MenuSymbol::GuiIcon(ICO_DISCONNECT),
             items,
             true,
@@ -1119,7 +1364,7 @@ impl IngameMenuState {
     }
 
     /// `C4MainMenu::ActivateGoals` (C4MainMenu.cpp:332-380).
-    pub fn goals_menu(goals: &[GoalRuleEntry]) -> Self {
+    pub fn goals_menu(goals: &[GoalRuleEntry], labels: &IngameMenuLabels) -> Self {
         let items = goals
             .iter()
             .map(|goal| {
@@ -1136,7 +1381,7 @@ impl IngameMenuState {
             .collect();
         Self::new(
             MenuPage::Goals,
-            "Goals",
+            labels.goals.clone(),
             MenuSymbol::Menu(4),
             items,
             false,
@@ -1145,7 +1390,7 @@ impl IngameMenuState {
     }
 
     /// `C4MainMenu::ActivateRules` (C4MainMenu.cpp:382-405).
-    pub fn rules_menu(rules: &[GoalRuleEntry]) -> Self {
+    pub fn rules_menu(rules: &[GoalRuleEntry], labels: &IngameMenuLabels) -> Self {
         let items = rules
             .iter()
             .map(|rule| {
@@ -1162,7 +1407,7 @@ impl IngameMenuState {
             .collect();
         Self::new(
             MenuPage::Rules,
-            "Rules",
+            labels.rules.clone(),
             MenuSymbol::Menu(5),
             items,
             false,
@@ -1172,12 +1417,12 @@ impl IngameMenuState {
 
     /// `C4MainMenu::ActivateNewPlayer` (C4MainMenu.cpp:59-122). The menu
     /// caption is IDS_MENU_NOPLRFILES, which doubles as the empty-menu text.
-    pub fn new_player_menu(players: &[NewPlayerEntry]) -> Self {
+    pub fn new_player_menu(players: &[NewPlayerEntry], labels: &IngameMenuLabels) -> Self {
         let items = players
             .iter()
             .map(|player| {
                 MenuItem::new(
-                    format!("Join player: {}", player.name),
+                    substitute_resource_arguments(&labels.new_player_item, &[&player.name]),
                     MenuSymbol::PlayerColor,
                     MenuAction::JoinPlayer(player.file.clone()),
                     None,
@@ -1186,7 +1431,7 @@ impl IngameMenuState {
             .collect();
         Self::new(
             MenuPage::NewPlayer,
-            "No additional player files available.",
+            labels.no_player_files.clone(),
             MenuSymbol::PlayerColor,
             items,
             false,
@@ -2511,6 +2756,12 @@ fn draw_hv_frame(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<
 
 #[cfg(test)]
 mod tests {
+    /// The frozen US table, which is what C4ResStrTable falls back to for a
+    /// missing key, so these presentation tests keep asserting native text.
+    fn labels() -> IngameMenuLabels {
+        IngameMenuLabels::default()
+    }
+
     use super::*;
 
     #[test]
@@ -2643,7 +2894,7 @@ mod tests {
                 has_participants: false,
             },
         ];
-        let mut menu = IngameMenuState::team_selection_menu(&teams);
+        let mut menu = IngameMenuState::team_selection_menu(&teams, &labels());
 
         assert_eq!(menu.page(), MenuPage::TeamSelection);
         // C4MN_Style_Normal installs the selected row's caption as the title
@@ -2705,7 +2956,7 @@ mod tests {
                 has_participants: false,
             },
         ];
-        let menu = IngameMenuState::team_selection_menu(&teams);
+        let menu = IngameMenuState::team_selection_menu(&teams, &labels());
         let declared = Color::opaque(0xe1, 0x22, 0x33);
         let generic = Color::opaque(0xf0, 0xd1, 0x12);
         let gfx = IngameMenuGraphics {
@@ -2763,7 +3014,8 @@ mod tests {
     // (C4MainMenu.cpp:643-715).
     #[test]
     fn main_menu_local_single_player_matches_cpp_entry_list() {
-        let menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         assert_eq!(menu.caption(), "Player Menu"); // IDS_MENU_CPMAIN
         assert_eq!(
             captions(&menu),
@@ -2784,7 +3036,8 @@ mod tests {
 
     #[test]
     fn main_menu_actions_mirror_cpp_commands() {
-        let menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         let actions: Vec<&MenuAction> = menu.items().iter().map(|item| &item.action).collect();
         assert_eq!(
             actions,
@@ -2809,7 +3062,7 @@ mod tests {
             player_count: 0,
             ..MainMenuConditions::default()
         };
-        let menu = IngameMenuState::main_menu(&cond).expect("menu");
+        let menu = IngameMenuState::main_menu(&cond, &labels()).expect("menu");
         assert_eq!(menu.caption(), "Observer Menu"); // IDS_MENU_OBSERVER
         assert_eq!(
             captions(&menu),
@@ -2824,26 +3077,29 @@ mod tests {
             player_count: 2,
             ..MainMenuConditions::default()
         };
-        let menu = IngameMenuState::main_menu(&cond).expect("menu");
+        let menu = IngameMenuState::main_menu(&cond, &labels()).expect("menu");
         assert_eq!(captions(&menu)[2], "Attack");
     }
 
     #[test]
     fn hostility_menu_matches_directional_cpp_rows_and_refill() {
-        let mut menu = IngameMenuState::hostility_menu(&[
-            HostilityEntry {
-                opponent: 7,
-                name: "Ada".to_string(),
-                hostile: false,
-                opponent_hostile: true,
-            },
-            HostilityEntry {
-                opponent: 9,
-                name: "Bob".to_string(),
-                hostile: true,
-                opponent_hostile: false,
-            },
-        ]);
+        let mut menu = IngameMenuState::hostility_menu(
+            &[
+                HostilityEntry {
+                    opponent: 7,
+                    name: "Ada".to_string(),
+                    hostile: false,
+                    opponent_hostile: true,
+                },
+                HostilityEntry {
+                    opponent: 9,
+                    name: "Bob".to_string(),
+                    hostile: true,
+                    opponent_hostile: false,
+                },
+            ],
+            &labels(),
+        );
 
         assert_eq!(menu.page(), MenuPage::Hostility);
         assert_eq!(menu.caption(), "Don't attack Ada");
@@ -2869,12 +3125,15 @@ mod tests {
 
         menu.set_selection(1);
         assert_eq!(menu.caption(), "Attack Bob");
-        menu.refill_hostility(&[HostilityEntry {
-            opponent: 7,
-            name: "Ada".to_string(),
-            hostile: true,
-            opponent_hostile: true,
-        }]);
+        menu.refill_hostility(
+            &[HostilityEntry {
+                opponent: 7,
+                name: "Ada".to_string(),
+                hostile: true,
+                opponent_hostile: true,
+            }],
+            &labels(),
+        );
         assert_eq!(captions(&menu), vec!["Attack Ada"]);
         assert_eq!(menu.caption(), "Attack Ada");
         assert_eq!(menu.selection(), 0);
@@ -2887,7 +3146,7 @@ mod tests {
                 opponent_hostile: false,
             })
             .collect::<Vec<_>>();
-        let mut grid = IngameMenuState::hostility_menu(&entries);
+        let mut grid = IngameMenuState::hostility_menu(&entries, &labels());
         grid.handle_command(ControlCommand::MenuUp, CommandKind::Press);
         assert_eq!(
             grid.selection(),
@@ -2959,16 +3218,16 @@ mod tests {
         let font = HudFont::Fallback(&font_backend);
         let gfx = IngameMenuGraphics::default();
         let area = Rect::new(0, 0, 640, 480);
-        let mut menu = IngameMenuState::hostility_menu(&entries(7));
+        let mut menu = IngameMenuState::hostility_menu(&entries(7), &labels());
 
         assert_eq!(menu.layout(area, &font, &gfx).lines, 2);
-        menu.refill_hostility(&entries(1));
+        menu.refill_hostility(&entries(1), &labels());
         assert_eq!(
             menu.layout(area, &font, &gfx).lines,
             2,
             "normal refill shrink retains C4Menu's initialized client height"
         );
-        menu.refill_hostility(&entries(11));
+        menu.refill_hostility(&entries(11), &labels());
         assert_eq!(
             menu.layout(area, &font, &gfx).lines,
             3,
@@ -2998,8 +3257,8 @@ mod tests {
         let gfx = IngameMenuGraphics::default();
         let area = Rect::new(0, 0, 640, 480);
 
-        let initial = IngameMenuState::team_selection_menu(&teams);
-        let switching = IngameMenuState::team_switch_menu(&teams);
+        let initial = IngameMenuState::team_selection_menu(&teams, &labels());
+        let switching = IngameMenuState::team_switch_menu(&teams, &labels());
         let initial_bounds = initial.layout(area, &font, &gfx).bounds;
         let switch_bounds = switching.layout(area, &font, &gfx).bounds;
 
@@ -3035,7 +3294,7 @@ mod tests {
             team_switch_allowed: true,
             ..MainMenuConditions::default()
         };
-        let menu = IngameMenuState::main_menu(&cond).expect("menu");
+        let menu = IngameMenuState::main_menu(&cond, &labels()).expect("menu");
         let team = menu
             .items()
             .iter()
@@ -3059,7 +3318,7 @@ mod tests {
                 has_participants: false,
             },
         ];
-        let initial_from_main = IngameMenuState::team_selection_menu_from_main(&teams);
+        let initial_from_main = IngameMenuState::team_selection_menu_from_main(&teams, &labels());
         assert_eq!(
             initial_from_main.items()[0].action,
             MenuAction::SelectTeam(7)
@@ -3069,7 +3328,7 @@ mod tests {
             Some(&MenuAction::ActivateMain)
         );
 
-        let mut menu = IngameMenuState::team_switch_menu(&teams);
+        let mut menu = IngameMenuState::team_switch_menu(&teams, &labels());
         assert_eq!(menu.page(), MenuPage::TeamSelection);
         assert!(!menu.is_permanent());
         assert_eq!(menu.close_action(), Some(&MenuAction::ActivateMain));
@@ -3096,7 +3355,7 @@ mod tests {
             player_count: 2,
             ..MainMenuConditions::default()
         };
-        let menu = IngameMenuState::main_menu(&cond).expect("menu");
+        let menu = IngameMenuState::main_menu(&cond, &labels()).expect("menu");
         let names = captions(&menu);
         assert!(!names.contains(&"Save game"));
         assert!(names.contains(&"Disconnect"));
@@ -3109,14 +3368,15 @@ mod tests {
             is_league: true,
             ..MainMenuConditions::default()
         };
-        let menu = IngameMenuState::main_menu(&cond).expect("menu");
+        let menu = IngameMenuState::main_menu(&cond, &labels()).expect("menu");
         assert!(!captions(&menu).contains(&"Join player"));
     }
 
     // C4Menu::Control wrap-around navigation (C4Menu.cpp:439-461).
     #[test]
     fn navigation_wraps_in_both_directions() {
-        let mut menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let mut menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         let count = menu.items().len();
         menu.handle_command(ControlCommand::MenuUp, CommandKind::Press);
         assert_eq!(menu.selection(), count - 1);
@@ -3130,18 +3390,21 @@ mod tests {
 
     #[test]
     fn hostility_refill_resets_tooltip_age_when_first_row_appears() {
-        let mut menu = IngameMenuState::hostility_menu(&[]);
+        let mut menu = IngameMenuState::hostility_menu(&[], &labels());
         for _ in 0..INFO_CAPTION_DELAY {
             menu.tick();
         }
         assert_eq!(menu.time_on_selection, INFO_CAPTION_DELAY);
 
-        menu.refill_hostility(&[HostilityEntry {
-            opponent: 7,
-            name: "Ada".to_string(),
-            hostile: true,
-            opponent_hostile: false,
-        }]);
+        menu.refill_hostility(
+            &[HostilityEntry {
+                opponent: 7,
+                name: "Ada".to_string(),
+                hostile: true,
+                opponent_hostile: false,
+            }],
+            &labels(),
+        );
 
         assert_eq!(menu.selection(), 0);
         assert_eq!(menu.time_on_selection, 0);
@@ -3151,7 +3414,8 @@ mod tests {
     // runs (C4Menu.cpp:512-518).
     #[test]
     fn enter_on_main_menu_closes_and_returns_action() {
-        let mut menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let mut menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         let outcome = menu
             .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
             .expect("outcome");
@@ -3167,7 +3431,8 @@ mod tests {
     // Key releases do not activate items (menu coms act on press).
     #[test]
     fn release_events_are_ignored() {
-        let mut menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let mut menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         assert!(menu
             .handle_command(ControlCommand::MenuEnter, CommandKind::Release)
             .is_none());
@@ -3179,7 +3444,8 @@ mod tests {
     // (close command unset, C4MainMenu.cpp:643-715).
     #[test]
     fn close_on_main_menu_has_no_close_action() {
-        let mut menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let mut menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         let outcome = menu
             .handle_command(ControlCommand::MenuClose, CommandKind::Press)
             .expect("outcome");
@@ -3199,7 +3465,7 @@ mod tests {
             mouse_shown: true,
             mouse: true,
         };
-        let mut menu = IngameMenuState::options_menu(&flags, 0);
+        let mut menu = IngameMenuState::options_menu(&flags, 0, &labels());
         let outcome = menu
             .handle_command(ControlCommand::MenuClose, CommandKind::Press)
             .expect("outcome");
@@ -3221,7 +3487,7 @@ mod tests {
             mouse_shown: true,
             mouse: true,
         };
-        let menu = IngameMenuState::options_menu(&flags, 2);
+        let menu = IngameMenuState::options_menu(&flags, 2, &labels());
         assert_eq!(
             captions(&menu),
             vec!["Sound", "Music", "Mouse control", "Display"]
@@ -3243,7 +3509,7 @@ mod tests {
             mouse_shown: false,
             mouse: false,
         };
-        let mut menu = IngameMenuState::options_menu(&flags, 0);
+        let mut menu = IngameMenuState::options_menu(&flags, 0, &labels());
         let outcome = menu
             .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
             .expect("outcome");
@@ -3259,7 +3525,7 @@ mod tests {
     // ActivateDisplay fullscreen entry list (C4MainMenu.cpp:582-641).
     #[test]
     fn display_menu_fullscreen_lists_all_entries() {
-        let menu = IngameMenuState::display_menu(&DisplayFlags::default(), 0);
+        let menu = IngameMenuState::display_menu(&DisplayFlags::default(), 0, &labels());
         assert_eq!(
             captions(&menu),
             vec![
@@ -3283,7 +3549,7 @@ mod tests {
             is_fullscreen: false,
             ..DisplayFlags::default()
         };
-        let menu = IngameMenuState::display_menu(&flags, 0);
+        let menu = IngameMenuState::display_menu(&flags, 0, &labels());
         assert_eq!(
             captions(&menu),
             vec![
@@ -3310,7 +3576,7 @@ mod tests {
     fn savegame_menu_lists_ten_slots() {
         let mut slots = [SaveSlotState { free: true }; 10];
         slots[0].free = false;
-        let menu = IngameMenuState::savegame_menu(&slots);
+        let menu = IngameMenuState::savegame_menu(&slots, &labels());
         assert_eq!(menu.items().len(), 10);
         assert!(menu.is_permanent());
         assert!(menu.items().iter().all(|item| item.caption == "Save game"));
@@ -3335,7 +3601,7 @@ mod tests {
     // (C4MainMenu.cpp:538-551).
     #[test]
     fn surrender_menu_is_yes_no() {
-        let menu = IngameMenuState::surrender_menu();
+        let menu = IngameMenuState::surrender_menu(&labels());
         assert_eq!(captions(&menu), vec!["Yes", "No"]);
         assert_eq!(menu.items()[0].action, MenuAction::Surrender);
         assert_eq!(menu.items()[1].action, MenuAction::NoOp);
@@ -3350,7 +3616,7 @@ mod tests {
             description: Some("Collect all the gold.".to_string()),
             fulfilled: false,
         }];
-        let menu = IngameMenuState::goals_menu(&goals);
+        let menu = IngameMenuState::goals_menu(&goals, &labels());
         assert_eq!(captions(&menu), vec!["Gold Rush"]);
         assert_eq!(
             menu.items()[0].info_caption.as_deref(),
@@ -3374,7 +3640,7 @@ mod tests {
             description: Some("Keep to the rule.".to_string()),
             fulfilled: false,
         }];
-        let menu = IngameMenuState::rules_menu(&rules);
+        let menu = IngameMenuState::rules_menu(&rules, &labels());
         assert_eq!(
             menu.items()[0].info_caption.as_deref(),
             Some("Keep to the rule.")
@@ -3391,7 +3657,7 @@ mod tests {
             description: None,
             fulfilled: true,
         }];
-        let menu = IngameMenuState::goals_menu(&goals);
+        let menu = IngameMenuState::goals_menu(&goals, &labels());
         assert!(matches!(
             &menu.items()[0].symbol,
             MenuSymbol::Definition {
@@ -3461,7 +3727,7 @@ mod tests {
             file: "Player2.c4p".to_string(),
             name: "Twonk".to_string(),
         }];
-        let menu = IngameMenuState::new_player_menu(&players);
+        let menu = IngameMenuState::new_player_menu(&players, &labels());
         // IDS_MENU_NEWPLAYER = "Join player: %s"
         assert_eq!(captions(&menu), vec!["Join player: Twonk"]);
         // IDS_MENU_NOPLRFILES doubles as menu caption (C4MainMenu.cpp:71).
@@ -3475,7 +3741,7 @@ mod tests {
                 name: format!("Player {index}"),
             })
             .collect::<Vec<_>>();
-        IngameMenuState::new_player_menu(&players)
+        IngameMenuState::new_player_menu(&players, &labels())
     }
 
     #[test]
@@ -3654,7 +3920,8 @@ mod tests {
     #[test]
     fn layout_aligns_left_bottom_with_symbol_margin() {
         use clonk_graphics::BitmapFont;
-        let menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         let font_backend = BitmapFont::new();
         let font = HudFont::Fallback(&font_backend);
         let gfx = IngameMenuGraphics {
@@ -3681,7 +3948,8 @@ mod tests {
         // (C4GuiDialogs.cpp:386-425; C4Menu.cpp:1270-1276).
         use clonk_graphics::BitmapFont;
 
-        let menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         let font_backend = BitmapFont::new();
         let font = HudFont::Fallback(&font_backend);
         let area = Rect::new(0, 0, 640, 480);
@@ -3799,7 +4067,8 @@ mod tests {
     #[test]
     fn render_smoke_test_draws_selection_box() {
         use clonk_graphics::BitmapFont;
-        let menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         let font_backend = BitmapFont::new();
         let font = HudFont::Fallback(&font_backend);
         let gfx = IngameMenuGraphics::default();
@@ -3825,7 +4094,8 @@ mod tests {
         // C4MenuItem::DrawElement (C4Menu.cpp:152-154).
         use clonk_graphics::BitmapFont;
 
-        let menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
         let font_backend = BitmapFont::new();
         let font = HudFont::Fallback(&font_backend);
         let gfx = IngameMenuGraphics::default();

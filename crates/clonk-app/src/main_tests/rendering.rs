@@ -2328,7 +2328,7 @@
         let mut message = new_running_sandbox_app();
         message
             .ingame_menu
-            .replace(message.local_owner, Some(IngameMenuState::surrender_menu()));
+            .replace(message.local_owner, Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())));
         message.pressed_engine_keys.insert(VirtualKeyCode::A);
         remove_global_gui_sheet(&mut message, "GUISpinBoxArrow.png");
         let before = runtime_global_ui_snapshot(&message);
@@ -2347,7 +2347,7 @@
         let mut game_over = new_running_sandbox_app();
         game_over.ingame_menu.replace(
             game_over.local_owner,
-            Some(IngameMenuState::surrender_menu()),
+            Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
         );
         game_over.scoreboard_initial_reconcile_pending = true;
         game_over.pressed_engine_keys.insert(VirtualKeyCode::A);
@@ -4936,7 +4936,7 @@
             .collect::<Vec<_>>();
         player_app
             .ingame_menu
-            .replace(player, Some(IngameMenuState::new_player_menu(&players)));
+            .replace(player, Some(IngameMenuState::new_player_menu(&players, &IngameMenuLabels::default())));
         player_app
             .render(&mut frame)
             .expect("seed player-menu presentation");

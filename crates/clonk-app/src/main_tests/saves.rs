@@ -3848,7 +3848,7 @@
                 has_player: true,
                 player_count: 1,
                 ..MainMenuConditions::default()
-            }),
+            }, &IngameMenuLabels::default()),
         );
         app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
         let viewport = app.graphics.viewport_rect(owner).expect("film viewport");

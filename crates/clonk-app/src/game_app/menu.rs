@@ -587,8 +587,121 @@ impl GameApp {
     fn activate_hostility_menu_for_player(&mut self, player: i32) {
         let menu = self
             .hostility_entries_for_player(player)
-            .map(|entries| IngameMenuState::hostility_menu(&entries));
+            .map(|entries| IngameMenuState::hostility_menu(&entries, &self.ingame_menu_labels()));
         self.ingame_menu.replace(player, menu);
+    }
+
+    /// Resolve every in-game menu string through the active language table,
+    /// the way `C4MainMenu`'s `LoadResStr` calls do at page-construction time
+    /// (C4MainMenu.cpp:59-732; C4Player.cpp:1801). A key missing from the
+    /// table falls back to its shipped `LanguageUS.txt` value, matching
+    /// C4ResStrTable.
+    pub(crate) fn ingame_menu_labels(&self) -> IngameMenuLabels {
+        let defaults = IngameMenuLabels::default();
+        IngameMenuLabels {
+            main_caption: self.runtime_resource_text("IDS_MENU_CPMAIN", &defaults.main_caption),
+            observer_caption: self
+                .runtime_resource_text("IDS_MENU_OBSERVER", &defaults.observer_caption),
+            goals: self.runtime_resource_text("IDS_MENU_CPGOALS", &defaults.goals),
+            goals_info: self.runtime_resource_text("IDS_MENU_CPGOALSINFO", &defaults.goals_info),
+            rules: self.runtime_resource_text("IDS_MENU_CPRULES", &defaults.rules),
+            rules_info: self.runtime_resource_text("IDS_MENU_CPRULESINFO", &defaults.rules_info),
+            view: self.runtime_resource_text("IDS_TEXT_VIEW", &defaults.view),
+            view_info: self
+                .runtime_resource_text("IDS_TEXT_DETERMINEPLAYERVIEWTOFOLL", &defaults.view_info),
+            attack_page: self.runtime_resource_text("IDS_MENU_CPATTACK", &defaults.attack_page),
+            attack_page_info: self
+                .runtime_resource_text("IDS_MENU_CPATTACKINFO", &defaults.attack_page_info),
+            select_team: self.runtime_resource_text("IDS_MSG_SELTEAM", &defaults.select_team),
+            select_team_info: self.runtime_resource_text(
+                "IDS_MSG_ALLOWSYOUTOJOINADIFFERENT",
+                &defaults.select_team_info,
+            ),
+            join_team: self.runtime_resource_text("IDS_MSG_JOINTEAM", &defaults.join_team),
+            new_player: self.runtime_resource_text("IDS_MENU_CPNEWPLAYER", &defaults.new_player),
+            new_player_info: self
+                .runtime_resource_text("IDS_MENU_CPNEWPLAYERINFO", &defaults.new_player_info),
+            new_player_item: self
+                .runtime_resource_text("IDS_MENU_NEWPLAYER", &defaults.new_player_item),
+            no_player_files: self
+                .runtime_resource_text("IDS_MENU_NOPLRFILES", &defaults.no_player_files),
+            savegame: self.runtime_resource_text("IDS_MENU_CPSAVEGAME", &defaults.savegame),
+            savegame_info: self
+                .runtime_resource_text("IDS_MENU_CPSAVEGAMEINFO", &defaults.savegame_info),
+            options: self.runtime_resource_text("IDS_MNU_OPTIONS", &defaults.options),
+            options_info: self.runtime_resource_text("IDS_MNU_OPTIONSINFO", &defaults.options_info),
+            disconnect: self.runtime_resource_text("IDS_MENU_DISCONNECT", &defaults.disconnect),
+            disconnect_host_info: self.runtime_resource_text(
+                "IDS_TEXT_KICKCERTAINCLIENTSFROMTHE",
+                &defaults.disconnect_host_info,
+            ),
+            disconnect_client_info: self.runtime_resource_text(
+                "IDS_TEXT_DISCONNECTTHEGAMEFROMTHES",
+                &defaults.disconnect_client_info,
+            ),
+            disconnect_client_caption: self.runtime_resource_text(
+                "IDS_MENU_DISCONNECTCLIENT",
+                &defaults.disconnect_client_caption,
+            ),
+            disconnect_server_caption: self.runtime_resource_text(
+                "IDS_MENU_DISCONNECTFROMSERVER",
+                &defaults.disconnect_server_caption,
+            ),
+            surrender: self.runtime_resource_text("IDS_MENU_CPSURRENDER", &defaults.surrender),
+            surrender_info: self
+                .runtime_resource_text("IDS_MENU_CPSURRENDERINFO", &defaults.surrender_info),
+            surrender_caption: self
+                .runtime_resource_text("IDS_MENU_SURRENDER", &defaults.surrender_caption),
+            abort: self.runtime_resource_text("IDS_MENU_ABORT", &defaults.abort),
+            abort_info: self.runtime_resource_text("IDS_MENU_ABORT_DESC", &defaults.abort_info),
+            attack: self.runtime_resource_text("IDS_MENU_ATTACK", &defaults.attack),
+            no_attack: self.runtime_resource_text("IDS_MENU_NOATTACK", &defaults.no_attack),
+            attack_hostile: self
+                .runtime_resource_text("IDS_MENU_ATTACKHOSTILE", &defaults.attack_hostile),
+            attack_friendly: self
+                .runtime_resource_text("IDS_MENU_ATTACKFRIENDLY", &defaults.attack_friendly),
+            attack_not: self.runtime_resource_text("IDS_MENU_ATTACKNOT", &defaults.attack_not),
+            attack_info: self.runtime_resource_text("IDS_MENU_ATTACKINFO", &defaults.attack_info),
+            free_view: self.runtime_resource_text("IDS_MSG_FREEVIEW", &defaults.free_view),
+            free_view_info: self.runtime_resource_text(
+                "IDS_MSG_FREELYSCROLLAROUNDTHEMAP",
+                &defaults.free_view_info,
+            ),
+            follow_view: self
+                .runtime_resource_text("IDS_TEXT_FOLLOWVIEWOFPLAYER", &defaults.follow_view),
+            sound: self.runtime_resource_text("IDS_DLG_SOUND", &defaults.sound),
+            music: self.runtime_resource_text("IDS_MNU_MUSIC", &defaults.music),
+            mouse_control: self
+                .runtime_resource_text("IDS_MNU_MOUSECONTROL", &defaults.mouse_control),
+            display: self.runtime_resource_text("IDS_MENU_DISPLAY", &defaults.display),
+            player_names: self.runtime_resource_text("IDS_MNU_PLAYERNAMES", &defaults.player_names),
+            player_names_info: self
+                .runtime_resource_text("IDS_MENU_PLAYERNAMES_DESC", &defaults.player_names_info),
+            clonk_names: self.runtime_resource_text("IDS_MNU_CLONKNAMES", &defaults.clonk_names),
+            clonk_names_info: self
+                .runtime_resource_text("IDS_MENU_CLONKNAMES_DESC", &defaults.clonk_names_info),
+            portraits: self.runtime_resource_text("IDS_MNU_PORTRAITS", &defaults.portraits),
+            show_commands: self
+                .runtime_resource_text("IDS_MENU_SHOWCOMMANDS", &defaults.show_commands),
+            show_command_keys: self
+                .runtime_resource_text("IDS_MENU_SHOWCOMMANDKEYS", &defaults.show_command_keys),
+            upper_board: self.runtime_resource_text("IDS_MNU_UPPERBOARD", &defaults.upper_board),
+            upper_board_off: self
+                .runtime_resource_text("IDS_MNU_UPPERBOARD_OFF", &defaults.upper_board_off),
+            upper_board_normal: self
+                .runtime_resource_text("IDS_MNU_UPPERBOARD_NORMAL", &defaults.upper_board_normal),
+            upper_board_small: self
+                .runtime_resource_text("IDS_MNU_UPPERBOARD_SMALL", &defaults.upper_board_small),
+            upper_board_mini: self
+                .runtime_resource_text("IDS_MNU_UPPERBOARD_MINI", &defaults.upper_board_mini),
+            fps: self.runtime_resource_text("IDS_MNU_FPS", &defaults.fps),
+            clock: self.runtime_resource_text("IDS_MNU_CLOCK", &defaults.clock),
+            white_chat: self.runtime_resource_text("IDS_MNU_WHITECHAT", &defaults.white_chat),
+            white_chat_info: self
+                .runtime_resource_text("IDS_DESC_WHITECHAT_INGAME", &defaults.white_chat_info),
+            yes: self.runtime_resource_text("IDS_BTN_YES", &defaults.yes),
+            no: self.runtime_resource_text("IDS_BTN_NO", &defaults.no),
+        }
     }
 
     /// `C4Menu::Execute` refills *every* active menu when `Game.iTick35`
@@ -608,9 +721,10 @@ impl GameApp {
         }
         let entries = self.team_selection_entries();
         self.cache_team_selection_icons(&entries);
+        let labels = self.ingame_menu_labels();
         for (player, switching) in players {
             if let Some(menu) = self.ingame_menu.get_mut(player) {
-                menu.refill_team(&entries, switching);
+                menu.refill_team(&entries, switching, &labels);
             }
         }
     }
@@ -623,13 +737,14 @@ impl GameApp {
                 (menu.page() == ingame_menu::MenuPage::Hostility).then_some(player)
             })
             .collect::<Vec<_>>();
+        let labels = self.ingame_menu_labels();
         for player in players {
             let Some(entries) = self.hostility_entries_for_player(player) else {
                 self.close_ingame_menu_for_player(player);
                 continue;
             };
             if let Some(menu) = self.ingame_menu.get_mut(player) {
-                menu.refill_hostility(&entries);
+                menu.refill_hostility(&entries, &labels);
             }
         }
     }
@@ -1130,7 +1245,10 @@ impl GameApp {
             MenuAction::ActivateMain => {
                 self.ingame_menu.replace(
                     player,
-                    IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
+                    IngameMenuState::main_menu(
+                        &self.main_menu_conditions_for(player),
+                        &self.ingame_menu_labels(),
+                    ),
                 );
             }
             MenuAction::ActivateGoals => {
@@ -1165,8 +1283,13 @@ impl GameApp {
             MenuAction::ActivateRules => {
                 let rules = self.goal_rule_entries(C4D_RULE);
                 self.cache_definition_icons(&rules)?;
-                self.ingame_menu
-                    .replace(player, Some(IngameMenuState::rules_menu(&rules)));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::rules_menu(
+                        &rules,
+                        &self.ingame_menu_labels(),
+                    )),
+                );
             }
             MenuAction::ActivateNewPlayer => {
                 let conditions = self.main_menu_conditions_for(player);
@@ -1174,19 +1297,32 @@ impl GameApp {
                     return Ok(());
                 }
                 let players = self.available_runtime_player_files();
-                self.ingame_menu
-                    .replace(player, Some(IngameMenuState::new_player_menu(&players)));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::new_player_menu(
+                        &players,
+                        &self.ingame_menu_labels(),
+                    )),
+                );
             }
             MenuAction::ActivateOptions => {
                 self.ingame_menu.replace(
                     player,
-                    Some(IngameMenuState::options_menu(&self.option_flags(player), 0)),
+                    Some(IngameMenuState::options_menu(
+                        &self.option_flags(player),
+                        0,
+                        &self.ingame_menu_labels(),
+                    )),
                 );
             }
             MenuAction::ActivateDisplay => {
                 self.ingame_menu.replace(
                     player,
-                    Some(IngameMenuState::display_menu(&self.display_flags, 0)),
+                    Some(IngameMenuState::display_menu(
+                        &self.display_flags,
+                        0,
+                        &self.ingame_menu_labels(),
+                    )),
                 );
             }
             MenuAction::ActivateSavegame => {
@@ -1194,17 +1330,28 @@ impl GameApp {
                 // (C4Game.cpp:2205-2223) — the menu simply stays closed.
                 if self.can_quick_save() {
                     let slots = self.savegame_slots();
-                    self.ingame_menu
-                        .replace(player, Some(IngameMenuState::savegame_menu(&slots)));
+                    self.ingame_menu.replace(
+                        player,
+                        Some(IngameMenuState::savegame_menu(
+                            &slots,
+                            &self.ingame_menu_labels(),
+                        )),
+                    );
                 }
             }
             MenuAction::ActivateSurrender => {
-                self.ingame_menu
-                    .replace(player, Some(IngameMenuState::surrender_menu()));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::surrender_menu(&self.ingame_menu_labels())),
+                );
             }
             MenuAction::ActivateClientDisconnect => {
-                self.ingame_menu
-                    .replace(player, Some(IngameMenuState::client_disconnect_menu()));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::client_disconnect_menu(
+                        &self.ingame_menu_labels(),
+                    )),
+                );
             }
             MenuAction::ActivateHostility => {
                 self.activate_hostility_menu_for_player(player);
@@ -1258,7 +1405,10 @@ impl GameApp {
                     .collect::<Vec<_>>();
                 self.ingame_menu.replace(
                     player,
-                    Some(IngameMenuState::host_disconnect_menu(&clients)),
+                    Some(IngameMenuState::host_disconnect_menu(
+                        &clients,
+                        &self.ingame_menu_labels(),
+                    )),
                 );
             }
             MenuAction::KickClient(client_id) => {
@@ -1276,6 +1426,7 @@ impl GameApp {
                     } else {
                         ObserverTarget::Player(current_player)
                     },
+                    &self.ingame_menu_labels(),
                 );
                 let selected = menu
                     .selected_observer_target()
@@ -1288,9 +1439,12 @@ impl GameApp {
                     let entries = self.team_selection_entries();
                     self.cache_team_selection_icons(&entries);
                     let menu = if status == clonk_engine::PlayerStatus::TeamSelection {
-                        IngameMenuState::team_selection_menu_from_main(&entries)
+                        IngameMenuState::team_selection_menu_from_main(
+                            &entries,
+                            &self.ingame_menu_labels(),
+                        )
                     } else {
-                        IngameMenuState::team_switch_menu(&entries)
+                        IngameMenuState::team_switch_menu(&entries, &self.ingame_menu_labels())
                     };
                     self.ingame_menu.replace(player, Some(menu));
                 }
@@ -1375,8 +1529,13 @@ impl GameApp {
                 self.save_to_slot(slot);
                 if self.ingame_menu.contains(player) {
                     let slots = self.savegame_slots();
-                    self.ingame_menu
-                        .replace(player, Some(IngameMenuState::savegame_menu(&slots)));
+                    self.ingame_menu.replace(
+                        player,
+                        Some(IngameMenuState::savegame_menu(
+                            &slots,
+                            &self.ingame_menu_labels(),
+                        )),
+                    );
                 }
             }
             MenuAction::ToggleSound => {
@@ -1389,6 +1548,7 @@ impl GameApp {
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
                         selection,
+                        &self.ingame_menu_labels(),
                     )),
                 );
             }
@@ -1400,6 +1560,7 @@ impl GameApp {
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
                         selection,
+                        &self.ingame_menu_labels(),
                     )),
                 );
             }
@@ -1420,6 +1581,7 @@ impl GameApp {
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
                         selection,
+                        &self.ingame_menu_labels(),
                     )),
                 );
             }
@@ -1440,6 +1602,7 @@ impl GameApp {
                     Some(IngameMenuState::display_menu(
                         &self.display_flags,
                         selection,
+                        &self.ingame_menu_labels(),
                     )),
                 );
             }
@@ -1574,8 +1737,13 @@ impl GameApp {
                 })
                 .collect::<Vec<_>>();
             self.cache_definition_icons(&entries)?;
-            self.ingame_menu
-                .replace(request.player, Some(IngameMenuState::goals_menu(&entries)));
+            self.ingame_menu.replace(
+                request.player,
+                Some(IngameMenuState::goals_menu(
+                    &entries,
+                    &self.ingame_menu_labels(),
+                )),
+            );
         }
         Ok(())
     }

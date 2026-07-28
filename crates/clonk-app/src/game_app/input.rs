@@ -3056,7 +3056,10 @@ impl GameApp {
         if state == ElementState::Pressed {
             self.ingame_menu.replace(
                 OWNER_NONE,
-                IngameMenuState::main_menu(&self.main_menu_conditions_for(OWNER_NONE)),
+                IngameMenuState::main_menu(
+                    &self.main_menu_conditions_for(OWNER_NONE),
+                    &self.ingame_menu_labels(),
+                ),
             );
         }
         Ok(true)
@@ -3176,7 +3179,10 @@ impl GameApp {
             RuntimeCustomGamepadAction::MenuOpen => {
                 self.ingame_menu.replace(
                     OWNER_NONE,
-                    IngameMenuState::main_menu(&self.main_menu_conditions_for(OWNER_NONE)),
+                    IngameMenuState::main_menu(
+                        &self.main_menu_conditions_for(OWNER_NONE),
+                        &self.ingame_menu_labels(),
+                    ),
                 );
             }
         }

@@ -11856,7 +11856,7 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
             has_player: false,
             player_count: 0,
             ..MainMenuConditions::default()
-        }),
+        }, &IngameMenuLabels::default()),
     );
     assert!(observer_menu.primary_physical_viewport_is_no_owner());
     assert!(
@@ -12776,7 +12776,7 @@ fn main_menu_player_join_uses_active_network_max_players() {
     }];
 
     let conditions = app.main_menu_conditions();
-    let menu = IngameMenuState::main_menu(&conditions).expect("main menu has entries");
+    let menu = IngameMenuState::main_menu(&conditions, &IngameMenuLabels::default()).expect("main menu has entries");
 
     assert_eq!(conditions.max_players, 1);
     assert!(!menu

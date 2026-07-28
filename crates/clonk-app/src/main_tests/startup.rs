@@ -2192,7 +2192,7 @@
         app.engine.set_team_configuration(teams);
         let conditions = app.main_menu_conditions();
         assert!(!conditions.team_switch_allowed);
-        assert!(!IngameMenuState::main_menu(&conditions)
+        assert!(!IngameMenuState::main_menu(&conditions, &IngameMenuLabels::default())
             .expect("main menu")
             .items()
             .iter()
@@ -2248,10 +2248,10 @@
         let mut app = new_state_only_running_sandbox_app();
         app.set_display_mode(DisplayMode::Window);
 
-        let main = IngameMenuState::main_menu(&app.main_menu_conditions())
+        let main = IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
             .expect("windowed main menu remains nonempty");
         assert!(!main.items().iter().any(|item| item.action == MenuAction::Abort));
-        let display = IngameMenuState::display_menu(&app.display_flags, 0);
+        let display = IngameMenuState::display_menu(&app.display_flags, 0, &IngameMenuLabels::default());
         assert_eq!(
             display
                 .items()
@@ -2262,11 +2262,11 @@
         );
 
         app.set_display_mode(DisplayMode::Fullscreen);
-        let main = IngameMenuState::main_menu(&app.main_menu_conditions())
+        let main = IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
             .expect("fullscreen main menu remains nonempty");
         assert!(main.items().iter().any(|item| item.action == MenuAction::Abort));
         assert_eq!(
-            IngameMenuState::display_menu(&app.display_flags, 0)
+            IngameMenuState::display_menu(&app.display_flags, 0, &IngameMenuLabels::default())
                 .items()
                 .len(),
             9

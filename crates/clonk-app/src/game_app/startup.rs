@@ -720,7 +720,10 @@ impl GameApp {
         }
         self.ingame_menu.replace(
             player,
-            IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
+            IngameMenuState::main_menu(
+                &self.main_menu_conditions_for(player),
+                &self.ingame_menu_labels(),
+            ),
         );
         Ok(())
     }

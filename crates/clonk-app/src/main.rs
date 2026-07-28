@@ -138,9 +138,9 @@ use clonk_app_menus::game_over::{
 };
 use clonk_app_menus::ingame_menu::{
     DisplayFlags, DisplayToggle, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry,
-    IngameMenuGraphics, IngameMenuPointerTarget, IngameMenuState, MainMenuConditions, MenuAction,
-    MenuOutcome, NewPlayerEntry, ObserverPlayerEntry, ObserverTarget, OptionFlags, SaveSlotState,
-    TeamSelectionEntry, UpperBoardMode,
+    IngameMenuGraphics, IngameMenuLabels, IngameMenuPointerTarget, IngameMenuState,
+    MainMenuConditions, MenuAction, MenuOutcome, NewPlayerEntry, ObserverPlayerEntry,
+    ObserverTarget, OptionFlags, SaveSlotState, TeamSelectionEntry, UpperBoardMode,
 };
 use clonk_app_menus::menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
 use clonk_app_menus::object_menu::{

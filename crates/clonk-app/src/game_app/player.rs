@@ -680,16 +680,22 @@ impl GameApp {
         // scroll, tooltip age and numeric selection survive; only
         // `AdjustSelection` clamps an out-of-range row (C4Menu.cpp:947-973).
         if already_open {
+            let labels = self.ingame_menu_labels();
             if let Some(menu) = self.ingame_menu.get_mut(owner) {
-                menu.refill_team(&entries, false);
+                menu.refill_team(&entries, false, &labels);
             }
             return;
         }
         if owner == self.local_owner {
             self.close_object_menu();
         }
-        self.ingame_menu
-            .replace(owner, Some(IngameMenuState::team_selection_menu(&entries)));
+        self.ingame_menu.replace(
+            owner,
+            Some(IngameMenuState::team_selection_menu(
+                &entries,
+                &self.ingame_menu_labels(),
+            )),
+        );
     }
 
     /// `C4Player::Execute`'s PS_TeamSelection branch: a sole joinable team

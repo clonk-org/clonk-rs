@@ -1724,6 +1724,323 @@
         );
     }
 
+    // Every visible C4MainMenu string goes through LoadResStr against the
+    // active table at page-construction time (C4MainMenu.cpp:59-732;
+    // C4Player.cpp:1801), so a language change reaches the menus through the
+    // next Activate*/refill rather than being frozen at compile time.
+    #[test]
+    fn ingame_menu_uses_active_language_resources_for_all_pages() {
+        use clonk_app_menus::ingame_menu::{
+            DisplayFlags, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry,
+            NewPlayerEntry, ObserverPlayerEntry, ObserverTarget, OptionFlags, SaveSlotState,
+            TeamSelectionEntry, UpperBoardMode,
+        };
+
+        let mut app = new_running_sandbox_app();
+        // A key absent from the table keeps its shipped LanguageUS.txt value,
+        // which is exactly what C4ResStrTable falls back to.
+        assert_eq!(
+            app.ingame_menu_labels().goals,
+            IngameMenuLabels::default().goals
+        );
+
+        for (key, value) in [
+            ("IDS_MENU_CPMAIN", "[Spielermenü]"),
+            ("IDS_MENU_OBSERVER", "[Zuschauermenü]"),
+            ("IDS_MENU_CPGOALS", "[Ziele]"),
+            ("IDS_MENU_CPGOALSINFO", "[Zielinfo]"),
+            ("IDS_MENU_CPRULES", "[Regeln]"),
+            ("IDS_MENU_CPRULESINFO", "[Regelinfo]"),
+            ("IDS_TEXT_VIEW", "[Ansicht]"),
+            ("IDS_TEXT_DETERMINEPLAYERVIEWTOFOLL", "[Ansichtinfo]"),
+            ("IDS_MENU_CPATTACK", "[Angriff]"),
+            ("IDS_MENU_CPATTACKINFO", "[Angriffinfo]"),
+            ("IDS_MSG_SELTEAM", "[Team wählen]"),
+            ("IDS_MSG_ALLOWSYOUTOJOINADIFFERENT", "[Teaminfo]"),
+            ("IDS_MSG_JOINTEAM", "[Team %s beitreten]"),
+            ("IDS_MENU_CPNEWPLAYER", "[Spieler beitreten]"),
+            ("IDS_MENU_CPNEWPLAYERINFO", "[Beitrittinfo]"),
+            ("IDS_MENU_NEWPLAYER", "[Beitritt: %s]"),
+            ("IDS_MENU_NOPLRFILES", "[Keine Spielerdateien]"),
+            ("IDS_MENU_CPSAVEGAME", "[Speichern]"),
+            ("IDS_MENU_CPSAVEGAMEINFO", "[Speicherinfo]"),
+            ("IDS_MNU_OPTIONS", "[Optionen]"),
+            ("IDS_MNU_OPTIONSINFO", "[Optioneninfo]"),
+            ("IDS_MENU_DISCONNECT", "[Trennen]"),
+            ("IDS_TEXT_KICKCERTAINCLIENTSFROMTHE", "[Kickinfo]"),
+            ("IDS_TEXT_DISCONNECTTHEGAMEFROMTHES", "[Trenninfo]"),
+            ("IDS_MENU_DISCONNECTCLIENT", "[Client trennen]"),
+            ("IDS_MENU_DISCONNECTFROMSERVER", "[Vom Host trennen?]"),
+            ("IDS_MENU_CPSURRENDER", "[Aufgeben]"),
+            ("IDS_MENU_CPSURRENDERINFO", "[Aufgabeinfo]"),
+            ("IDS_MENU_SURRENDER", "[Sicher?]"),
+            ("IDS_MENU_ABORT", "[Abbrechen]"),
+            ("IDS_MENU_ABORT_DESC", "[Abbruchinfo]"),
+            ("IDS_MENU_ATTACK", "[%s angreifen]"),
+            ("IDS_MENU_NOATTACK", "[%s nicht angreifen]"),
+            ("IDS_MENU_ATTACKHOSTILE", "[feindlich] "),
+            ("IDS_MENU_ATTACKFRIENDLY", "[freundlich] "),
+            ("IDS_MENU_ATTACKNOT", "[nicht] "),
+            ("IDS_MENU_ATTACKINFO", "[%s ist %sund wird %sangegriffen]"),
+            ("IDS_MSG_FREEVIEW", "[Freie Sicht]"),
+            ("IDS_MSG_FREELYSCROLLAROUNDTHEMAP", "[Sichtinfo]"),
+            ("IDS_TEXT_FOLLOWVIEWOFPLAYER", "[Folge %s]"),
+            ("IDS_DLG_SOUND", "[Klang]"),
+            ("IDS_MNU_MUSIC", "[Musik]"),
+            ("IDS_MNU_MOUSECONTROL", "[Maussteuerung]"),
+            ("IDS_MENU_DISPLAY", "[Anzeige]"),
+            ("IDS_MNU_PLAYERNAMES", "[Spielernamen]"),
+            ("IDS_MENU_PLAYERNAMES_DESC", "[Spielernameninfo]"),
+            ("IDS_MNU_CLONKNAMES", "[Clonknamen]"),
+            ("IDS_MENU_CLONKNAMES_DESC", "[Clonknameninfo]"),
+            ("IDS_MNU_PORTRAITS", "[Portraits]"),
+            ("IDS_MENU_SHOWCOMMANDS", "[Befehle]"),
+            ("IDS_MENU_SHOWCOMMANDKEYS", "[Tasten]"),
+            ("IDS_MNU_UPPERBOARD", "[Titelleiste]"),
+            ("IDS_MNU_UPPERBOARD_OFF", "[Aus]"),
+            ("IDS_MNU_UPPERBOARD_NORMAL", "[Normal]"),
+            ("IDS_MNU_UPPERBOARD_SMALL", "[Klein]"),
+            ("IDS_MNU_UPPERBOARD_MINI", "[Minimal unten]"),
+            ("IDS_MNU_FPS", "[Bildrate]"),
+            ("IDS_MNU_CLOCK", "[Uhr]"),
+            ("IDS_MNU_WHITECHAT", "[Weisser Chat]"),
+            ("IDS_DESC_WHITECHAT_INGAME", "[Chatinfo]"),
+            ("IDS_BTN_YES", "[Ja]"),
+            ("IDS_BTN_NO", "[Nein]"),
+        ] {
+            app.startup_tooltip_resources
+                .insert(key.to_string(), value.to_string());
+        }
+        let labels = app.ingame_menu_labels();
+
+        let captions = |menu: &IngameMenuState| {
+            menu.items()
+                .iter()
+                .map(|item| item.caption.clone())
+                .collect::<Vec<_>>()
+        };
+        let tooltips = |menu: &IngameMenuState| {
+            menu.items()
+                .iter()
+                .filter_map(|item| item.info_caption.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let main = IngameMenuState::main_menu(
+            &MainMenuConditions {
+                has_player: true,
+                player_count: 2,
+                max_players: 4,
+                team_switch_allowed: true,
+                network_enabled: true,
+                network_host: true,
+                network_has_clients: true,
+                is_fullscreen: true,
+                ..MainMenuConditions::default()
+            },
+            &labels,
+        )
+        .expect("populated main menu");
+        assert_eq!(main.caption(), "[Spielermenü]");
+        assert_eq!(
+            captions(&main),
+            [
+                "[Ziele]",
+                "[Regeln]",
+                "[Angriff]",
+                "[Team wählen]",
+                "[Spieler beitreten]",
+                "[Speichern]",
+                "[Optionen]",
+                "[Trennen]",
+                "[Aufgeben]",
+                "[Abbrechen]",
+            ]
+        );
+        assert_eq!(
+            tooltips(&main),
+            [
+                "[Zielinfo]",
+                "[Regelinfo]",
+                "[Angriffinfo]",
+                "[Teaminfo]",
+                "[Beitrittinfo]",
+                "[Speicherinfo]",
+                "[Optioneninfo]",
+                "[Kickinfo]",
+                "[Aufgabeinfo]",
+                "[Abbruchinfo]",
+            ]
+        );
+        let observer = IngameMenuState::main_menu(
+            &MainMenuConditions {
+                has_player: false,
+                network_enabled: true,
+                ..MainMenuConditions::default()
+            },
+            &labels,
+        )
+        .expect("observer main menu");
+        assert_eq!(observer.caption(), "[Zuschauermenü]");
+        assert_eq!(
+            captions(&observer),
+            [
+                "[Ansicht]",
+                "[Spieler beitreten]",
+                "[Optionen]",
+                "[Trennen]",
+                "[Abbrechen]",
+            ]
+        );
+
+        // IDS_MENU_ATTACK/_NOATTACK and IDS_MENU_ATTACKINFO, whose hostile,
+        // friendly and not fragments each carry their own trailing space.
+        let hostility = IngameMenuState::hostility_menu(
+            &[
+                HostilityEntry {
+                    opponent: 1,
+                    name: "Ada".to_string(),
+                    hostile: true,
+                    opponent_hostile: true,
+                },
+                HostilityEntry {
+                    opponent: 2,
+                    name: "Bo".to_string(),
+                    hostile: false,
+                    opponent_hostile: false,
+                },
+            ],
+            &labels,
+        );
+        assert_eq!(hostility.items()[0].caption, "[Ada angreifen]");
+        assert_eq!(hostility.items()[1].caption, "[Bo nicht angreifen]");
+        assert_eq!(
+            tooltips(&hostility),
+            [
+                "[Ada ist [feindlich] und wird angegriffen]",
+                "[Bo ist [freundlich] und wird [nicht] angegriffen]",
+            ]
+        );
+
+        let observer_page = IngameMenuState::observer_menu(
+            &[ObserverPlayerEntry {
+                id: 3,
+                name: "Cid".to_string(),
+            }],
+            ObserverTarget::Free,
+            &labels,
+        );
+        assert_eq!(captions(&observer_page)[0], "[Freie Sicht]");
+        assert_eq!(
+            tooltips(&observer_page),
+            ["[Sichtinfo]", "[Folge Cid]"]
+        );
+
+        let options = IngameMenuState::options_menu(
+            &OptionFlags {
+                sound: false,
+                music: false,
+                mouse_shown: true,
+                mouse: false,
+            },
+            0,
+            &labels,
+        );
+        assert_eq!(
+            captions(&options),
+            ["[Klang]", "[Musik]", "[Maussteuerung]", "[Anzeige]"]
+        );
+
+        let display = IngameMenuState::display_menu(
+            &DisplayFlags {
+                is_fullscreen: true,
+                upper_board: UpperBoardMode::Small,
+                ..DisplayFlags::default()
+            },
+            0,
+            &labels,
+        );
+        assert_eq!(
+            captions(&display),
+            [
+                "[Spielernamen]",
+                "[Clonknamen]",
+                "[Portraits]",
+                "[Befehle]",
+                "[Tasten]",
+                "[Titelleiste]: [Klein]",
+                "[Bildrate]",
+                "[Uhr]",
+                "[Weisser Chat]",
+            ]
+        );
+        assert_eq!(
+            tooltips(&display),
+            [
+                "[Spielernameninfo]",
+                "[Clonknameninfo]",
+                "[Chatinfo]",
+            ]
+        );
+
+        let teams = [TeamSelectionEntry {
+            id: 4,
+            caption: "Alpha".to_string(),
+            icon_spec: None,
+            color: 0,
+            has_participants: false,
+        }];
+        let switch = IngameMenuState::team_switch_menu(&teams, &labels);
+        assert_eq!(tooltips(&switch), ["[Team Alpha beitreten]"]);
+
+        let savegame = IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10], &labels);
+        assert_eq!(captions(&savegame)[0], "[Speichern]");
+        assert_eq!(tooltips(&savegame)[0], "[Speicherinfo]");
+
+        let surrender = IngameMenuState::surrender_menu(&labels);
+        assert_eq!(surrender.caption(), "[Sicher?]");
+        assert_eq!(captions(&surrender), ["[Ja]", "[Nein]"]);
+
+        let part = IngameMenuState::client_disconnect_menu(&labels);
+        assert_eq!(part.caption(), "[Vom Host trennen?]");
+        assert_eq!(captions(&part), ["[Ja]", "[Nein]"]);
+
+        let kick = IngameMenuState::host_disconnect_menu(
+            &[HostDisconnectClientEntry {
+                client_id: 1,
+                caption: "Remote (Nick)".to_string(),
+                activated: true,
+            }],
+            &labels,
+        );
+        assert_eq!(kick.caption(), "[Client trennen]");
+
+        let goal = GoalRuleEntry {
+            definition_id: "GOAL".to_string(),
+            name: "Settle".to_string(),
+            description: None,
+            fulfilled: false,
+        };
+        assert_eq!(
+            IngameMenuState::goals_menu(std::slice::from_ref(&goal), &labels).caption(),
+            "[Ziele]"
+        );
+        assert_eq!(
+            IngameMenuState::rules_menu(std::slice::from_ref(&goal), &labels).caption(),
+            "[Regeln]"
+        );
+
+        let new_player = IngameMenuState::new_player_menu(
+            &[NewPlayerEntry {
+                name: "Clonko".to_string(),
+                file: "Clonko.c4p".to_string(),
+            }],
+            &labels,
+        );
+        assert_eq!(new_player.caption(), "[Keine Spielerdateien]");
+        assert_eq!(captions(&new_player), ["[Beitritt: Clonko]"]);
+    }
+
     #[test]
     fn takeover_submenu_fills_live_at_open() {
         let mut app = new_menu_app(640, 480);
@@ -3692,7 +4009,7 @@
         let pages = vec![
             (
                 "C4MainMenu::Main",
-                IngameMenuState::main_menu(&MainMenuConditions::default())
+                IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default())
                     .expect("nonempty main menu"),
             ),
             (
@@ -3702,7 +4019,7 @@
                     name: "Goal".to_string(),
                     description: None,
                     fulfilled: false,
-                }]),
+                }], &IngameMenuLabels::default()),
             ),
             (
                 "C4MainMenu::Rules",
@@ -3711,18 +4028,18 @@
                     name: "Rule".to_string(),
                     description: None,
                     fulfilled: false,
-                }]),
+                }], &IngameMenuLabels::default()),
             ),
             (
                 "C4MainMenu::NewPlayer",
                 IngameMenuState::new_player_menu(&[ingame_menu::NewPlayerEntry {
                     file: "Player.c4p".to_string(),
                     name: "Player".to_string(),
-                }]),
+                }], &IngameMenuLabels::default()),
             ),
             (
                 "C4MainMenu::Savegame",
-                IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10]),
+                IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10], &IngameMenuLabels::default()),
             ),
             (
                 "C4MainMenu::Options",
@@ -3733,17 +4050,17 @@
                         mouse_shown: true,
                         mouse: true,
                     },
-                    0,
+                    0, &IngameMenuLabels::default(),
                 ),
             ),
             (
                 "C4MainMenu::Display",
-                IngameMenuState::display_menu(&DisplayFlags::default(), 0),
+                IngameMenuState::display_menu(&DisplayFlags::default(), 0, &IngameMenuLabels::default()),
             ),
-            ("C4MainMenu::Surrender", IngameMenuState::surrender_menu()),
+            ("C4MainMenu::Surrender", IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
             (
                 "C4MainMenu::ClientDisconnect",
-                IngameMenuState::client_disconnect_menu(),
+                IngameMenuState::client_disconnect_menu(&IngameMenuLabels::default()),
             ),
             (
                 "C4MainMenu::HostDisconnect",
@@ -3751,7 +4068,7 @@
                     client_id: 0,
                     caption: "Host (Host)".to_string(),
                     activated: true,
-                }]),
+                }], &IngameMenuLabels::default()),
             ),
         ];
         assert_eq!(pages.len(), 10, "MenuPage exhaustiveness changed");
@@ -3878,7 +4195,7 @@
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start explicit test sandbox");
         let mut menu =
-            IngameMenuState::main_menu(&MainMenuConditions::default()).expect("main menu");
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()).expect("main menu");
         let abort = menu
             .items()
             .iter()
@@ -6550,7 +6867,7 @@
                     has_player: false,
                     player_count: 3,
                     ..MainMenuConditions::default()
-                }),
+                }, &IngameMenuLabels::default()),
             );
             assert!(
                 app.handle_menu_command(
@@ -6969,7 +7286,7 @@
         app.ingame_menu.clear();
         app.ingame_menu.replace(
             owner + 1,
-            IngameMenuState::main_menu(&MainMenuConditions::default()),
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()),
         );
         app.render(&mut frame)
             .expect("render menu not owned by the mouse player");
@@ -7001,7 +7318,7 @@
         app.ingame_menu.clear();
         app.ingame_menu.replace(
             owner,
-            IngameMenuState::main_menu(&MainMenuConditions::default()),
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()),
         );
         app.local_controls = LocalControlRegistry::default();
         let assignment = app.local_controls.initialize(LocalControlInit {
@@ -7942,7 +8259,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .collect::<Vec<_>>();
         app.ingame_menu.replace(
             owner,
-            Some(IngameMenuState::new_player_menu(&players)),
+            Some(IngameMenuState::new_player_menu(&players, &IngameMenuLabels::default())),
         );
         app.render(&mut frame).expect("render long player menu");
         let area = app.ingame_menu_area(owner).expect("player viewport");
@@ -8105,24 +8422,24 @@ func ControlDig() { dig_count = 1; return(1); }
                 fulfilled: false,
             };
             vec![
-                IngameMenuState::main_menu(&MainMenuConditions::default())
+                IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default())
                     .expect("default player main menu"),
-                IngameMenuState::hostility_menu(&[]),
-                IngameMenuState::observer_menu(&[], ObserverTarget::Free),
+                IngameMenuState::hostility_menu(&[], &IngameMenuLabels::default()),
+                IngameMenuState::observer_menu(&[], ObserverTarget::Free, &IngameMenuLabels::default()),
                 IngameMenuState::team_selection_menu(&[TeamSelectionEntry {
                     id: 1,
                     caption: "Team".to_string(),
                     icon_spec: None,
                     color: 0,
                     has_participants: false,
-                }]),
-                IngameMenuState::goals_menu(std::slice::from_ref(&entry)),
-                IngameMenuState::rules_menu(std::slice::from_ref(&entry)),
+                }], &IngameMenuLabels::default()),
+                IngameMenuState::goals_menu(std::slice::from_ref(&entry), &IngameMenuLabels::default()),
+                IngameMenuState::rules_menu(std::slice::from_ref(&entry), &IngameMenuLabels::default()),
                 IngameMenuState::new_player_menu(&[ingame_menu::NewPlayerEntry {
                     file: "Player.c4p".to_string(),
                     name: "Player".to_string(),
-                }]),
-                IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10]),
+                }], &IngameMenuLabels::default()),
+                IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10], &IngameMenuLabels::default()),
                 IngameMenuState::options_menu(
                     &OptionFlags {
                         sound: true,
@@ -8130,16 +8447,16 @@ func ControlDig() { dig_count = 1; return(1); }
                         mouse_shown: true,
                         mouse: true,
                     },
-                    0,
+                    0, &IngameMenuLabels::default(),
                 ),
-                IngameMenuState::display_menu(&DisplayFlags::default(), 0),
-                IngameMenuState::surrender_menu(),
-                IngameMenuState::client_disconnect_menu(),
+                IngameMenuState::display_menu(&DisplayFlags::default(), 0, &IngameMenuLabels::default()),
+                IngameMenuState::surrender_menu(&IngameMenuLabels::default()),
+                IngameMenuState::client_disconnect_menu(&IngameMenuLabels::default()),
                 IngameMenuState::host_disconnect_menu(&[HostDisconnectClientEntry {
                     client_id: 0,
                     caption: "Host (Host)".to_string(),
                     activated: true,
-                }]),
+                }], &IngameMenuLabels::default()),
             ]
         };
         let default_pages = every_player_menu_page();
@@ -8507,24 +8824,24 @@ func ControlDig() { dig_count = 1; return(1); }
                 fulfilled: false,
             };
             vec![
-                IngameMenuState::main_menu(&MainMenuConditions::default())
+                IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default())
                     .expect("default player main menu"),
-                IngameMenuState::hostility_menu(&[]),
-                IngameMenuState::observer_menu(&[], ObserverTarget::Free),
+                IngameMenuState::hostility_menu(&[], &IngameMenuLabels::default()),
+                IngameMenuState::observer_menu(&[], ObserverTarget::Free, &IngameMenuLabels::default()),
                 IngameMenuState::team_selection_menu(&[TeamSelectionEntry {
                     id: 1,
                     caption: "Team".to_string(),
                     icon_spec: None,
                     color: 0,
                     has_participants: false,
-                }]),
-                IngameMenuState::goals_menu(std::slice::from_ref(&entry)),
-                IngameMenuState::rules_menu(std::slice::from_ref(&entry)),
+                }], &IngameMenuLabels::default()),
+                IngameMenuState::goals_menu(std::slice::from_ref(&entry), &IngameMenuLabels::default()),
+                IngameMenuState::rules_menu(std::slice::from_ref(&entry), &IngameMenuLabels::default()),
                 IngameMenuState::new_player_menu(&[ingame_menu::NewPlayerEntry {
                     file: "Player.c4p".to_string(),
                     name: "Player".to_string(),
-                }]),
-                IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10]),
+                }], &IngameMenuLabels::default()),
+                IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10], &IngameMenuLabels::default()),
                 IngameMenuState::options_menu(
                     &OptionFlags {
                         sound: true,
@@ -8532,16 +8849,16 @@ func ControlDig() { dig_count = 1; return(1); }
                         mouse_shown: true,
                         mouse: true,
                     },
-                    0,
+                    0, &IngameMenuLabels::default(),
                 ),
-                IngameMenuState::display_menu(&DisplayFlags::default(), 0),
-                IngameMenuState::surrender_menu(),
-                IngameMenuState::client_disconnect_menu(),
+                IngameMenuState::display_menu(&DisplayFlags::default(), 0, &IngameMenuLabels::default()),
+                IngameMenuState::surrender_menu(&IngameMenuLabels::default()),
+                IngameMenuState::client_disconnect_menu(&IngameMenuLabels::default()),
                 IngameMenuState::host_disconnect_menu(&[HostDisconnectClientEntry {
                     client_id: 0,
                     caption: "Host (Host)".to_string(),
                     activated: true,
-                }]),
+                }], &IngameMenuLabels::default()),
             ]
         };
         let default_pages = every_player_menu_page();
@@ -8645,7 +8962,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 has_player: false,
                 player_count: 0,
                 ..MainMenuConditions::default()
-            }),
+            }, &IngameMenuLabels::default()),
         );
         observer
             .bindings

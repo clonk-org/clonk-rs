@@ -1081,7 +1081,7 @@
 
         let mut menu = new_running_sandbox_app();
         menu.ingame_menu
-            .replace(menu.local_owner, Some(IngameMenuState::surrender_menu()));
+            .replace(menu.local_owner, Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())));
         check(menu, "running player menu");
 
         let mut evaluation = new_classic_running_sandbox_app();
@@ -1528,7 +1528,7 @@
                 has_player: false,
                 player_count: 2,
                 ..MainMenuConditions::default()
-            }),
+            }, &IngameMenuLabels::default()),
         );
         let before = app
             .ingame_menu

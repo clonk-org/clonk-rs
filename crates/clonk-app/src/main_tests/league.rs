@@ -1900,7 +1900,7 @@
         invalid_hidden_menu.style = 99;
         install_test_cursor_menu(&mut app, cursor, invalid_hidden_menu);
         app.ingame_menu
-            .replace(owner, Some(IngameMenuState::surrender_menu()));
+            .replace(owner, Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())));
         let mut with_hidden_menus = vec![0_u8; app.graphics.surface().pixels().len()];
         app.render(&mut with_hidden_menus)
             .expect("eliminated viewport skips menu preflight and drawing");
@@ -1946,7 +1946,7 @@
             .expect("render eliminated target through an owned physical viewport");
         retargeted.ingame_menu.replace(
             local_owner,
-            IngameMenuState::main_menu(&MainMenuConditions::default()),
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()),
         );
         let mut retargeted_hidden_script_menu = two_item_script_menu(retargeted_cursor);
         retargeted_hidden_script_menu.style = 99;
@@ -2000,7 +2000,7 @@
         app.render(&mut ownerless_notice_only)
             .expect("render eliminated player through physical observer viewport");
         app.ingame_menu
-            .replace(OWNER_NONE, Some(IngameMenuState::surrender_menu()));
+            .replace(OWNER_NONE, Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())));
         let mut with_hidden_fullscreen_menu = vec![0_u8; app.graphics.surface().pixels().len()];
         app.render(&mut with_hidden_fullscreen_menu)
             .expect("eliminated observer target suppresses the fullscreen menu");
@@ -2179,7 +2179,7 @@
 
         let conditions = app.main_menu_conditions();
         assert!(conditions.is_league);
-        let menu = IngameMenuState::main_menu(&conditions).expect("main menu has entries");
+        let menu = IngameMenuState::main_menu(&conditions, &IngameMenuLabels::default()).expect("main menu has entries");
         assert!(!menu
             .items()
             .iter()

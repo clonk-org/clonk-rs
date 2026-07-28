@@ -6457,7 +6457,7 @@
                 has_player: false,
                 player_count: 2,
                 ..MainMenuConditions::default()
-            }),
+            }, &IngameMenuLabels::default()),
         );
         app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("ownerless fullscreen menu replaces FreeView scope");
