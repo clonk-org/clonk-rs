@@ -2812,9 +2812,26 @@
         assert_eq!(bundle.fonts.title.line_height, 39); // 16*22/14 = 25px
         assert_eq!(bundle.tooltip.line_height, 25);
         assert_eq!(bundle.tooltip.h_space, 0);
-        assert!(
-            bundle.native_source.is_none(),
-            "the fixed native builder must not impersonate a size-16 role map"
+        // The native atlas builder used to carry a hard-coded 22/16/14/13/12
+        // role map, so the only safe answer at size 16 was to refuse rather
+        // than impersonate a recipe it could not serve. It now carries the
+        // resolved sizes, so it may serve this recipe — but it still must not
+        // claim a role map that disagrees with the bundle it came from, which
+        // is the invariant this test has always been about.
+        let native = bundle
+            .native_source
+            .as_ref()
+            .expect("a resolved size-16 recipe is serviceable by the native builder");
+        assert_eq!(
+            native.sizes,
+            clonk_frontend::clonk_fonts::NativeFontSizes {
+                title: 25,
+                caption: 18,
+                text: 16,
+                main_small: 14,
+                mini: 13,
+            },
+            "the native role map must be the same one the bundle resolved"
         );
     }
 

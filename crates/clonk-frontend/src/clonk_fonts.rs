@@ -49,6 +49,9 @@ pub struct NativeClonkFont {
     logical_height: u32,
     raster_height: u32,
     logical_h_space: i32,
+    /// `Graphics.SnapTextToPixels`: this atlas was rasterized at the rounded
+    /// physical height, so a whole-pixel origin gives a 1:1 texel blit.
+    snap_to_pixels: bool,
     /// Stable per-glyph retained resources. C++ keeps these cells resident in
     /// a font atlas; the Rust backend gives each immutable cell a stable GPU
     /// identity so replay emits one quad per glyph without CPU resampling.
@@ -112,6 +115,22 @@ impl NativeDrawProjection {
 }
 
 impl NativeClonkFont {
+    /// True when `Graphics.SnapTextToPixels` is on *and* this atlas really was
+    /// rasterized for the projection about to draw it, i.e. `raster_height` is
+    /// the rounded projected height on both axes. A mismatched projection (a
+    /// stale font set, or an anisotropic clipper far from the build scale)
+    /// still takes the C++-exact resampling path.
+    fn snaps_to_physical_pixels(&self, projection: NativeDrawProjection) -> bool {
+        let logical = f64::from(self.logical_height);
+        let raster = f64::from(self.raster_height);
+        let rounds_to_raster =
+            |projection_scale: f64| (projection_scale * logical - raster).abs() <= 0.5 + 1.0e-6;
+        self.snap_to_pixels
+            && logical > 0.0
+            && rounds_to_raster(projection.scale_x)
+            && rounds_to_raster(projection.scale_y)
+    }
+
     /// Exact rational denominator used by CStdFont's scale-native GUI metrics.
     ///
     /// A glyph facet of width `W` occupies `W * logical_height` of these units;
@@ -550,8 +569,9 @@ impl NativeClonkFont {
                 projection.project(logical_left, logical_y)
             })
             .collect::<Vec<_>>();
+        let snaps = self.snaps_to_physical_pixels(projection);
         if surface.is_gpu_command_capture_active()
-            || projection.requires_resampling(self.effective_scale)
+            || (!snaps && projection.requires_resampling(self.effective_scale))
         {
             self.draw_fractional_lines_at_origins(
                 surface, &origins, text, color, markup, gamma, images, projection,
@@ -698,7 +718,8 @@ impl NativeClonkFont {
         });
         let physical_origin = projection.project(logical_left, y);
         if surface.is_gpu_command_capture_active()
-            || projection.requires_resampling(self.effective_scale)
+            || (!self.snaps_to_physical_pixels(projection)
+                && projection.requires_resampling(self.effective_scale))
         {
             // StringOut invokes one CStdFont::DrawText call. Newlines are
             // ignored by DrawText and markup-enabled pipes remain ordinary
@@ -805,9 +826,28 @@ impl NativeClonkFont {
         stack: &mut Vec<NativeMarkupTag>,
         projection: NativeDrawProjection,
     ) {
-        let quad_scale_x = projection.scale_x / f64::from(self.effective_scale);
-        let quad_scale_y = projection.scale_y / f64::from(self.effective_scale);
-        let physical_spacing = f64::from(self.logical_h_space) * projection.scale_x;
+        // `Graphics.SnapTextToPixels` draws the atlas at its rasterized size
+        // from a whole-pixel pen instead of rescaling every facet by
+        // `scale / effective_scale` (StdFont.cpp:685,701,841).
+        let snaps = self.snaps_to_physical_pixels(projection);
+        let (quad_scale_x, quad_scale_y) = if snaps {
+            (1.0, 1.0)
+        } else {
+            (
+                projection.scale_x / f64::from(self.effective_scale),
+                projection.scale_y / f64::from(self.effective_scale),
+            )
+        };
+        let physical_spacing = if snaps {
+            (f64::from(self.logical_h_space) * projection.scale_x).round()
+        } else {
+            f64::from(self.logical_h_space) * projection.scale_x
+        };
+        let (x, y) = if snaps {
+            (x.round(), y.round())
+        } else {
+            (x, y)
+        };
         let mut pen_x = x;
         let pen_y = y;
         let mut rest = line;
@@ -1827,13 +1867,21 @@ fn build_native_font(
     logical_height: u32,
     application_scale: f32,
     shadow: bool,
+    snap_to_pixels: bool,
 ) -> Result<NativeClonkFont> {
     let scaled_height = logical_height as f32 * application_scale;
     anyhow::ensure!(
         scaled_height.is_finite() && scaled_height <= i32::MAX as f32,
         "scaled font height overflow"
     );
-    let raster_height = scaled_height as u32;
+    // C++ truncates (`StdFont.cpp:325`). Whole-pixel snapping instead asks
+    // FreeType for the nearest physical height so the atlas can be blitted
+    // 1:1 at fractional application scales.
+    let raster_height = if snap_to_pixels {
+        scaled_height.round() as u32
+    } else {
+        scaled_height as u32
+    };
     anyhow::ensure!(raster_height > 0, "scaled font height truncates to zero");
     let effective_scale = raster_height as f32 / logical_height as f32;
     let shadow_size = if shadow {
@@ -1890,6 +1938,7 @@ fn build_native_font(
         logical_height,
         raster_height,
         logical_h_space: if shadow { -1 } else { 0 },
+        snap_to_pixels,
         retained_glyph_images: Mutex::new(HashMap::new()),
     })
 }
@@ -2045,6 +2094,78 @@ pub fn build_prerendered_font(
     Ok(font)
 }
 
+/// The per-role FreeType heights `C4FontLoader::InitFont` derives from
+/// `Config.General.RXFontSize` (`C4Fonts.cpp:279-287`). Only `Main` uses the
+/// configured size unchanged; the remaining roles are integer ratios of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeFontSizes {
+    pub title: u32,
+    pub caption: u32,
+    pub text: u32,
+    pub main_small: u32,
+    pub mini: u32,
+}
+
+impl NativeFontSizes {
+    /// `RXFontSize = 14`, the shipped default recipe.
+    pub const CLASSIC: Self = Self {
+        title: 22,
+        caption: 16,
+        text: 14,
+        main_small: 13,
+        mini: 12,
+    };
+
+    /// `C4Fonts.cpp:281-286` — each role is `iSize * numerator / 14` in C++
+    /// integer arithmetic.
+    pub fn for_base_size(base_size: u32) -> Self {
+        Self {
+            title: base_size * 22 / 14,
+            caption: base_size * 16 / 14,
+            text: base_size,
+            main_small: base_size * 13 / 14,
+            mini: base_size * 12 / 14,
+        }
+    }
+}
+
+/// Everything about a scale-native font set that is independent of the
+/// application scale: which face of the file to use, the per-role heights, and
+/// the opt-in whole-pixel snapping divergence.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeFontRecipe {
+    pub sizes: NativeFontSizes,
+    /// Face within a TrueType/OpenType collection.
+    pub face_index: u32,
+    /// `Graphics.SnapTextToPixels`: rasterize at `round(logical * scale)` and
+    /// blit glyphs at whole physical pixels. C++ truncates the scaled height
+    /// (`StdFont.cpp:325`) and resamples the atlas through the application
+    /// transform, so this is a deliberate presentation divergence and stays
+    /// off unless the player asks for it.
+    pub snap_to_pixels: bool,
+}
+
+impl NativeFontRecipe {
+    pub fn new(sizes: NativeFontSizes) -> Self {
+        Self {
+            sizes,
+            face_index: 0,
+            snap_to_pixels: false,
+        }
+    }
+
+    pub fn with_face_index(self, face_index: u32) -> Self {
+        Self { face_index, ..self }
+    }
+
+    pub fn with_snap_to_pixels(self, snap_to_pixels: bool) -> Self {
+        Self {
+            snap_to_pixels,
+            ..self
+        }
+    }
+}
+
 /// Build the five GUI fonts the way C++ does at `Graphics.Scale`: native
 /// physical raster data with logical GUI metrics. C++ truncates each scaled
 /// FreeType height independently, then stores that font's effective scale as
@@ -2064,6 +2185,19 @@ pub fn build_native_font_set_face(
     face_index: u32,
     scale: impl Into<f64>,
 ) -> Result<NativeClonkFontSet> {
+    build_native_font_set_recipe(
+        ttf_bytes,
+        NativeFontRecipe::new(NativeFontSizes::CLASSIC).with_face_index(face_index),
+        scale,
+    )
+}
+
+/// Builds the scale-native GUI font set for an arbitrary `RXFontSize` recipe.
+pub fn build_native_font_set_recipe(
+    ttf_bytes: &[u8],
+    recipe: NativeFontRecipe,
+    scale: impl Into<f64>,
+) -> Result<NativeClonkFontSet> {
     let scale = scale.into();
     anyhow::ensure!(
         scale.is_finite() && scale > 0.0,
@@ -2071,21 +2205,36 @@ pub fn build_native_font_set_face(
     );
     let scale = scale as f32;
     anyhow::ensure!(scale.is_finite(), "font scale exceeds f32 geometry");
+    let sizes = recipe.sizes;
+    anyhow::ensure!(
+        [
+            sizes.title,
+            sizes.caption,
+            sizes.text,
+            sizes.main_small,
+            sizes.mini
+        ]
+        .iter()
+        .all(|size| *size > 0),
+        "native font recipe requests a zero FreeType height"
+    );
     let library = Library::init().context("FreeType init failed")?;
-    let face_index = isize::try_from(face_index).context("font face index exceeds FreeType")?;
+    let face_index =
+        isize::try_from(recipe.face_index).context("font face index exceeds FreeType")?;
     let face = library
         .new_memory_face(ttf_bytes.to_vec(), face_index)
         .context("failed to load font face")?;
+    let snap = recipe.snap_to_pixels;
     Ok(NativeClonkFontSet {
-        title: build_native_font(&face, 22, scale, true)?,
-        caption: build_native_font(&face, 16, scale, true)?,
-        text: build_native_font(&face, 14, scale, true)?,
-        main_small: build_native_font(&face, 13, scale, true)?,
-        mini: build_native_font(&face, 12, scale, true)?,
-        book_title: build_native_font(&face, 22, scale, false)?,
-        book_caption: build_native_font(&face, 16, scale, false)?,
-        book_text: build_native_font(&face, 14, scale, false)?,
-        book_small: build_native_font(&face, 13, scale, false)?,
+        title: build_native_font(&face, sizes.title, scale, true, snap)?,
+        caption: build_native_font(&face, sizes.caption, scale, true, snap)?,
+        text: build_native_font(&face, sizes.text, scale, true, snap)?,
+        main_small: build_native_font(&face, sizes.main_small, scale, true, snap)?,
+        mini: build_native_font(&face, sizes.mini, scale, true, snap)?,
+        book_title: build_native_font(&face, sizes.title, scale, false, snap)?,
+        book_caption: build_native_font(&face, sizes.caption, scale, false, snap)?,
+        book_text: build_native_font(&face, sizes.text, scale, false, snap)?,
+        book_small: build_native_font(&face, sizes.main_small, scale, false, snap)?,
         scale,
     })
 }
@@ -2181,6 +2330,43 @@ mod tests {
     }
 
     #[test]
+    fn configured_font_size_recipe_rasterizes_every_native_role() {
+        // C4FontLoader::InitFont derives one FreeType height per role from
+        // Config.General.RXFontSize (C4Fonts.cpp:279-287); the 22/16/14/13/12
+        // recipe is only the RXFontSize=14 case. CStdFont::Init then scales
+        // each of those heights independently (StdFont.cpp:319-352).
+        assert_eq!(
+            NativeFontSizes::for_base_size(14),
+            NativeFontSizes::CLASSIC,
+            "the classic recipe is the size-14 derivation"
+        );
+        let sizes = NativeFontSizes::for_base_size(16);
+        assert_eq!(
+            sizes,
+            NativeFontSizes {
+                title: 25,
+                caption: 18,
+                text: 16,
+                main_small: 14,
+                mini: 13,
+            }
+        );
+
+        let fonts =
+            build_native_font_set_recipe(&endeavour_bytes(), NativeFontRecipe::new(sizes), 2.0_f32)
+                .expect("build the size-16 recipe at 2x");
+        assert_eq!(fonts.scale(), 2.0);
+        assert_eq!(fonts.title.logical_height(), 25);
+        assert_eq!(fonts.title.raster_height(), 50);
+        assert_eq!(fonts.caption.logical_height(), 18);
+        assert_eq!(fonts.text.logical_height(), 16);
+        assert_eq!(fonts.text.raster_height(), 32);
+        assert_eq!(fonts.main_small.logical_height(), 14);
+        assert_eq!(fonts.mini.logical_height(), 13);
+        assert!(fonts.text.glyph('A').is_some());
+    }
+
+    #[test]
     fn fractional_native_fonts_truncate_each_raster_height_and_keep_effective_metrics() {
         let fonts =
             build_native_font_set(&endeavour_bytes(), 1.5_f32).expect("build scale-1.5 fonts");
@@ -2210,6 +2396,102 @@ mod tests {
         );
         assert_eq!(main_small.logical_line_height(), 19);
         assert_eq!(main_small.measure("A\nA", false).1, 40);
+    }
+
+    #[test]
+    fn snapped_native_fonts_round_each_raster_height_and_blit_whole_pixels() {
+        // Opt-in `Graphics.SnapTextToPixels`. C++ truncates the scaled
+        // FreeType height (StdFont.cpp:325) and then rescales every facet by
+        // `scale / effective_scale` (StdFont.cpp:685,701,841), so a
+        // fractional Graphics.Scale resamples all text. Snapping asks
+        // FreeType for the nearest physical height instead and blits the
+        // atlas at whole physical pixels: a deliberate divergence.
+        let snapped = build_native_font_set_recipe(
+            &endeavour_bytes(),
+            NativeFontRecipe::new(NativeFontSizes::CLASSIC).with_snap_to_pixels(true),
+            1.5_f32,
+        )
+        .expect("snapped 1.5x fonts");
+        assert_eq!(snapped.main_small.raster_height(), 20, "round(13 * 1.5)");
+        assert_eq!(snapped.text.raster_height(), 21);
+        let truncated =
+            build_native_font_set(&endeavour_bytes(), 1.5_f32).expect("C++-exact 1.5x fonts");
+        assert_eq!(truncated.main_small.raster_height(), 19, "trunc(13 * 1.5)");
+
+        // A striped atlas cell: a 1:1 blit reproduces the stripes exactly,
+        // while any resample mixes neighbouring columns into partial alpha.
+        let striped_font = |snap_to_pixels: bool| {
+            let raster_height = if snap_to_pixels { 20 } else { 19 };
+            let mut raster = ClonkFont::new(raster_height);
+            raster.cell_height = raster_height;
+            raster.h_space = -2;
+            raster.add_glyph(
+                'A',
+                GlyphCell {
+                    width: raster_height,
+                    pixels: (0..raster_height * raster_height)
+                        .map(|index| {
+                            if index % raster_height % 2 == 0 {
+                                Color::opaque(255, 255, 255)
+                            } else {
+                                Color::new(255, 255, 255, 0)
+                            }
+                        })
+                        .collect(),
+                },
+            );
+            NativeClonkFont {
+                raster,
+                application_scale: 1.5,
+                effective_scale: raster_height as f32 / 13.0,
+                logical_height: 13,
+                raster_height: raster_height as u32,
+                logical_h_space: -1,
+                snap_to_pixels,
+                retained_glyph_images: Mutex::new(HashMap::new()),
+            }
+        };
+        let covered = |font: &NativeClonkFont| {
+            let mut surface = Surface::new(48, 48, clonk_graphics::PixelFormat::Rgba8888);
+            font.draw_to_physical_surface(
+                &mut surface,
+                1,
+                1,
+                "A",
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                false,
+                None,
+            );
+            (0..surface.height())
+                .flat_map(|y| (0..surface.width()).map(move |x| (x, y)))
+                .filter_map(|(x, y)| {
+                    surface
+                        .get_pixel(x, y)
+                        .filter(|pixel| pixel.a != 0)
+                        .map(|pixel| (x, y, pixel.a))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let resampled = covered(&striped_font(false));
+        assert!(
+            resampled.iter().any(|(_, _, alpha)| *alpha != 255),
+            "the C++-exact 19px atlas is resampled to 19.5 physical pixels"
+        );
+
+        let snapped = covered(&striped_font(true));
+        assert!(
+            snapped.iter().all(|(_, _, alpha)| *alpha == 255),
+            "a snapped atlas blits one texel per physical pixel"
+        );
+        assert_eq!(
+            snapped.len(),
+            10 * 20,
+            "every second column of the 20px cell stays fully transparent"
+        );
+        let left = snapped.iter().map(|(x, _, _)| *x).min();
+        assert_eq!(left, Some(2), "the line origin snaps to round(1 * 1.5)");
     }
 
     #[test]
@@ -2246,6 +2528,7 @@ mod tests {
             logical_height: 13,
             raster_height: 19,
             logical_h_space: -1,
+            snap_to_pixels: false,
             retained_glyph_images: Mutex::new(HashMap::new()),
         };
         let mut surface = Surface::new(64, 40, clonk_graphics::PixelFormat::Rgba8888);
@@ -2322,6 +2605,7 @@ mod tests {
             logical_height: 13,
             raster_height: 19,
             logical_h_space: -1,
+            snap_to_pixels: false,
             retained_glyph_images: Mutex::new(HashMap::new()),
         };
         let images = SolidImage(vec![255; 19 * 19 * 4]);
@@ -2491,6 +2775,7 @@ mod tests {
             logical_height: 2,
             raster_height: 3,
             logical_h_space: 0,
+            snap_to_pixels: false,
             retained_glyph_images: Mutex::new(HashMap::new()),
         }
     }

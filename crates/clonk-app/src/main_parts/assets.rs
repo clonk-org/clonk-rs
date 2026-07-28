@@ -4,6 +4,7 @@
 //! the same binary crate, re-exported from `main.rs` so every path resolves.
 
 use super::*;
+use clonk_frontend::clonk_fonts::NativeFontSizes;
 
 const PLAYER_OWNER: i32 = 1;
 pub(crate) const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -2074,6 +2075,28 @@ pub(crate) struct ClassicStartupFontBundle {
 pub(crate) struct ClassicNativeFontSource {
     pub(crate) bytes: Arc<[u8]>,
     pub(crate) face_index: u32,
+    /// Per-role FreeType heights the classic loader resolved for this face.
+    pub(crate) sizes: NativeFontSizes,
+    /// `Graphics.SnapTextToPixels`, resolved once with the rest of the bundle.
+    pub(crate) snap_to_pixels: bool,
+}
+
+impl ClassicNativeFontSource {
+    fn recipe(&self) -> clonk_frontend::clonk_fonts::NativeFontRecipe {
+        clonk_frontend::clonk_fonts::NativeFontRecipe::new(self.sizes)
+            .with_face_index(self.face_index)
+            .with_snap_to_pixels(self.snap_to_pixels)
+    }
+
+    /// Rasterizes this bundle's GUI fonts at the application scale. Callers
+    /// must use this rather than `build_native_font_set_face`, which silently
+    /// assumes the RXFontSize=14 recipe.
+    pub(crate) fn build_native_fonts(
+        &self,
+        scale: f32,
+    ) -> Result<clonk_frontend::clonk_fonts::NativeClonkFontSet> {
+        clonk_frontend::clonk_fonts::build_native_font_set_recipe(&self.bytes, self.recipe(), scale)
+    }
 }
 
 fn classic_font_request(paths: &AppPaths, scenario_font: Option<&str>) -> Result<(String, i32)> {
@@ -2240,29 +2263,167 @@ fn matching_native_font_source(
     mini: &ResolvedFontSpec,
     tooltip: &ResolvedFontSpec,
 ) -> Option<ClassicNativeFontSource> {
-    let vector_source = |spec: &ResolvedFontSpec, expected_size: i32| match spec {
+    // The scale-native builder rasterizes every role itself, so it needs one
+    // shared regular-weight vector face — not one particular size recipe.
+    // `C4FontLoader::InitFont` derives each role's FreeType height from
+    // `Config.General.RXFontSize` (C4Fonts.cpp:279-287), and a FontDef may
+    // override any of them, so carry the resolved sizes instead of asserting
+    // the RXFontSize=14 literals.
+    let vector_source = |spec: &ResolvedFontSpec| match spec {
         ResolvedFontSpec::Vector {
             bytes: Some(bytes),
             face_index,
             size,
             weight,
             ..
-        } if *size == expected_size && *weight == 400 => Some((bytes.clone(), *face_index)),
+        } if *size > 0 && *weight == 400 => u32::try_from(*size)
+            .ok()
+            .map(|size| (bytes.clone(), *face_index, size)),
         _ => None,
     };
     let sources = [
-        vector_source(title, 22)?,
-        vector_source(caption, 16)?,
-        vector_source(text, 14)?,
-        vector_source(main_small?, 13)?,
-        vector_source(mini, 12)?,
-        vector_source(tooltip, 14)?,
+        vector_source(title)?,
+        vector_source(caption)?,
+        vector_source(text)?,
+        vector_source(main_small?)?,
+        vector_source(mini)?,
+        // FontTooltip has no native slot of its own: `font_for_role` draws it
+        // from the shadowless Main atlas, so it must stay the Main size.
+        vector_source(tooltip)?,
     ];
-    let (bytes, face_index) = sources[0].clone();
-    sources
+    let (bytes, face_index, text_size) = sources[2].clone();
+    let sizes = NativeFontSizes {
+        title: sources[0].2,
+        caption: sources[1].2,
+        text: text_size,
+        main_small: sources[3].2,
+        mini: sources[4].2,
+    };
+    (sources
         .iter()
         .all(|candidate| candidate.0.as_ref() == bytes.as_ref() && candidate.1 == face_index)
-        .then_some(ClassicNativeFontSource { bytes, face_index })
+        && sources[5].2 == text_size)
+        .then_some(ClassicNativeFontSource {
+            bytes,
+            face_index,
+            sizes,
+            snap_to_pixels: false,
+        })
+}
+
+#[cfg(test)]
+mod native_font_recipe_tests {
+    use super::*;
+
+    fn vector_spec(size: i32, bytes: &Arc<[u8]>, face_index: u32, weight: u32) -> ResolvedFontSpec {
+        ResolvedFontSpec::Vector {
+            face: "Endeavour".to_string(),
+            bytes: Some(bytes.clone()),
+            face_index,
+            size,
+            weight,
+        }
+    }
+
+    #[test]
+    fn snap_text_to_pixels_defaults_to_the_remaster_master_switch() {
+        assert!(!configured_snap_text_to_pixels(b""));
+        assert!(!configured_snap_text_to_pixels(
+            b"[Graphics]\nSnapTextToPixels=0\n"
+        ));
+        assert!(configured_snap_text_to_pixels(
+            b"[Graphics]\nSnapTextToPixels=1\n"
+        ));
+        assert!(configured_snap_text_to_pixels(b"[Graphics]\nRemaster=1\n"));
+        assert!(!configured_snap_text_to_pixels(
+            b"[Graphics]\nRemaster=1\nSnapTextToPixels=0\n"
+        ));
+    }
+
+    #[test]
+    fn native_font_source_carries_any_configured_size_recipe() {
+        // `C4FontLoader::InitFont` derives one FreeType height per role from
+        // `Config.General.RXFontSize` (C4Fonts.cpp:279-287). A scale-native
+        // atlas only needs every role to share one vector face at the regular
+        // weight; the 22/16/14/13/12 recipe is just RXFontSize=14.
+        let bytes: Arc<[u8]> = Arc::from(vec![7_u8; 8].into_boxed_slice());
+        let spec = |size| vector_spec(size, &bytes, 0, 400);
+
+        let classic = matching_native_font_source(
+            &spec(22),
+            &spec(16),
+            &spec(14),
+            Some(&spec(13)),
+            &spec(12),
+            &spec(14),
+        )
+        .expect("the size-14 recipe keeps its native source");
+        assert_eq!(classic.sizes, NativeFontSizes::CLASSIC);
+
+        let sixteen = matching_native_font_source(
+            &spec(25),
+            &spec(18),
+            &spec(16),
+            Some(&spec(14)),
+            &spec(13),
+            &spec(16),
+        )
+        .expect("a size-16 recipe keeps its native source");
+        assert_eq!(sixteen.sizes, NativeFontSizes::for_base_size(16));
+        assert_eq!(sixteen.bytes.as_ref(), bytes.as_ref());
+        assert_eq!(sixteen.face_index, 0);
+
+        assert!(
+            matching_native_font_source(
+                &spec(25),
+                &spec(18),
+                &spec(16),
+                Some(&spec(14)),
+                &spec(13),
+                &spec(14),
+            )
+            .is_none(),
+            "FontTooltip is drawn from the shadowless Main atlas, so it must \
+             keep the Main size"
+        );
+        let other: Arc<[u8]> = Arc::from(vec![9_u8; 8].into_boxed_slice());
+        assert!(
+            matching_native_font_source(
+                &vector_spec(25, &other, 0, 400),
+                &spec(18),
+                &spec(16),
+                Some(&spec(14)),
+                &spec(13),
+                &spec(16),
+            )
+            .is_none(),
+            "a per-role face mixture has no single native source"
+        );
+        assert!(
+            matching_native_font_source(
+                &vector_spec(25, &bytes, 0, 700),
+                &spec(18),
+                &spec(16),
+                Some(&spec(14)),
+                &spec(13),
+                &spec(16),
+            )
+            .is_none(),
+            "the native builder only rasterizes the regular weight"
+        );
+        assert!(
+            matching_native_font_source(
+                &spec(25),
+                &spec(18),
+                &spec(16),
+                None,
+                &spec(13),
+                &spec(16),
+            )
+            .is_none(),
+            "a missing MainSmall alias has no native recipe"
+        );
+    }
 }
 
 pub(crate) fn resolve_classic_font_bundle(
@@ -2336,6 +2497,8 @@ pub(crate) fn resolve_classic_font_bundle_for_request_with_system_fonts(
         Err(_) => (None, text.clone()),
     };
     let main_small = main_small.with_role(ClonkFontRole::GuiMainSmall);
+    let snap_to_pixels =
+        configured_snap_text_to_pixels(&fs::read(paths.config_file()).unwrap_or_default());
     let native_source = matching_native_font_source(
         &title_spec,
         &caption_spec,
@@ -2343,7 +2506,11 @@ pub(crate) fn resolve_classic_font_bundle_for_request_with_system_fonts(
         main_small_spec.as_ref(),
         &mini_spec,
         &tooltip_spec,
-    );
+    )
+    .map(|source| ClassicNativeFontSource {
+        snap_to_pixels,
+        ..source
+    });
     let fonts = clonk_frontend::ClonkFontSet {
         title: title.with_role(ClonkFontRole::GuiTitle),
         caption: caption.with_role(ClonkFontRole::GuiCaption),
@@ -2542,7 +2709,37 @@ fn resolve_named_graphics_image(
     Ok(ResolvedGraphicsImage { image })
 }
 
+/// Higher-resolution stems for a named graphics resource, most detailed
+/// first.
+///
+/// Graphics.c4g has no per-sheet scale metadata — DefCore `Scale=` covers
+/// object definitions only — so this filename suffix is the opt-in channel a
+/// remastered pack uses to ship, say, `Control@2x.png` beside the 1x art.
+/// `FindSuitableFile` (`C4Group.cpp:1178-1206`) knows nothing about it, so
+/// with no such file present resolution is byte-identical to the oracle's,
+/// and the drawing code then recognises the sheet's scale from its exact
+/// integer multiple of the 1x dimensions (`clonk_frontend::hud::GuiArtScale`).
+pub(crate) const REMASTERED_GRAPHICS_STEM_SUFFIXES: [&str; 3] = ["@4x", "@3x", "@2x"];
+
 pub(crate) fn select_named_graphics_image_source(
+    name: &str,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+) -> Result<SelectedGraphicsImageSource> {
+    REMASTERED_GRAPHICS_STEM_SUFFIXES
+        .into_iter()
+        .find_map(|suffix| {
+            select_oracle_graphics_image_source(&format!("{name}{suffix}"), registrations, graphics)
+                .ok()
+        })
+        .map_or_else(
+            || select_oracle_graphics_image_source(name, registrations, graphics),
+            Ok,
+        )
+}
+
+/// `C4GraphicsResource`'s own `FindSuitableFile` selection, verbatim.
+fn select_oracle_graphics_image_source(
     name: &str,
     registrations: &[LoaderGroupRegistration],
     graphics: &Group,
@@ -8141,6 +8338,36 @@ pub(crate) fn configured_smooth_landscape(config: &[u8]) -> bool {
     configured_remaster_feature(config, "SmoothLandscape")
 }
 
+/// `Graphics.FineFogOfWar`: subdivide the fog-of-war modulation grid so the
+/// visibility boundary stops showing 64-world-pixel facets.
+pub(crate) fn configured_fine_fog_of_war(config: &[u8]) -> bool {
+    configured_remaster_feature(config, "FineFogOfWar")
+}
+
+/// `Graphics.HDExactBlits`: treat a source that matches its destination in
+/// PHYSICAL pixels as exact, so higher-resolution definition art lands one
+/// authored texel per device pixel instead of a corrected linear resample.
+pub(crate) fn configured_hd_exact_blits(config: &[u8]) -> bool {
+    configured_remaster_feature(config, "HDExactBlits")
+}
+
+/// `Graphics.LoaderAspect`: cover-fit the fullscreen loader image instead of
+/// C++'s unconditional non-aspect stretch.
+pub(crate) fn configured_loader_aspect(config: &[u8]) -> bool {
+    configured_remaster_feature(config, "LoaderAspect")
+}
+
+/// `Graphics.SnapTextToPixels`: opt in to rasterizing the scale-native GUI
+/// fonts at `round(logical * Graphics.Scale)` and blitting their glyph cells
+/// at whole physical pixels. C++ truncates the scaled FreeType height
+/// (`StdFont.cpp:325`) and then rescales every facet by
+/// `scale / effective_scale` (`StdFont.cpp:685,701,841`), so at a fractional
+/// scale like 150% the oracle resamples all text. This changes glyph bytes and
+/// therefore defaults off.
+pub(crate) fn configured_snap_text_to_pixels(config: &[u8]) -> bool {
+    configured_remaster_feature(config, "SnapTextToPixels")
+}
+
 /// `Graphics.SkyDither`: opt in to sub-LSB dithering of the sky gradient.
 /// C++ emits the fade as a plain interpolated quad, so this defaults off and
 /// is recorded as a deliberate divergence in `PORT_STATUS.md`.
@@ -8383,11 +8610,144 @@ pub(crate) fn should_reconcile_deferred_fullscreen(mode: DisplayMode, is_fullscr
 
 pub(crate) const DEFERRED_FULLSCREEN_RETRY_DELAY: Duration = Duration::from_secs(2);
 
+/// `Config.Graphics.Monitor` — "monitor index to play on" (`C4Config.h:162`),
+/// stored with the `D3DADAPTER_DEFAULT` default of zero
+/// (`C4Config.cpp:483`). The oracle's SDL/GL build never reads the value back,
+/// so the row is inert there; honouring it is a presentation-only divergence
+/// that cannot reach simulation state. Zero — the default, and every negative
+/// value — keeps the pre-existing "whichever monitor the window opened on"
+/// behaviour, which is what the default adapter means.
+pub(crate) fn configured_startup_monitor(config: &[u8]) -> Option<usize> {
+    usize::try_from(startup_config_integer(config, "Graphics", "Monitor", 0))
+        .ok()
+        .filter(|index| *index > 0)
+}
+
+/// The configured monitor out of the ones this session can enumerate.
+///
+/// An index past the end — a laptop undocked since the key was written, an
+/// empty list on a headless session — falls back to `None` so the window still
+/// opens borderless on its current monitor rather than failing.
+pub(crate) fn select_startup_monitor<M>(
+    monitors: impl IntoIterator<Item = M>,
+    index: Option<usize>,
+) -> Option<M> {
+    index.and_then(|index| monitors.into_iter().nth(index))
+}
+
+fn configured_startup_monitor_handle(window: &Window) -> Option<winit::monitor::MonitorHandle> {
+    select_startup_monitor(
+        window.available_monitors(),
+        configured_startup_monitor(&load_native_config_bytes(
+            cached_app_paths().ok().as_deref(),
+        )),
+    )
+}
+
 pub(crate) fn reconcile_deferred_fullscreen(window: &Window, mode: DisplayMode) -> bool {
+    // `startup_window_builder` runs before an event loop exists, so this is
+    // the first point at which the monitor list is knowable at all.
+    let monitor = configured_startup_monitor_handle(window);
     if should_reconcile_deferred_fullscreen(mode, window.fullscreen().is_some()) {
-        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
-        true
-    } else {
-        false
+        window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
+        return true;
+    }
+    // Platforms that went fullscreen straight from the builder landed on
+    // whichever monitor the window was placed on. Move them across once.
+    if matches!(mode, DisplayMode::Fullscreen)
+        && monitor.is_some()
+        && window.current_monitor() != monitor
+    {
+        window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
+    }
+    false
+}
+
+#[cfg(test)]
+mod remastered_graphics_stem_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn selected_name(group: &Group, stem: &str) -> String {
+        select_named_graphics_image_source(stem, &[], group)
+            .expect("stem resolves")
+            .source
+            .presentation_filename()
+    }
+
+    #[test]
+    fn remastered_stem_suffix_wins_over_the_oracle_filename() {
+        let install = tempdir().expect("graphics group root");
+        let root = install.path().join("Graphics.c4g");
+        fs::create_dir_all(&root).expect("graphics group directory");
+        for name in ["GUIButton.png", "Control.png", "Control.bmp"] {
+            fs::write(root.join(name), b"").expect("seed sheet");
+        }
+        let group = Group::open(&root).expect("open graphics group");
+
+        // Nothing remastered present: FindSuitableFile's own selection,
+        // including its "every later extension replaces an earlier one" rule.
+        assert_eq!(selected_name(&group, "GUIButton"), "GUIButton.png");
+        assert_eq!(selected_name(&group, "Control"), "Control.png");
+
+        fs::write(root.join("GUIButton@2x.png"), b"").expect("seed 2x sheet");
+        let group = Group::open(&root).expect("reopen graphics group");
+        assert_eq!(selected_name(&group, "GUIButton"), "GUIButton@2x.png");
+        // Untouched stems keep resolving exactly as before.
+        assert_eq!(selected_name(&group, "Control"), "Control.png");
+
+        // The most detailed variant wins, whatever order the files appear in.
+        fs::write(root.join("GUIButton@4x.png"), b"").expect("seed 4x sheet");
+        let group = Group::open(&root).expect("reopen graphics group");
+        assert_eq!(selected_name(&group, "GUIButton"), "GUIButton@4x.png");
+
+        // A missing stem still reports the oracle stem, not a suffixed probe.
+        let error = select_named_graphics_image_source("Absent", &[], &group)
+            .err()
+            .map(|error| error.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("classic graphics resource `Absent` is unavailable")
+        );
+    }
+}
+
+#[cfg(test)]
+mod startup_monitor_tests {
+    use super::*;
+
+    #[test]
+    fn configured_monitor_row_selects_the_nth_enumerated_monitor() {
+        // Graphics.Monitor is `int32_t Monitor; // monitor index to play on`
+        // defaulted to D3DADAPTER_DEFAULT (C4Config.h:162, C4Config.cpp:483),
+        // so zero and below mean "the default adapter" — the pre-existing
+        // borderless-current-monitor behaviour.
+        let monitors = ["primary", "4k", "tv"];
+        for (config, expected) in [
+            (&b""[..], None),
+            (b"[Graphics]\nMonitor=0\n", None),
+            (b"[Graphics]\nMonitor=-1\n", None),
+            (b"[Graphics]\nMonitor=1\n", Some("4k")),
+            (b"[Graphics]\nMonitor=2\n", Some("tv")),
+            // Out of range: the display the window already opened on wins
+            // rather than the window failing to go fullscreen.
+            (b"[Graphics]\nMonitor=3\n", None),
+            (b"[Graphics]\nMonitor=9999\n", None),
+        ] {
+            assert_eq!(
+                select_startup_monitor(monitors, configured_startup_monitor(config)),
+                expected,
+                "config {}",
+                String::from_utf8_lossy(config)
+            );
+        }
+        // An empty monitor list must not panic or select anything.
+        assert_eq!(
+            select_startup_monitor(
+                std::iter::empty::<&str>(),
+                configured_startup_monitor(b"[Graphics]\nMonitor=1\n")
+            ),
+            None
+        );
     }
 }

@@ -4,6 +4,7 @@
 
 use clonk_engine::text_spec::{parse_text_spec, TextSpec, TextSpecIcon};
 use clonk_engine::{DefinitionPictureImage, Engine, ObjectSnapshot, SimulationSnapshot};
+use clonk_frontend::hud::GuiArtScale;
 use clonk_frontend::{HudGraphics, InventoryPictureOverlay};
 use clonk_graphics::{
     BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, Transform,
@@ -40,6 +41,35 @@ pub fn resolve_portrait_text_spec(
     ))
 }
 
+/// GUIIcons.png — a 6x9 grid of `C4GUI_IconWdt` cells (`C4Gui.cpp:1090`).
+const GUI_ICONS_NATIVE_SIZE: (u32, u32) = (240, 360);
+const GUI_ICONS_NATIVE_CELL: u32 = 40;
+/// GUIIcons2.png — a 4x5 grid of `C4GUI_IconExWdt` cells (`C4Gui.cpp:1091`).
+const GUI_ICONS2_NATIVE_SIZE: (u32, u32) = (256, 320);
+const GUI_ICONS2_NATIVE_CELL: u32 = 64;
+
+/// Phase `phase` of GUIIcons.png, addressed through the sheet's own art scale
+/// so a higher-resolution replacement keeps the oracle's grid and only grows
+/// the cell (see [`GuiArtScale`]).
+fn resolve_gui_icons_phase(image: &ImageData, phase: u32) -> Option<ImageData> {
+    resolve_gui_icon_phase(
+        image,
+        phase,
+        GuiArtScale::of(image, GUI_ICONS_NATIVE_SIZE).scale_up(GUI_ICONS_NATIVE_CELL),
+    )
+}
+
+/// Phase `phase` of GUIIcons2.png; see [`resolve_gui_icons_phase`].
+fn resolve_gui_icons2_phase(image: &ImageData, phase: u32) -> Option<ImageData> {
+    resolve_gui_icon_phase(
+        image,
+        phase,
+        GuiArtScale::of(image, GUI_ICONS2_NATIVE_SIZE).scale_up(GUI_ICONS2_NATIVE_CELL),
+    )
+}
+
+/// The raw grid crop. `cell` is in *source* pixels, so callers that hold a
+/// hard-coded 1x cell must project it through the sheet's [`GuiArtScale`].
 pub fn resolve_gui_icon_phase(image: &ImageData, phase: u32, cell: u32) -> Option<ImageData> {
     let columns = image.width().checked_div(cell)?;
     (columns != 0).then_some(())?;
@@ -78,12 +108,12 @@ pub fn resolve_script_font_image(
             resolve_portrait_text_spec(engine, definition_id, portrait_name, portrait_color, color)
         }
         TextSpec::Icon(icon) => match icon {
-            TextSpecIcon::Locked => resolve_gui_icon_phase(resources.gui_icons_extended?, 13, 64),
-            TextSpecIcon::League => resolve_gui_icon_phase(resources.gui_icons_extended?, 8, 64),
-            TextSpecIcon::GameRunning => resolve_gui_icon_phase(resources.gui_icons?, 30, 40),
-            TextSpecIcon::Lobby => resolve_gui_icon_phase(resources.gui_icons?, 31, 40),
-            TextSpecIcon::RuntimeJoin => resolve_gui_icon_phase(resources.gui_icons?, 32, 40),
-            TextSpecIcon::FairCrew => resolve_gui_icon_phase(resources.gui_icons_extended?, 2, 64),
+            TextSpecIcon::Locked => resolve_gui_icons2_phase(resources.gui_icons_extended?, 13),
+            TextSpecIcon::League => resolve_gui_icons2_phase(resources.gui_icons_extended?, 8),
+            TextSpecIcon::GameRunning => resolve_gui_icons_phase(resources.gui_icons?, 30),
+            TextSpecIcon::Lobby => resolve_gui_icons_phase(resources.gui_icons?, 31),
+            TextSpecIcon::RuntimeJoin => resolve_gui_icons_phase(resources.gui_icons?, 32),
+            TextSpecIcon::FairCrew => resolve_gui_icons2_phase(resources.gui_icons_extended?, 2),
             TextSpecIcon::Settlement => resources.score.cloned(),
         },
     }
@@ -1269,4 +1299,90 @@ pub fn blend_straight_picture_additive(source: Color, destination: Color) -> Col
         channel(source.b, destination.b),
         destination.a,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A grid sheet whose every phase cell is filled with its own phase index,
+    /// scaled up by `factor` in both axes.
+    fn phase_sheet(cell: u32, columns: u32, rows: u32, factor: u32) -> ImageData {
+        let (width, height) = (cell * columns * factor, cell * rows * factor);
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        for phase in 0..columns * rows {
+            let phase_x = (phase % columns) * cell * factor;
+            let phase_y = (phase / columns) * cell * factor;
+            for y in phase_y..phase_y + cell * factor {
+                for x in phase_x..phase_x + cell * factor {
+                    let offset = ((y * width + x) * 4) as usize;
+                    pixels[offset..offset + 4].copy_from_slice(&[phase as u8, 1, 2, 255]);
+                }
+            }
+        }
+        ImageData::new(width, height, pixels)
+    }
+
+    #[test]
+    fn gui_icon_phases_follow_double_resolution_icon_sheets() {
+        // C4Gui.cpp:1090-1092 slices GUIIcons/GUIIcons2 as pure C4GUI_IconWdt
+        // grids, so a sheet that is an exact integer multiple of the oracle's
+        // 240x360 / 256x320 keeps the grid and grows the cell. Addressing it
+        // with the 1x cell would land on an entirely different phase.
+        let icons = phase_sheet(40, 6, 9, 2);
+        let icons2 = phase_sheet(64, 4, 5, 2);
+        assert_eq!((icons.width(), icons.height()), (480, 720));
+        assert_eq!((icons2.width(), icons2.height()), (512, 640));
+        let engine = Engine::new();
+        let resources = ScriptTextSpecResources {
+            gui_icons: Some(&icons),
+            gui_icons_extended: Some(&icons2),
+            score: None,
+        };
+
+        for (spec, phase, native_cell) in [
+            ("Ico:GameRunning", 30_u8, 40_u32),
+            ("Ico:Lobby", 31, 40),
+            ("Ico:RuntimeJoin", 32, 40),
+            ("Ico:Locked", 13, 64),
+            ("Ico:League", 8, 64),
+            ("Ico:FairCrew", 2, 64),
+        ] {
+            let image = resolve_script_font_image(&engine, spec, 0xff, resources)
+                .unwrap_or_else(|| panic!("{spec} resolves"));
+            assert_eq!(
+                (image.width(), image.height()),
+                (native_cell * 2, native_cell * 2),
+                "{spec} crops the doubled cell"
+            );
+            assert!(
+                image
+                    .pixels()
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[0] == phase),
+                "{spec} must address phase {phase} on the doubled sheet"
+            );
+        }
+    }
+
+    #[test]
+    fn native_icon_sheets_keep_their_oracle_cells() {
+        let icons = phase_sheet(40, 6, 9, 1);
+        let icons2 = phase_sheet(64, 4, 5, 1);
+        let engine = Engine::new();
+        let resources = ScriptTextSpecResources {
+            gui_icons: Some(&icons),
+            gui_icons_extended: Some(&icons2),
+            score: None,
+        };
+        for (spec, phase, cell) in [("Ico:Lobby", 31_u8, 40_u32), ("Ico:League", 8, 64)] {
+            let image = resolve_script_font_image(&engine, spec, 0xff, resources)
+                .unwrap_or_else(|| panic!("{spec} resolves"));
+            assert_eq!((image.width(), image.height()), (cell, cell), "{spec}");
+            assert!(image
+                .pixels()
+                .chunks_exact(4)
+                .all(|pixel| pixel[0] == phase));
+        }
+    }
 }

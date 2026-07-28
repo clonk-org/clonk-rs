@@ -1954,8 +1954,34 @@
             .expect("pre-definition tooltip font");
         assert_eq!(tooltip.line_height, 31);
         assert_eq!(tooltip.h_space, 0);
-        assert!(setup.initial_native_font_source.is_none());
-        assert!(setup.refreshed_native_font_source.is_none());
+        // `Font=...,20` collapses every role onto one explicit size. The
+        // native builder used to refuse any recipe that was not its hard-coded
+        // 22/16/14/13/12 map; it now carries the resolved sizes, so it serves
+        // this one — but it must report exactly the uniform map the loader
+        // resolved, never a different one.
+        let uniform_twenty = clonk_frontend::clonk_fonts::NativeFontSizes {
+            title: 20,
+            caption: 20,
+            text: 20,
+            main_small: 20,
+            mini: 20,
+        };
+        assert_eq!(
+            setup
+                .initial_native_font_source
+                .as_ref()
+                .expect("explicit Head.Font size is serviceable")
+                .sizes,
+            uniform_twenty
+        );
+        assert_eq!(
+            setup
+                .refreshed_native_font_source
+                .as_ref()
+                .expect("the refresh keeps the same explicit recipe")
+                .sizes,
+            uniform_twenty
+        );
 
         // A definition root is not registered until the later full resource
         // refresh. It cannot rescue a face missing during InitLoaderScreen.

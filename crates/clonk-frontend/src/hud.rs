@@ -92,6 +92,100 @@ const MOUSE_SOURCE: (u32, u32, u32, u32) = (198, 100, 32, 32);
 /// `fctGamepad` is loaded with an 80px phase width and the image's full
 /// height (src/C4GraphicsResource.cpp:229).
 const GAMEPAD_CELL_WIDTH: u32 = 80;
+
+/// The 1x authoring size of the Graphics.c4g sheets whose *destination*
+/// geometry is derived from — or hard-coded against — their pixel dimensions.
+///
+/// C4Facet slicing takes its cell sizes straight from the loaded surface
+/// (src/C4GraphicsResource.cpp:200-233) and the classic HUD then hard-codes
+/// sub-rects into the same sheets, so simply dropping in higher-resolution art
+/// would magnify the on-screen layout instead of the art. The format carries
+/// no per-sheet scale metadata — DefCore `Scale=` (src/C4Def.cpp:290) covers
+/// object definitions only — so a remastered sheet declares itself exactly the
+/// way a `Scale=200` definition graphic does: by being an exact integer
+/// multiple of the oracle's dimensions. Stock content is always 1x and every
+/// path below then reduces to the byte-identical oracle blit.
+pub const CONTROL_SHEET_NATIVE_SIZE: (u32, u32) = (400, 164);
+/// Gamepad.png, four [`GAMEPAD_CELL_WIDTH`] phases (src/C4GraphicsResource.cpp:229).
+pub const GAMEPAD_SHEET_NATIVE_SIZE: (u32, u32) = (320, 36);
+/// EnergyBars.png, a 6x3 grid of 8x12 cells (src/C4GraphicsResource.cpp:213).
+pub const ENERGY_BARS_NATIVE_SIZE: (u32, u32) = (48, 36);
+
+/// The largest art multiple recognised by [`GuiArtScale::detect`]. Anything
+/// beyond this is far likelier to be an unrelated sheet that happens to divide
+/// evenly than a deliberate remaster.
+const MAX_GUI_ART_SCALE: u32 = 8;
+
+/// How much larger than its 1x authoring size a loaded GUI sheet is.
+///
+/// Source coordinates scale *up* by the factor so they keep addressing the
+/// same artwork; dimension-derived cell sizes scale *down* so the logical
+/// destination geometry stays bit-identical to the oracle's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuiArtScale(u32);
+
+impl Default for GuiArtScale {
+    fn default() -> Self {
+        Self::NATIVE
+    }
+}
+
+impl GuiArtScale {
+    /// Oracle-sized art: every projection below is the identity.
+    pub const NATIVE: Self = Self(1);
+
+    /// The scale of `image` against the 1x size of the sheet it was loaded as.
+    /// Anything that is not an exact integer multiple in *both* axes — an
+    /// unrelated replacement, a cropped sheet, a synthetic test fixture — is
+    /// treated as 1x, which is the pre-existing behaviour.
+    pub fn detect(width: u32, height: u32, native: (u32, u32)) -> Self {
+        let (native_width, native_height) = native;
+        width
+            .checked_div(native_width)
+            .filter(|factor| (2..=MAX_GUI_ART_SCALE).contains(factor))
+            .filter(|factor| {
+                native_width.checked_mul(*factor) == Some(width)
+                    && native_height.checked_mul(*factor) == Some(height)
+            })
+            .map(Self)
+            .unwrap_or(Self::NATIVE)
+    }
+
+    pub fn of(image: &ImageData, native: (u32, u32)) -> Self {
+        Self::detect(image.width(), image.height(), native)
+    }
+
+    /// The `Scale=`-style percentage, so 1x art reports 100.
+    pub const fn percent(self) -> u32 {
+        self.0 * 100
+    }
+
+    pub const fn is_native(self) -> bool {
+        self.0 == 1
+    }
+
+    /// A hard-coded 1x source coordinate projected onto the loaded sheet.
+    pub const fn scale_up(self, value: u32) -> u32 {
+        value.saturating_mul(self.0)
+    }
+
+    /// A dimension-derived source cell projected back to its 1x logical size.
+    pub const fn scale_down(self, value: u32) -> u32 {
+        value / self.0
+    }
+
+    /// A hard-coded 1x sub-rect projected onto the loaded sheet.
+    fn source_rect(self, rect: SurfaceRect) -> SurfaceRect {
+        let factor = self.0 as i32;
+        SurfaceRect::new(
+            rect.x * factor,
+            rect.y * factor,
+            self.scale_up(rect.width),
+            self.scale_up(rect.height),
+        )
+    }
+}
+
 /// White HUD text (`CStdDDraw::DEFAULT_MESSAGE_COLOR`, src/StdDDraw2.h:361).
 const MESSAGE_COLOR: Color = Color::opaque(255, 255, 255);
 /// `C4MSGB_MaxMsgFading` (src/C4MessageBoard.h:21).
@@ -351,6 +445,44 @@ fn draw_hud_image_strip(
 ) {
     draw_image_strip(
         surface, dest_x, dest_y, image, src_x, src_y, src_w, src_h, gamma,
+    );
+}
+
+/// Blit one sheet cell at its 1x logical size.
+///
+/// Native art keeps the exact 1:1 `C4Facet::Draw` strip the oracle emits;
+/// higher-resolution art samples the correspondingly larger source rect into
+/// the same logical destination, so only the sampling density changes.
+#[allow(clippy::too_many_arguments)]
+fn draw_sheet_cell(
+    surface: &mut Surface,
+    dest_x: i32,
+    dest_y: i32,
+    image: &ImageData,
+    scale: GuiArtScale,
+    src_x: u32,
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+    gamma: Option<&GammaRamp>,
+) {
+    if scale.is_native() {
+        draw_image_strip(
+            surface, dest_x, dest_y, image, src_x, src_y, src_w, src_h, gamma,
+        );
+        return;
+    }
+    draw_scaled_region(
+        surface,
+        image,
+        SurfaceRect::new(src_x as i32, src_y as i32, src_w, src_h),
+        SurfaceRect::new(
+            dest_x,
+            dest_y,
+            scale.scale_down(src_w).max(1),
+            scale.scale_down(src_h).max(1),
+        ),
+        gamma,
     );
 }
 
@@ -1705,10 +1837,11 @@ fn draw_command_key_cell(
     gamma: Option<&GammaRamp>,
 ) {
     if let Some(control) = hud.control.as_ref() {
+        let scale = GuiArtScale::of(control, CONTROL_SHEET_NATIVE_SIZE);
         draw_scaled_region(
             surface,
             control,
-            SurfaceRect::new(0, 100, 64, 64),
+            scale.source_rect(SurfaceRect::new(0, 100, 64, 64)),
             cell,
             gamma,
         );
@@ -1716,7 +1849,12 @@ fn draw_command_key_cell(
         draw_scaled_region(
             surface,
             control,
-            SurfaceRect::new(32 * control_index, 36 + 32 * i32::from(double), 32, 32),
+            scale.source_rect(SurfaceRect::new(
+                32 * control_index,
+                36 + 32 * i32::from(double),
+                32,
+                32,
+            )),
             cell,
             gamma,
         );
@@ -1808,10 +1946,11 @@ fn draw_viewport_button_cell(
     gamma: Option<&GammaRamp>,
 ) {
     if let Some(control) = hud.control.as_ref() {
+        let scale = GuiArtScale::of(control, CONTROL_SHEET_NATIVE_SIZE);
         draw_scaled_region(
             surface,
             control,
-            SurfaceRect::new(0, 100, 64, 64),
+            scale.source_rect(SurfaceRect::new(0, 100, 64, 64)),
             cell,
             gamma,
         );
@@ -1822,7 +1961,7 @@ fn draw_viewport_button_cell(
             ViewportButton::Chat => None,
         };
         if let Some(symbol) = symbol {
-            draw_scaled_region(surface, control, symbol, cell, gamma);
+            draw_scaled_region(surface, control, scale.source_rect(symbol), cell, gamma);
         }
     }
     if button == ViewportButton::Chat {
@@ -1996,7 +2135,8 @@ pub fn draw_command_image_cell_with_gamma(
                 draw_scaled_region_aspect(
                     surface,
                     control,
-                    SurfaceRect::new(128, 132, 32, 32),
+                    GuiArtScale::of(control, CONTROL_SHEET_NATIVE_SIZE)
+                        .source_rect(SurfaceRect::new(128, 132, 32, 32)),
                     get_fraction(cell, 85, 85, true, false, false),
                     gamma,
                 );
@@ -2256,8 +2396,13 @@ fn draw_bar(
     let Some(bars) = hud.energy_bars.as_ref() else {
         return;
     };
-    let cell_w = bars.width() / 6;
-    let cell_h = bars.height() / 3;
+    // The 6x3 grid is derived from the loaded surface, so it is in *source*
+    // pixels; the bar's on-screen footprint is the 1x projection of that cell.
+    let scale = GuiArtScale::of(bars, ENERGY_BARS_NATIVE_SIZE);
+    let source_cell_w = bars.width() / 6;
+    let source_cell_h = bars.height() / 3;
+    let cell_w = scale.scale_down(source_cell_w);
+    let cell_h = scale.scale_down(source_cell_h);
     if cell_w == 0 || cell_h == 0 {
         return;
     }
@@ -2289,15 +2434,16 @@ fn draw_bar(
             (1, row % cell_h_i)
         };
         let column = kind as u32 * 2 + u32::from(row < y_bar);
-        draw_hud_image_strip(
+        draw_sheet_cell(
             surface,
             x,
             y + row,
             bars,
-            column * cell_w,
-            vidx as u32 * cell_h + dy as u32,
-            cell_w,
-            1,
+            scale,
+            column * source_cell_w,
+            vidx as u32 * source_cell_h + scale.scale_up(dy as u32),
+            source_cell_w,
+            scale.scale_up(1),
             gamma,
         );
     }
@@ -2340,25 +2486,33 @@ pub(crate) fn draw_player_startup_with_gamma(
     mouse_control: bool,
     gamma: Option<&GammaRamp>,
 ) {
+    // The fctKeyboard/fctMouse cells are hard-coded 1x layout constants, so
+    // they stay the destination geometry whatever the sheet resolution is.
     let (cell_w, cell_h) = KEYBOARD_CELL;
     let dest_x = viewport.x + (viewport.width as i32 - cell_w as i32) / 2;
     let dest_y = viewport.y + viewport.height as i32 * 2 / 3 + DRAW_MESSAGE_OFFSET;
     let mut name_height_off = 0;
+    let control_scale = hud
+        .control
+        .as_ref()
+        .map(|control| GuiArtScale::of(control, CONTROL_SHEET_NATIVE_SIZE))
+        .unwrap_or_default();
 
     // MouseControl is independent of the keyboard/gamepad branch and draws
     // first, so the later control facet wins in their overlap.
     if mouse_control {
         if let Some(control) = hud.control.as_ref() {
             let (src_x, src_y, src_w, src_h) = MOUSE_SOURCE;
-            draw_hud_image_strip(
+            draw_sheet_cell(
                 surface,
                 dest_x + 55,
                 dest_y - 10,
                 control,
-                src_x,
-                src_y,
-                src_w,
-                src_h,
+                control_scale,
+                control_scale.scale_up(src_x),
+                control_scale.scale_up(src_y),
+                control_scale.scale_up(src_w),
+                control_scale.scale_up(src_h),
                 gamma,
             );
         }
@@ -2366,34 +2520,39 @@ pub(crate) fn draw_player_startup_with_gamma(
 
     if (0..=3).contains(&control_set) {
         if let Some(control) = hud.control.as_ref() {
-            draw_hud_image_strip(
+            draw_sheet_cell(
                 surface,
                 dest_x,
                 dest_y,
                 control,
-                control_set as u32 * cell_w,
+                control_scale,
+                control_scale.scale_up(control_set as u32 * cell_w),
                 0,
-                cell_w,
-                cell_h,
+                control_scale.scale_up(cell_w),
+                control_scale.scale_up(cell_h),
                 gamma,
             );
         }
         name_height_off = cell_h as i32;
     } else if (4..=7).contains(&control_set) {
         if let Some(gamepad) = hud.gamepad.as_ref() {
+            // fctGamepad takes its height from the image, so the name offset
+            // is that height projected back to 1x.
+            let gamepad_scale = GuiArtScale::of(gamepad, GAMEPAD_SHEET_NATIVE_SIZE);
             let gamepad_height = gamepad.height();
-            draw_hud_image_strip(
+            draw_sheet_cell(
                 surface,
                 dest_x,
                 dest_y,
                 gamepad,
-                (control_set as u32 - 4) * GAMEPAD_CELL_WIDTH,
+                gamepad_scale,
+                gamepad_scale.scale_up((control_set as u32 - 4) * GAMEPAD_CELL_WIDTH),
                 0,
-                GAMEPAD_CELL_WIDTH,
+                gamepad_scale.scale_up(GAMEPAD_CELL_WIDTH),
                 gamepad_height,
                 gamma,
             );
-            name_height_off = gamepad_height as i32;
+            name_height_off = gamepad_scale.scale_down(gamepad_height) as i32;
         }
     }
 
@@ -2505,18 +2664,19 @@ pub(crate) fn draw_player_controls_with_gamma(
             cell_height as u32,
         );
         if let Some(control_sheet) = hud.control.as_ref() {
+            let scale = GuiArtScale::of(control_sheet, CONTROL_SHEET_NATIVE_SIZE);
             let pressed = i32::from(last_control == control);
             draw_scaled_region(
                 surface,
                 control_sheet,
-                SurfaceRect::new(64 * pressed, 100, 64, 64),
+                scale.source_rect(SurfaceRect::new(64 * pressed, 100, 64, 64)),
                 cell,
                 gamma,
             );
             draw_scaled_region_aspect(
                 surface,
                 control_sheet,
-                SurfaceRect::new(32 * control, 36, 32, 32),
+                scale.source_rect(SurfaceRect::new(32 * control, 36, 32, 32)),
                 cell,
                 gamma,
             );
@@ -5076,6 +5236,208 @@ mod tests {
         assert_eq!(
             (render(None), render(Some(&gamma))),
             (727_770_473, 366_450_976)
+        );
+    }
+
+    /// A doubled sheet built by nearest-neighbour expansion: every logical
+    /// pixel becomes a `factor` square, so a correct 2x sampler reproduces the
+    /// exact 1x colours at the exact 1x destination pixels.
+    fn upscaled_sheet(image: &ImageData, factor: u32) -> ImageData {
+        expanded_sheet(image, factor, factor)
+    }
+
+    fn expanded_sheet(image: &ImageData, x_factor: u32, y_factor: u32) -> ImageData {
+        let (width, height) = (image.width(), image.height());
+        let source = image.pixels();
+        let mut pixels = Vec::with_capacity((width * height * x_factor * y_factor * 4) as usize);
+        for y in 0..height * y_factor {
+            for x in 0..width * x_factor {
+                let index = (((y / y_factor) * width + x / x_factor) * 4) as usize;
+                pixels.extend_from_slice(&source[index..index + 4]);
+            }
+        }
+        ImageData::new(width * x_factor, height * y_factor, pixels)
+    }
+
+    #[test]
+    fn gui_art_scale_detects_only_exact_integer_multiples() {
+        // There is no per-sheet scale metadata in Graphics.c4g, so the factor
+        // has to be an exact multiple in both axes to be believed.
+        assert_eq!(
+            GuiArtScale::detect(400, 164, CONTROL_SHEET_NATIVE_SIZE),
+            GuiArtScale::NATIVE
+        );
+        assert_eq!(
+            GuiArtScale::detect(800, 328, CONTROL_SHEET_NATIVE_SIZE).percent(),
+            200
+        );
+        assert_eq!(
+            GuiArtScale::detect(1600, 656, CONTROL_SHEET_NATIVE_SIZE).percent(),
+            400
+        );
+        // Only one axis doubled, a non-integer multiple, an oversized guess,
+        // and degenerate inputs all stay 1x.
+        for (width, height) in [
+            (800, 164),
+            (400, 328),
+            (600, 246),
+            (3600, 1476),
+            (0, 0),
+            (200, 82),
+        ] {
+            assert_eq!(
+                GuiArtScale::detect(width, height, CONTROL_SHEET_NATIVE_SIZE),
+                GuiArtScale::NATIVE,
+                "{width}x{height} must not be read as remastered art"
+            );
+        }
+        assert_eq!(
+            GuiArtScale::detect(96, 72, ENERGY_BARS_NATIVE_SIZE).percent(),
+            200
+        );
+        assert_eq!(
+            GuiArtScale::detect(640, 72, GAMEPAD_SHEET_NATIVE_SIZE).percent(),
+            200
+        );
+        assert_eq!(GuiArtScale::NATIVE.percent(), 100);
+        assert!(GuiArtScale::default().is_native());
+    }
+
+    #[test]
+    fn double_resolution_control_sheet_keeps_logical_startup_geometry() {
+        // C4Viewport::DrawPlayerStartup (src/C4Viewport.cpp:1446-1476) places
+        // fctKeyboard/fctMouse by their 1x cell size. A 2x Control.png must
+        // land on the same pixels, not at twice the offset and twice the size.
+        let viewport = SurfaceRect::new(10, 20, 240, 180);
+        let dest_x = 90;
+        let dest_y = 105;
+        let marker = MarkerFont;
+        let font = HudFont::Fallback(&marker);
+        let render = |hud: &HudGraphics, control_set, mouse_control| {
+            let mut target = surface(280, 220);
+            draw_player_startup(
+                &mut target,
+                &font,
+                hud,
+                viewport,
+                "P",
+                Color::opaque(7, 8, 9),
+                control_set,
+                mouse_control,
+            );
+            target
+        };
+
+        let native = HudGraphics {
+            control: Some(startup_control_sheet()),
+            gamepad: Some(startup_gamepad_sheet(36)),
+            ..HudGraphics::default()
+        };
+        let doubled = HudGraphics {
+            control: Some(upscaled_sheet(&startup_control_sheet(), 2)),
+            gamepad: Some(upscaled_sheet(&startup_gamepad_sheet(36), 2)),
+            ..HudGraphics::default()
+        };
+        assert_eq!(
+            GuiArtScale::of(
+                doubled.control.as_ref().expect("control"),
+                CONTROL_SHEET_NATIVE_SIZE
+            )
+            .percent(),
+            200
+        );
+
+        for control_set in 0..8 {
+            assert_eq!(
+                render(&doubled, control_set, true).snapshot().checksum(),
+                render(&native, control_set, true).snapshot().checksum(),
+                "control set {control_set} must render identically from 2x art"
+            );
+        }
+        // The keyboard facet still ends where the 1x cell ended, so the name
+        // baseline is unmoved.
+        let target = render(&doubled, 0, false);
+        assert_eq!(
+            target.get_pixel(dest_x + KEYBOARD_CELL.0 - 1, dest_y + KEYBOARD_CELL.1 - 1),
+            Some(Color::opaque(200, 10, 10))
+        );
+        assert_eq!(
+            target.get_pixel(dest_x + KEYBOARD_CELL.0, dest_y),
+            Some(Color::opaque(0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn double_resolution_energy_bars_keep_logical_bar_geometry() {
+        // C4Facet::DrawEnergyLevelEx slices EnergyBars.png as a 6x3 grid
+        // (src/C4Facet.cpp:334-389); the bar width comes from that cell, so a
+        // 2x sheet must not double the on-screen bar.
+        let mut pixels = Vec::new();
+        for _row in 0..3 {
+            pixels.extend_from_slice(&[200, 0, 0, 255]);
+            pixels.extend_from_slice(&[60, 60, 60, 255]);
+            pixels.extend_from_slice(&[0, 0, 200, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        // The oracle's own 48x36 grid of 8x12 cells, so the fixture is
+        // recognised as 1x at all.
+        let native_sheet = expanded_sheet(&ImageData::new(6, 3, pixels), 8, 12);
+        assert_eq!(
+            (native_sheet.width(), native_sheet.height()),
+            ENERGY_BARS_NATIVE_SIZE
+        );
+        let render = |bars: ImageData| {
+            let mut target = surface(40, 200);
+            draw_level_bar(
+                &mut target,
+                &HudGraphics {
+                    energy_bars: Some(bars),
+                    ..HudGraphics::default()
+                },
+                SurfaceRect::new(0, 0, 40, 200),
+                HudBarKind::Energy,
+                1,
+                1,
+                2,
+                true,
+            );
+            target
+        };
+        assert_eq!(
+            render(upscaled_sheet(&native_sheet, 2))
+                .snapshot()
+                .checksum(),
+            render(native_sheet).snapshot().checksum(),
+            "a 2x EnergyBars.png must produce the same logical bar"
+        );
+    }
+
+    #[test]
+    fn double_resolution_control_sheet_keeps_command_cell_geometry() {
+        // DrawCommandKey (src/C4ObjectCom.cpp:930-944) hard-codes its caps and
+        // symbols into Control.png; those sub-rects have to follow the art.
+        let control = startup_control_sheet();
+        let marker = MarkerFont;
+        let font = HudFont::Fallback(&marker);
+        let render = |sheet: ImageData| {
+            let mut target = surface(64, 64);
+            draw_command_key_cell(
+                &mut target,
+                &font,
+                &HudGraphics {
+                    control: Some(sheet),
+                    ..HudGraphics::default()
+                },
+                SurfaceRect::new(0, 0, 40, 40),
+                1,
+                "",
+                false,
+                None,
+            );
+            target
+        };
+        assert_eq!(
+            render(upscaled_sheet(&control, 2)).snapshot().checksum(),
+            render(control).snapshot().checksum()
         );
     }
 }
