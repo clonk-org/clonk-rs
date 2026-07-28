@@ -24,6 +24,20 @@ pub(crate) const SAVE_THUMBNAIL_HEIGHT: u32 = 150;
 pub(crate) static LOBBY_PRELOAD_SERIAL: AtomicU64 = AtomicU64::new(0);
 pub(crate) const NETWORK_CONTROL_OVERFLOW_LIMIT: u32 = 3;
 pub(crate) const NETWORK_RENDER_SKIP_BEHIND: u32 = 25;
+
+/// Simulation frames that may pass without drawing anything while catching up.
+///
+/// C++ thins rendering during catch-up by `(behind + 15) / 20`, which at a large
+/// backlog means drawing one frame in twenty or worse — and the port's pass
+/// coalescing can stack several such passes, so a client recovering from a long
+/// stall can go a noticeable time with a completely static picture. That is
+/// indistinguishable from a hang to the person watching it.
+///
+/// Spring solves the same problem with an explicit floor, pinning draw to 2 Hz
+/// while fast-forwarding rather than letting the sim have everything. 18 frames
+/// is that 2 Hz at the 28 ms in-game tick. Counted in frames rather than wall
+/// time so the behaviour is deterministic and testable.
+pub(crate) const NETWORK_RENDER_FLOOR_FRAMES: u32 = 18;
 pub(crate) const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const STARTUP_NETWORK_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const STARTUP_NETWORK_QUERY_ERROR_LIFETIME: Duration = Duration::from_secs(10);

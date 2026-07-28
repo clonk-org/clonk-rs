@@ -1,4 +1,5 @@
 mod audit;
+mod chaos;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clonk_engine::fixtures::SNAPSHOT_SCENARIOS;
@@ -29,14 +30,8 @@ const MACOS_ICON_STEM: &str = "ClonkRust";
 const MACOS_ICON_SOURCE: &str = "planet/Graphics.c4g/Logo.png";
 /// Everything the staged payload keeps outside `bin/`, relocated into
 /// `Contents/Resources` so the bundle stays self-contained.
-const MACOS_BUNDLED_RESOURCES: [&str; 6] = [
-    "planet",
-    "content",
-    "COPYING",
-    "README.md",
-    "credits.txt",
-    "THIRD_PARTY_GAME_CONTENT.md",
-];
+const MACOS_BUNDLED_RESOURCES: [&str; 5] =
+    ["planet", "content", "COPYING", "README.md", "credits.txt"];
 
 fn main() -> Result<()> {
     clonk_logging::init();
@@ -55,6 +50,10 @@ fn main() -> Result<()> {
         Some("dev-check") => {
             let tail: Vec<String> = args.collect();
             dev_check::command(&tail)
+        }
+        Some("chaos") => {
+            let tail: Vec<String> = args.collect();
+            chaos::command(&tail)
         }
         Some("parity") => {
             let tail: Vec<String> = args.collect();
@@ -78,7 +77,7 @@ fn main() -> Result<()> {
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
     );
 }
 
@@ -1054,10 +1053,6 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
         &paths.repo_root.join("credits.txt"),
         &package_dir.join("credits.txt"),
     )?;
-    copy_file(
-        &paths.repo_root.join("THIRD_PARTY_GAME_CONTENT.md"),
-        &package_dir.join("THIRD_PARTY_GAME_CONTENT.md"),
-    )?;
 
     let planet_dst = package_dir.join("planet");
     copy_tracked_directory(&paths.repo_root, Path::new("planet"), &planet_dst)?;
@@ -1856,16 +1851,15 @@ mod tests {
         let temp = TempDir::new().expect("temporary workspace");
         let root = temp.path();
 
-        for name in [
-            "COPYING",
-            "README.md",
-            "credits.txt",
-            "THIRD_PARTY_GAME_CONTENT.md",
-        ] {
+        for name in ["COPYING", "README.md", "credits.txt"] {
             write_fixture(&root.join(name), name.as_bytes());
         }
         write_fixture(&root.join("planet/System.c4g/C4.c"), b"system");
         write_fixture(&root.join("planet/Graphics.c4g/Logo.png"), b"logo");
+        write_fixture(
+            &root.join("content/THIRD_PARTY_GAME_CONTENT.md"),
+            b"redistribution permission",
+        );
         write_fixture(&root.join("content/Objects.c4d/DefCore.txt"), b"objects");
         write_fixture(
             &root.join("content/Worlds.c4f/Test.c4s/Scenario.txt"),
@@ -1972,7 +1966,7 @@ mod tests {
             PathBuf::from("COPYING"),
             PathBuf::from("README.md"),
             PathBuf::from("credits.txt"),
-            PathBuf::from("THIRD_PARTY_GAME_CONTENT.md"),
+            PathBuf::from("content/THIRD_PARTY_GAME_CONTENT.md"),
             PathBuf::from("planet/System.c4g/C4.c"),
             PathBuf::from("planet/Graphics.c4g/Logo.png"),
             PathBuf::from("content/Objects.c4d/DefCore.txt"),

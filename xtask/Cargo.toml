@@ -15,6 +15,7 @@ default-run = "xtask"
 default = []
 engine-tools = [
     "dep:clonk-engine",
+    "dep:clonk-network",
     "dep:clonk-logging",
     "dep:clonk-resources",
     "dep:image",
@@ -31,6 +32,7 @@ image = { version = "0.24", default-features = false, features = ["bmp", "jpeg",
 walkdir = { version = "2", optional = true }
 zip = { version = "0.6", default-features = false, features = ["deflate"], optional = true }
 clonk-engine = { path = "../crates/clonk-engine", optional = true }
+clonk-network = { path = "../crates/clonk-network", optional = true }
 clonk-logging = { path = "../crates/clonk-logging", optional = true }
 clonk-resources = { path = "../crates/clonk-resources", optional = true }
 tracing = { version = "0.1", optional = true }

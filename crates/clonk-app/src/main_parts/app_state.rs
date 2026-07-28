@@ -374,6 +374,18 @@ pub(crate) struct GameApp {
     pub(crate) sync_checks: SyncCheckState,
     pub(crate) network_ticks: NetworkTickGate,
     pub(crate) waiting_network_control: Option<NetworkControlWait>,
+    /// When the current lockstep stall began, and whether it has been announced.
+    ///
+    /// A control stall is completely silent in C++: `DrawHoldMessages` prints
+    /// only "Pause", and only for `HaltCount`, which a stall never sets. The
+    /// world therefore freezes while rendering carries on at full frame rate,
+    /// which is indistinguishable from a hang — the symptom behind LegacyClonk
+    /// issue #28, "network games stop randomly". There is no C++ behaviour to
+    /// preserve here, so the port says something.
+    pub(crate) network_stall_since: Option<(Instant, bool)>,
+    /// Simulation frames executed since anything was last drawn, so a long
+    /// catch-up cannot leave the screen frozen. See `NETWORK_RENDER_FLOOR_FRAMES`.
+    pub(crate) frames_since_redraw: u32,
     pub(crate) network_control_retry_pending: bool,
     pub(crate) network_sync: NetworkSyncGate,
     /// `C4GameControl::Input` packets produced outside the simulation in a
@@ -3357,7 +3369,33 @@ pub(crate) fn advance_simulation_pass(
         }
     }
 
+    apply_render_floor(app, &mut outcome);
+
     Ok(outcome)
+}
+
+/// Holds a floor under drawing during a long catch-up.
+///
+/// `pacing.skip_render` thins rendering hard while a client is behind — one
+/// frame in twenty or worse — and because a pass coalesces several frames,
+/// consecutive passes can each decide to draw nothing at all. A recovering
+/// client then shows a frozen picture, which is exactly the "is it hung?"
+/// symptom a silent stall produces. Spring solves the same problem the same
+/// way, pinning draw to 2 Hz while fast-forwarding rather than giving the
+/// simulation everything.
+///
+/// Applied after the pass has decided, so it overrides the skip without
+/// perturbing the per-frame accounting that mirrors C++.
+pub(crate) fn apply_render_floor(app: &mut GameApp, outcome: &mut SimulationPassOutcome) {
+    app.frames_since_redraw = app
+        .frames_since_redraw
+        .saturating_add(outcome.executed_frames);
+    if outcome.skip_redraw && app.frames_since_redraw >= NETWORK_RENDER_FLOOR_FRAMES {
+        outcome.skip_redraw = false;
+    }
+    if !outcome.skip_redraw {
+        app.frames_since_redraw = 0;
+    }
 }
 
 pub(crate) struct MenuState {

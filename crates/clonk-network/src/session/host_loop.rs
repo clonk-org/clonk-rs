@@ -311,6 +311,8 @@ pub(crate) async fn run_host(
             NETWORK_STATE_GO | NETWORK_STATE_PAUSE
         ),
         control_mode: config.initial_status.control_mode,
+        straggler_late: Default::default(),
+        peer_capabilities: Default::default(),
         async_control_wait: None,
         admission,
         client_cores,
@@ -1321,11 +1323,41 @@ async fn force_expired_async_control(state: &mut HostState) {
     let Some(waiting) = state.async_control_wait else {
         return;
     };
-    if state.control_mode != 2
-        || waiting.tick != state.coordinator.current_tick()
-        || tokio::time::Instant::now() < waiting.deadline(state.config.async_max_wait_frames)
-    {
+    if state.control_mode != 2 || waiting.tick != state.coordinator.current_tick() {
         return;
+    }
+    let missing = state.coordinator.clients_missing(waiting.tick);
+    // Waiting the full budget is right for a peer that hiccupped. It is wrong
+    // for one that has missed every recent tick: the host would spend the whole
+    // budget again on control that is not coming, and every other participant
+    // waits with him. Once all the clients still outstanding are in that state,
+    // pack immediately. They rejoin the waited-for set the moment they deliver.
+    let patience = state.config.straggler_patience;
+    let all_missing_are_stragglers = patience > 0
+        && !missing.is_empty()
+        && missing.iter().all(|client_id| {
+            state
+                .straggler_late
+                .get(client_id)
+                .is_some_and(|late| *late >= patience)
+        });
+    let deadline_expired =
+        tokio::time::Instant::now() >= waiting.deadline(state.config.async_max_wait_frames);
+    if !all_missing_are_stragglers && !deadline_expired {
+        return;
+    }
+    for client_id in state.coordinator.client_ids().collect::<Vec<_>>() {
+        let missed = missing.contains(&client_id);
+        let late = state.straggler_late.entry(client_id).or_insert(0);
+        if !missed {
+            *late = 0;
+        } else if deadline_expired {
+            // Only a client that had the whole budget and still did not deliver
+            // has earned a mark. On the fast path the host packs early *because*
+            // of a known straggler, so anyone else merely still in flight has
+            // not failed at anything and must not be written off for it.
+            *late = late.saturating_add(1);
+        }
     }
     for batch in state.coordinator.force_current_tick() {
         publish_ready_batch(batch, state).await;

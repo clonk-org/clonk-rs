@@ -286,6 +286,12 @@ pub enum ControlMessage {
     ExecSync {
         control_tick: Tick,
     },
+    /// This peer announcing what it can do beyond the C++ protocol.
+    ///
+    /// Safe to send to anybody: C++'s `HandlePacket` switch has no `default:`
+    /// case, so a stock peer ignores the ID entirely. See
+    /// [`crate::capabilities`].
+    PortCapabilities(crate::PortCapabilities),
 }
 
 #[derive(Debug)]
@@ -629,6 +635,9 @@ impl<S> ControlTransport<S> {
             ControlMessage::Packet { delivery, data } => {
                 frame.extend(encode_complete_control_delivery_packet(delivery, &data));
             }
+            ControlMessage::PortCapabilities(capabilities) => {
+                frame.extend(crate::encode_port_capabilities(capabilities));
+            }
             ControlMessage::ExecSync { control_tick } => {
                 frame.push(PID_EXEC_SYNC_CTRL);
                 let control_tick = i32::try_from(control_tick)
@@ -801,6 +810,11 @@ fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> 
         PID_CONTROL_REQ => parse_request(&body[1..]),
         PID_CONTROL_PKT => parse_packet(&body[1..]),
         PID_EXEC_SYNC_CTRL => parse_exec_sync(&body[1..]),
+        crate::PID_PORT_CAPABILITIES => crate::decode_port_capabilities(body)
+            .map(ControlMessage::PortCapabilities)
+            .ok_or(TransportError::UnsupportedPacket(
+                crate::PID_PORT_CAPABILITIES,
+            )),
         other => Err(TransportError::UnsupportedPacket(other)),
     }
 }
@@ -1291,6 +1305,39 @@ impl<'a> ConnectionPayloadReader<'a> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The capability announcement has to travel the ordinary frame codec, not
+    /// a side channel, or receiving one would need special handling.
+    #[test]
+    fn a_capability_announcement_round_trips_through_the_frame_codec() {
+        let announced =
+            crate::PortCapabilities::from_bits(crate::PortCapabilities::CONTROL_CHANNEL);
+        let frame = ControlTransport::<tokio::io::DuplexStream>::encode_message_frame(
+            ControlMessage::PortCapabilities(announced),
+        )
+        .expect("announcement encodes");
+
+        // Skip the 0xFF prefix and the u32 length to reach the body.
+        let decoded =
+            parse_control_message(&frame[FRAME_HEADER_LEN..]).expect("announcement decodes");
+
+        assert_eq!(decoded, ControlMessage::PortCapabilities(announced));
+    }
+
+    /// A stock C++ peer never sends this, so the port must never *require* it —
+    /// and must not mistake some other packet for one.
+    #[test]
+    fn no_other_packet_decodes_as_a_capability_announcement() {
+        let ping = ControlTransport::<tokio::io::DuplexStream>::encode_message_frame(
+            ControlMessage::ExecSync { control_tick: 7 },
+        )
+        .expect("encodes");
+
+        assert!(!matches!(
+            parse_control_message(&ping[FRAME_HEADER_LEN..]),
+            Ok(ControlMessage::PortCapabilities(_))
+        ));
+    }
     use super::*;
     use crate::resource_packet::{
         ResourceChunkAvailability, ResourceChunkRange, ResourceDataPacket, ResourceDiscoverPacket,

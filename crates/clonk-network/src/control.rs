@@ -210,6 +210,19 @@ impl ControlCoordinator {
         ready
     }
 
+    /// Registered clients that have not contributed `tick` yet.
+    ///
+    /// The host needs this to tell a peer that hiccuped from one that has
+    /// stopped keeping up: the async deadline bounds the wait for the first, but
+    /// paying it every tick for the second costs every other participant.
+    pub fn clients_missing(&self, tick: Tick) -> Vec<ClientId> {
+        self.clients
+            .iter()
+            .filter(|(_, state)| !state.pending.contains_key(&tick))
+            .map(|(client_id, _)| *client_id)
+            .collect()
+    }
+
     pub fn backlog_limit(&self) -> usize {
         self.backlog_limit
     }

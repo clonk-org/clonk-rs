@@ -286,6 +286,22 @@ pub struct HostConfig {
     pub resync_cooldown: Duration,
     /// `Config.Network.AsyncMaxWait`, measured in extra control frames.
     pub async_max_wait_frames: i32,
+    /// Consecutive ticks a client may miss before the host stops extending the
+    /// `CNM_Async` deadline for it. Zero restores C++'s behaviour.
+    ///
+    /// The deadline alone bounds the wait per tick, which is right for a peer
+    /// that hiccups. A peer that is late on *every* tick — a machine that cannot
+    /// sustain the cadence — makes the host pay the whole budget every tick, and
+    /// every other participant pays it too.
+    ///
+    /// Four by measurement, not by taste (`cargo xtask chaos`, 8 seeds x 200
+    /// ticks, one Pi-class machine among four). Healthy-participant drift falls
+    /// from 10086 ms to 464 ms, and they lose 38 inputs out of 4800 doing it. At
+    /// two the win is the same but an *all-healthy* session starts losing input
+    /// as well (65 -> 120), because ordinary loss makes a good client miss twice
+    /// in a row often enough to be written off. Above four the win decays with
+    /// no compensating gain.
+    pub straggler_patience: u32,
     pub max_players: usize,
     pub start_tick: Tick,
     pub local_core: clonk_engine::ClientCoreControlData,
@@ -360,6 +376,7 @@ impl Default for HostConfig {
             resync_interval: Duration::from_millis(200),
             resync_cooldown: Duration::from_secs(2),
             async_max_wait_frames: 2,
+            straggler_patience: 4,
             max_players: 8,
             start_tick: 0,
             local_core: local_core.clone(),
