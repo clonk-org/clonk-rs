@@ -4245,7 +4245,10 @@ impl GraphicsSystem {
                 None => CacheUpdate::Rebuild,
             },
         };
-        if !matches!(&update, CacheUpdate::Reuse) {
+        // A reused cache is already anchored to the grid this frame presents;
+        // a rebuilt one is constructed from it below.
+        let mut anchored = matches!(&update, CacheUpdate::Reuse);
+        if !anchored {
             let regions = match update {
                 CacheUpdate::Reuse => unreachable!(),
                 CacheUpdate::Patch {
@@ -4280,6 +4283,7 @@ impl GraphicsSystem {
                         shade_materials,
                         border_state,
                     ));
+                    anchored = true;
                     vec![(0, 0, width, height)]
                 }
             };
@@ -4576,7 +4580,13 @@ impl GraphicsSystem {
         };
         // Anchor the exact byte-plane generation presented by this snapshot.
         // The next engine mutation then starts a new COW dirty generation.
-        cache.grid = grid.clone();
+        // A reused or freshly rebuilt cache already holds that generation, so
+        // re-cloning would only deep-copy the grid's texture names, material
+        // names, densities, materials, dirty generations and pending relights
+        // to arrive at the anchor it is already on.
+        if !anchored || cache.grid.bytes().as_ptr() != grid.bytes().as_ptr() {
+            cache.grid = grid.clone();
+        }
         if record_gpu_landscape(
             &mut self.surface,
             cache,

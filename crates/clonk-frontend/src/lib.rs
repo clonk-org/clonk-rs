@@ -17107,6 +17107,98 @@ mod tests {
         );
     }
 
+    /// The landscape cache re-anchors to the byte plane the frame presented so
+    /// the engine's next write forks a distinct COW generation
+    /// (clonk-engine landscape.rs:550-554). A frame that changed nothing is
+    /// already anchored to that exact `Arc`, yet re-cloning still deep-copies
+    /// the grid's texture names, material names, densities, materials, dirty
+    /// generations and pending relights (landscape.rs:290-348).
+    #[test]
+    fn unchanged_landscape_reuses_its_anchored_cache_grid() {
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 64;
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT as i32);
+        let texture_names = (0..128)
+            .map(|index| (index > 0).then(|| format!("Texture{index}")))
+            .collect::<Vec<_>>();
+        let material_names = (0..128)
+            .map(|index| (index > 0).then(|| format!("Material{index}")))
+            .collect::<Vec<_>>();
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![1; (WIDTH * HEIGHT) as usize],
+            (0..128).map(|index| if index == 0 { 0 } else { 50 }).collect(),
+            material_names,
+            texture_names,
+        ));
+        let mut graphics = GraphicsSystem::new(
+            WIDTH,
+            HEIGHT,
+            HEIGHT as i32,
+            "landscape cache anchor",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "texture1".to_string(),
+            ImageData::new(1, 1, vec![128, 128, 128, 255]),
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "material1".to_string(),
+            MaterialRenderInfo::new([100, 100, 100, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 50),
+        )])));
+
+        let anchor = |graphics: &GraphicsSystem| {
+            let cache = graphics.landscape_cache.as_ref().expect("cache built");
+            (
+                cache.grid.texture_names().as_ptr(),
+                cache.grid.material_names().as_ptr(),
+                cache.grid.bytes().as_ptr(),
+            )
+        };
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        let first = anchor(&graphics);
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        let second = anchor(&graphics);
+        assert_eq!(
+            (first.0, first.1),
+            (second.0, second.1),
+            "an unchanged landscape re-cloned its cache grid"
+        );
+        // The whole point of the anchor: the cache still shares the presented
+        // byte plane, so the engine's next write cannot mutate it in place.
+        let presented = landscape.pixel_grid().expect("grid").bytes().as_ptr();
+        assert_eq!(second.2, presented, "cache lost the presented byte plane");
+
+        landscape.grid_write_byte(4, 4, 2);
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        let third = anchor(&graphics);
+        assert_ne!(
+            (second.0, second.1),
+            (third.0, third.1),
+            "a changed landscape must re-anchor its cache grid"
+        );
+        assert_eq!(
+            third.2,
+            landscape.pixel_grid().expect("grid").bytes().as_ptr(),
+            "cache lost the rewritten byte plane"
+        );
+
+        let grid = landscape.pixel_grid().expect("grid");
+        let start = std::time::Instant::now();
+        const CLONES: u32 = 1000;
+        for _ in 0..CLONES {
+            std::hint::black_box(grid.clone());
+        }
+        println!(
+            "PixelGrid::clone with 128 texture and 128 material names: {:.3} us",
+            start.elapsed().as_secs_f64() * 1e6 / f64::from(CLONES)
+        );
+    }
+
     #[test]
     fn landscape_placement_shading_expands_warm_cache_relight_region() {
         const WIDTH: u32 = 25;
