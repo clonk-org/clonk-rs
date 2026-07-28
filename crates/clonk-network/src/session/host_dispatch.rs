@@ -936,6 +936,43 @@ pub(crate) async fn ingest_control(
     }
 }
 
+// Borrow the lobby TextWindow's numeric 100/4096 ceilings as conservative
+// raw-packet cache bounds (src/C4GameLobby.cpp:277-280).
+const LOBBY_CHAT_HISTORY_MAX_MESSAGES: usize = 100;
+const LOBBY_CHAT_HISTORY_MAX_BYTES: usize = 4096;
+
+/// Retain only public, presentation-only lobby conversation in its authenticated
+/// C++ wire form. Reusing the original control keeps rendering and sender
+/// lookup on the ordinary client execution path without touching lockstep.
+fn retain_lobby_chat_message(
+    delivery: ControlDelivery,
+    control: &clonk_engine::ControlPacket,
+    data: &[u8],
+    state: &mut HostState,
+) {
+    let retain = delivery == ControlDelivery::Private
+        && state.status_barrier.status.state == NETWORK_STATE_LOBBY
+        && matches!(
+            control,
+            clonk_engine::ControlPacket::Message(message)
+                if matches!(
+                    message.message_type,
+                    clonk_engine::MESSAGE_TYPE_NORMAL | clonk_engine::MESSAGE_TYPE_ME
+                )
+        );
+    if !retain {
+        return;
+    }
+
+    state.lobby_chat_history.push_back(data.to_vec());
+    while state.lobby_chat_history.len() > LOBBY_CHAT_HISTORY_MAX_MESSAGES
+        || state.lobby_chat_history.iter().map(Vec::len).sum::<usize>()
+            > LOBBY_CHAT_HISTORY_MAX_BYTES
+    {
+        state.lobby_chat_history.pop_front();
+    }
+}
+
 /// Authenticate security-sensitive inner authors in a queued contribution.
 ///
 /// C++ typed packet unpack rejects unknown control IDs, so every queued frame
@@ -1210,6 +1247,7 @@ async fn dispatch_packet(
                 }
             };
             let mut local_data = data.clone();
+            retain_lobby_chat_message(delivery, &control, &data, state);
             if let clonk_engine::ControlPacket::PlayerInfo(info) = &mut control {
                 let local_sources = load_authoritative_player_resources(
                     &state.resource_resolver,
@@ -1675,6 +1713,9 @@ pub(crate) async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &m
                 apply_host_control_mode(mode, from_tick, state).await
             }
             BarrierEffect::BroadcastStatus(status) => {
+                if status.state != NETWORK_STATE_LOBBY {
+                    state.lobby_chat_history.clear();
+                }
                 broadcast_status(status, false, state).await;
                 let _ = state.event_tx.send(HostEvent::StatusChanged(status)).await;
             }

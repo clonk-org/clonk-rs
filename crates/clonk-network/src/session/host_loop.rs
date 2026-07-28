@@ -331,6 +331,7 @@ pub(crate) async fn run_host(
         pending_admissions: BTreeMap::new(),
         pending_post_mortems: BTreeMap::new(),
         removing_clients: BTreeSet::new(),
+        lobby_chat_history: VecDeque::new(),
         event_tx: event_tx.clone(),
         config,
     };
@@ -1245,6 +1246,7 @@ fn enqueue_client_setup_prefix(
     let ClientSetup {
         join_data,
         addresses,
+        lobby_chat_history,
     } = setup;
     outbound
         .try_send(ControlMessage::JoinData(Box::new(join_data)))
@@ -1253,6 +1255,14 @@ fn enqueue_client_setup_prefix(
         outbound
             .try_send(ControlMessage::Address(address))
             .map_err(|_| "accepted route closed while queueing initial addresses".to_string())?;
+    }
+    for data in lobby_chat_history {
+        outbound
+            .try_send(ControlMessage::Packet {
+                delivery: ControlDelivery::Private,
+                data,
+            })
+            .map_err(|_| "accepted route closed while queueing lobby chat history".to_string())?;
     }
     Ok(())
 }
@@ -1287,9 +1297,15 @@ fn build_client_setup(
         parameters: snapshot.parameters,
     };
     let addresses = address_packets_for_peer(&state.client_addresses, client.peer_addr);
+    let lobby_chat_history = if state.status_barrier.status.state == NETWORK_STATE_LOBBY {
+        state.lobby_chat_history.iter().cloned().collect()
+    } else {
+        Vec::new()
+    };
     Ok(Some(ClientSetup {
         join_data,
         addresses,
+        lobby_chat_history,
     }))
 }
 
@@ -1460,6 +1476,25 @@ async fn publish_pending_join_data(state: &mut HostState) {
                 client_id,
                 ConnectionTrafficClass::Message,
                 ControlMessage::Address(address),
+            )
+            .await
+            {
+                failed = true;
+                break;
+            }
+        }
+        if failed {
+            continue;
+        }
+        for data in setup.lobby_chat_history {
+            if !send_host_message(
+                state,
+                client_id,
+                ConnectionTrafficClass::Message,
+                ControlMessage::Packet {
+                    delivery: ControlDelivery::Private,
+                    data,
+                },
             )
             .await
             {

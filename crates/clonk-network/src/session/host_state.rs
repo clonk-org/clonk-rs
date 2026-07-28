@@ -9,6 +9,8 @@ use super::*;
 pub(crate) struct ClientSetup {
     pub(crate) join_data: JoinDataEnvelope,
     pub(crate) addresses: Vec<crate::AddressPacket>,
+    /// Oldest-first raw `CID_Message` controls queued after JoinData.
+    pub(crate) lobby_chat_history: Vec<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -125,6 +127,8 @@ pub(crate) struct HostState {
     pub(crate) pending_admissions: BTreeMap<u32, i32>,
     pub(crate) pending_post_mortems: BTreeMap<u32, (ClientId, crate::PostMortemPacket, i32)>,
     pub(crate) removing_clients: BTreeSet<ClientId>,
+    /// Bounded, presentation-only NORMAL/ME controls for late lobby joiners.
+    pub(crate) lobby_chat_history: VecDeque<Vec<u8>>,
     pub(crate) event_tx: mpsc::Sender<HostEvent>,
 }
 
