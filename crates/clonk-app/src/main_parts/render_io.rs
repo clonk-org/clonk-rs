@@ -449,9 +449,15 @@ pub(crate) fn draw_scensel_dynamic(
         )
         .0;
     let search_cursor_half = fonts.text.measure("¦", false).0 / 2;
+    let search_has_clear = !scenario_menu.search_text().is_empty();
+    let search_clear_width = if search_has_clear {
+        scensel::search_clear_button_bounds(&layout).w
+    } else {
+        0
+    };
     scenario_menu.search_edit.scroll_cursor_in_view(
         search_cursor_x,
-        layout.search_edit.w - 8,
+        layout.search_edit.w - 8 - search_clear_width,
         search_cursor_half,
     );
     let search_selection = scenario_menu
@@ -469,18 +475,25 @@ pub(crate) fn draw_scensel_dynamic(
         draw_focus && scenario_menu.search_edit.cursor_visible(),
         Some(gamma),
     );
+    if search_has_clear {
+        scensel::draw_search_clear_button(surface, &layout, fonts, Some(gamma));
+    }
 
     if let Some(label) = loading_label {
         scensel::draw_loading_label(surface, &layout, fonts, book_fonts, label, Some(gamma));
         return Ok(());
     }
 
-    // Caption: current folder name, or "Scenarios" at root (cpp:1527-1535).
+    // Enhanced search replaces the folder caption with settled result status;
+    // ordinary browsing retains the C++ folder caption.
+    let enhanced_caption = scenario_menu.enhanced_search_caption();
     scensel::draw_book_caption(
         surface,
         &layout,
         book_fonts,
-        scenario_menu.book_caption(),
+        enhanced_caption
+            .as_deref()
+            .unwrap_or_else(|| scenario_menu.book_caption()),
         Some(gamma),
     );
 
@@ -500,9 +513,14 @@ pub(crate) fn draw_scensel_dynamic(
     let rows: Vec<(String, u32, String, bool)> = scenario_menu
         .visible_entries()
         .iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(index, entry)| {
             let mut title = entry.title.clone();
             Markup::strip_markup(&mut title);
+            if let Some(context) = scenario_menu.search_result_context(index) {
+                title.push_str(" - ");
+                title.push_str(context);
+            }
             let enabled = scenario_entry_enabled
                 .get(&entry.identifier)
                 .copied()
@@ -530,6 +548,28 @@ pub(crate) fn draw_scensel_dynamic(
         ))
     });
     surface.set_clip(list_clip);
+    if let Some(message) = scenario_menu.enhanced_search_empty_message() {
+        book_fonts.text.draw_with_gamma(
+            surface,
+            x + 4,
+            top + 4,
+            &message,
+            [0, 0, 0, 255],
+            clonk_graphics::clonk_font::TextAlign::Left,
+            false,
+            Some(gamma),
+        );
+        book_fonts.text.draw_with_gamma(
+            surface,
+            x + 4,
+            top + 4 + book_fonts.text.line_height,
+            "Press Esc to clear search.",
+            [0, 0, 0, 255],
+            clonk_graphics::clonk_font::TextAlign::Left,
+            false,
+            Some(gamma),
+        );
+    }
     let mut y = top - scenario_menu.scenario_list_scroll();
     for (index, (identifier, icon, title, enabled)) in rows.iter().enumerate() {
         if y >= bottom {

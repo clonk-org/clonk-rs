@@ -173,8 +173,12 @@ impl GameApp {
         }
         if self.startup_view == StartupView::ScenarioBrowser && self.menu_state.search_focused() {
             let mut encoded = [0_u8; 4];
-            self.menu_state
-                .insert_search_text(character.encode_utf8(&mut encoded));
+            if self
+                .menu_state
+                .insert_search_text(character.encode_utf8(&mut encoded))
+            {
+                self.submit_scenario_search()?;
+            }
             self.mark_menu_dirty();
             return Ok(());
         }
@@ -4004,30 +4008,39 @@ impl GameApp {
                         self.menu_state.set_definition_checkbox_focused(true);
                         return Ok(());
                     }
+                    let search_shortcut = self.keyboard_modifiers.ctrl()
+                        || (cfg!(target_os = "macos")
+                            && self.keyboard_modifiers.intersects(ModifiersState::LOGO));
                     if state == ElementState::Pressed
                         && key == VirtualKeyCode::F
-                        && self.keyboard_modifiers.ctrl()
+                        && search_shortcut
                         && self.context_menu.is_none()
                         && self.menu_state.current_map().is_none()
                     {
                         self.menu_state.set_search_focused(true);
+                        self.menu_state.search_edit.select_all();
                         return Ok(());
                     }
                     if self.menu_state.search_focused() && self.context_menu.is_none() {
                         let ctrl = self.keyboard_modifiers.ctrl();
+                        let edit_shortcut = search_shortcut;
                         let shift = self.keyboard_modifiers.shift();
                         let consumed = match (state, key) {
                             (ElementState::Pressed, VirtualKeyCode::Back) => {
-                                self.menu_state.search_edit.backspace(ctrl, shift);
+                                if self.menu_state.search_edit.backspace(ctrl, shift) {
+                                    self.submit_scenario_search()?;
+                                }
                                 true
                             }
                             (ElementState::Pressed, VirtualKeyCode::Delete)
                                 if !self.keyboard_modifiers.alt() =>
                             {
-                                self.menu_state.search_edit.delete(ctrl, shift);
+                                if self.menu_state.search_edit.delete(ctrl, shift) {
+                                    self.submit_scenario_search()?;
+                                }
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::Left) if ctrl || shift => {
+                            (ElementState::Pressed, VirtualKeyCode::Left) => {
                                 self.menu_state.search_edit.move_cursor(
                                     SearchCursorOperation::Left,
                                     ctrl,
@@ -4035,7 +4048,7 @@ impl GameApp {
                                 );
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::Right) if ctrl || shift => {
+                            (ElementState::Pressed, VirtualKeyCode::Right) => {
                                 self.menu_state.search_edit.move_cursor(
                                     SearchCursorOperation::Right,
                                     ctrl,
@@ -4059,19 +4072,21 @@ impl GameApp {
                                 );
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::A) if ctrl => {
+                            (ElementState::Pressed, VirtualKeyCode::A) if edit_shortcut => {
                                 self.menu_state.search_edit.select_all();
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::C) if ctrl => {
-                                self.copy_search_edit_selection(false);
+                            (ElementState::Pressed, VirtualKeyCode::C) if edit_shortcut => {
+                                let _ = self.copy_search_edit_selection(false);
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::X) if ctrl => {
-                                self.copy_search_edit_selection(true);
+                            (ElementState::Pressed, VirtualKeyCode::X) if edit_shortcut => {
+                                if self.copy_search_edit_selection(true) {
+                                    self.submit_scenario_search()?;
+                                }
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::V) if ctrl => {
+                            (ElementState::Pressed, VirtualKeyCode::V) if edit_shortcut => {
                                 self.paste_search_edit_clipboard()?;
                                 true
                             }
@@ -4083,9 +4098,12 @@ impl GameApp {
                                 true
                             }
                             (ElementState::Pressed, VirtualKeyCode::Escape) => {
-                                // C4StartupScenSelDlg::KeyEscape returns focus to
-                                // the list without clearing the edit/filter.
-                                self.menu_state.set_search_focused(false);
+                                if self.menu_state.search_text().is_empty() {
+                                    self.menu_state.set_search_focused(false);
+                                } else {
+                                    self.menu_state.set_search_text("");
+                                    self.submit_scenario_search()?;
+                                }
                                 true
                             }
                             (ElementState::Pressed, VirtualKeyCode::Tab) => {
@@ -4106,16 +4124,14 @@ impl GameApp {
                                 | VirtualKeyCode::Space,
                             ) => true,
                             (_, VirtualKeyCode::Delete) if !self.keyboard_modifiers.alt() => true,
-                            (_, VirtualKeyCode::Left | VirtualKeyCode::Right) if ctrl || shift => {
-                                true
-                            }
+                            (_, VirtualKeyCode::Left | VirtualKeyCode::Right) => true,
                             (
                                 _,
                                 VirtualKeyCode::A
                                 | VirtualKeyCode::C
                                 | VirtualKeyCode::X
                                 | VirtualKeyCode::V,
-                            ) if ctrl => true,
+                            ) if edit_shortcut => true,
                             _ => false,
                         };
                         if consumed {
@@ -9088,7 +9104,11 @@ impl GameApp {
                 if let Some(point) = self.menu_state.pointer_position() {
                     if self.scensel_search_char_pos(point, true).is_some() {
                         let primary = primary_clipboard_text();
+                        let before = self.menu_state.search_text().to_string();
                         self.handle_scensel_search_middle_down(point, primary.as_deref());
+                        if self.menu_state.search_text() != before {
+                            self.submit_scenario_search()?;
+                        }
                     }
                 }
             }
@@ -10582,7 +10602,8 @@ impl GameApp {
                             }
                             match button_state {
                                 ElementState::Pressed => {
-                                    if !self.handle_scensel_search_pointer_down(point)
+                                    if !self.handle_scensel_search_clear_pointer_down(point)?
+                                        && !self.handle_scensel_search_pointer_down(point)
                                         && !self.handle_scensel_scrollbar_down(point)
                                     {
                                         self.handle_scensel_map_pointer_down(point);
@@ -11581,7 +11602,8 @@ impl GameApp {
                 }
                 match phase {
                     TouchPhase::Started => {
-                        if !self.handle_scensel_search_pointer_down(position)
+                        if !self.handle_scensel_search_clear_pointer_down(position)?
+                            && !self.handle_scensel_search_pointer_down(position)
                             && !self.handle_scensel_scrollbar_down(position)
                         {
                             self.handle_scensel_map_pointer_down(position);

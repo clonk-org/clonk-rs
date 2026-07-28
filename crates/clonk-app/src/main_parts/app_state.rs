@@ -1409,7 +1409,7 @@ impl SearchEditState {
     }
 
     pub(crate) fn insert_text(&mut self, text: &str) -> bool {
-        self.delete_selection();
+        let selection_deleted = self.delete_selection();
         let available = SEARCH_EDIT_MAX_BYTES.saturating_sub(self.text.len());
         let mut sanitized = String::new();
         for character in text.chars() {
@@ -1423,7 +1423,7 @@ impl SearchEditState {
             sanitized.push(character);
         }
         if sanitized.is_empty() {
-            return false;
+            return selection_deleted;
         }
         self.text.insert_str(self.caret, &sanitized);
         self.caret += sanitized.len();
@@ -3598,11 +3598,19 @@ pub(crate) struct MenuState {
     /// C++ keeps the loader tree intact and rebuilds only the visible list
     /// (`C4StartupScenSelDlg::UpdateList`, cpp:1472-1538).
     visible_entries: Vec<FrontendScenario>,
+    /// Parent-folder labels for flattened enhanced-search results, aligned
+    /// with `visible_entries`. Ordinary folder browsing leaves these empty.
+    visible_entry_contexts: Vec<Option<String>>,
     /// Current edit buffer/caret/selection. C++ does not filter until Enter
     /// invokes `OnSearchBarEnter`.
     pub(crate) search_edit: SearchEditState,
     /// Last submitted edit buffer used by `visible_entries`.
     pub(crate) applied_search_text: String,
+    /// The richer product search is isolated from the C++ submit matcher.
+    enhanced_search_active: bool,
+    enhanced_search_total: usize,
+    search_restore_selection: Option<String>,
+    search_restore_scroll: Option<i32>,
     /// Inline `CallbackRenameEdit` projected over the selected row label.
     pub(crate) rename_edit: Option<ScenarioRenameState>,
     /// Logical-pixel offset of the left scenario `C4GUI::ListBox`.
@@ -5388,8 +5396,13 @@ impl MenuState {
             pointer_position: None,
             stack: vec![MenuLayer::new("Scenarios", entries)],
             visible_entries,
+            visible_entry_contexts: Vec::new(),
             search_edit: SearchEditState::default(),
             applied_search_text: String::new(),
+            enhanced_search_active: false,
+            enhanced_search_total: 0,
+            search_restore_selection: None,
+            search_restore_scroll: None,
             rename_edit: None,
             scenario_list_scroll: 0,
             list_scroll_selection: None,
@@ -5521,7 +5534,11 @@ impl MenuState {
         self.scenario_list_scroll = 0;
         self.selection_info_scroll = 0;
         self.scrollbar_interaction = None;
-        self.refresh_menu_entries();
+        if self.enhanced_search_active {
+            let _ = self.apply_enhanced_search();
+        } else {
+            self.refresh_menu_entries();
+        }
         let selected = selected_identifier
             .and_then(|identifier| {
                 self.visible_entries
@@ -5568,6 +5585,12 @@ impl MenuState {
     }
 
     fn activation_path(&self, identifier: &str) -> Option<Vec<FrontendScenario>> {
+        if self.enhanced_search_active {
+            return find_frontend_entry_path(
+                self.stack.first().map(|layer| layer.entries.as_slice())?,
+                identifier,
+            );
+        }
         let mut path = self
             .stack
             .iter()
@@ -5593,12 +5616,49 @@ impl MenuState {
         &self.visible_entries
     }
 
+    pub(crate) fn search_result_context(&self, index: usize) -> Option<&str> {
+        self.visible_entry_contexts
+            .get(index)
+            .and_then(|context| context.as_deref())
+    }
+
+    pub(crate) fn enhanced_search_caption(&self) -> Option<String> {
+        self.enhanced_search_active.then(|| {
+            let scenario_label = if self.enhanced_search_total == 1 {
+                "scenario"
+            } else {
+                "scenarios"
+            };
+            if self.visible_entries.is_empty() {
+                format!(
+                    "No matches among {} {scenario_label}",
+                    self.enhanced_search_total
+                )
+            } else {
+                format!(
+                    "{} of {} {scenario_label}",
+                    self.visible_entries.len(),
+                    self.enhanced_search_total
+                )
+            }
+        })
+    }
+
+    pub(crate) fn enhanced_search_empty_message(&self) -> Option<String> {
+        (self.enhanced_search_active && self.visible_entries.is_empty()).then(|| {
+            format!(
+                "No scenarios match \"{}\".",
+                self.applied_search_text.trim()
+            )
+        })
+    }
+
     pub(crate) fn set_search_text(&mut self, text: impl Into<String>) {
         self.search_edit.set_text(text);
     }
 
-    pub(crate) fn insert_search_text(&mut self, text: &str) {
-        self.search_edit.insert_text(text);
+    pub(crate) fn insert_search_text(&mut self, text: &str) -> bool {
+        self.search_edit.insert_text(text)
     }
 
     pub(crate) fn search_text(&self) -> &str {
@@ -5911,6 +5971,10 @@ impl MenuState {
     /// (C4StartupScenSelDlg.h:434-437), preserving the selected entry by
     /// identity when it still survives and otherwise selecting the first.
     pub(crate) fn submit_search(&mut self) -> Vec<StartupMenuAction> {
+        self.enhanced_search_active = false;
+        self.enhanced_search_total = 0;
+        self.search_restore_selection = None;
+        self.search_restore_scroll = None;
         let old_selection = self
             .selected_scenario()
             .map(|entry| entry.identifier.clone());
@@ -5939,9 +6003,106 @@ impl MenuState {
             })
     }
 
+    /// Applies the product search over every loaded non-folder descendant.
+    /// `submit_search` remains the isolated C++ current-folder oracle path.
+    pub(crate) fn apply_enhanced_search(&mut self) -> Vec<StartupMenuAction> {
+        self.applied_search_text = self.search_edit.text().to_string();
+        let normalized_query = normalize_scenario_search_text(&self.applied_search_text);
+        if normalized_query.is_empty() {
+            let restore_selection = self.search_restore_selection.take();
+            let restore_scroll = self.search_restore_scroll.take();
+            self.enhanced_search_active = false;
+            self.enhanced_search_total = 0;
+            self.applied_search_text.clear();
+            self.refresh_menu_entries();
+            self.scenario_list_scroll = restore_scroll.unwrap_or(0);
+            let index = restore_selection
+                .as_deref()
+                .and_then(|identifier| {
+                    self.visible_entries
+                        .iter()
+                        .position(|entry| entry.identifier == identifier)
+                })
+                .or_else(|| (!self.visible_entries.is_empty()).then_some(0));
+            return index
+                .map(|index| index + usize::from(self.include_back))
+                .map(|index| match self.menu.select_entry_by_index(index) {
+                    Ok(actions) => actions,
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "failed to restore selection after clearing scenario search"
+                        );
+                        Vec::new()
+                    }
+                })
+                .unwrap_or_default();
+        }
+        if !self.enhanced_search_active {
+            self.search_restore_selection = self
+                .selected_scenario()
+                .map(|entry| entry.identifier.clone());
+            self.search_restore_scroll = Some(self.scenario_list_scroll);
+            self.enhanced_search_active = true;
+        }
+        let old_selection = self
+            .selected_scenario()
+            .map(|entry| entry.identifier.clone());
+        let mut hits = Vec::new();
+        let mut ancestors = Vec::new();
+        let mut order = 0;
+        if let Some(root) = self.stack.first() {
+            collect_enhanced_scenario_search_matches(
+                &root.entries,
+                &normalized_query,
+                &mut ancestors,
+                &mut order,
+                &mut hits,
+            );
+        }
+        self.enhanced_search_total = order;
+        hits.sort_by_key(|hit| (hit.rank, hit.order));
+        self.visible_entry_contexts = hits
+            .iter()
+            .map(|hit| (!hit.context.is_empty()).then(|| hit.context.clone()))
+            .collect();
+        self.visible_entries = hits.into_iter().map(|hit| hit.entry).collect();
+        let entries = build_menu_entries(&self.visible_entries, self.include_back);
+        if let Err(err) = self.menu.set_entries(entries) {
+            tracing::error!(error = %err, "failed to update startup menu search results");
+        }
+        self.list_scroll_selection = None;
+        let index = old_selection
+            .as_deref()
+            .and_then(|identifier| {
+                self.visible_entries
+                    .iter()
+                    .position(|entry| entry.identifier == identifier)
+            })
+            .or_else(|| (!self.visible_entries.is_empty()).then_some(0));
+        index
+            .map(|index| index + usize::from(self.include_back))
+            .map(|index| match self.menu.select_entry_by_index(index) {
+                Ok(actions) => actions,
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to select enhanced scenario search result");
+                    Vec::new()
+                }
+            })
+            .unwrap_or_else(|| {
+                self.sync_definition_checkbox_to_selection();
+                Vec::new()
+            })
+    }
+
     pub(crate) fn clear_search(&mut self) {
         self.search_edit = SearchEditState::default();
         self.applied_search_text.clear();
+        self.enhanced_search_active = false;
+        self.enhanced_search_total = 0;
+        self.search_restore_selection = None;
+        self.search_restore_scroll = None;
+        self.visible_entry_contexts.clear();
     }
 
     pub(crate) fn menu(&mut self) -> &mut StartupMenu {
@@ -6091,6 +6252,7 @@ impl MenuState {
             collect_current_folder_search_matches(self.current_entries(), &needle, &mut matches);
             matches
         };
+        self.visible_entry_contexts = vec![None; self.visible_entries.len()];
         let entries = build_menu_entries(&self.visible_entries, self.include_back);
         if let Err(err) = self.menu.set_entries(entries) {
             tracing::error!(error = %err, "failed to update startup menu entries");
@@ -6126,6 +6288,149 @@ impl MenuState {
                 tracing::error!(error = %err, "failed to select default scenario entry");
                 Vec::new()
             }
+        }
+    }
+}
+
+struct EnhancedScenarioSearchHit {
+    entry: FrontendScenario,
+    context: String,
+    rank: u16,
+    order: usize,
+}
+
+fn normalize_scenario_search_text(text: &str) -> String {
+    let mut normalized = String::new();
+    let mut separated = true;
+    for character in text
+        .nfd()
+        .filter(|character| !is_combining_mark(*character))
+    {
+        for lowercase in character.to_lowercase() {
+            if lowercase.is_alphanumeric() {
+                normalized.push(lowercase);
+                separated = false;
+            } else if !separated {
+                normalized.push(' ');
+                separated = true;
+            }
+        }
+    }
+    if separated {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn normalize_scenario_search_field(text: &str) -> String {
+    let mut text = text.to_string();
+    Markup::strip_markup(&mut text);
+    normalize_scenario_search_text(&text)
+}
+
+fn scenario_search_field_contains_all(field: &str, terms: &[&str]) -> bool {
+    terms.iter().all(|term| field.contains(term))
+}
+
+fn scenario_search_fuzzy_title_score(title: &str, terms: &[&str]) -> Option<u16> {
+    let title_terms = title.split_whitespace().collect::<Vec<_>>();
+    terms.iter().try_fold(0_u16, |score, term| {
+        if title_terms.iter().any(|candidate| candidate.contains(term)) {
+            return Some(score);
+        }
+        let length = term.chars().count();
+        let threshold = if term.chars().any(|character| character.is_numeric()) || length < 4 {
+            return None;
+        } else if length >= 8 {
+            2
+        } else {
+            1
+        };
+        title_terms
+            .iter()
+            .map(|candidate| damerau_levenshtein(term, candidate))
+            .min()
+            .filter(|distance| *distance <= threshold)
+            .and_then(|distance| u16::try_from(distance).ok())
+            .map(|distance| score.saturating_add(distance))
+    })
+}
+
+fn collect_enhanced_scenario_search_matches(
+    entries: &[FrontendScenario],
+    query: &str,
+    ancestors: &mut Vec<String>,
+    order: &mut usize,
+    matches: &mut Vec<EnhancedScenarioSearchHit>,
+) {
+    let terms = query.split_whitespace().collect::<Vec<_>>();
+    for entry in entries {
+        if matches!(entry.kind, ScenarioKind::Folder) {
+            let mut title = entry.title.clone();
+            Markup::strip_markup(&mut title);
+            ancestors.push(title);
+            collect_enhanced_scenario_search_matches(
+                &entry.children,
+                query,
+                ancestors,
+                order,
+                matches,
+            );
+            ancestors.pop();
+            continue;
+        }
+        let entry_order = *order;
+        *order = order.saturating_add(1);
+        let title = normalize_scenario_search_field(&entry.title);
+        let identifier = normalize_scenario_search_text(&entry.identifier);
+        let context = normalize_scenario_search_text(&ancestors.join(" "));
+        let author = entry
+            .author
+            .as_deref()
+            .map(normalize_scenario_search_field)
+            .unwrap_or_default();
+        let description = entry
+            .description
+            .as_deref()
+            .map(normalize_scenario_search_field)
+            .unwrap_or_default();
+        let all_fields = [
+            title.as_str(),
+            identifier.as_str(),
+            context.as_str(),
+            author.as_str(),
+            description.as_str(),
+        ]
+        .join(" ");
+        let rank = if title == query {
+            Some(0)
+        } else if title.starts_with(query) {
+            Some(1)
+        } else if title.contains(query) {
+            Some(2)
+        } else if scenario_search_field_contains_all(&title, &terms) {
+            Some(3)
+        } else if scenario_search_field_contains_all(&identifier, &terms) {
+            Some(4)
+        } else if scenario_search_field_contains_all(&context, &terms) {
+            Some(5)
+        } else if scenario_search_field_contains_all(&author, &terms) {
+            Some(6)
+        } else if scenario_search_field_contains_all(&description, &terms) {
+            Some(7)
+        } else if scenario_search_field_contains_all(&all_fields, &terms) {
+            Some(8)
+        } else {
+            scenario_search_fuzzy_title_score(&title, &terms)
+                .map(|distance| 100_u16.saturating_add(distance))
+        };
+        if let Some(rank) = rank {
+            matches.push(EnhancedScenarioSearchHit {
+                entry: entry.clone(),
+                context: ancestors.join(" / "),
+                rank,
+                order: entry_order,
+            });
         }
     }
 }

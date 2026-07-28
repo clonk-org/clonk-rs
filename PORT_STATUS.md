@@ -196,7 +196,10 @@ code faults. Second, `clonk-network`'s LAN-discovery tests need IPv6 multicast;
 where the host cannot join a multicast group (`EADDRNOTAVAIL` from
 `IPV6_JOIN_GROUP`), `startup_lan_reference_query_reports_address_lifecycle` and
 `disabled_reference_server_keeps_discovery_only_advertiser_clean` fail
-deterministically regardless of the revision under test. A third,
+deterministically regardless of the revision under test. The same host
+condition makes
+`selected_network_scenario_installs_prepared_host_before_admission` fail
+because the prepared host cannot install its LAN advertiser. A third,
 `synchronized_tick::inactive_joined_client_does_not_block_host_lockstep`, plus
 `clonk-app`'s `real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running`
 (a 480-attempt timeout), are load-sensitive and pass in isolation. Re-run the
@@ -419,6 +422,16 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Open UI gap (found 2026-07-28, not closed): **the custom raster frontend
+  exposes neither platform accessibility semantics nor IME composition.**
+  Scenario-search counts and no-result guidance are visible pixels but are not
+  announced through an accessibility status node, and the search field has no
+  semantic role or programmatic name. Window input handles committed
+  characters but no IME preedit/commit lifecycle or candidate positioning.
+  Closing this requires a platform accessibility bridge plus explicit IME
+  enablement, composition state, and rendering. Classic keyboard parity remains
+  covered, but screen-reader and international text-entry completeness must not
+  be claimed.
 - Open gap (found 2026-07-27, not closed): **scenario load is ~half the
   process cost and is unoptimized.** `ClonkMars/03_Chaos` takes 13.8-15.7 s to
   load on the reference machine — roughly two minutes on a Pi 4 — and 99% of
@@ -576,6 +589,18 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **Scenario search uses a live catalog-wide product matcher while retaining
+  the C++ matcher as a testable oracle** (`MenuState::apply_enhanced_search`,
+  `MenuState::submit_search`; C++
+  `C4StartupScenSelDlg::OnSearchBarEnter`/`UpdateList`). Approved 2026-07-28.
+  C++ waits for Enter and searches only immediate-folder display titles; Rust
+  deliberately searches loaded catalog metadata live, ranks results
+  deterministically, and presents ancestor context and recovery feedback.
+  `scensel_search_does_not_recurse_into_unopened_folders` and
+  `scensel_search_applies_on_submit_case_insensitively` continue to pin the
+  oracle path independently of enhanced-search tests. This affects startup
+  discovery and presentation only; ordinary activation and simulation state
+  are unchanged.
 - **Guided missiles turn only while a turn key is held, and key-ups are
   synchronized in both control styles**
   (`planet/System.c4g/EkeGuidedMissile.c`, `planet/System.c4g/EkeSftRelease.c`,

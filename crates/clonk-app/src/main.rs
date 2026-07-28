@@ -303,7 +303,9 @@ use startup_player_files::{
     PlayerActivationRefusal, PlayerImageWrite, PlayerPropertiesSaveError, SavedStartupPlayer,
     StartupCrewFile, StartupCrewMutationError, StartupPlayerFile,
 };
+use strsim::damerau_levenshtein;
 use time::{macros::format_description, OffsetDateTime};
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, Event, KeyboardInput, ModifiersState, MouseButton, MouseScrollDelta, TouchPhase,
@@ -2509,13 +2511,17 @@ impl GameApp {
         }
     }
 
-    fn copy_search_edit_selection(&mut self, cut: bool) {
+    fn copy_search_edit_selection(&mut self, cut: bool) -> bool {
         let result = transfer_edit_selection(&mut self.menu_state.search_edit, cut, |selected| {
             arboard::Clipboard::new()
                 .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
         });
-        if let Err(err) = result {
-            tracing::warn!(error = %err, "failed to copy scenario search text");
+        match result {
+            Ok(transferred) => cut && transferred,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to copy scenario search text");
+                false
+            }
         }
     }
 
@@ -2527,7 +2533,13 @@ impl GameApp {
                 return Ok(());
             }
         };
-        if apply_scensel_search_paste(&mut self.menu_state.search_edit, &text) {
+        self.paste_scenario_search_text(&text)
+    }
+
+    fn paste_scenario_search_text(&mut self, text: &str) -> Result<(), EngineError> {
+        let before = self.menu_state.search_text().to_string();
+        let _submitted = apply_scensel_search_paste(&mut self.menu_state.search_edit, text);
+        if self.menu_state.search_text() != before {
             self.submit_scenario_search()?;
         }
         Ok(())

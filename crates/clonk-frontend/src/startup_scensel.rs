@@ -1584,6 +1584,69 @@ pub fn draw_search_edit_contents(
     }
 }
 
+/// The enhanced search's field-contained clear target. Its hit area stays at
+/// least 24 logical pixels wide without extending beyond the classic edit.
+pub fn search_clear_button_bounds(layout: &ScenSelLayout) -> IntRect {
+    let edit = layout.search_edit;
+    let width = edit.h.max(24).min(edit.w.max(0));
+    IntRect {
+        x: edit.x + edit.w - width,
+        y: edit.y,
+        w: width,
+        h: edit.h,
+    }
+}
+
+/// Draws the enhanced search's trailing clear affordance over the mutable edit
+/// client. The background masks long text before the glyph is placed.
+pub fn draw_search_clear_button(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    gui_fonts: &ClonkFontSet,
+    gamma: Option<&GammaRamp>,
+) {
+    let clear = search_clear_button_bounds(layout);
+    draw_box_dw(
+        surface,
+        clear.x,
+        clear.y + 2,
+        clear.x + clear.w - 3,
+        clear.y + clear.h - 3,
+        0x7f000000,
+        gamma,
+    );
+    draw_box_dw(
+        surface,
+        clear.x,
+        clear.y + 4,
+        clear.x,
+        clear.y + clear.h - 5,
+        0x7f7f7f7f,
+        gamma,
+    );
+    let glyph = "\u{d7}";
+    let glyph_width = gui_fonts.text.measure(glyph, false).0;
+    let glyph_x = clear.x + (clear.w - glyph_width) / 2;
+    let glyph_y = clear.y + (clear.h - gui_fonts.text.line_height) / 2 - 1;
+    draw_text_clipped(
+        surface,
+        &gui_fonts.text,
+        glyph_x,
+        glyph_y,
+        glyph,
+        [255, 255, 255, 255],
+        TextAlign::Left,
+        false,
+        gamma,
+        (
+            clear.x,
+            clear.y,
+            clear.x + clear.w - 1,
+            clear.y + clear.h - 1,
+        ),
+    );
+}
+
 /// The Open/Start button with its selection-specific text — "Open"
 /// (IDS_BTN_OPEN) for folders/none, "&Start" (IDS_BTN_STARTGAME) for
 /// scenarios (Entry::GetOpenText, C4StartupScenSelDlg.cpp:794-797,926-929;
@@ -2772,6 +2835,48 @@ mod tests {
             render(None, text.len(), 20, false).snapshot(),
             plain.snapshot()
         );
+    }
+
+    // C++ exposes only the edit itself (src/gui/C4GuiEdit.cpp:556-626).
+    // The enhanced product search adds a persistent, field-contained clear
+    // target when a query is present.
+    #[test]
+    fn search_edit_clear_target_is_large_and_contained() {
+        let fonts = endeavour_font_set();
+        let layout = scen_sel_layout(800, 600, &fonts);
+
+        let clear = search_clear_button_bounds(&layout);
+
+        assert!(clear.w >= 24);
+        assert!(clear.x >= layout.search_edit.x);
+        assert!(clear.y >= layout.search_edit.y);
+        assert!(clear.x + clear.w <= layout.search_edit.x + layout.search_edit.w);
+        assert!(clear.y + clear.h <= layout.search_edit.y + layout.search_edit.h);
+    }
+
+    // C++ has no trailing action inside `C4GUI::Edit`
+    // (src/gui/C4GuiEdit.cpp:556-626). The enhanced product renderer makes
+    // the nonempty search's clear target visibly distinct.
+    #[test]
+    fn search_edit_clear_target_is_visible() {
+        let fonts = endeavour_font_set();
+        let layout = scen_sel_layout(800, 600, &fonts);
+        let mut plain = Surface::new(800, 600, clonk_graphics::PixelFormat::Rgba8888);
+        draw_search_edit_contents(
+            &mut plain, &layout, &fonts, "alpha", 5, None, 0, false, None,
+        );
+        let mut with_clear = plain.clone();
+
+        draw_search_clear_button(&mut with_clear, &layout, &fonts, None);
+
+        assert_ne!(with_clear.snapshot(), plain.snapshot());
+        let clear = search_clear_button_bounds(&layout);
+        assert!((clear.y as u32..(clear.y + clear.h) as u32).any(|y| {
+            (clear.x as u32..(clear.x + clear.w) as u32).any(|x| {
+                with_clear.get_pixel(x, y).expect("clear pixel")
+                    != plain.get_pixel(x, y).expect("plain pixel")
+            })
+        }));
     }
 
     #[test]
