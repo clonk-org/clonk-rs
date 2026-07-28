@@ -325,6 +325,28 @@ Landed optimizations, each with its measurement:
   material names measures **4.3-5.6 us**, once per viewport per frame, now zero
   on static-landscape frames.
 
+- **The texmap name tables are identified, not compared, every frame**
+  (`texmap_identity`, `PixelGrid::texmap_tables_match`,
+  `crates/clonk-engine/src/landscape.rs`). `render_dirty_rects_since` runs once
+  per presented frame and compared `material_names` and `texture_names` — two
+  128-entry `Vec<Option<String>>` — element by element to answer one yes/no
+  question. Both tables move only in `sync_runtime_texmap`, so an FNV-1a
+  identity over them (the same scheme `render_token` already uses) answers it
+  with a `u64`. Measured on the shipped 128-slot table over 10,000 checks:
+  **1.870 us -> 0.007 us per frame**, i.e. ~1.86 us saved per presented frame
+  on the reference machine. That is a small absolute win — well under 0.01% of
+  the 28 ms budget, ~17-37 us on the stated Pi multipliers — and is recorded as
+  such rather than as a headline.
+  The identity is content-derived rather than a counter because two grids that
+  never synced a texmap would share any naive generation, and the frontend can
+  be handed grids from unrelated landscapes. It is runtime-only: not
+  serialized, equal to every other value under `PartialEq` so a save round-trip
+  stays equal, and zero means "not computed", which makes
+  `texmap_tables_match` fall back to the original compare for a grid restored
+  from a save. Pinned by `texmap_identity_agrees_with_the_name_table_compare`
+  (which includes the save round-trip case) and
+  `texmap_identity_costs_less_than_the_name_table_compare`.
+
 - **Particles are grouped by layer once per object pass**
   (`ParticleLayerIndex`, `crates/clonk-frontend/src/graphics_system.rs`)
   instead of `draw_definition_particles` filtering the whole particle slice on
@@ -339,15 +361,6 @@ Landed optimizations, each with its measurement:
 
 ## Open
 
-- Open gap (found 2026-07-27, not closed): `PixelGrid::render_dirty_rects_since`
-  compares `self.material_names != previous.material_names` and
-  `self.texture_names != previous.texture_names`
-  (`crates/clonk-engine/src/landscape.rs:557-558`) — two 128-entry
-  `Vec<Option<String>>` compared element by element on **every** frame,
-  whether or not anything changed. Both tables are fixed once the texmap
-  resolves, so a resolution generation counter would replace the whole compare
-  with one integer test. It survived this pass only because the frontend work
-  that found it could not edit `clonk-engine`.
 - Open gap (found 2026-07-27, not closed): **scenario load is ~half the
   process cost and is unoptimized.** `ClonkMars/03_Chaos` takes 13.8-15.7 s to
   load on the reference machine — roughly two minutes on a Pi 4 — and 99% of
