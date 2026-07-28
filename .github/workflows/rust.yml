@@ -25,6 +25,34 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Deliberately its own job. While this was the first step of `full-parity`,
+  # every step after it was `skipped` whenever it failed, so ~82 hunks of
+  # cosmetic whitespace drift hid the workspace tests, the lints, the engine
+  # snapshots and the C++ oracle parity check for as long as the drift lasted.
+  # A formatting failure must never mask a determinism failure again.
+  #
+  # rustfmt only parses, so this needs no submodule, no build cache and no
+  # dependency download — it reports in well under a minute.
+  formatting:
+    name: Rust formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          components: rustfmt
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
   focused-feedback:
     name: Focused developer feedback
     runs-on: ubuntu-latest
@@ -149,9 +177,6 @@ jobs:
           workspaces: . -> target
           shared-key: full-parity
           cache-on-failure: true
-
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
 
       - name: Run repository script tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
