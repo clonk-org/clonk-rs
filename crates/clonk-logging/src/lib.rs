@@ -16,6 +16,9 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 static INITIALIZED: OnceLock<()> = OnceLock::new();
 const DEFAULT_DEPENDENCY_FILTER: &str = "wgpu_core::device=warn";
+/// Target of the panic hook. Deliberately not the script target: a Rust panic
+/// is not content output and has no business on the in-game message board.
+const PANIC_LOG_TARGET: &str = "panic";
 /// Target of the C4Script `Log()`/`DebugLog()` stream. It is the Rust
 /// counterpart of the C++ logger whose output `C4LogSystem::GuiSink` shows
 /// in-game (`src/C4Log.cpp:226-240`). Re-exported from `clonk-core` so the
@@ -272,6 +275,39 @@ pub fn init_verbose_with_file_and_capture(
             Err(err)
         }
     }
+}
+
+/// Route panics through the log before the process dies.
+///
+/// The default hook writes straight to stderr, which bypasses the session log
+/// and, in a windowed build, goes nowhere at all — so the one event that ends
+/// the session is missing from the file a user attaches to a bug report. The
+/// backtrace is force-captured because end users never set `RUST_BACKTRACE`.
+/// The previous hook still runs, so the usual stderr message is unaffected.
+///
+/// Call this after initializing logging; the hook applies to every thread.
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        tracing::error!(
+            target: PANIC_LOG_TARGET,
+            thread = std::thread::current().name().unwrap_or("<unnamed>"),
+            location = %info.location().map_or_else(
+                || "<unknown>".to_string(),
+                std::panic::Location::to_string,
+            ),
+            payload,
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "the process panicked"
+        );
+        previous(info);
+    }));
 }
 
 /// Claim the one-time initialization slot, refusing when any subscriber — ours

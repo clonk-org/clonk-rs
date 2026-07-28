@@ -37,6 +37,7 @@ const MACOS_BUNDLED_RESOURCES: [&str; 5] =
 
 fn main() -> Result<()> {
     clonk_logging::init();
+    clonk_logging::install_panic_hook();
 
     let mut args = env::args().skip(1);
     match args.next().as_deref() {

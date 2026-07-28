@@ -77,6 +77,7 @@ fn main() {
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     clonk_logging::init();
+    clonk_logging::install_panic_hook();
 
     if let Err(error) = run() {
         tracing::error!(error = ?error, "clonk-game encountered an error");

@@ -39,6 +39,7 @@ use winit::window::{Window, WindowBuilder};
 
 fn main() -> Result<()> {
     clonk_logging::init();
+    clonk_logging::install_panic_hook();
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()

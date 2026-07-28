@@ -360,6 +360,7 @@ fn main() -> Result<()> {
             Some(game_log_capture.clone()),
         );
     }
+    clonk_logging::install_panic_hook();
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
             tracing::warn!(
