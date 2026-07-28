@@ -1207,6 +1207,50 @@ fn object_is_closed_to_fog(snapshot: &SimulationSnapshot, object: &ObjectSnapsho
         .is_some_and(|closed| *closed == 1)
 }
 
+/// `Graphics.FineFogOfWar` divides the modulation grid by this much.
+///
+/// C++ resets `ClrModMap` at `Game.C4S.Landscape.FoWRes`
+/// (C4Viewport.cpp:1048, default 64 from StdColors.h:379) and then reads it
+/// through `GetModAt` only at the four corners of each blit chunk, letting GL
+/// smooth-shade between them (StdGL.cpp:729-740).
+/// `GraphicsSystem::fog_box_sampler` mirrors that with chunks exactly one cell
+/// wide, so the visibility falloff is a piecewise-bilinear approximation of a
+/// circle over 64 world pixels, which reads as polygonal seams.
+///
+/// The falloff has a first-order kink at both radii, so its peak interpolation
+/// error falls about linearly with the cell size: measured 72 -> 19 grey levels
+/// for 64px -> 16px cells (`fine_fog_cells_track_the_analytic_falloff_far_more_closely`).
+/// The cost is quadratic, so 4 is where those meet - see
+/// `fine_fog_cell_budget_stays_affordable_at_4k` for the measured budget and
+/// `fog_cell_resolution` for why this is presentation-only.
+pub(crate) const FINE_FOG_CELL_DIVISOR: i32 = 4;
+
+/// Divisor for the renderer-side fog grid. `false` is the C++-exact grid.
+pub(crate) fn fine_fog_cell_divisor(enabled: bool) -> i32 {
+    if enabled {
+        FINE_FOG_CELL_DIVISOR
+    } else {
+        1
+    }
+}
+
+/// Cell size the renderer builds `ClrModMap` with.
+///
+/// `EnvironmentFrame::fow_resolution` is presentation-only: the sole read in
+/// the whole workspace is `build_fog_modulation_map` below, and nothing feeds
+/// the chosen cell size back into the simulation or the network protocol, so
+/// subdividing it here cannot desync. The snapshot value stays untouched.
+///
+/// A non-positive `FoWRes` is passed through unchanged so `ClrModMap::reset`
+/// keeps rejecting it exactly as it does today.
+pub(crate) fn fog_cell_resolution(fow_resolution: i32, cell_divisor: i32) -> i32 {
+    if cell_divisor > 1 && fow_resolution > 0 {
+        (fow_resolution / cell_divisor).max(1)
+    } else {
+        fow_resolution
+    }
+}
+
 pub(crate) fn build_fog_modulation_map(
     snapshot: &SimulationSnapshot,
     owner: i32,
@@ -1215,11 +1259,32 @@ pub(crate) fn build_fog_modulation_map(
     logical_width: i32,
     logical_height: i32,
 ) -> Option<ClrModMap> {
+    build_fog_modulation_map_with_cell_divisor(
+        snapshot,
+        owner,
+        target_x,
+        target_y,
+        logical_width,
+        logical_height,
+        1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_fog_modulation_map_with_cell_divisor(
+    snapshot: &SimulationSnapshot,
+    owner: i32,
+    target_x: i32,
+    target_y: i32,
+    logical_width: i32,
+    logical_height: i32,
+    cell_divisor: i32,
+) -> Option<ClrModMap> {
     let player = snapshot
         .players
         .iter()
         .find(|player| player.id == owner && player.fog_of_war)?;
-    let resolution = snapshot.environment.fow_resolution;
+    let resolution = fog_cell_resolution(snapshot.environment.fow_resolution, cell_divisor);
     let mut map = ClrModMap::reset(
         resolution,
         resolution,
@@ -1638,5 +1703,111 @@ pub(crate) fn prepare_liquid_animation_fragment(
         } else {
             f32::from(source.a.saturating_sub(modulation[3]))
         },
+    }
+}
+
+#[cfg(test)]
+mod fine_fog_tests {
+    use super::*;
+
+    /// C++ resets the map at the raw `Game.C4S.Landscape.FoWRes`
+    /// (C4Viewport.cpp:1048); divisor 1 must reproduce that exactly.
+    #[test]
+    fn fog_cell_resolution_keeps_the_cpp_grid_unless_subdivision_is_requested() {
+        assert_eq!(fog_cell_resolution(64, 1), 64);
+        assert_eq!(fog_cell_resolution(64, 0), 64);
+        assert_eq!(fog_cell_resolution(64, -4), 64);
+        assert_eq!(fine_fog_cell_divisor(false), 1);
+    }
+
+    #[test]
+    fn fine_fog_subdivides_the_grid_and_never_reaches_zero() {
+        assert_eq!(fine_fog_cell_divisor(true), FINE_FOG_CELL_DIVISOR);
+        assert_eq!(fog_cell_resolution(64, FINE_FOG_CELL_DIVISOR), 16);
+        assert_eq!(fog_cell_resolution(96, FINE_FOG_CELL_DIVISOR), 24);
+        // A scenario may already ask for a fine grid; `res / divisor` must not
+        // reach 0 because `ClrModMap::reset` rejects that outright.
+        assert_eq!(fog_cell_resolution(2, FINE_FOG_CELL_DIVISOR), 1);
+        assert_eq!(fog_cell_resolution(1, FINE_FOG_CELL_DIVISOR), 1);
+        // Non-positive FoWRes stays rejected rather than being rounded up.
+        assert_eq!(fog_cell_resolution(0, FINE_FOG_CELL_DIVISOR), 0);
+        let rejected = fog_cell_resolution(0, FINE_FOG_CELL_DIVISOR);
+        assert!(ClrModMap::reset(rejected, 64, 8, 8, 0, 0, 0, 0, 0).is_none());
+    }
+
+    /// Peak deviation of the sampled falloff from the analytic
+    /// `(r2^2 - d^2) * 255 / (r2^2 - r1^2)` visibility ramp that
+    /// `reduce_modulation` evaluates per cell corner. Bilinear interpolation
+    /// between corners is what makes the boundary look polygonal, so this
+    /// number *is* the faceting.
+    fn peak_falloff_error(resolution: i32, radius1: i32, radius2: i32) -> i64 {
+        let extent = radius2 * 3;
+        let mut map =
+            ClrModMap::reset(resolution, resolution, extent, extent, 0, 0, 0, 0, 0).unwrap();
+        let center = extent / 2;
+        map.reduce_modulation(center, center, radius1, radius2);
+        let radius1_sq = i64::from(radius1) * i64::from(radius1);
+        let radius2_sq = i64::from(radius2) * i64::from(radius2);
+        let mut peak = 0;
+        for y in 0..extent {
+            for x in 0..extent {
+                let dx = i64::from(x - center);
+                let dy = i64::from(y - center);
+                let distance = dx * dx + dy * dy;
+                let ideal = if distance < radius1_sq {
+                    255
+                } else if distance >= radius2_sq {
+                    0
+                } else {
+                    (radius2_sq - distance) * 255 / (radius2_sq - radius1_sq)
+                };
+                let sampled = i64::from(map.get_mod_at(x, y) & 0xff);
+                peak = peak.max((sampled - ideal).abs());
+            }
+        }
+        peak
+    }
+
+    #[test]
+    fn fine_fog_cells_track_the_analytic_falloff_far_more_closely() {
+        let coarse = peak_falloff_error(64, 200, 300);
+        let fine = peak_falloff_error(fog_cell_resolution(64, FINE_FOG_CELL_DIVISOR), 200, 300);
+        // The ramp has a first-order kink at both radii, so the peak error
+        // falls roughly linearly with the cell size rather than quadratically:
+        // 72 -> 19 grey levels for 64px -> 16px cells.
+        assert!(
+            fine * 3 < coarse,
+            "16px cells must cut the faceting error by more than 3x: coarse {coarse}, fine {fine}"
+        );
+    }
+
+    /// Both `reduce_modulation` and the box sampler are quadratic in the cell
+    /// count, so the divisor has to stay defensible at the worst realistic
+    /// viewport: 3840x2160 world pixels at zoom 1. Measured there (release,
+    /// M-series): 2135 cells / 75us sampler build at the C++ 64px grid versus
+    /// 32776 cells / 1.21ms at 16px. A divisor of 8 would be 131k cells and
+    /// ~5ms per sampler, which is not affordable, so pin the budget.
+    #[test]
+    fn fine_fog_cell_budget_stays_affordable_at_4k() {
+        let resolution = fog_cell_resolution(64, FINE_FOG_CELL_DIVISOR);
+        let coarse = ClrModMap::reset(64, 64, 3840, 2160, 0, 0, 0, 0, 0).unwrap();
+        let fine = ClrModMap::reset(resolution, resolution, 3840, 2160, 0, 0, 0, 0, 0).unwrap();
+        assert_eq!(coarse.cells.len(), 2135);
+        assert_eq!(fine.cells.len(), 32776);
+        assert!(
+            fine.cells.len() < 40_000,
+            "fine fog grid grew past its 4K budget: {} cells",
+            fine.cells.len()
+        );
+    }
+
+    /// `GraphicsSystem::fog_box_sampler` chunks world blits at
+    /// `map.resolution_x`/`resolution_y`, so subdividing the grid is also what
+    /// subdivides the interpolated quads the fog boundary is drawn from.
+    #[test]
+    fn fine_fog_resolution_reaches_the_map_the_box_sampler_chunks_from() {
+        let resolution = fog_cell_resolution(64, FINE_FOG_CELL_DIVISOR);
+        let map = ClrModMap::reset(resolution, resolution, 256, 256, 0, 0, 0, 0, 0).unwrap();
+        assert_eq!((map.resolution_x, map.resolution_y), (16, 16));
     }
 }
