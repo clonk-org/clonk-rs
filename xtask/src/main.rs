@@ -939,16 +939,48 @@ fn load_recording(path: &Path) -> Result<Recording> {
 struct PackageOptions {
     /// Whether to compress the staged layout into a release archive.
     archive: bool,
+    /// Which update components to emit alongside it.
+    components: ComponentSelection,
+}
+
+/// Which per-component update archives a packaging run produces.
+///
+/// Defaults to `None` so a local `cargo xtask package` stays exactly what it
+/// was. The shared components are large and only the Linux release pass needs
+/// to build them, since their bytes are identical everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentSelection {
+    None,
+    /// Just this platform's binaries.
+    Engine,
+    /// Binaries plus the platform-independent `planet` and `content`.
+    All,
+}
+
+impl ComponentSelection {
+    fn includes_shared(self) -> bool {
+        matches!(self, ComponentSelection::All)
+    }
+
+    fn includes_engine(self) -> bool {
+        matches!(self, ComponentSelection::Engine | ComponentSelection::All)
+    }
 }
 
 impl PackageOptions {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Self> {
-        let mut options = Self { archive: true };
+        let mut options = Self {
+            archive: true,
+            components: ComponentSelection::None,
+        };
         for argument in arguments {
             match argument.as_str() {
                 // The Windows installer consumes the staged directory itself,
                 // so the archive step would only produce a file to discard.
                 "--no-archive" => options.archive = false,
+                "--components=none" => options.components = ComponentSelection::None,
+                "--components=engine" => options.components = ComponentSelection::Engine,
+                "--components=all" => options.components = ComponentSelection::All,
                 other => bail!("unexpected argument `{other}` for `package` command"),
             }
         }
@@ -985,6 +1017,21 @@ fn package(options: PackageOptions) -> Result<()> {
     // in place, and nothing else would notice.
     components::verify_components_cover_layout(&package_dir)?;
     let output = package_output(&paths.target_triple, options.archive);
+    let components_dir = paths.target_dir.join("dist").join("components");
+
+    // Shared components are emitted from the flat layout, before the macOS
+    // bundle relocates `planet` and `content` into `Contents/Resources`, and
+    // before any platform prefix could reach their entry names.
+    if options.components.includes_shared() {
+        for component in [components::ComponentId::Planet, components::ComponentId::Content] {
+            let emitted = emit_update_component(component, &package_dir, &components_dir, &paths)?;
+            tracing::info!(
+                path = %emitted.path.display(),
+                sha256 = %emitted.sha256,
+                "emitted update component"
+            );
+        }
+    }
 
     // The bundle is the macOS staged layout, so it is assembled even when no
     // disk image is requested.
@@ -993,6 +1040,18 @@ fn package(options: PackageOptions) -> Result<()> {
     } else {
         package_dir
     };
+
+    // The engine component is emitted last on macOS because `Info.plist`,
+    // `PkgInfo` and the icon only exist once the bundle has been assembled.
+    if options.components.includes_engine() {
+        let emitted =
+            emit_update_component(components::ComponentId::Engine, &staged, &components_dir, &paths)?;
+        tracing::info!(
+            path = %emitted.path.display(),
+            sha256 = %emitted.sha256,
+            "emitted update component"
+        );
+    }
 
     match output {
         PackageOutput::StagedOnly => {
@@ -1399,6 +1458,69 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
         true,
     )?;
     Ok(archive_path)
+}
+
+/// Emits one update component archive from an already-staged layout.
+///
+/// On macOS the engine component is taken from the assembled `.app`, whose
+/// `Contents/Resources` also holds the shared components and whose
+/// `_CodeSignature` seals whatever is present — neither belongs in an engine
+/// archive, and the seal would be stale by the time a client applied it.
+fn emit_update_component(
+    component: components::ComponentId,
+    source_dir: &Path,
+    output_dir: &Path,
+    paths: &WorkspacePaths,
+) -> Result<components::EmittedComponent> {
+    let is_bundle = component == components::ComponentId::Engine
+        && paths.target_triple.contains("apple-darwin");
+
+    let write = |archive: &Path, root: &Path, include: &dyn Fn(&Path) -> bool| -> Result<()> {
+        let combined = |relative: &Path| -> bool {
+            // Inside a bundle the only top-level entry is `Contents`, which the
+            // staged-layout predicate does not recognise; membership is defined
+            // by exclusion there instead.
+            if is_bundle {
+                return !bundle_path_belongs_to_another_component(relative);
+            }
+            include(relative)
+        };
+        write_deterministic_zip(
+            archive,
+            root,
+            None,
+            &combined,
+            &executable_bit_for_component,
+            false,
+        )
+    };
+
+    components::emit_component(
+        component,
+        source_dir,
+        output_dir,
+        env!("CARGO_PKG_VERSION"),
+        &paths.target_triple,
+        &write,
+    )
+}
+
+/// Paths inside an assembled `.app` that the engine component must not carry.
+fn bundle_path_belongs_to_another_component(relative: &Path) -> bool {
+    let text = path_to_zip_string(relative);
+    text.starts_with("Contents/Resources/planet/")
+        || text.starts_with("Contents/Resources/content/")
+        || text.starts_with("Contents/_CodeSignature/")
+}
+
+/// Executables live in `bin/` off the bundle and `Contents/MacOS/` inside it.
+fn executable_bit_for_component(relative: &Path) -> u32 {
+    let text = path_to_zip_string(relative);
+    if text.starts_with("bin/") || text.starts_with("Contents/MacOS/") {
+        0o755
+    } else {
+        0o644
+    }
 }
 
 /// `bin/` ships executables; everything else is data.
@@ -1997,7 +2119,7 @@ mod tests {
     fn package_options_default_to_writing_an_archive() {
         assert_eq!(
             PackageOptions::parse(Vec::new().into_iter()).expect("no arguments parses"),
-            PackageOptions { archive: true }
+            PackageOptions { archive: true, components: ComponentSelection::None }
         );
     }
 
@@ -2008,7 +2130,85 @@ mod tests {
         assert_eq!(
             PackageOptions::parse(["--no-archive".to_string()].into_iter())
                 .expect("--no-archive parses"),
-            PackageOptions { archive: false }
+            PackageOptions { archive: false, components: ComponentSelection::None }
+        );
+    }
+
+    #[test]
+    fn component_selection_defaults_to_none_and_parses_each_level() {
+        // A local `cargo xtask package` must stay exactly what it was; only
+        // the release workflow asks for components.
+        assert_eq!(
+            PackageOptions::parse(Vec::new().into_iter())
+                .expect("parses")
+                .components,
+            ComponentSelection::None
+        );
+        for (argument, expected) in [
+            ("--components=none", ComponentSelection::None),
+            ("--components=engine", ComponentSelection::Engine),
+            ("--components=all", ComponentSelection::All),
+        ] {
+            assert_eq!(
+                PackageOptions::parse([argument.to_string()].into_iter())
+                    .expect("parses")
+                    .components,
+                expected,
+                "{argument}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_all_selection_emits_the_shared_components() {
+        // The shared archives are byte-identical everywhere, so exactly one
+        // platform pass should pay ~265 MB to build them.
+        assert!(!ComponentSelection::Engine.includes_shared());
+        assert!(ComponentSelection::Engine.includes_engine());
+        assert!(ComponentSelection::All.includes_shared());
+        assert!(!ComponentSelection::None.includes_engine());
+    }
+
+    #[test]
+    fn the_bundle_engine_component_excludes_data_and_the_stale_seal() {
+        // `Contents/Resources` also holds the shared components, and
+        // `_CodeSignature` seals whatever was present at packaging time — a
+        // seal that is stale the moment a client applies an update.
+        for excluded in [
+            "Contents/Resources/planet/System.c4g/C4.c",
+            "Contents/Resources/content/Objects.c4d/DefCore.txt",
+            "Contents/_CodeSignature/CodeResources",
+        ] {
+            assert!(
+                bundle_path_belongs_to_another_component(Path::new(excluded)),
+                "{excluded} must not ride along in the engine component"
+            );
+        }
+        for included in [
+            "Contents/MacOS/clonk-app",
+            "Contents/Info.plist",
+            "Contents/PkgInfo",
+            "Contents/Resources/ClonkRust.icns",
+            "Contents/Resources/COPYING",
+        ] {
+            assert!(
+                !bundle_path_belongs_to_another_component(Path::new(included)),
+                "{included} belongs to the engine component"
+            );
+        }
+    }
+
+    #[test]
+    fn executables_are_marked_in_both_the_flat_and_bundle_layouts() {
+        assert_eq!(executable_bit_for_component(Path::new("bin/clonk-app")), 0o755);
+        assert_eq!(
+            executable_bit_for_component(Path::new("Contents/MacOS/clonk-app")),
+            0o755
+        );
+        assert_eq!(executable_bit_for_component(Path::new("COPYING")), 0o644);
+        assert_eq!(
+            executable_bit_for_component(Path::new("Contents/Resources/ClonkRust.icns")),
+            0o644
         );
     }
 
