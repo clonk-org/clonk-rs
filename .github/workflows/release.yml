@@ -20,6 +20,11 @@ on:
     - cron: '0 10 * * *'
   # Reacts to a `chore: release <version>` commit, which is how the
   # release-prepare pull request publishes when one is used.
+  #
+  # This path deliberately skips the `prepare` job, and with it the CI-green
+  # check: pushing a release commit by hand is the offline escape hatch, for
+  # when CI is broken or unavailable. The auditable equivalent is dispatching
+  # this workflow with force=true.
   push:
     branches: [main]
   workflow_dispatch:
@@ -28,6 +33,11 @@ on:
         description: 'Explicit version (MAJOR.MINOR.PATCH). Leave blank to infer from commits.'
         required: false
         type: string
+      force:
+        description: 'Release even if the latest CI run on main is not green.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -66,14 +76,24 @@ jobs:
       - name: Require main's CI to be green
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
         run: |
           conclusion=$(gh run list --workflow "Clonk Rust CI" --branch main \
             --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
           echo "latest Clonk Rust CI on main: $conclusion"
-          if [[ "$conclusion" != "success" ]]; then
-            echo "refusing to release: main's CI is '$conclusion'" >&2
-            exit 1
+          if [[ "$conclusion" == "success" ]]; then
+            exit 0
           fi
+          if [[ "$FORCE" == "true" ]]; then
+            # Deliberate override, recorded in the run log so a forced release
+            # is auditable afterwards rather than indistinguishable from a
+            # green one.
+            echo "::warning::releasing with CI '$conclusion' because force was requested"
+            exit 0
+          fi
+          echo "refusing to release: main's CI is '$conclusion'" >&2
+          echo "re-run this workflow with force=true to override" >&2
+          exit 1
 
       - name: Install native build dependencies
         run: |

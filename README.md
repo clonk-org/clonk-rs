@@ -62,9 +62,26 @@ The next version comes from the Conventional Commit subjects since the last
 single tag, not one per crate.
 
 The script bumps that version, refreshes `Cargo.lock` and prepends a
-[`CHANGELOG.md`](CHANGELOG.md) section. It stops there; review the result, run
-the gates, then commit and tag. Pushing the release commit to `main` builds and
-publishes the assets automatically — see below.
+[`CHANGELOG.md`](CHANGELOG.md) section, then stops. It exits 3 when no
+releasable commits have landed, which is how the scheduled release skips a
+quiet day.
+
+Releases otherwise run themselves: the `Release` workflow fires daily at 10:00
+UTC and, when `Clonk Rust CI` on `main` is green and releasable commits exist,
+bumps, tags, builds all four platform assets and publishes them.
+
+To release without waiting on CI — because it is red, timed out, or
+unavailable — either dispatch `Release` with **force** ticked, which records
+the override in the run log, or push a release commit by hand:
+
+```sh
+scripts/prepare-release.sh
+git commit -am "chore: release <version>"
+git push
+```
+
+The hand-pushed path skips the CI check by design. To build assets without
+releasing anything, run `cargo xtask package` locally on each platform.
 
 See [`AGENTS.md`](AGENTS.md) for engineering constraints,
 [`PORT_STATUS.md`](PORT_STATUS.md) for parity status, and
