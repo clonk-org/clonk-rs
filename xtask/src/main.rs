@@ -1,6 +1,7 @@
 mod audit;
 mod chaos;
 mod components;
+mod manifest;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clonk_engine::fixtures::SNAPSHOT_SCENARIOS;
@@ -1393,6 +1394,7 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
         &archive_path,
         package_dir,
         Some(&base_name),
+        &|_| true,
         &executable_bit_for_bin_directory,
         true,
     )?;
@@ -1422,6 +1424,7 @@ fn write_deterministic_zip(
     archive_path: &Path,
     source_root: &Path,
     entry_prefix: Option<&str>,
+    include: &dyn Fn(&Path) -> bool,
     mode_for: &dyn Fn(&Path) -> u32,
     include_directory_entries: bool,
 ) -> Result<()> {
@@ -1469,7 +1472,7 @@ fn write_deterministic_zip(
 
     for entry in entries {
         let relative = entry.path().strip_prefix(source_root).unwrap();
-        if relative.as_os_str().is_empty() {
+        if relative.as_os_str().is_empty() || !include(relative) {
             continue;
         }
         let zip_path_str = entry_name(relative);
