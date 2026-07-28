@@ -885,7 +885,7 @@ impl Engine {
         // other script's (C4AulScriptEngine owns AA_GLOBAL functions from
         // EVERY linked script): GoldRush's FxStayThere*/DoInitialize live
         // there and must resolve from def scripts and effect callbacks.
-        let mut functions: HashMap<String, clonk_script::Function> = self
+        let mut functions: rustc_hash::FxHashMap<String, clonk_script::Function> = self
             .global_script_functions
             .as_deref()
             .cloned()

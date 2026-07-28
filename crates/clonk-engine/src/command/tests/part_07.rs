@@ -65,7 +65,7 @@
         item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
         item.construction = FULL_CON;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(item.id, item);
 
@@ -273,7 +273,7 @@
         let target2 = ObjectId::new(3);
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.command_direction = CommandDirection::Right;
-        let objects = HashMap::from([(actor_id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
@@ -324,7 +324,7 @@
             command_direction: CommandDirection::Right,
             ..snapshot_with_id(actor_id.as_u64())
         };
-        let objects = HashMap::from([(actor_id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
@@ -359,7 +359,7 @@
         let definitions = HashMap::new();
 
         let target = snapshot_with_id(target_id.as_u64());
-        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone()), (target_id, target)]);
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut enter = CommandStack::new();
         enter
@@ -377,7 +377,7 @@
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.collectible = false;
-        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone()), (target_id, target)]);
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut get = CommandStack::new();
         get.push_front(
@@ -540,7 +540,7 @@
     #[test]
     fn targetless_enter_materializes_and_increments_the_base_failure_counter() {
         let actor = snapshot_with_id(1);
-        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
@@ -564,7 +564,7 @@
     #[test]
     fn targetless_call_materializes_before_parent_failure_handling() {
         let actor = snapshot_with_id(2);
-        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
@@ -608,7 +608,7 @@
         actor.action_procedure = ActionProcedure::Push;
         actor.action_target = Some(pushed_id);
         let pushed = snapshot_with_id(pushed_id.as_u64());
-        let objects = HashMap::from([(actor_id, actor.clone()), (pushed_id, pushed)]);
+        let objects = CommandObjectSnapshots::from_iter([(actor_id, actor.clone()), (pushed_id, pushed)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
@@ -644,7 +644,7 @@
     #[test]
     fn typed_malformed_exceptions_keep_native_evaluation_and_guard_order() {
         let actor = snapshot_with_id(5);
-        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
@@ -703,7 +703,7 @@
         actor.position = Vector2::new(0, 0);
         actor.command_direction = CommandDirection::Right;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(actor.id, actor.clone());
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
@@ -786,7 +786,7 @@
         actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
         actor.collectible = false;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(actor.id, actor.clone());
         let players = HashMap::new();
         let definitions = HashMap::new();
@@ -862,7 +862,7 @@
         // command below them without inspecting BaseMode (C4Command.cpp:2498-2508).
         let actor_id = ObjectId::new(1);
         let actor = snapshot_with_id(actor_id.as_u64());
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(actor.id, actor.clone());
         let players = HashMap::new();
         let definitions = HashMap::new();
@@ -932,7 +932,7 @@
         container.category = CATEGORY_STRUCTURE;
         container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(actor.id, actor.clone());
         objects.insert(item.id, item.clone());
         objects.insert(container.id, container.clone());
@@ -1169,7 +1169,7 @@
         base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
         base.collectible = false;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(base.id, base.clone());
 
@@ -1268,7 +1268,7 @@
         item.container = Some(target_id);
         item.position = target.position;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(target.id, target);
         objects.insert(item.id, item);
@@ -1363,7 +1363,7 @@
         item.container = Some(base_id);
         item.position = base.position;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(base.id, base.clone());
         objects.insert(item.id, item);
@@ -1461,7 +1461,7 @@
         item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
         item.construction = FULL_CON;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(base.id, base.clone());
         objects.insert(item.id, item.clone());
@@ -1554,7 +1554,7 @@
         base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
         base.collectible = false;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(base.id, base.clone());
 
@@ -1626,7 +1626,7 @@
         item.container = Some(target_id);
         item.position = target.position;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(target.id, target);
         objects.insert(item.id, item);
@@ -1715,7 +1715,7 @@
         item.container = Some(target_id);
         item.position = target.position;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder.clone());
         objects.insert(target.id, target);
         objects.insert(item.id, item);
@@ -1802,7 +1802,7 @@
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
         target.alive = false;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -1906,7 +1906,7 @@
         target.position = Vector2::new(0, 0);
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -1982,7 +1982,7 @@
         target.shape = DefinitionRect::new(-3, -3, 6, 6);
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
 
-        let objects = HashMap::from([(builder_id, builder), (target_id, target)]);
+        let objects = CommandObjectSnapshots::from_iter([(builder_id, builder), (target_id, target)]);
         let players = HashMap::new();
         let definitions = HashMap::from([(
             builder_definition,
@@ -2044,7 +2044,7 @@
         target.position = Vector2::new(0, 0);
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -2108,7 +2108,7 @@
         target.position = Vector2::new(0, 0);
         target.ocf = ocf::AVAILABLE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -2170,7 +2170,7 @@
         target.position = Vector2::new(0, 0);
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(builder.id, builder);
         objects.insert(target.id, target);
 
@@ -2248,7 +2248,7 @@
         stack.restore_from_snapshot(&snapshot);
         let mut actor = snapshot_with_id(1);
         actor.position = Vector2::new(100, 100);
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 1);

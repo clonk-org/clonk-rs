@@ -2881,7 +2881,7 @@ global func PreInitializePlayer(int player)
                 script_a
                     .global_access_functions()
                     .map(|(name, function)| (name.clone(), function.clone()))
-                    .collect::<HashMap<_, _>>(),
+                    .collect::<rustc_hash::FxHashMap<_, _>>(),
             );
             script_a.set_global_functions(Some(Arc::clone(&globals)));
             let script_a = Arc::new(script_a);
