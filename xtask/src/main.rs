@@ -35,6 +35,20 @@ const MACOS_ICON_SOURCE: &str = "planet/Graphics.c4g/Logo.png";
 const MACOS_BUNDLED_RESOURCES: [&str; 5] =
     ["planet", "content", "COPYING", "README.md", "credits.txt"];
 
+/// What a macOS release names itself, and the directory its fused binaries land
+/// in. Not a rustc target — `lipo` produces it, cargo never does.
+const MACOS_UNIVERSAL_TRIPLE: &str = "universal-apple-darwin";
+
+/// The real architectures a universal build fuses, in `lipo` argument order.
+///
+/// One `.app` for both cuts the macOS release in half: a per-architecture disk
+/// image is ~340 MB of identical game data wrapped around ~20 MB of different
+/// executables.
+const MACOS_UNIVERSAL_ARCHES: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
+
+/// The executables a release ships, in every layout.
+const RUNTIME_BINARIES: [&str; 2] = ["clonk-game", "clonk-app"];
+
 fn main() -> Result<()> {
     clonk_logging::init();
     clonk_logging::install_panic_hook();
@@ -886,31 +900,46 @@ fn update_manifest_command(args: &[String]) -> Result<()> {
 /// The triples a release ships, and therefore the ones every component must
 /// offer an archive for.
 ///
-/// Five entries for four builds: `x86_64-pc-windows-gnu` is a retired triple
-/// kept alive by [`UPDATE_TRIPLE_ALIASES`], not a build of its own.
-const UPDATE_TARGET_TRIPLES: [&str; 5] = [
+/// Six entries for three builds: `x86_64-pc-windows-gnu` and the two macOS
+/// architecture triples are all served through [`UPDATE_TRIPLE_ALIASES`] rather
+/// than being builds of their own.
+const UPDATE_TARGET_TRIPLES: [&str; 6] = [
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
     "x86_64-pc-windows-gnu",
+    MACOS_UNIVERSAL_TRIPLE,
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
 ];
 
-/// `(retired triple, the triple whose archive it is served)`.
+/// `(the triple a client reports, the triple whose archive it is served)`.
 ///
-/// Windows releases were cross-built from Linux as `x86_64-pc-windows-gnu`
-/// until the build moved to a native MSVC runner. A client reports the triple
-/// it was *built* for, so simply swapping the entry would leave every Windows
-/// install that already exists with no entry for itself — told there is no
-/// update, for ever, with nothing to notice it.
+/// A client can only report the triple *cargo* built it for: `build.rs` reads
+/// `TARGET`, and nothing else in the toolchain knows. Dropping a key here
+/// therefore leaves every install that reports it with no entry for itself —
+/// told there is no update, for ever, with nothing to notice it, because
+/// "nothing offered for my triple" is indistinguishable from "up to date".
 ///
-/// Serving those clients the MSVC archive is the migration rather than a
-/// workaround: the `engine` component replaces the executables wholesale, so
-/// applying it turns a gnu install into an MSVC one and the next check reports
-/// the new triple. Only `engine` needs the alias — the shared components are
-/// offered to every triple in [`UPDATE_TARGET_TRIPLES`] already.
-const UPDATE_TRIPLE_ALIASES: [(&str, &str); 1] =
-    [("x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc")];
+/// The two aliases are not the same kind of thing:
+///
+/// * **Windows** releases were cross-built from Linux as `x86_64-pc-windows-gnu`
+///   until the build moved to a native MSVC runner. That alias is a *migration*
+///   and drains: the `engine` component replaces the executables wholesale, so
+///   applying it turns a gnu install into an MSVC one and the next check
+///   reports the new triple.
+/// * **macOS** ships one universal `.app`, but each slice of it is compiled for
+///   a real architecture triple, so a universal install still reports
+///   `aarch64-apple-darwin` or `x86_64-apple-darwin` *after* updating. Those two
+///   aliases are permanent — they are how every Mac resolves, not a bridge from
+///   an older layout — and removing either one strands that architecture.
+///
+/// Only `engine` needs an alias; the shared components are offered to every
+/// triple in [`UPDATE_TARGET_TRIPLES`] already.
+const UPDATE_TRIPLE_ALIASES: [(&str, &str); 3] = [
+    ("x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"),
+    ("aarch64-apple-darwin", MACOS_UNIVERSAL_TRIPLE),
+    ("x86_64-apple-darwin", MACOS_UNIVERSAL_TRIPLE),
+];
 
 /// The triple recorded against a shared archive.
 ///
@@ -1425,18 +1454,34 @@ fn package(options: PackageOptions) -> Result<()> {
 }
 
 fn build_runtime_binaries(paths: &WorkspacePaths) -> Result<()> {
-    tracing::info!("building clonk-game and clonk-app (release)");
+    if paths.target_triple == MACOS_UNIVERSAL_TRIPLE {
+        return build_universal_macos_binaries(paths);
+    }
+    cargo_build_runtime(paths, None)
+}
+
+/// One `cargo build --release` of the two shipped executables.
+///
+/// `target` is passed on the command line rather than through the environment
+/// so a single run can build both macOS architectures; when it is `None` the
+/// inherited `CARGO_BUILD_TARGET` still decides, exactly as before.
+fn cargo_build_runtime(paths: &WorkspacePaths, target: Option<&str>) -> Result<()> {
+    tracing::info!(target, "building clonk-game and clonk-app (release)");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(&cargo)
-        .args([
-            "build",
-            "--release",
-            "--locked",
-            "-p",
-            "clonk-game",
-            "-p",
-            "clonk-app",
-        ])
+    let mut command = Command::new(&cargo);
+    command.args([
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "clonk-game",
+        "-p",
+        "clonk-app",
+    ]);
+    if let Some(target) = target {
+        command.args(["--target", target]);
+    }
+    let status = command
         .arg("--target-dir")
         .arg(&paths.target_dir)
         .current_dir(&paths.workspace_dir)
@@ -1445,6 +1490,75 @@ fn build_runtime_binaries(paths: &WorkspacePaths) -> Result<()> {
     if !status.success() {
         bail!("cargo build failed with status {:?}", status.code());
     }
+    Ok(())
+}
+
+/// Builds every macOS architecture and fuses each executable into one fat file.
+///
+/// Everything downstream — the audit, the staged layout, the bundle, the engine
+/// component, the disk image — then reads a single `release_dir`, so exactly
+/// one `.app` is assembled and signed.
+fn build_universal_macos_binaries(paths: &WorkspacePaths) -> Result<()> {
+    for arch in MACOS_UNIVERSAL_ARCHES {
+        cargo_build_runtime(paths, Some(arch))?;
+    }
+    fs::create_dir_all(&paths.release_dir)
+        .with_context(|| format!("failed to create {}", paths.release_dir.display()))?;
+    for binary_name in RUNTIME_BINARIES {
+        lipo_create(
+            &macos_universal_slices(paths, binary_name),
+            &paths.release_dir.join(binary_name),
+        )?;
+    }
+    Ok(())
+}
+
+/// Where cargo left each architecture's build of one executable.
+///
+/// Explicitly per-target, never `target/release`: a slice read from the host's
+/// default output directory would be whichever architecture was built last, and
+/// `lipo` would happily fuse a binary with itself.
+fn macos_universal_slices(paths: &WorkspacePaths, binary_name: &str) -> Vec<PathBuf> {
+    MACOS_UNIVERSAL_ARCHES
+        .iter()
+        .map(|arch| {
+            paths
+                .target_dir
+                .join(arch)
+                .join("release")
+                .join(binary_name)
+        })
+        .collect()
+}
+
+/// Fuses architecture slices into one universal executable.
+///
+/// The result carries no valid signature: the linker ad-hoc signs each slice,
+/// and `lipo` rebuilds the file around them. That is why signing has to happen
+/// after this, on the bundle these binaries end up in.
+fn lipo_create(slices: &[PathBuf], destination: &Path) -> Result<()> {
+    if let Some(missing) = slices.iter().find(|slice| !slice.exists()) {
+        bail!(
+            "expected a macOS architecture slice at {}; `rustup target add` each of {}",
+            missing.display(),
+            MACOS_UNIVERSAL_ARCHES.join(", ")
+        );
+    }
+    let status = Command::new("lipo")
+        .arg("-create")
+        .args(slices)
+        .arg("-output")
+        .arg(destination)
+        .status()
+        .with_context(|| format!("failed to invoke lipo for {}", destination.display()))?;
+    if !status.success() {
+        bail!(
+            "lipo -create failed for {} with status {:?}",
+            destination.display(),
+            status.code()
+        );
+    }
+    set_executable(destination)?;
     Ok(())
 }
 
@@ -2356,6 +2470,23 @@ fn validate_linux_elf_output(binary: &Path, output: &str) -> Result<()> {
     Ok(())
 }
 
+/// The triple a packaging run names every artifact after.
+///
+/// A macOS host with no target named builds *both* architectures and fuses
+/// them, so the run is not for the host triple at all. Naming an explicit
+/// target keeps the single-architecture behaviour: cargo can only be asked for
+/// one, and an artifact that claims to be fat when it is not would be served to
+/// Macs it cannot run on.
+fn packaging_triple(host_triple: &str, explicit_target: Option<&str>) -> String {
+    explicit_target.map(str::to_string).unwrap_or_else(|| {
+        if host_triple.contains("apple-darwin") {
+            MACOS_UNIVERSAL_TRIPLE.to_string()
+        } else {
+            host_triple.to_string()
+        }
+    })
+}
+
 struct WorkspacePaths {
     workspace_dir: PathBuf,
     repo_root: PathBuf,
@@ -2388,9 +2519,7 @@ impl WorkspacePaths {
         let explicit_target = env::var("CARGO_BUILD_TARGET")
             .ok()
             .filter(|target| !target.is_empty());
-        let target_triple = explicit_target
-            .clone()
-            .unwrap_or_else(|| host_triple.clone());
+        let target_triple = packaging_triple(&host_triple, explicit_target.as_deref());
         if !target_triple
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -2399,10 +2528,15 @@ impl WorkspacePaths {
                 "CARGO_BUILD_TARGET must be a target triple suitable for an archive name, got `{target_triple}`"
             );
         }
-        let release_dir = explicit_target.map_or_else(
-            || target_dir.join("release"),
-            |target| target_dir.join(target).join("release"),
-        );
+        // A universal run owns a directory of its own, because `target/release`
+        // holds whichever single architecture the host builds by default.
+        let release_dir = explicit_target
+            .as_deref()
+            .or((target_triple == MACOS_UNIVERSAL_TRIPLE).then_some(MACOS_UNIVERSAL_TRIPLE))
+            .map_or_else(
+                || target_dir.join("release"),
+                |directory| target_dir.join(directory).join("release"),
+            );
         Ok(Self {
             workspace_dir,
             repo_root,
@@ -2608,12 +2742,75 @@ mod tests {
     #[test]
     fn packaging_produces_a_disk_image_on_macos_and_an_archive_elsewhere() {
         assert_eq!(
+            package_output("universal-apple-darwin", true),
+            PackageOutput::DiskImage
+        );
+        assert_eq!(
             package_output("x86_64-apple-darwin", true),
             PackageOutput::DiskImage
         );
         assert_eq!(
             package_output("x86_64-unknown-linux-gnu", true),
             PackageOutput::Archive
+        );
+    }
+
+    #[test]
+    fn a_macos_host_packages_one_universal_build_for_both_architectures() {
+        // Every artifact name — the disk image and the engine component alike —
+        // is derived from this triple, so naming the run `universal-apple-darwin`
+        // is what collapses the two macOS passes into one.
+        for host in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            assert_eq!(packaging_triple(host, None), "universal-apple-darwin");
+        }
+    }
+
+    #[test]
+    fn a_named_target_still_packages_only_that_architecture() {
+        // The escape hatch: `CARGO_BUILD_TARGET` names one real triple, and a
+        // build that was asked for one architecture must not claim to be fat.
+        assert_eq!(
+            packaging_triple("aarch64-apple-darwin", Some("x86_64-apple-darwin")),
+            "x86_64-apple-darwin"
+        );
+        assert_eq!(
+            packaging_triple("x86_64-unknown-linux-gnu", Some("x86_64-pc-windows-msvc")),
+            "x86_64-pc-windows-msvc"
+        );
+    }
+
+    #[test]
+    fn a_non_macos_host_packages_for_itself() {
+        // Only macOS has `lipo`; everywhere else the host triple is the whole
+        // story and this must stay exactly what it was.
+        assert_eq!(
+            packaging_triple("x86_64-unknown-linux-gnu", None),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            packaging_triple("x86_64-pc-windows-msvc", None),
+            "x86_64-pc-windows-msvc"
+        );
+    }
+
+    #[test]
+    fn a_universal_build_is_fused_from_both_architecture_slices() {
+        // Read from cargo's per-target directories, never `target/release`: a
+        // slice picked up from the host's default output would be single-arch
+        // and `lipo` would happily fuse a binary with itself.
+        let (_temp, mut paths) = package_fixture();
+        paths.target_triple = MACOS_UNIVERSAL_TRIPLE.to_string();
+
+        assert_eq!(
+            macos_universal_slices(&paths, "clonk-app"),
+            [
+                paths
+                    .target_dir
+                    .join("aarch64-apple-darwin/release/clonk-app"),
+                paths
+                    .target_dir
+                    .join("x86_64-apple-darwin/release/clonk-app"),
+            ]
         );
     }
 
@@ -2964,9 +3161,13 @@ mod tests {
         );
     }
 
-    /// The six archives a complete release run leaves in
-    /// `target/dist/components`: one engine build per shipped triple, plus the
+    /// The five archives a complete release run leaves in
+    /// `target/dist/components`: one engine build per shipped *build*, plus the
     /// two shared components.
+    ///
+    /// Three engine archives for five shipped triples: macOS ships one
+    /// universal build for both of its triples, and Windows serves its retired
+    /// gnu triple from the msvc archive. See [`UPDATE_TRIPLE_ALIASES`].
     ///
     /// Every archive carries different bytes, so a manifest that mixed two of
     /// them up cannot pass by coincidence.
@@ -2980,7 +3181,7 @@ mod tests {
 
     /// `(archive name, bytes)`. The digests asserted below were taken from
     /// `shasum -a 256` over these exact strings, not from the code under test.
-    const RELEASE_COMPONENTS_FIXTURE: [(&str, &str); 6] = [
+    const RELEASE_COMPONENTS_FIXTURE: [(&str, &str); 5] = [
         (
             "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
             "linux engine",
@@ -2990,12 +3191,8 @@ mod tests {
             "windows engine",
         ),
         (
-            "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip",
-            "arm64 macos engine",
-        ),
-        (
-            "clonk-rust-0.4.0-engine-x86_64-apple-darwin.zip",
-            "x86_64 macos engine",
+            "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+            "universal macos engine",
         ),
         (
             "content-00112233445566778899aabbccddeeff.zip",
@@ -3039,7 +3236,7 @@ mod tests {
 
     #[test]
     fn every_triple_resolves_to_its_own_engine_archive() {
-        // The reason the manifest is keyed by triple at all: four different
+        // The reason the manifest is keyed by triple at all: three different
         // engine builds ship under one component, and a client has nothing but
         // this map to tell which of them is its own.
         let components = release_components_fixture();
@@ -3061,17 +3258,10 @@ mod tests {
                 ),
             ),
             (
-                "aarch64-apple-darwin",
+                "universal-apple-darwin",
                 (
-                    "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip",
-                    "7f2056195596313b436e5d52ce95845372aeff5776e16be72b4d7ddf13c52db4",
-                ),
-            ),
-            (
-                "x86_64-apple-darwin",
-                (
-                    "clonk-rust-0.4.0-engine-x86_64-apple-darwin.zip",
-                    "3d866264cd2e8015a19de6086555e710f83aab5a0deb30cbd1c7942474b43908",
+                    "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+                    "6da2dcb44809e63fda53cf66b9cd958585a9b6453b7b06e283c38cee2eed014a",
                 ),
             ),
         ] {
@@ -3102,9 +3292,47 @@ mod tests {
             .collect();
         assert_eq!(
             digests.len(),
-            4,
-            "four separate builds must not share a digest"
+            3,
+            "three separate builds must not share a digest"
         );
+    }
+
+    #[test]
+    fn both_macos_triples_are_served_the_universal_engine_archive() {
+        // macOS ships one universal `.app` for both architectures, but a binary
+        // can only report the triple *cargo* built it for — `build.rs` reads
+        // `TARGET`, and each slice of a `lipo` build is compiled for a real
+        // arch triple. So no Mac ever asks for `universal-apple-darwin`: the
+        // arm64 slice asks as `aarch64-apple-darwin` and the Intel slice as
+        // `x86_64-apple-darwin`, both before *and* after they update.
+        //
+        // Losing either key would tell every Mac there is no update, for ever
+        // and silently, because "nothing offered for my triple" is
+        // indistinguishable from "up to date".
+        let components = release_components_fixture();
+        let engine = component_entry(&generated_manifest(&components), "engine").clone();
+
+        for triple in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            let target = engine
+                .targets
+                .get(triple)
+                .unwrap_or_else(|| panic!("engine has no archive for {triple}"));
+            assert_eq!(
+                target.archive, "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+                "{triple} must be offered the universal build"
+            );
+            // The whole target, not just the name: a client verifies the digest
+            // it was given, so an alias that agreed on the filename alone would
+            // fail every Mac at the integrity check instead of at the manifest.
+            assert_eq!(
+                target, &engine.targets["universal-apple-darwin"],
+                "{triple} must resolve to the same bytes, not merely the same name"
+            );
+            assert_eq!(
+                target.install, "",
+                "the engine archive carries its own layout"
+            );
+        }
     }
 
     #[test]
@@ -3205,7 +3433,7 @@ mod tests {
             scan_emitted_components(components.path(), "0.4.0")
                 .expect("scan the components")
                 .len(),
-            6
+            5
         );
     }
 
@@ -3231,7 +3459,7 @@ mod tests {
         // before the tag, which is what makes the failure recoverable.
         let components = TempDir::new().expect("temporary components directory");
         for (name, contents) in RELEASE_COMPONENTS_FIXTURE {
-            if !name.contains("aarch64-apple-darwin") {
+            if !name.contains("apple-darwin") {
                 write_fixture(&components.path().join(name), contents.as_bytes());
             }
         }
@@ -3245,10 +3473,19 @@ mod tests {
         })
         .expect_err("a manifest that strands a platform must not be published");
 
-        assert!(
-            error.to_string().contains("engine/aarch64-apple-darwin"),
-            "error names the component and triple that would be missing: {error}"
-        );
+        // Every Mac triple, not just the one that was not built: the aliases
+        // are what the two architecture triples resolve through, so a missing
+        // universal archive strands all three at once.
+        for triple in [
+            "universal-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+        ] {
+            assert!(
+                error.to_string().contains(&format!("engine/{triple}")),
+                "error names the component and triple that would be missing: {error}"
+            );
+        }
         assert!(
             !out.path().join("manifest.json").exists(),
             "nothing may be written when the manifest is refused"
