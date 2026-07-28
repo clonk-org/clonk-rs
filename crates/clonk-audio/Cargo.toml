@@ -18,6 +18,7 @@ hound = "3"
 lewton = "0.10"
 libloading = "0.8"
 midly = { version = "=0.5.3", default-features = false, features = ["std", "strict"] }
-minimp3 = "0.5"
+symphonia-bundle-mp3 = "0.6"
+symphonia-core = "0.6"
 cpal = { version = "0.18.1", optional = true }
 tracing = "0.1"

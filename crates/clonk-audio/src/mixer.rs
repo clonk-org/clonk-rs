@@ -41,6 +41,10 @@ fn sdl_mixer_pan_steps(pan: f32) -> (i32, i32) {
 /// similarly bounded instead of retaining one stereo-f32 frame per track
 /// frame for the complete duration.
 const MUSIC_DECODE_BUFFER_FRAMES: usize = 4_096;
+/// Largest PCM payload one MPEG Layer III frame can decode to: 1152 samples
+/// across two channels. Bounds how much a streaming decoder may hold at once.
+#[cfg(test)]
+const MAX_MPEG_SAMPLES_PER_FRAME: usize = 2_304;
 #[cfg(feature = "cpal")]
 const CLASSIC_OUTPUT_SAMPLE_RATE: u32 = 44_100;
 #[cfg(feature = "cpal")]
@@ -2149,7 +2153,7 @@ mod tests {
 
         let initial_capacity = mixer.music_buffered_frame_capacity().unwrap();
         assert!(
-            initial_capacity <= MUSIC_DECODE_BUFFER_FRAMES + minimp3::MAX_SAMPLES_PER_FRAME + 2,
+            initial_capacity <= MUSIC_DECODE_BUFFER_FRAMES + MAX_MPEG_SAMPLES_PER_FRAME + 2,
             "stream retains {initial_capacity} decoded frames"
         );
 
@@ -2166,7 +2170,7 @@ mod tests {
         );
         assert!(
             mixer.music_peak_buffered_frame_capacity().unwrap()
-                <= MUSIC_DECODE_BUFFER_FRAMES + minimp3::MAX_SAMPLES_PER_FRAME + 2
+                <= MUSIC_DECODE_BUFFER_FRAMES + MAX_MPEG_SAMPLES_PER_FRAME + 2
         );
     }
 
