@@ -15,15 +15,19 @@
 //! Guards, in the order they run:
 //!
 //! 1. Declared unpacked size against the caller's budget, before any write.
-//! 2. Per entry: our own path rules (no `..`, nothing absolute, no `\` or `:`
+//! 2. Entry names that would name the same file once case is folded — also
+//!    before any write, since a collision is a property of the archive rather
+//!    than of the entry that happens to arrive second.
+//! 3. Per entry: our own path rules (no `..`, nothing absolute, no `\` or `:`
 //!    smuggling, no empty or `.` segments).
-//! 3. Per entry: `ZipFile::enclosed_name`, the reader's independent
+//! 4. Per entry: `ZipFile::enclosed_name`, the reader's independent
 //!    containment check, as a backstop for names our rules did not anticipate.
-//! 4. Per entry: no symlinks — the classic way an archive turns a later
+//! 5. Per entry: no symlinks — the classic way an archive turns a later
 //!    innocuous entry into a write outside the destination.
-//! 5. Bytes actually written against the same budget, because a declared size
+//! 6. Bytes actually written against the same budget, because a declared size
 //!    is only a bound if it is honest.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -41,6 +45,8 @@ pub enum EntryFault {
     Malformed,
     /// A symbolic link.
     Symlink,
+    /// Names another entry already claimed once case is folded.
+    Collision,
 }
 
 impl EntryFault {
@@ -51,6 +57,7 @@ impl EntryFault {
             Self::Unenclosed => "is not enclosed by the destination",
             Self::Malformed => "is not a usable relative path",
             Self::Symlink => "is a symbolic link",
+            Self::Collision => "collides with another entry once case is folded",
         }
     }
 }
@@ -108,6 +115,16 @@ pub struct ExtractSummary {
 const UNIX_FILE_TYPE_MASK: u32 = 0o170000;
 const UNIX_SYMLINK: u32 = 0o120000;
 
+/// How a filesystem that ignores case would see an entry's path.
+///
+/// Full Unicode lowercasing rather than ASCII folding: it collapses a superset
+/// of what macOS and Windows collapse, and the asymmetry favours us — refusing
+/// an archive is something a user can retry, whereas letting a collision
+/// through drops a file from a component that then looks complete.
+fn fold_case(relative: &Path) -> String {
+    relative.to_string_lossy().to_lowercase()
+}
+
 /// Applies our own containment rules to a stored entry name.
 ///
 /// Deliberately platform-independent: a name that is relative on Linux but
@@ -149,9 +166,10 @@ fn safe_entry_path(name: &str) -> Result<PathBuf, EntryFault> {
 /// Unpacks `archive` into `destination`, refusing anything that does not stay
 /// inside it or that exceeds `unpacked_size` bytes in total.
 ///
-/// `unpacked_size` is the caller's budget, not a manifest field: the manifest
-/// records the *archive* size, so the applier is the layer that knows what
-/// expansion is plausible and how much free space it checked for.
+/// `unpacked_size` is the caller's budget, and deliberately not read from the
+/// manifest: the schema records only the *archive* size, so the applier — which
+/// knows what expansion is plausible for the component and how much free space
+/// it just checked for — is the layer that has to supply the bound.
 ///
 /// `destination` must not already contain files: staging is always into a
 /// directory this call owns, and it is removed in full if anything goes wrong.
@@ -203,7 +221,9 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
     };
 
     // Cheap pre-pass over the central directory: a bomb that admits its own
-    // size is rejected before a single byte lands on disk.
+    // size, and an archive whose names cannot coexist, are both rejected
+    // before a single byte lands on disk.
+    let mut claimed: HashSet<String> = HashSet::new();
     let declared = (0..zip.len()).try_fold(0u64, |total, index| {
         let entry = zip.by_index_raw(index).map_err(|source| {
             tracing::debug!(%index, "component archive entry unreadable");
@@ -212,6 +232,20 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
                 source,
             }
         })?;
+        let name = entry.name().to_string();
+        // A name our own rules reject is refused by the loop below, with the
+        // fault that actually describes it; it never reaches a write, so it
+        // has nothing to collide with here.
+        if let Ok(relative) = safe_entry_path(&name) {
+            claimed
+                .insert(fold_case(&relative))
+                .then_some(())
+                .ok_or_else(|| ExtractError::Unsafe {
+                    archive: archive.to_path_buf(),
+                    entry: name,
+                    fault: EntryFault::Collision,
+                })?;
+        }
         Ok::<_, ExtractError>(total.saturating_add(entry.size()))
     })?;
     if declared > unpacked_size {
@@ -459,6 +493,77 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn entries_differing_only_in_case_reject_the_archive() {
+        // macOS and Windows fold case, so two such entries become one file:
+        // the later one silently overwrites the earlier, and the component
+        // installs looking complete while holding contents no case-sensitive
+        // machine ever produced. Building the archive by hand is the point —
+        // a publisher's tree cannot contain the pair, an attacker's can.
+        let bytes = archive_of(|writer| {
+            writer
+                .start_file("Graphics.c4g/Info.txt", FileOptions::default())
+                .expect("start file");
+            writer.write_all(b"real").expect("write file");
+            writer
+                .start_file("graphics.c4g/INFO.TXT", FileOptions::default())
+                .expect("start colliding file");
+            writer.write_all(b"shadow").expect("write colliding file");
+        });
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(
+            matches!(
+                result,
+                Err(ExtractError::Unsafe {
+                    fault: EntryFault::Collision,
+                    ..
+                })
+            ),
+            "a case-folding collision should reject the archive, got {result:?}"
+        );
+        // Rejected in the pre-pass, so not one byte of it reached the disk.
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn a_repeated_entry_name_rejects_the_archive() {
+        // The same collision without the case fold: the second entry would
+        // overwrite the first on every filesystem.
+        let bytes = archive_of(|writer| {
+            for _ in 0..2 {
+                writer
+                    .start_file("planet/System.c4g/Rank.txt", FileOptions::default())
+                    .expect("start file");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+        let (_directory, result) = extract(&bytes, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Collision,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn names_that_only_share_a_folded_prefix_still_extract() {
+        // The guard folds whole paths, not fragments: `Info.txt` beside
+        // `info-2.txt` is an ordinary archive and must not be refused.
+        let bytes = archive_of(|writer| {
+            for name in ["Graphics.c4g/Info.txt", "graphics.c4g/info-2.txt"] {
+                writer
+                    .start_file(name, FileOptions::default())
+                    .expect("start file");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+        let (_directory, result) = extract(&bytes, 1024);
+        assert_eq!(result.expect("extract").files, 2);
     }
 
     #[test]
