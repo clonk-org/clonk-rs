@@ -1386,12 +1386,21 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "package".to_string());
+    // Timestamps are pinned rather than inherited: `FileOptions::default()`
+    // reads the wall clock when `zip`'s `time` feature is enabled, which any
+    // dependency in the workspace could turn on through feature unification.
+    // Release archives — and the content-addressed hashes taken over them —
+    // must not depend on that.
+    let epoch = zip::DateTime::default();
     let dir_options = FileOptions::default()
         .compression_method(CompressionMethod::Stored)
+        .last_modified_time(epoch)
         .unix_permissions(0o755);
     zip.add_directory(format!("{}/", base_name), dir_options)?;
 
-    let file_options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    let file_options = FileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .last_modified_time(epoch);
 
     let mut entries = WalkDir::new(package_dir)
         .into_iter()
@@ -2046,6 +2055,47 @@ mod tests {
             archive_file_name("1.2.3", "aarch64-apple-darwin"),
             "clonk-rust-1.2.3-aarch64-apple-darwin.zip"
         );
+    }
+
+    #[test]
+    fn archive_entries_carry_a_pinned_timestamp() {
+        // Reproducibility currently rests on `zip`'s `time` feature being off:
+        // `FileOptions::default()` reads the wall clock when it is on, and the
+        // repeatability test above cannot see the difference because DOS
+        // timestamps have two-second granularity. Pin it so a version bump or
+        // feature unification elsewhere in the workspace cannot silently make
+        // releases non-reproducible.
+        let (_temp, paths) = package_fixture();
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+        let archive = create_archive(&paths, &package_dir).expect("create archive");
+
+        let file = File::open(&archive).expect("open archive");
+        let mut zip = zip::ZipArchive::new(file).expect("open zip");
+        let epoch = zip::DateTime::default();
+        for index in 0..zip.len() {
+            let entry = zip.by_index(index).expect("read zip entry");
+            let stamp = entry.last_modified();
+            assert_eq!(
+                (
+                    stamp.year(),
+                    stamp.month(),
+                    stamp.day(),
+                    stamp.hour(),
+                    stamp.minute(),
+                    stamp.second()
+                ),
+                (
+                    epoch.year(),
+                    epoch.month(),
+                    epoch.day(),
+                    epoch.hour(),
+                    epoch.minute(),
+                    epoch.second()
+                ),
+                "entry {} carries a wall-clock timestamp",
+                entry.name()
+            );
+        }
     }
 
     #[test]
