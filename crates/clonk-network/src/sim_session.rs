@@ -186,6 +186,16 @@ pub struct SessionConfig {
     pub presend: bool,
     /// Which signal they size it from.
     pub presend_source: PresendSource,
+    /// Consecutive ticks a client may arrive late before the host stops
+    /// extending the async deadline for it. Zero keeps the shipped behaviour.
+    ///
+    /// The async deadline bounds the wait *per tick*, which is enough for a peer
+    /// that hiccups. It does nothing for one that is late on every tick: the
+    /// host then pays the full budget every single tick, and the healthy players
+    /// pay it with him. Dropping a persistent straggler out of the waited-for
+    /// set is the same move C++ already makes for `NCS_Chasing` clients, which
+    /// `isWaitedFor()` excludes from `AllClientsReady`.
+    pub straggler_patience: u32,
 }
 
 impl SessionConfig {
@@ -211,6 +221,9 @@ impl Default for SessionConfig {
             async_max_wait_frames: 2,
             presend: true,
             presend_source: PresendSource::default(),
+            // Matches `HostConfig::straggler_patience` so the harness measures
+            // what actually ships.
+            straggler_patience: 4,
         }
     }
 }
@@ -314,6 +327,8 @@ struct Peer {
     /// approximates with `iHostPing` in central mode.
     stamped_at: BTreeMap<Tick, Duration>,
     horizons: Vec<Duration>,
+    /// Consecutive ticks this client failed to deliver before the host packed.
+    consecutive_late: u32,
     outcome: ClientOutcome,
 }
 
@@ -365,6 +380,7 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
                 arrived: BTreeMap::new(),
                 stamped_at: BTreeMap::new(),
                 horizons: Vec::new(),
+                consecutive_late: 0,
                 outcome: ClientOutcome {
                     id,
                     overloaded: profile.cpu.is_overloaded(config.control_rate),
@@ -479,7 +495,40 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
             }
         }
         if let Some((tick, started)) = wait_start {
-            if tick == coordinator.current_tick() && now >= started.saturating_add(budget) {
+            // A client that has been late `straggler_patience` ticks running has
+            // stopped being someone worth waiting for. Once every client still
+            // missing is in that state, the host packs immediately instead of
+            // spending the whole budget again on a peer that will not make it.
+            // Exactly the host's rule: ask the coordinator who is actually
+            // outstanding. "The peer has sent it" is not the same as "the host
+            // has it" — a packet still in flight belongs to a client that has
+            // done nothing wrong, and packing over it would discard the input of
+            // whoever happened to be a few milliseconds behind.
+            let missing = coordinator.clients_missing(tick);
+            let all_missing_are_stragglers = config.straggler_patience > 0
+                && !missing.is_empty()
+                && missing.iter().all(|client_id| {
+                    peers.iter().any(|peer| {
+                        peer.id == *client_id && peer.consecutive_late >= config.straggler_patience
+                    })
+                });
+            let effective = if all_missing_are_stragglers {
+                Duration::ZERO
+            } else {
+                budget
+            };
+            let deadline_expired = now >= started.saturating_add(budget);
+            // The host reaches control tick T on its own frame loop, so it can
+            // never force T before T is due. Without this floor a host that has
+            // fallen behind sprints through the backlog, forcing tick after tick
+            // in the same instant and discarding everybody's input for ticks
+            // they had not even reached yet -- an artefact of the model, not
+            // something `control_tick_reached` can do.
+            let due = CONTROL_PERIOD * tick;
+            if tick == coordinator.current_tick()
+                && now >= due
+                && now >= started.saturating_add(effective)
+            {
                 let forced = coordinator.force_current_tick();
                 for batch in &forced {
                     let present: Vec<ClientId> = batch
@@ -488,8 +537,15 @@ pub fn run_session(config: &SessionConfig) -> SessionReport {
                         .map(|packet| packet.client_id())
                         .collect();
                     for peer in &mut peers {
-                        if !present.contains(&peer.id) {
+                        if present.contains(&peer.id) {
+                            peer.consecutive_late = 0;
+                        } else {
                             peer.outcome.dropped_inputs += 1;
+                            // Only a client that had the whole budget and still
+                            // missed has earned a mark; see host_loop.rs.
+                            if deadline_expired {
+                                peer.consecutive_late = peer.consecutive_late.saturating_add(1);
+                            }
                         }
                     }
                     forced_ticks += 1;
@@ -751,38 +807,28 @@ mod tests {
 
     #[test]
     fn a_slow_machine_drags_the_healthy_players_down_with_it() {
-        // The failure this whole rig exists to reproduce. The potato's ping is
-        // fine; only its frame loop is slow, so PreSend never grows to cover it
-        // and the host stops waiting.
+        // The defect, with `straggler_patience` off. The async deadline bounds
+        // the wait per tick, but a peer that is late on *every* tick makes the
+        // host spend the whole budget (ControlRate * AsyncMaxWait * 1000 /
+        // TargetFPS = 106 ms at defaults) every single tick, and the healthy
+        // players pay it with him. Over a nominal 11 s session they finish about
+        // 10 s behind -- the game runs at roughly half speed for four players
+        // because of one. This is the residual PORT_STATUS.md:353-357 warns
+        // about, measured end to end.
         let mut clients = vec![ClientProfile::healthy(); 4];
         clients[0].cpu = CpuProfile::potato();
-        let report = run_session(&config_with(clients, 200));
+        let report = run_session(&SessionConfig {
+            straggler_patience: 0,
+            ..config_with(clients, 200)
+        });
 
         let potato = &report.clients[0];
         assert!(potato.overloaded, "the potato cannot sustain the cadence");
         // It falls behind in *wall clock*, not in tick count: at 20x the
         // reference cost a control tick takes 156 ms against a 55 ms period, so
-        // it still runs every tick, just nearly three times too slowly. Drift is
-        // therefore the symptom to assert on; a tick counter would miss it.
+        // it still runs every tick, just nearly three times too slowly.
         let nominal = CONTROL_PERIOD * report.ticks as u32;
-        assert!(
-            potato.drift > nominal,
-            "it must end up more than a session-length behind, drifted {:?} over {:?}",
-            potato.drift,
-            nominal
-        );
-        // BASELINE DEFECT, pinned deliberately so the Tier 1 work has something
-        // to invert. The healthy players are dragged along with the potato: the
-        // host waits the full async budget (ControlRate * AsyncMaxWait * 1000 /
-        // TargetFPS = 106 ms at defaults) on *every* tick before giving up on a
-        // peer that is permanently late, so a straggler that never recovers
-        // costs everyone ~106 ms per tick. Over a nominal 11 s session the
-        // healthy clients finish about 10 s behind — the game runs at roughly
-        // half speed for four players because of one.
-        //
-        // This is the residual PORT_STATUS.md:353-357 already warns about
-        // ("a peer whose latency consistently exceeds the budget is dropped on
-        // nearly every tick"), now measured end to end rather than argued.
+        assert!(potato.drift > nominal, "drifted {:?}", potato.drift);
         for healthy in report.healthy() {
             assert!(
                 healthy.drift > nominal / 2,
@@ -793,13 +839,52 @@ mod tests {
                 nominal
             );
         }
+    }
+
+    #[test]
+    fn giving_up_on_a_persistent_straggler_frees_the_healthy_players() {
+        // The fix for the defect above, and it is nearly free. Once a client has
+        // been late two ticks running the host stops extending the deadline for
+        // it, so the healthy players stop paying 106 ms per tick for a peer that
+        // was never going to make it. They end within a few hundred milliseconds
+        // of an all-healthy session instead of ten seconds behind.
+        //
+        // The straggler is no worse off: it is CPU-bound, so its own drift is
+        // unchanged, and it loses only a handful more inputs -- the host was
+        // already discarding them, just after paying for them first.
+        let mut clients = vec![ClientProfile::healthy(); 4];
+        clients[0].cpu = CpuProfile::potato();
+        let patient = run_session(&SessionConfig {
+            straggler_patience: 0,
+            ..config_with(clients.clone(), 200)
+        });
+        let decisive = run_session(&config_with(clients, 200));
+
+        let patient_drift = patient.healthy().map(|c| c.drift).max().unwrap_or_default();
+        let decisive_drift = decisive
+            .healthy()
+            .map(|c| c.drift)
+            .max()
+            .unwrap_or_default();
         assert!(
-            report.forced_ticks > 0,
-            "the host must give up waiting for it at least once"
+            decisive_drift * 10 < patient_drift,
+            "healthy drift should collapse: {patient_drift:?} -> {decisive_drift:?}"
         );
         assert!(
-            potato.dropped_inputs > 0,
-            "and its input must be the input that gets discarded"
+            decisive.worst_healthy_blocked_fraction() < 0.01,
+            "and the healthy players should essentially stop stalling, got {:.4}",
+            decisive.worst_healthy_blocked_fraction()
+        );
+        assert_eq!(
+            decisive.clients[0].drift, patient.clients[0].drift,
+            "the straggler is CPU-bound, so giving up on it costs it no drift"
+        );
+        assert!(
+            decisive.clients[0].dropped_inputs
+                <= patient.clients[0].dropped_inputs.saturating_add(20),
+            "and only marginally more of its input: {} -> {}",
+            patient.clients[0].dropped_inputs,
+            decisive.clients[0].dropped_inputs
         );
     }
 

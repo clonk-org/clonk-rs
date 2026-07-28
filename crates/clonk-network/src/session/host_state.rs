@@ -101,6 +101,9 @@ pub(crate) struct HostState {
     pub(crate) last_chase_target_update: Option<tokio::time::Instant>,
     pub(crate) game_started: bool,
     pub(crate) control_mode: i32,
+    /// Consecutive ticks each client has failed to deliver before the host
+    /// packed without it.
+    pub(crate) straggler_late: std::collections::BTreeMap<ClientId, u32>,
     pub(crate) async_control_wait: Option<AsyncControlWait>,
     pub(crate) admission: HostAdmission,
     pub(crate) client_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,

@@ -356,6 +356,49 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
+- **The host stops extending the async deadline for a persistent straggler**
+  (`crates/clonk-network/src/session/host_loop.rs`, `force_expired_async_control`;
+  `HostConfig::straggler_patience`, default 4). Approved 2026-07-27. No C++
+  equivalent: C++ has no control-lag drop of any kind, and its only kick is 30 s
+  of unanswered ping.
+  `CNM_Async` bounds the host's wait *per tick*, which is the right answer for a
+  peer that hiccups. It does nothing for a peer that is late on *every* tick — a
+  machine that cannot sustain the cadence — because the host then pays the whole
+  budget (106 ms at defaults) every single tick and every other participant pays
+  it too. Once a client has missed the full budget on four consecutive ticks the
+  host stops waiting for it; it rejoins the waited-for set the moment it
+  delivers. This is the same move C++ already makes for `NCS_Chasing` clients,
+  which `isWaitedFor()` excludes from `AllClientsReady`.
+  Determinism is unaffected for the same reason `CNM_Async` itself is: only the
+  host decides, and it still broadcasts one authoritative aggregate that every
+  participant executes identically.
+  Two details that took measurement to get right, both worth preserving:
+  lateness is counted **only when the full budget actually expired**, never on a
+  fast-path pack, or a client merely in flight when the host gave up on somebody
+  else accumulates marks and is eventually written off itself; and the fast path
+  fires only when **every** client the coordinator is still missing is a known
+  straggler, since "the peer sent it" is not "the host has it".
+  Measured with `cargo xtask chaos`, 16 committed seeds x 200 ticks. Healthy
+  participants, before -> after, against the ping-sized-PreSend baseline this
+  and the entry below replace:
+  one Pi-class machine on a good link 975 -> 0 permille blocked and
+  10348 -> 394 ms drift;
+  the same machine on 33.6k dial-up 970 -> 0 permille and 10384 -> 394 ms;
+  a Pi 4 on congested hotel wifi 930 -> 15 permille and 8995 -> 524 ms;
+  a dial-up link on a good machine 530 -> 5 permille and 3491 -> 447 ms.
+  Every impaired profile now costs the healthy players about what an all-healthy
+  session does (368 ms).
+  The cost is the straggler's input, and it is small: at patience 4 the healthy
+  participants lose 38 inputs out of 4800 and the straggler 1.6% more than
+  before, while an all-healthy session is completely unaffected (65 dropped, the
+  same as with the feature off). Patience 2 buys the same drift but starts
+  costing an all-healthy session input (65 -> 120), because ordinary loss makes a
+  good client miss twice in a row often enough to be written off.
+  What this does **not** fix: the straggler's own experience. It is CPU-bound, so
+  its drift is unchanged at 20.5 s over an 11 s session. Nothing in the network
+  layer can help a machine that cannot execute ticks fast enough; that needs
+  adaptive `ControlRate` or a smaller scenario.
+
 - **Published resources advertise 10 KiB chunks, not 100 KiB**
   (`crates/clonk-network/src/host_resource_core.rs`, `STOCK_CHUNK_SIZE`; C++
   `C4NetResChunkSize`, LegacyClonk 7d43b47 src/C4Network2Res.h:27). Approved
