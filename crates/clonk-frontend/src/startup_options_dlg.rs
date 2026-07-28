@@ -6010,25 +6010,39 @@ mod tests {
             (scale.y + scale.h / 2) as f32,
         );
 
+        // The thumb maps linearly onto the whole spinbox domain
+        // (`iNewScale = val + minScale`, C4StartupOptionsDlg.cpp:1105), so the
+        // track midpoint and its right end follow the ceiling constant.
+        let midpoint_percent = MIN_GRAPHICS_SCALE_PERCENT
+            + (MAX_GRAPHICS_SCALE_PERCENT - MIN_GRAPHICS_SCALE_PERCENT) / 2;
         assert_eq!(
             state.handle_pointer_down(midpoint),
             vec![OptionsDlgAction::Graphics(
-                GraphicsSheetAction::ScaleProposalChanged(200)
+                GraphicsSheetAction::ScaleProposalChanged(midpoint_percent)
             )]
         );
         assert_eq!(
             state.handle_pointer_move(right),
             vec![OptionsDlgAction::Graphics(
-                GraphicsSheetAction::ScaleProposalChanged(300)
+                GraphicsSheetAction::ScaleProposalChanged(MAX_GRAPHICS_SCALE_PERCENT)
             )]
         );
         assert_eq!(
             state.handle_pointer_up(right),
             vec![OptionsDlgAction::Graphics(
-                GraphicsSheetAction::ScaleProposalChanged(300)
+                GraphicsSheetAction::ScaleProposalChanged(MAX_GRAPHICS_SCALE_PERCENT)
             )]
         );
-        assert_eq!(state.graphics().proposed_scale_percent, 300);
+        assert_eq!(
+            state.graphics().proposed_scale_percent,
+            MAX_GRAPHICS_SCALE_PERCENT
+        );
+        // The thumb round-trips at the raised ceiling: a full-travel drag
+        // leaves the rendered position at the end of the track.
+        assert_eq!(
+            state.graphics_slider_position(GraphicsSliderId::Scale, scale),
+            scale_travel
+        );
 
         let smoke = layout.graphics.smoke_slider;
         let increment = GuiPoint::new(

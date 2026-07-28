@@ -11,7 +11,13 @@ use crate::GuiPoint;
 
 /// `C4StartupOptionsDlg.cpp`'s scale-spinbox limits.
 pub const MIN_GRAPHICS_SCALE_PERCENT: i32 = 100;
-pub const MAX_GRAPHICS_SCALE_PERCENT: i32 = 300;
+/// Deliberate divergence: C++ caps the scale spinbox and slider at 300
+/// (`constexpr int maxScale = 300`, C4StartupOptionsDlg.cpp:132). The first-run
+/// scale follows the monitor's pixel density, so a 4x panel clamps to the C++
+/// ceiling and renders a smaller-than-classic logical layout. Raising the cap
+/// to 400 only widens what the Options dialog can express; the slider mapping,
+/// the spinbox clamp, and the scale-test flow are unchanged.
+pub const MAX_GRAPHICS_SCALE_PERCENT: i32 = 400;
 /// `Config.Graphics.SmokeLevel` range exposed by the Options slider.
 pub const MIN_SMOKE_LEVEL: i32 = 0;
 pub const MAX_SMOKE_LEVEL: i32 = 300;
@@ -845,11 +851,18 @@ mod tests {
         );
         assert_eq!(state.proposed_scale_percent, 150);
         assert_eq!(state.scale_slider_value(), 50);
+        // Out-of-domain spinbox input clamps to the ceiling, whatever it is
+        // (`SpinBox` clamps to its maximum, C4StartupOptionsDlg.cpp:135).
         assert_eq!(
             state.set_scale_spinbox_value(999),
-            Some(GraphicsSheetAction::ScaleProposalChanged(300))
+            Some(GraphicsSheetAction::ScaleProposalChanged(
+                MAX_GRAPHICS_SCALE_PERCENT
+            ))
         );
-        assert_eq!(state.scale_slider_value(), 200);
+        assert_eq!(
+            state.scale_slider_value(),
+            MAX_GRAPHICS_SCALE_PERCENT - MIN_GRAPHICS_SCALE_PERCENT
+        );
         assert_eq!(
             state.step_scale_spinbox(-500),
             Some(GraphicsSheetAction::ScaleProposalChanged(100))
@@ -859,6 +872,42 @@ mod tests {
         assert_eq!(text, "250");
         assert_eq!(action, Some(GraphicsSheetAction::ScaleProposalChanged(250)));
         assert_eq!(sanitize_scale_spinbox_text("12-34"), "123");
+    }
+
+    #[test]
+    fn high_dpi_scale_ceiling_extends_past_the_cpp_spinbox_maximum() {
+        // Deliberate divergence from C4StartupOptionsDlg.cpp:131-132, which
+        // pins `constexpr int maxScale = 300` on both the spinbox
+        // (`Base{rtBounds, fFocusEdit, minScale, maxScale}`, :135) and the
+        // slider range (`maxScale - minScale + 1`, :858). The first-run scale
+        // is seeded from the monitor density, so a 4x panel needs 400% to keep
+        // the classic 800x600 logical layout; at the C++ ceiling it would be
+        // truncated to a value the panel cannot express.
+        assert_eq!(MIN_GRAPHICS_SCALE_PERCENT, 100);
+        assert_eq!(MAX_GRAPHICS_SCALE_PERCENT, 400);
+
+        let mut state = GraphicsSheetState::default();
+        assert_eq!(
+            state.set_scale_spinbox_value(400),
+            Some(GraphicsSheetAction::ScaleProposalChanged(400))
+        );
+        assert_eq!(state.proposed_scale_percent, 400);
+        assert_eq!(state.scale_slider_value(), 300);
+        assert_eq!(
+            state.set_scale_spinbox_value(999),
+            None,
+            "the raised ceiling still clamps"
+        );
+
+        // The slider spans exactly the spinbox domain in both directions, and
+        // the widened three-digit edit domain still reaches the new maximum.
+        assert_eq!(
+            state.set_scale_slider_value(0),
+            Some(GraphicsSheetAction::ScaleProposalChanged(100))
+        );
+        let (text, action) = state.set_scale_from_spinbox_text("400");
+        assert_eq!(text, "400");
+        assert_eq!(action, Some(GraphicsSheetAction::ScaleProposalChanged(400)));
     }
 
     #[test]

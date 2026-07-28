@@ -387,7 +387,7 @@ mod tests {
         let mut huge = DisplayOptions::default();
         huge.mark_first_run();
         huge.apply_first_run_display_scale(9.0);
-        assert_eq!(huge.scale_percent(), 300);
+        assert_eq!(huge.scale_percent(), MAX_GRAPHICS_SCALE_PERCENT);
 
         // Degenerate factors never disturb the default.
         for factor in [0.0, -2.0, f64::NAN, f64::INFINITY] {
