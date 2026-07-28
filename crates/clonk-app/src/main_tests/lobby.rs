@@ -3173,6 +3173,114 @@
         );
     }
 
+    // C4GameLobby::MainDlg adds the Options sheet for every participant and
+    // fills it with one C4GameOptionsList (src/C4GameLobby.cpp:223,247). For a
+    // joined client every row is read-only: control mode is read-only in the
+    // lobby regardless of role, control rate and the team rows are read-only
+    // off the control host, and RuntimeJoin/RandomTeamCount are never added
+    // (src/C4GameOptions.cpp:80,126,154,186,211,234,269-280).
+    #[test]
+    fn joined_lobby_options_sheet_projects_read_only_rows() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (manager, events) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+
+        let host_config = clonk_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        let mut status = host_config.initial_status;
+        status.control_mode = 1;
+        snapshot.parameters.control_rate = 3;
+        snapshot.parameters.teams.active = 1;
+        snapshot.parameters.teams.team_colors = 1;
+        snapshot.parameters.teams.team_distribution = 3;
+        snapshot.parameters.teams.random_team_count = 4;
+        events
+            .send(NetworkEvent::JoinData(clonk_network::JoinDataEnvelope {
+                client_id: 7,
+                start_control_tick: 0,
+                status,
+                dynamic: snapshot.dynamic,
+                parameters: snapshot.parameters,
+            }))
+            .unwrap();
+        app.process_network_events()
+            .expect("client JoinData seeds lobby state");
+
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Options))
+            .expect("joined Options opens without a parity boundary");
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().active_sheet,
+            LobbySheet::Options
+        );
+
+        let rows = app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .option_rows()
+            .to_vec();
+        assert_eq!(
+            rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+            [
+                LobbyOptionKind::ControlMode,
+                LobbyOptionKind::ControlRate,
+                LobbyOptionKind::TeamDistribution,
+                LobbyOptionKind::TeamColors,
+            ],
+            "no RuntimeJoin and no RandomTeamCount for a joined client"
+        );
+        assert!(
+            rows.iter().all(|row| !row.editable),
+            "every joined client row is a read-only ComboBox"
+        );
+        assert_eq!(rows[1].value, "3", "control rate follows the joined status");
+
+        // C4GameOptionsList::Activate forces one Update, and its Sec1 timer
+        // keeps the visible sheet current (src/C4GameOptions.cpp:302-308).
+        {
+            let lobby = app.network_lobby.as_mut().unwrap();
+            lobby.controller.set_option_rows(Vec::new());
+        }
+        app.sec1_timer().expect("second timer refreshes joined options");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .option_rows()
+                .len(),
+            4,
+            "the one-second callback reprojects the visible sheet"
+        );
+
+        // An inactive sheet does no periodic work.
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Players))
+            .expect("leave the joined Options sheet");
+        {
+            let lobby = app.network_lobby.as_mut().unwrap();
+            lobby.controller.set_option_rows(Vec::new());
+        }
+        app.sec1_timer().expect("second timer with Options hidden");
+        assert!(
+            app.network_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .option_rows()
+                .is_empty(),
+            "a hidden Options sheet retains its last projection"
+        );
+    }
+
     #[test]
     fn client_lobby_resource_sheet_tracks_hidden_transfer_progress() {
         let mut app = new_menu_app(640, 480);
@@ -3699,7 +3807,9 @@
             )
         }
 
-        let joined_entries = GameApp::lobby_tab_context_entries(false, false);
+        // MainDlg::OnRightTabContext adds Players, optional Teams, Resources
+        // and Options for every participant (C4GameLobby.cpp:844-866).
+        let joined_entries = GameApp::lobby_tab_context_entries(false, true);
         assert_eq!(
             joined_entries
                 .iter()
@@ -3708,6 +3818,7 @@
             vec![
                 AppContextMenuCommand::LobbySheet(LobbySheet::Players),
                 AppContextMenuCommand::LobbySheet(LobbySheet::Resources),
+                AppContextMenuCommand::LobbySheet(LobbySheet::Options),
             ]
         );
         assert_eq!(
@@ -3715,9 +3826,13 @@
                 .iter()
                 .map(|entry| entry.icon)
                 .collect::<Vec<_>>(),
-            vec![ContextMenuIcon::Phase(9), ContextMenuIcon::Phase(10)]
+            vec![
+                ContextMenuIcon::Phase(9),
+                ContextMenuIcon::Phase(10),
+                ContextMenuIcon::Phase(14),
+            ]
         );
-        let joined_team_entries = GameApp::lobby_tab_context_entries(true, false);
+        let joined_team_entries = GameApp::lobby_tab_context_entries(true, true);
         assert_eq!(
             joined_team_entries
                 .iter()
@@ -3727,6 +3842,7 @@
                 AppContextMenuCommand::LobbySheet(LobbySheet::Players),
                 AppContextMenuCommand::LobbySheet(LobbySheet::Teams),
                 AppContextMenuCommand::LobbySheet(LobbySheet::Resources),
+                AppContextMenuCommand::LobbySheet(LobbySheet::Options),
             ]
         );
         assert_eq!(
@@ -3738,6 +3854,7 @@
                 ContextMenuIcon::Phase(9),
                 ContextMenuIcon::Phase(19),
                 ContextMenuIcon::Phase(10),
+                ContextMenuIcon::Phase(14),
             ]
         );
 
@@ -3758,8 +3875,8 @@
                 .panels[0]
                 .rows
                 .len(),
-            2,
-            "without teams, only Players and Resources are available"
+            3,
+            "without teams: Players, Resources and Options"
         );
         app.close_context_menu_silently();
 
@@ -3779,8 +3896,8 @@
                 .layout();
             assert_eq!(
                 layout.panels[0].rows.len(),
-                3,
-                "Players, Teams and Resources are the complete available subset"
+                4,
+                "Players, Teams, Resources and Options match the native popup"
             );
             let row = &layout.panels[0].rows[2];
             GuiPoint::new(
