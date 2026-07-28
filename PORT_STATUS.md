@@ -188,6 +188,20 @@ The 300-frame runs in the table below are the startup burst and are noisy by
 ±20% on a shared machine; the 6000-frame `03_Chaos` figure is the one to
 regress against.
 
+Two environment traps that will otherwise be misread as regressions. First,
+`content/` in a worktree is an empty directory unless symlinked to the main
+checkout: with it empty, five `clonk-network::integration
+initial_network_dynamic` tests fail on missing oracle content and look like
+code faults. Second, `clonk-network`'s LAN-discovery tests need IPv6 multicast;
+where the host cannot join a multicast group (`EADDRNOTAVAIL` from
+`IPV6_JOIN_GROUP`), `startup_lan_reference_query_reports_address_lifecycle` and
+`disabled_reference_server_keeps_discovery_only_advertiser_clean` fail
+deterministically regardless of the revision under test. A third,
+`synchronized_tick::inactive_joined_client_does_not_block_host_lockstep`, plus
+`clonk-app`'s `real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running`
+(a 480-attempt timeout), are load-sensitive and pass in isolation. Re-run the
+crate alone before attributing any of these to a change.
+
 Per-frame simulation cost by scenario, before against after, 2000 frames each.
 Both binaries are run **interleaved** in the same pass and repeated twice, so
 machine drift hits both arms; single 300-frame runs swing ±20% on a shared
@@ -287,8 +301,28 @@ Landed optimizations, each with its measurement:
   therefore strictly *more* reproducible than what it replaces. Pinned by
   `per_frame_lookup_tables_hash_without_a_per_process_seed`
   (`crates/clonk-engine/src/engine/exec_order.rs`), which asserts the engine
-  hasher is stable across instances while `RandomState` is not. All four gates
-  pass, including `parity verify`.
+  hasher is stable across instances while `RandomState` is not.
+  The argument was not taken on faith; every iteration site over a converted
+  map was traced and none reaches simulation state or ordering:
+  `command/machine.rs:5159,:5663` are `.any()` booleans; `:5180`
+  `find_candidate` ranks on the total order (distance, master-list rank, id);
+  `:1655` `find_spawned_construction` is `min_by_key((master_list_order, id))`
+  where ties are impossible; `engine/player_view.rs:695` is a per-entry
+  `values_mut()` write; `clonk-script/src/vm.rs:9490,:9532,:9562,:9571` iterate
+  the scope *Vec* and `contains_key` each, folding into another name-keyed map;
+  `clonk-script/src/engine.rs:1266,:1270` remove by name, `:1795` sorts, and
+  `:1364` `link_script` carries physical declaration order separately in
+  `local_function_order`/`global_function_order` — the design already treats
+  those maps as unordered; `compat/world.rs:1592` is a commutative `|=` and
+  `:1623` builds a set consumed only by `.contains()`.
+  Measured in isolation (only this commit reverted, so the other work is in
+  both arms), `03_Chaos` 6000 frames: p50 1.631 -> 1.550 ms and wall 11.494 ->
+  10.884 s, **-5.0% p50 / -5.3% wall**, min-of-6.
+  **Estimator caveat, carried deliberately:** round-by-round was 3-3 under load
+  average 10-53, so this is min-of-N, not clean per-round separation.
+  Min-of-N is the right estimator because contention only ever adds time, and
+  it agrees with an independent earlier run (-4.7%) and with the profile
+  (~4.9% of tick was in the converted maps) — but it is not a clean A/B.
 
 - **`c4_names_equal` compares folded byte streams instead of building owned
   keys** (`crates/clonk-resources/src/material.rs`). `c4_name_key` allocates
@@ -297,7 +331,12 @@ Landed optimizations, each with its measurement:
   Equality is now an iterator comparison. Pinned by
   `name_equality_matches_the_owned_key_projection`, which asserts the new
   predicate agrees with the old owned-key one across case, padding, embedded
-  NULs and latin1 spellings.
+  NULs and latin1 spellings. Measured in isolation against commit `3824cea5e`,
+  `03_Chaos` 6000 frames: p50 1.810 -> 1.631 ms and wall 12.645 -> 11.461 s,
+  **-9.9% p50 / -9.4% wall**, winning all 8 paired rounds.
+  Do **not** add this to the hasher figure below: the two were baselined
+  against different trees, so they do not compose arithmetically. The combined
+  effect is the whole-branch table above.
 
 - **The per-viewport pixel plane is deferred until something touches pixels**
   (`PixelPlane`, `crates/clonk-graphics/src/surface.rs`). `Surface::new`
@@ -358,6 +397,25 @@ Landed optimizations, each with its measurement:
   and the index is rebuilt from, and invalidated at the end of, the single
   object pass that owns it, with a slice-identity check that falls back to the
   linear scan rather than trusting a stale list.
+
+Evaluated and deliberately **not** built, so it is not re-derived:
+memoizing `RuntimeTexMapState::default_material_entry`
+(`crates/clonk-engine/src/landscape.rs`), an allocating linear scan whose
+answer is a load-time constant. After the name-comparison fix above its whole
+ceiling is `c4_names_equal` 0.55% + `ocf_solid_mask_overlay` 0.50% inclusive of
+`advance_tick`. A stale-proof memo needs `default_material_entries` wrapped in
+a newtype, because `RuntimeTexMapState` derives `PartialEq`/`Serialize` and the
+field is writable from ~18 sites — that is a cache-staleness desync class taken
+on for at most 0.5%. Not worth it.
+
+Measured next tier, for whoever picks this up. The large remaining target is
+**effect-dispatch cloning**: `dispatch_object_effect_events` is 47% inclusive,
+and nearly all of the ~20% malloc/free self time sits under it —
+`EffectState::to_vec`, `ObjectState::clone`, `Value::clone` (4.6% self) and
+`drop_glue::<Value>` (2.6% self). Remaining unconverted hashing is much
+smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
+`ActionLibrary::spec_for_entry` 1.0%, `HostWorldContext::get` 1.0%,
+`Engine::snapshot` 0.7%, `SectorMap::update` 0.6%.
 
 ## Open
 
