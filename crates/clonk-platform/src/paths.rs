@@ -97,6 +97,19 @@ impl AppPaths {
         &self.planet_dir
     }
 
+    /// The directory holding the shipped executables.
+    ///
+    /// A macOS install root *is* the bundle's `Contents/Resources`, so its
+    /// executables sit in the sibling `Contents/MacOS` and no `bin` exists.
+    pub fn binaries_dir(&self) -> PathBuf {
+        binaries_dir_for(&self.install_root)
+    }
+
+    /// The enclosing `.app` directory when the install root is a macOS bundle.
+    pub fn macos_bundle_root(&self) -> Option<PathBuf> {
+        macos_bundle_root_for(&self.install_root)
+    }
+
     pub fn content_dir(&self) -> Option<&Path> {
         self.content_dir.as_deref()
     }
@@ -253,6 +266,29 @@ fn macos_bundle_install_root(executable: &Path) -> Option<PathBuf> {
         .join("planet/System.c4g")
         .exists()
         .then_some(resources)
+}
+
+/// The `Contents` directory when `install_root` is a bundle's
+/// `Contents/Resources`.
+///
+/// Keyed on the path shape rather than the host, so the bundle layout stays
+/// reachable from tests on every platform.
+fn macos_bundle_contents(install_root: &Path) -> Option<&Path> {
+    let contents = install_root.parent()?;
+    (install_root.file_name()? == "Resources" && contents.file_name()? == "Contents")
+        .then_some(contents)
+}
+
+fn binaries_dir_for(install_root: &Path) -> PathBuf {
+    macos_bundle_contents(install_root)
+        .map(|contents| contents.join("MacOS"))
+        .unwrap_or_else(|| install_root.join("bin"))
+}
+
+fn macos_bundle_root_for(install_root: &Path) -> Option<PathBuf> {
+    macos_bundle_contents(install_root)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
 }
 
 fn find_root_starting_at(start: PathBuf) -> Option<PathBuf> {
@@ -493,6 +529,35 @@ mod tests {
         let path = planet.join("System.c4g");
         let mut file = fs::File::create(path).unwrap();
         writeln!(file, "stub").unwrap();
+    }
+
+    #[test]
+    fn binaries_live_beside_a_plain_install_root() {
+        let root = Path::new("/opt/clonk-rust");
+        assert_eq!(binaries_dir_for(root), root.join("bin"));
+        assert_eq!(macos_bundle_root_for(root), None);
+    }
+
+    #[test]
+    fn binaries_live_in_the_bundle_macos_directory() {
+        // A macOS install root *is* `Contents/Resources`, so the executables
+        // are in the sibling `Contents/MacOS` and there is no `bin`.
+        let root = Path::new("/Applications/Clonk Rust.app/Contents/Resources");
+        assert_eq!(
+            binaries_dir_for(root),
+            Path::new("/Applications/Clonk Rust.app/Contents/MacOS")
+        );
+        assert_eq!(
+            macos_bundle_root_for(root).as_deref(),
+            Some(Path::new("/Applications/Clonk Rust.app"))
+        );
+    }
+
+    #[test]
+    fn a_resources_directory_outside_a_bundle_is_not_treated_as_one() {
+        let root = Path::new("/srv/game/Resources");
+        assert_eq!(binaries_dir_for(root), root.join("bin"));
+        assert_eq!(macos_bundle_root_for(root), None);
     }
 
     #[test]
