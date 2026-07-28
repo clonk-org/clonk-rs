@@ -218,6 +218,16 @@ impl LocalControlRegistry {
         I: IntoIterator<Item = (usize, Option<ControlEvent>)>,
         F: FnMut(i32) -> Option<bool>,
     {
+        // clonk-rs divergence: C4Game::LocalControlKeyUp routes a key-up only
+        // for AutoStopControl players and otherwise declines
+        // (C4Game.cpp:3592-3605), so classic control never delivers
+        // Control*Released and an item that latches a steering command (the Eke
+        // rocket launcher's remote guidance) cannot learn the key came up. A
+        // classic set therefore becomes the *lowest priority* release handler:
+        // an AutoStop set still wins the key exactly as in C++, and classic
+        // movement is untouched because C4Object::DirectCom's procedure switch
+        // has no release arm.
+        let mut classic_release: Option<(i32, ControlEvent)> = None;
         for (control_set, event) in candidates {
             // LocalControlKeyUp checks this before GetLocalByKbdSet, so even
             // an otherwise unused callback consumes a repeated release.
@@ -251,11 +261,20 @@ impl LocalControlRegistry {
                         event,
                     };
                 }
-                ElementState::Released => {}
+                ElementState::Released => {
+                    if let Some(event) = event {
+                        classic_release.get_or_insert((owner, event));
+                    }
+                }
             }
         }
 
-        KeyboardRoutingOutcome::Unhandled
+        classic_release.map_or(KeyboardRoutingOutcome::Unhandled, |(owner, event)| {
+            KeyboardRoutingOutcome::Consumed {
+                owner: Some(owner),
+                event: Some(event),
+            }
+        })
     }
 
     pub(crate) fn mouse_owner(&self) -> Option<i32> {
@@ -284,6 +303,45 @@ mod tests {
     use super::*;
     use clonk_engine::{CommandKind, ControlButton, ControlCommand, ControlEvent};
     use winit::event::ElementState;
+
+    #[test]
+    fn classic_release_is_emitted_only_when_no_autostop_set_claims_the_key() {
+        // clonk-rs divergence: a classic set still yields the key to an
+        // AutoStop set (C4Game.cpp:3592-3605) but now emits its own release
+        // when nothing else takes it, so scripts get Control*Released in both
+        // control styles. Eventless classic candidates keep declining.
+        let mut controls = LocalControlRegistry::default();
+        controls.initialize(LocalControlInit {
+            owner: 70,
+            preferred_set: 0,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        let release = ControlEvent::Release(ControlButton::Left);
+
+        assert_eq!(
+            controls.route_keyboard_candidates(
+                [(0, Some(release))],
+                ElementState::Released,
+                false,
+                |_| Some(false),
+            ),
+            KeyboardRoutingOutcome::Consumed {
+                owner: Some(70),
+                event: Some(release),
+            },
+            "a lone classic set delivers the key-up"
+        );
+        assert_eq!(
+            controls.route_keyboard_candidates([(0, None)], ElementState::Released, false, |_| {
+                Some(false)
+            }),
+            KeyboardRoutingOutcome::Unhandled,
+            "an eventless classic candidate must not swallow the key"
+        );
+    }
 
     #[test]
     fn classic_release_falls_through_but_autostop_eventless_release_consumes() {

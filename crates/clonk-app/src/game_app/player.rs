@@ -492,25 +492,12 @@ impl GameApp {
                 return Ok(());
             }
         }
-        // C4Game::LocalControlKeyUp only creates a synchronized control for
-        // AutoStopControl players. Classic control keeps the press active
-        // until another direction arrives (C4Game.cpp:3578-3592).
-        let is_release = matches!(
-            event,
-            ControlEvent::Release(_)
-                | ControlEvent::Command {
-                    kind: CommandKind::Release,
-                    ..
-                }
-        );
-        if is_release
-            && self
-                .engine
-                .player(owner)
-                .is_some_and(|player| !player.control_style())
-        {
-            return Ok(());
-        }
+        // clonk-rs divergence: C4Game::LocalControlKeyUp only creates a
+        // synchronized control for AutoStopControl players, so classic control
+        // never delivers Control*Released (C4Game.cpp:3592-3605). The port
+        // synchronizes the key-up in both styles instead, so scripts can act
+        // on a held key in either mode; classic movement is unaffected because
+        // C4Object::DirectCom's procedure switch has no release arm.
         if let Some(network) = self.network.as_ref() {
             let tick = self.local_control_submission_tick();
             network.submit_local_control(owner, event, tick);

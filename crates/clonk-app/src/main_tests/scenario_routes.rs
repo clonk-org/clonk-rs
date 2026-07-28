@@ -4071,7 +4071,6 @@
         // keys through GameApp rather than injecting logical ControlEvents.
         let mut app = new_running_sandbox_app();
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
-        let auto_stop = keyboard.player_control().control_style;
 
         for (key, com) in [
             (VirtualKeyCode::S, clonk_engine::COM_UP),
@@ -4087,9 +4086,10 @@
             );
             keyboard.release(key).expect("physical key release");
             assert_eq!(
-                keyboard.player_control().pressed_coms & (1 << com) == 0,
-                auto_stop,
-                "{key:?} release must follow the local player's control style"
+                keyboard.player_control().pressed_coms & (1 << com),
+                0,
+                "{key:?} release must clear the C4Player::InCom bit in either \
+                 control style (clonk-rs key-up divergence)"
             );
         }
 

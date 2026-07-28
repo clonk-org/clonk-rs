@@ -1112,9 +1112,12 @@
     }
 
     #[test]
-    fn selected_player_classic_control_ignores_horizontal_key_release() {
-        // Classic control has no synchronized key-up command: movement keeps
-        // its direction until the next press (C4Game.cpp:3578-3592).
+    fn selected_player_classic_control_synchronizes_horizontal_key_release() {
+        // Classic movement still keeps its direction until the next press,
+        // but the key-up itself is synchronized (a clonk-rs divergence from
+        // C4Game.cpp:3592-3605) so scripts get Control*Released in both
+        // control styles. Renamed from
+        // `selected_player_classic_control_ignores_horizontal_key_release`.
         assert_selected_player_horizontal_release(false);
     }
 

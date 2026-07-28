@@ -842,12 +842,15 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
             } else {
                 held_direction
             },
-            "C4Game::LocalControlKeyUp only synchronizes releases in AutoStopControl mode"
+            "classic movement stays latched: the release com has no arm in \
+             C4Object::DirectCom's procedure switch (C4Object.cpp:3405-3556)"
         );
         assert_eq!(
-            keyboard.player_control().pressed_coms == 0,
-            auto_stop,
-            "classic key-up is not synchronized, so C4Player::PressedComs remains held"
+            keyboard.player_control().pressed_coms,
+            0,
+            "clonk-rs divergence: C4Game::LocalControlKeyUp synchronizes the \
+             key-up in both control styles, so scripts see Control*Released \
+             and C4Player::PressedComs tracks the physical keys"
         );
     }
 }
