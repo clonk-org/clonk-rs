@@ -51,6 +51,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
+        with:
+          tool: cargo-nextest
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: windows-launcher
@@ -58,8 +62,14 @@ jobs:
 
       # No submodule: these crates' tests build their fixtures in temp
       # directories, so the 299 MB content checkout would be pure latency.
+      #
+      # `--no-fail-fast` matters here: one crate aborting the run would hide
+      # whether the launcher itself works, which is the whole point of the job.
       - name: Test the launcher and path resolution
-        run: cargo test -p clonk-game -p clonk-platform -p clonk-core --locked
+        run: cargo nextest run -p clonk-game -p clonk-platform -p clonk-core --locked --no-fail-fast
 
+      # `--no-deps` keeps this scoped to the crates the job actually tests.
+      # Other workspace crates carry their own Windows-only lint debt, and
+      # inheriting it here would make the launcher signal unreadable.
       - name: Clippy
-        run: cargo clippy --profile test -p clonk-game -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
+        run: cargo clippy --profile test --no-deps -p clonk-game -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings

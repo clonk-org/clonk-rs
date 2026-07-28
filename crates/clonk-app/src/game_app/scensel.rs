@@ -286,6 +286,39 @@ impl GameApp {
         true
     }
 
+    pub(crate) fn handle_scensel_search_clear_pointer_down(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        if self.menu_state.search_text().is_empty()
+            || self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || self.menu_state.current_map().is_some()
+        {
+            return Ok(false);
+        }
+        let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
+            return Ok(false);
+        };
+        let layout = clonk_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        let clear = clonk_frontend::startup_scensel::search_clear_button_bounds(&layout);
+        let inside = point.x >= clear.x as f32
+            && point.x < (clear.x + clear.w) as f32
+            && point.y >= clear.y as f32
+            && point.y < (clear.y + clear.h) as f32;
+        if !inside {
+            return Ok(false);
+        }
+        self.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        self.menu_state.set_search_text("");
+        self.submit_scenario_search()?;
+        Ok(true)
+    }
+
     /// C4GUI middle-down repositions the caret on every platform, inserts
     /// the raw PRIMARY selection only where the platform supplies one, and
     /// neither focuses the edit nor starts a selection drag.

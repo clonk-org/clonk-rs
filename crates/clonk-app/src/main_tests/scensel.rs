@@ -564,8 +564,14 @@
         );
     }
 
+    // C++ edit pointer handling and the Back button use standard control
+    // routes (src/C4GuiEdit.cpp:458-527;
+    // src/C4StartupScenSelDlg.cpp:1297-1382,1705-1724;
+    // src/C4StartupScenSelDlg.h:427,434-437). The enhanced product query
+    // returns the descendant leaf and clears back to the folder row before
+    // exercising the classic Back bounds.
     #[test]
-    fn scensel_touch_uses_classic_list_search_and_back_bounds() {
+    fn scensel_touch_uses_live_search_and_classic_back_bounds() {
         let _lock = env_lock().lock();
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -666,6 +672,16 @@
             .expect("submit touch search");
         app.handle_key(VirtualKeyCode::Return, ElementState::Released)
             .expect("release touch search");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("outer/inner/target")
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("clear touch search");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release touch search clear");
         assert_eq!(
             app.menu_state
                 .selected_scenario()
@@ -773,6 +789,318 @@
         assert!(state.visible_entries().is_empty());
         assert!(state.selected_scenario().is_none());
         assert!(actions.is_empty());
+    }
+
+    // C++ UpdateList deliberately filters only the current folder
+    // (src/C4StartupScenSelDlg.cpp:1513-1537). The enhanced product path is
+    // separate: it searches loaded descendants and ranks an exact title ahead
+    // of a catalog-earlier prefix match.
+    #[test]
+    fn scensel_enhanced_search_recurses_and_ranks_exact_titles_first() {
+        let mut prefix = FrontendScenario::fallback();
+        prefix.identifier = "gold_rush_extended".to_string();
+        prefix.title = "Gold Rush Extended".to_string();
+
+        let mut exact = FrontendScenario::fallback();
+        exact.identifier = "western/gold_rush".to_string();
+        exact.title = "Gold Rush".to_string();
+
+        let mut folder = FrontendScenario::fallback();
+        folder.identifier = "western".to_string();
+        folder.title = "Western Pack".to_string();
+        folder.kind = ScenarioKind::Folder;
+        folder.is_playable = false;
+        folder.children = vec![exact];
+
+        let scenarios = vec![prefix, folder];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state.set_search_text("gold rush");
+
+        let actions = state.apply_enhanced_search();
+
+        assert_eq!(
+            state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["western/gold_rush", "gold_rush_extended"]
+        );
+        assert_eq!(state.search_result_context(0), Some("Western Pack"));
+        assert!(matches!(
+            actions.as_slice(),
+            [StartupMenuAction::SelectionChanged(summary)]
+            if summary.identifier == "western/gold_rush"
+        ));
+    }
+
+    // C++ emits matches in current-folder traversal order
+    // (src/C4StartupScenSelDlg.cpp:1513-1521). The enhanced product rank keeps
+    // that catalog order as the deterministic tie-breaker.
+    #[test]
+    fn scensel_enhanced_search_preserves_catalog_order_for_equal_ranks() {
+        let mut first = FrontendScenario::fallback();
+        first.identifier = "zeta".to_string();
+        first.title = "Crystal Cavern".to_string();
+        let mut second = FrontendScenario::fallback();
+        second.identifier = "alpha".to_string();
+        second.title = "Crystal Crossing".to_string();
+        let scenarios = vec![first, second];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state.set_search_text("Crystal");
+
+        state.apply_enhanced_search();
+
+        assert_eq!(
+            state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zeta", "alpha"]
+        );
+    }
+
+    // C++ validates the selected current-folder entry before activation
+    // (src/C4StartupScenSelDlg.cpp:1472-1537,1681-1702). Because the enhanced
+    // product search can surface a sibling-folder scenario, its validation
+    // path must instead resolve that result from the catalog root.
+    #[test]
+    fn scensel_enhanced_search_resolves_a_global_result_from_inside_a_folder() {
+        let mut local = FrontendScenario::fallback();
+        local.identifier = "local/mission".to_string();
+        local.title = "Local Mission".to_string();
+        let mut local_folder = FrontendScenario::fallback();
+        local_folder.identifier = "local".to_string();
+        local_folder.title = "Local Pack".to_string();
+        local_folder.kind = ScenarioKind::Folder;
+        local_folder.is_playable = false;
+        local_folder.children = vec![local];
+
+        let mut remote = FrontendScenario::fallback();
+        remote.identifier = "remote/crystal".to_string();
+        remote.title = "Crystal Cavern".to_string();
+        let mut remote_folder = FrontendScenario::fallback();
+        remote_folder.identifier = "remote".to_string();
+        remote_folder.title = "Remote Pack".to_string();
+        remote_folder.kind = ScenarioKind::Folder;
+        remote_folder.is_playable = false;
+        remote_folder.children = vec![remote];
+
+        let scenarios = vec![local_folder, remote_folder];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state.enter_folder("local");
+        state.set_search_text("Crystal Cavern");
+
+        state.apply_enhanced_search();
+
+        assert_eq!(
+            state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("remote/crystal")
+        );
+        assert_eq!(
+            state
+                .require_supported_activation("remote/crystal")
+                .expect("validate global result"),
+            Some(ScenarioKind::Scenario)
+        );
+    }
+
+    // C++ F5 reloads the current folder and rebuilds UpdateList from the live
+    // edit text (src/C4StartupScenSelDlg.cpp:1472-1537,1727-1735). The
+    // enhanced product path must retain its catalog-wide semantics when
+    // discovery replaces the backing tree.
+    #[test]
+    fn scensel_enhanced_search_survives_catalog_rediscovery() {
+        let build_scenarios = |extra: bool| {
+            let mut first = FrontendScenario::fallback();
+            first.identifier = "pack/crystal".to_string();
+            first.title = "Crystal Cavern".to_string();
+            let mut children = vec![first];
+            if extra {
+                let mut second = FrontendScenario::fallback();
+                second.identifier = "pack/crystal_lake".to_string();
+                second.title = "Crystal Lake".to_string();
+                children.push(second);
+            }
+            let mut folder = FrontendScenario::fallback();
+            folder.identifier = "pack".to_string();
+            folder.title = "Adventure Pack".to_string();
+            folder.kind = ScenarioKind::Folder;
+            folder.is_playable = false;
+            folder.children = children;
+            vec![folder]
+        };
+        let scenarios = build_scenarios(false);
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state.set_search_text("Crystal");
+        state.apply_enhanced_search();
+
+        state.replace_discovered_entries(build_scenarios(true), None, true, true);
+
+        assert_eq!(
+            state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pack/crystal", "pack/crystal_lake"]
+        );
+        assert_eq!(state.enhanced_search_caption().as_deref(), Some("2 of 2 scenarios"));
+    }
+
+    // C++ lowercases only the markup-stripped display title
+    // (src/C4StartupScenSelDlg.cpp:1513-1523). The enhanced product matcher
+    // normalizes user-visible metadata and lets terms span safe fields.
+    #[test]
+    fn scensel_enhanced_search_normalizes_terms_and_matches_safe_metadata() {
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "western/crystal_run.c4s".to_string();
+        scenario.title = "Café-Cavern".to_string();
+        scenario.description = Some("A crystal expedition underground.".to_string());
+        scenario.author = Some("Zoë".to_string());
+
+        let mut folder = FrontendScenario::fallback();
+        folder.identifier = "western".to_string();
+        folder.title = "Western Adventures".to_string();
+        folder.kind = ScenarioKind::Folder;
+        folder.is_playable = false;
+        folder.children = vec![scenario];
+
+        let scenarios = vec![folder];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+
+        for query in [
+            "  CAFE   cavern ",
+            "western crystal",
+            "zoe expedition",
+            "crystal_run western",
+        ] {
+            state.set_search_text(query);
+            state.apply_enhanced_search();
+            assert_eq!(
+                state
+                    .visible_entries()
+                    .iter()
+                    .map(|entry| entry.identifier.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["western/crystal_run.c4s"],
+                "query {query:?}"
+            );
+        }
+    }
+
+    // C++ treats the edit text as one literal title substring
+    // (src/C4StartupScenSelDlg.cpp:1513-1521). The enhanced product matcher
+    // requires every normalized term, even when terms span indexed fields.
+    #[test]
+    fn scensel_enhanced_search_requires_all_terms_across_fields() {
+        let mut match_all = FrontendScenario::fallback();
+        match_all.identifier = "crystal_cavern".to_string();
+        match_all.title = "Crystal Cavern".to_string();
+        match_all.author = Some("Zoë".to_string());
+        let mut title_only = FrontendScenario::fallback();
+        title_only.identifier = "crystal_canyon".to_string();
+        title_only.title = "Crystal Canyon".to_string();
+        title_only.author = Some("Anne".to_string());
+        let mut author_only = FrontendScenario::fallback();
+        author_only.identifier = "amber_mine".to_string();
+        author_only.title = "Amber Mine".to_string();
+        author_only.author = Some("Zoë".to_string());
+        let scenarios = vec![match_all, title_only, author_only];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state.set_search_text("crystal zoe");
+
+        state.apply_enhanced_search();
+
+        assert_eq!(
+            state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["crystal_cavern"]
+        );
+    }
+
+    // C++ uses a literal title substring
+    // (src/C4StartupScenSelDlg.cpp:1513-1523). The enhanced product matcher
+    // adds conservative title-only typo recovery behind exact tiers.
+    #[test]
+    fn scensel_enhanced_search_tolerates_conservative_title_typos() {
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "crystal_cavern".to_string();
+        scenario.title = "Crystal Cavern".to_string();
+        let scenarios = vec![scenario];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state.set_search_text("crytal caver");
+
+        state.apply_enhanced_search();
+
+        assert_eq!(
+            state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["crystal_cavern"]
+        );
+    }
+
+    // C++ uses an exact title substring with no typo fallback
+    // (src/C4StartupScenSelDlg.cpp:1513-1521). The enhanced fallback remains
+    // disabled for short or numeric terms and rejects excess edit distance.
+    #[test]
+    fn scensel_enhanced_search_rejects_unsafe_title_typos() {
+        let scenarios = [
+            ("short_case", "Cart"),
+            ("numeric_case", "1234"),
+            ("distance_case", "Coat"),
+        ]
+        .into_iter()
+        .map(|(identifier, title)| {
+            let mut scenario = FrontendScenario::fallback();
+            scenario.identifier = identifier.to_string();
+            scenario.title = title.to_string();
+            scenario
+        })
+        .collect::<Vec<_>>();
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+
+        for query in ["crt", "1235", "crab"] {
+            state.set_search_text(query);
+            state.apply_enhanced_search();
+            assert!(
+                state.visible_entries().is_empty(),
+                "unsafe typo query {query:?} must not match"
+            );
+        }
     }
 
     #[test]
@@ -911,6 +1239,22 @@
             edit.tick_blink();
         }
         assert!(!edit.cursor_visible());
+    }
+
+    // C++ notifies text change while deleting the selection before a
+    // replacement that cannot fit (src/C4GuiEdit.cpp:145-190). The Rust edit
+    // must likewise report that mutation so live results are refreshed.
+    #[test]
+    fn scensel_search_edit_reports_selection_deletion_when_replacement_does_not_fit() {
+        let mut edit = SearchEditState::default();
+        edit.set_text("a".repeat(SEARCH_EDIT_MAX_BYTES));
+        edit.anchor = SEARCH_EDIT_MAX_BYTES - 1;
+        edit.caret = SEARCH_EDIT_MAX_BYTES;
+
+        let changed = edit.insert_text("é");
+
+        assert!(changed);
+        assert_eq!(edit.text().len(), SEARCH_EDIT_MAX_BYTES - 1);
     }
 
     #[test]
@@ -1162,9 +1506,417 @@
         assert!(app.menu_state.search_focused());
     }
 
+    // C4GUI::Edit consumes plain cursor operations and moves the caret by one
+    // character (src/C4GuiEdit.cpp:371-445). The selector's dialog-wide
+    // Left/Right bindings must not see those keys while the edit has focus.
+    #[test]
+    fn scensel_search_plain_arrows_move_the_caret_without_navigating() {
+        let mut app = new_menu_app(800, 600);
+        app.open_scenario_browser();
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.menu_state.set_search_text("cave");
+        let selected = app
+            .menu_state
+            .selected_scenario()
+            .map(|entry| entry.identifier.clone());
+
+        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("move search caret left");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(app.menu_state.stack.len(), 1);
+        assert_eq!(app.menu_state.search_edit.caret(), 3);
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.clone()),
+            selected
+        );
+
+        app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+            .expect("move search caret right");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(app.menu_state.stack.len(), 1);
+        assert_eq!(app.menu_state.search_edit.caret(), 4);
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.clone()),
+            selected
+        );
+    }
+
+    // C++ binds Ctrl+F through the startup dialog accelerator
+    // (src/C4StartupScenSelDlg.cpp:1400-1401). The macOS product path also
+    // accepts the platform-standard Command+F and reselects an active query.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scensel_search_command_f_focuses_and_reselects_the_query() {
+        let mut app = new_menu_app(800, 600);
+        app.open_scenario_browser();
+        app.menu_state.set_search_text("crystal");
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.menu_state.search_edit.move_cursor(
+            SearchCursorOperation::Left,
+            false,
+            false,
+        );
+        assert!(app.menu_state.search_edit.selection_range().is_none());
+        app.handle_modifiers_changed(ModifiersState::LOGO)
+            .expect("set Command modifier");
+
+        app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
+            .expect("focus scenario search with Command+F");
+
+        assert!(app.menu_state.search_focused());
+        assert_eq!(app.menu_state.search_edit.selected_text(), Some("crystal"));
+    }
+
+    // C++ registers Ctrl for edit commands (src/C4GuiEdit.cpp:61-78).
+    // The macOS product path also accepts Command for the standard edit
+    // shortcut family.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scensel_search_command_a_selects_the_query() {
+        let mut app = new_menu_app(800, 600);
+        app.open_scenario_browser();
+        app.menu_state.set_search_text("crystal");
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.menu_state.search_edit.move_cursor(
+            SearchCursorOperation::Left,
+            false,
+            false,
+        );
+        app.handle_modifiers_changed(ModifiersState::LOGO)
+            .expect("set Command modifier");
+
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("select scenario query with Command+A");
+
+        assert_eq!(app.menu_state.search_edit.selected_text(), Some("crystal"));
+    }
+
+    // C++ waits for Enter and only blurs on Escape
+    // (src/C4StartupScenSelDlg.cpp:1513-1537,1810-1817). The enhanced
+    // product path filters in-memory scenarios immediately; the first Escape
+    // clears and restores browsing state, and the second leaves the edit.
+    #[test]
+    fn scensel_enhanced_search_filters_live_and_escape_restores_browsing_state() {
+        let mut alpha = FrontendScenario::fallback();
+        alpha.identifier = "alpha".to_string();
+        alpha.title = "Alpha Mission".to_string();
+        let mut beta = FrontendScenario::fallback();
+        beta.identifier = "beta".to_string();
+        beta.title = "Beta Mission".to_string();
+        let scenarios = vec![alpha, beta];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("scenario menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        app.handle_menu_input(|menu| menu.select_list_index(1))
+            .expect("select Beta before searching");
+        app.menu_state.scenario_list_scroll = 47;
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+
+        for character in "Alpha".chars() {
+            app.handle_text_input(character)
+                .expect("type live scenario query");
+        }
+
+        assert_eq!(app.menu_state.applied_search_text, "Alpha");
+        assert_eq!(
+            app.menu_state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"]
+        );
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("alpha")
+        );
+        assert!(app.menu_state.search_focused());
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("clear live scenario query");
+        assert_eq!(app.menu_state.search_text(), "");
+        assert_eq!(
+            app.menu_state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("beta")
+        );
+        assert_eq!(app.menu_state.scenario_list_scroll, 47);
+        assert!(app.menu_state.search_focused());
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("leave empty scenario search");
+        assert!(!app.menu_state.search_focused());
+    }
+
+    // C++ exposes the search edit without a trailing action
+    // (src/C4GuiEdit.cpp:556-634). The enhanced product control clears
+    // immediately from its field-contained target and retains edit focus.
+    #[test]
+    fn scensel_enhanced_search_clear_button_restores_browsing_state() {
+        let mut alpha = FrontendScenario::fallback();
+        alpha.identifier = "alpha".to_string();
+        alpha.title = "Alpha Mission".to_string();
+        let mut beta = FrontendScenario::fallback();
+        beta.identifier = "beta".to_string();
+        beta.title = "Beta Mission".to_string();
+        let scenarios = vec![alpha, beta];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("scenario menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        app.handle_menu_input(|menu| menu.select_list_index(1))
+            .expect("select Beta before searching");
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        for character in "Alpha".chars() {
+            app.handle_text_input(character)
+                .expect("type live scenario query");
+        }
+
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let layout = clonk_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
+        let clear = clonk_frontend::startup_scensel::search_clear_button_bounds(&layout);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(clear.x + clear.w / 2),
+            f64::from(clear.y + clear.h / 2),
+        ))
+        .expect("point at clear button");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press clear button");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release clear button");
+
+        assert_eq!(app.menu_state.search_text(), "");
+        assert_eq!(
+            app.menu_state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("beta")
+        );
+        assert!(app.menu_state.search_focused());
+    }
+
+    // C4GUI::Edit mutates the buffer immediately while C++ waits for Enter to
+    // rebuild rows (src/C4GuiEdit.cpp:371-445;
+    // src/C4StartupScenSelDlg.cpp:1513-1537). The product path reapplies after
+    // keyboard deletion.
+    #[test]
+    fn scensel_enhanced_search_updates_after_keyboard_deletion() {
+        let mut alpha = FrontendScenario::fallback();
+        alpha.identifier = "alpha".to_string();
+        alpha.title = "Alpha Mission".to_string();
+        let scenarios = vec![alpha];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("scenario menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        for character in "Alphzz".chars() {
+            app.handle_text_input(character)
+                .expect("type unmatched scenario query");
+        }
+        assert!(app.menu_state.visible_entries().is_empty());
+
+        app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
+            .expect("delete bad query suffix");
+
+        assert_eq!(app.menu_state.search_text(), "Alphz");
+        assert_eq!(
+            app.menu_state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"]
+        );
+    }
+
+    // C++ routes Clear through the edit context command but does not rebuild
+    // until submission (src/C4GuiEdit.h:47-53;
+    // src/C4GuiEdit.cpp:145-158,645-672;
+    // src/C4StartupScenSelDlg.h:434-437;
+    // src/C4StartupScenSelDlg.cpp:1472-1537). The product path reapplies it
+    // immediately.
+    #[test]
+    fn scensel_enhanced_search_context_clear_updates_results_immediately() {
+        let mut alpha = FrontendScenario::fallback();
+        alpha.identifier = "alpha".to_string();
+        alpha.title = "Alpha Mission".to_string();
+        let mut beta = FrontendScenario::fallback();
+        beta.identifier = "beta".to_string();
+        beta.title = "Beta Mission".to_string();
+        let scenarios = vec![alpha, beta];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("scenario menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        for character in "Alpha".chars() {
+            app.handle_text_input(character)
+                .expect("type live scenario query");
+        }
+        assert_eq!(app.menu_state.visible_entries().len(), 1);
+        app.menu_state.search_edit.select_all();
+
+        app.execute_scenario_search_context_command(ScenselSearchContextCommand::Clear)
+            .expect("clear scenario query from context command");
+
+        assert_eq!(app.menu_state.search_text(), "");
+        assert_eq!(
+            app.menu_state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+    }
+
+    // C++ routes Paste through the edit context command but does not rebuild
+    // until submission (src/C4GuiEdit.h:47-53;
+    // src/C4GuiEdit.cpp:316-350,645-672;
+    // src/C4StartupScenSelDlg.h:434-437;
+    // src/C4StartupScenSelDlg.cpp:1472-1537). The product path reapplies it
+    // immediately.
+    #[test]
+    fn scensel_enhanced_search_paste_updates_results_immediately() {
+        let mut alpha = FrontendScenario::fallback();
+        alpha.identifier = "alpha".to_string();
+        alpha.title = "Alpha Mission".to_string();
+        let mut beta = FrontendScenario::fallback();
+        beta.identifier = "beta".to_string();
+        beta.title = "Beta Mission".to_string();
+        let scenarios = vec![alpha, beta];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("scenario menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        for character in "Alpha".chars() {
+            app.handle_text_input(character)
+                .expect("type initial live scenario query");
+        }
+        app.menu_state.search_edit.select_all();
+
+        app.paste_scenario_search_text("Beta")
+            .expect("paste replacement scenario query");
+
+        assert_eq!(app.menu_state.search_text(), "Beta");
+        assert_eq!(
+            app.menu_state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["beta"]
+        );
+    }
+
+    // C++ retains the folder caption and leaves an unmatched list blank
+    // (src/C4StartupScenSelDlg.cpp:1527-1537). The enhanced product renderer
+    // exposes a count and query-aware recovery state.
+    #[test]
+    fn scensel_enhanced_search_reports_counts_and_a_query_aware_empty_state() {
+        let scenarios = ["Alpha Mission", "Beta Mission"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, title)| {
+                let mut scenario = FrontendScenario::fallback();
+                scenario.identifier = format!("scenario_{index}");
+                scenario.title = title.to_string();
+                scenario
+            })
+            .collect::<Vec<_>>();
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("scenario menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state.set_search_text("mission");
+        state.apply_enhanced_search();
+        assert_eq!(
+            state.enhanced_search_caption().as_deref(),
+            Some("2 of 2 scenarios")
+        );
+        assert_eq!(state.enhanced_search_empty_message(), None);
+
+        state.set_search_text("missing castle");
+        state.apply_enhanced_search();
+        assert_eq!(
+            state.enhanced_search_caption().as_deref(),
+            Some("No matches among 2 scenarios")
+        );
+        assert_eq!(
+            state.enhanced_search_empty_message().as_deref(),
+            Some("No scenarios match \"missing castle\".")
+        );
+    }
+
+    // C++ keeps the folder title as the caption
+    // (src/C4StartupScenSelDlg.cpp:1527-1535). The enhanced product caption
+    // uses grammatically correct result status for a one-item catalog.
+    #[test]
+    fn scensel_enhanced_search_uses_singular_result_status() {
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "alpha".to_string();
+        scenario.title = "Alpha Mission".to_string();
+        let scenarios = vec![scenario];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("scenario menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state.set_search_text("Alpha");
+        state.apply_enhanced_search();
+        assert_eq!(
+            state.enhanced_search_caption().as_deref(),
+            Some("1 of 1 scenario")
+        );
+
+        state.set_search_text("missing");
+        state.apply_enhanced_search();
+        assert_eq!(
+            state.enhanced_search_caption().as_deref(),
+            Some("No matches among 1 scenario")
+        );
+    }
+
     // The real window route must consume Ctrl+F/text/Enter in the search
-    // edit. Enter confirms the edit instead of starting the selected scenario
-    // (C4StartupScenSelDlg.cpp:1400-1401,1804-1808; C4GuiEdit.cpp:364-368).
+    // edit. The product path filters live, while Enter still confirms the
+    // edit instead of starting the selected scenario
+    // (src/C4StartupScenSelDlg.cpp:1400-1401,1804-1808;
+    // src/C4GuiEdit.cpp:364-368).
     #[test]
     fn scensel_search_routes_window_text_and_enter() {
         let _lock = env_lock().lock();
@@ -1201,7 +1953,6 @@
         wait_for_menu(&mut app);
         app.open_scenario_browser();
 
-        let original_count = app.menu_state.visible_entries().len();
         let mut query = app.menu_state.visible_entries()[0].title.clone();
         Markup::strip_markup(&mut query);
         query.make_ascii_lowercase();
@@ -1221,21 +1972,23 @@
             app.handle_text_input(character).expect("type query");
         }
         assert!(app.menu_state.search_focused());
-        assert_eq!(
-            app.menu_state.visible_entries().len(),
-            original_count,
-            "C++ does not apply search until Enter"
-        );
+        assert_eq!(app.menu_state.applied_search_text, query);
+        assert!(!app.menu_state.visible_entries().is_empty());
+        let mut selected_title = app
+            .menu_state
+            .selected_scenario()
+            .expect("exact live search result")
+            .title
+            .clone();
+        Markup::strip_markup(&mut selected_title);
+        selected_title.make_ascii_lowercase();
+        assert_eq!(selected_title, query);
 
         app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
             .expect("submit query");
         assert_eq!(app.mode, AppMode::Menu, "Enter must not start a scenario");
         assert!(!app.menu_state.visible_entries().is_empty());
-        assert!(app.menu_state.visible_entries().iter().all(|entry| {
-            let mut title = entry.title.clone();
-            Markup::strip_markup(&mut title);
-            title.to_lowercase().contains(&query)
-        }));
+        assert_eq!(app.menu_state.applied_search_text, query);
 
         let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
@@ -1874,6 +2627,9 @@
             .expect("Refresh remains dialog-wide without a selection");
     }
 
+    // C++ F5 reloads the current folder and reapplies the live edit
+    // (src/C4StartupScenSelDlg.cpp:1472-1537,1727-1735). The enhanced product
+    // path reapplies its catalog-wide query atomically after rediscovery.
     #[test]
     fn scensel_f5_rediscovers_current_folder_and_applies_live_search() {
         let _lock = env_lock().lock();
@@ -1890,12 +2646,12 @@
             .expect("write refresh folder core");
         fs::write(
             alpha.join("Scenario.txt"),
-            "[Head]\nTitle=Alpha Mission\n",
+            "[Head]\nTitle=Refresh Alpha Mission\n",
         )
             .expect("write initial refresh scenario core");
         fs::write(
             beta.join("Scenario.txt"),
-            "[Head]\nTitle=Beta Mission\n",
+            "[Head]\nTitle=Refresh Beta Mission\n",
         )
         .expect("write second initial refresh scenario core");
         fs::write(
@@ -1921,14 +2677,14 @@
             .expect("initial Beta row");
         app.handle_menu_input(|menu| menu.menu().select_entry_by_index(beta_index).unwrap())
             .expect("select Beta before refresh");
-        app.menu_state.set_search_text("mission");
+        app.menu_state.set_search_text("refresh mission");
         app.menu_state.set_search_focused(true);
 
         let gamma = folder.join("Gamma.c4s");
         fs::create_dir_all(&gamma).expect("create refreshed scenario");
         fs::write(
             gamma.join("Scenario.txt"),
-            "[Head]\nTitle=Gamma Mission\n",
+            "[Head]\nTitle=Refresh Gamma Mission\n",
         )
             .expect("write refreshed scenario core");
         app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
@@ -1954,12 +2710,12 @@
             zero_percent_frame, progressed_frame,
             "the visible loading label must track the percentage state"
         );
-        assert_eq!(app.menu_state.search_text(), "mission");
+        assert_eq!(app.menu_state.search_text(), "refresh mission");
         app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
             .expect("move loading search caret home");
         app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
             .expect("edit search without deleting the retained hidden row");
-        assert_eq!(app.menu_state.search_text(), "ission");
+        assert_eq!(app.menu_state.search_text(), "efresh mission");
         assert_eq!(
             app.menu_state
                 .selected_scenario()
@@ -2000,8 +2756,8 @@
                 .map(|entry| entry.identifier.as_str()),
             Some("RefreshPack.c4f/Beta.c4s")
         );
-        assert_eq!(app.menu_state.search_text(), "ission");
-        assert_eq!(app.menu_state.applied_search_text, "ission");
+        assert_eq!(app.menu_state.search_text(), "efresh mission");
+        assert_eq!(app.menu_state.applied_search_text, "efresh mission");
         assert!(
             app.scenario_catalog
                 .contains_key("RefreshPack.c4f/Gamma.c4s")
@@ -2530,7 +3286,7 @@
             .expect("activate Clear on left-down");
         assert!(app.context_menu.is_none());
         assert_eq!(app.menu_state.search_text(), " beta");
-        assert_eq!(app.menu_state.applied_search_text, "");
+        assert_eq!(app.menu_state.applied_search_text, " beta");
         app.handle_mouse_button(ElementState::Released)
             .expect("captured activation release");
         assert!(
@@ -3007,14 +3763,20 @@
         app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
         app.handle_text_input('T').expect("type into scenario search");
         assert_eq!(app.menu_state.search_text(), "T");
-        assert_eq!(app.menu_state.menu.selected_index(), Some(2));
+        assert_eq!(app.menu_state.menu.selected_index(), Some(1));
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("scenario_2")
+        );
         assert_eq!(app.ui_sound_log.len(), sound_count);
 
         app.set_scensel_dialog_focus(ScenselDialogFocus::Back);
         app.handle_text_input('T')
             .expect("character outside scenario list focus");
         assert_eq!(app.menu_state.search_text(), "T");
-        assert_eq!(app.menu_state.menu.selected_index(), Some(2));
+        assert_eq!(app.menu_state.menu.selected_index(), Some(1));
         assert_eq!(app.ui_sound_log.len(), sound_count);
     }
 

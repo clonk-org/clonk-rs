@@ -417,14 +417,15 @@ impl StdScheduler {
         }
 
         let mut ranges: Vec<HandleRange> = Vec::new();
-        let mut fallbacks: Vec<(ProcHandle, i32)> = Vec::new();
 
         for entry in &self.procs {
             let proc = Arc::clone(&entry.proc);
             let handle_list = proc.get_handles();
-            if handle_list.is_empty() {
-                fallbacks.push((proc, entry.proc.get_timeout()));
-            } else {
+            // C++ collects only procs that expose an event and never executes a
+            // handle-less proc from this arm (`StdScheduler.cpp:86-119`). Such
+            // procs run solely from the zero-timeout sweep below, so executing
+            // them here too would run them twice per `execute`.
+            if !handle_list.is_empty() {
                 let start = handles.len();
                 handles.extend(handle_list.iter().map(|interest| interest.handle()));
                 let end = handles.len();
@@ -435,7 +436,7 @@ impl StdScheduler {
         let mut success = true;
         let mut signalled: Vec<usize> = Vec::new();
 
-        if handles.len() > 0 {
+        if !handles.is_empty() {
             let wait_result = unsafe {
                 WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, wait_timeout)
             };
@@ -456,11 +457,11 @@ impl StdScheduler {
         }
 
         if handles.len() > 1 {
-            for index in 1..handles.len() {
+            for (index, handle) in handles.iter().enumerate().skip(1) {
                 if signalled.contains(&index) {
                     continue;
                 }
-                let status = unsafe { WaitForSingleObject(handles[index], 0) };
+                let status = unsafe { WaitForSingleObject(*handle, 0) };
                 match status {
                     WAIT_FAILED => {
                         let err = io::Error::last_os_error();
@@ -491,20 +492,10 @@ impl StdScheduler {
             }
         }
 
-        for (proc, proc_timeout) in &fallbacks {
-            let should_run = timeout == 0 || *proc_timeout == 0 || timeout >= 0;
-            if should_run && !proc.execute(timeout) {
-                success = false;
-                self.handle_error(proc);
-            }
-        }
-
         for entry in &self.procs {
-            if entry.proc.get_timeout() == 0 {
-                if !entry.proc.execute(INFINITE_TIMEOUT) {
-                    success = false;
-                    self.handle_error(&entry.proc);
-                }
+            if entry.proc.get_timeout() == 0 && !entry.proc.execute(INFINITE_TIMEOUT) {
+                success = false;
+                self.handle_error(&entry.proc);
             }
         }
 
@@ -680,6 +671,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    // Only the `#[cfg(unix)]` fd-readiness tests below poll on a deadline.
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     struct CountingProc {

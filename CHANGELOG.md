@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Bug fixes
 
+- Keep plain arrow keys inside the focused scenario search edit
 - Copy runtime asset groups recursively
 - Widen the GPU backend set instead of aborting startup without an adapter
 - Tag a release only after every platform builds
@@ -18,6 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Documentation
 
+- Record enhanced scenario search as a deliberate C++ divergence and its accessibility and IME gaps
 - Describe the game and show it in the README
 - Attribute the per-commit engine measurements and the gate environment traps
 - Record the texmap identity measurement and close its open gap
@@ -29,6 +31,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Features
 
+- Search the full scenario catalog live with normalized metadata ranking, conservative typo tolerance, folder context, result counts, and recoverable no-results
 - Reduce presentation detail automatically when drawing cannot hold the frame budget
 - Reserve wall-clock for drawing and force a repaint floor on slow hardware
 - Hold a draw floor while catching up and pin the control-rate limit

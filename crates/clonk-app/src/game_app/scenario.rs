@@ -83,10 +83,16 @@ impl GameApp {
     }
 
     pub(crate) fn submit_scenario_search(&mut self) -> Result<(), EngineError> {
-        // UpdateList destroys and recreates the visible row elements.
+        // Both search paths destroy and recreate the visible row elements.
+        // The player-facing path uses the enhanced in-memory index; the
+        // isolated `MenuState::submit_search` method retains C++ behavior for
+        // parity coverage.
         self.startup_tooltip.pointer_left();
         self.menu_frame_cache = None;
-        self.handle_menu_input(|menu| menu.submit_search())?;
+        // Rebuilding the list necessarily recreates and reselects a row.
+        // That programmatic selection must stay silent while the user types;
+        // dependent controls are synchronized explicitly below.
+        let _ = self.menu_state.apply_enhanced_search();
         // An empty result emits no SelectionChanged action. Explicitly clear
         // selection-derived checkbox/ForcedNoCrew state in that case rather
         // than retaining the previously selected scenario's constraint.
@@ -104,11 +110,19 @@ impl GameApp {
             return Ok(());
         }
         match command {
-            ScenselSearchContextCommand::Cut => self.copy_search_edit_selection(true),
-            ScenselSearchContextCommand::Copy => self.copy_search_edit_selection(false),
+            ScenselSearchContextCommand::Cut => {
+                if self.copy_search_edit_selection(true) {
+                    self.submit_scenario_search()?;
+                }
+            }
+            ScenselSearchContextCommand::Copy => {
+                let _ = self.copy_search_edit_selection(false);
+            }
             ScenselSearchContextCommand::Paste => self.paste_search_edit_clipboard()?,
             ScenselSearchContextCommand::Clear => {
-                self.menu_state.search_edit.delete_selection();
+                if self.menu_state.search_edit.delete_selection() {
+                    self.submit_scenario_search()?;
+                }
             }
             ScenselSearchContextCommand::SelectAll => {
                 self.menu_state.search_edit.select_all();

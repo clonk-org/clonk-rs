@@ -2197,6 +2197,30 @@ func Probe(object other)
     }
 
     #[test]
+    fn get_effect_scans_the_live_context_without_cloning_its_effect_stack() {
+        // FnGetEffect walks pTarget->pEffects in place (C4Script.cpp:5458-5487);
+        // a read-only query does not copy the C4Effect list.
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| {
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(100)])?;
+            reset_effect_snapshot_count();
+            let value = get_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(0),
+                Value::Int(1),
+            ])?;
+            assert_eq!(effect_snapshot_count(), 0);
+            Ok::<_, RuntimeError>(value)
+        });
+
+        assert_eq!(
+            result.expect("GetEffect succeeds"),
+            Value::String("Glow".into())
+        );
+    }
+
+    #[test]
     fn get_effect_converts_bool_query_to_c4valueint() {
         // FnGetEffect declares iQueryValue as C4ValueInt
         // (C4Script.cpp:5458), and Bool->Int is a direct conversion
@@ -2322,4 +2346,3 @@ func Probe(object other)
             "equal-priority effect #2 is list index 0, so bool true selects #1"
         );
     }
-

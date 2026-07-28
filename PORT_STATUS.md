@@ -196,7 +196,10 @@ code faults. Second, `clonk-network`'s LAN-discovery tests need IPv6 multicast;
 where the host cannot join a multicast group (`EADDRNOTAVAIL` from
 `IPV6_JOIN_GROUP`), `startup_lan_reference_query_reports_address_lifecycle` and
 `disabled_reference_server_keeps_discovery_only_advertiser_clean` fail
-deterministically regardless of the revision under test. A third,
+deterministically regardless of the revision under test. The same host
+condition makes
+`selected_network_scenario_installs_prepared_host_before_admission` fail
+because the prepared host cannot install its LAN advertiser. A third,
 `synchronized_tick::inactive_joined_client_does_not_block_host_lockstep`, plus
 `clonk-app`'s `real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running`
 (a 480-attempt timeout), are load-sensitive and pass in isolation. Re-run the
@@ -433,6 +436,42 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   at the unzoomed width. Any zoom work must add the zoom term here, and the
   frontend must then stop being the only place that knows the zoom.
 
+- Open UI gap (found 2026-07-28, not closed): **the custom raster frontend
+  exposes neither platform accessibility semantics nor IME composition.**
+  Scenario-search counts and no-result guidance are visible pixels but are not
+  announced through an accessibility status node, and the search field has no
+  semantic role or programmatic name. Window input handles committed
+  characters but no IME preedit/commit lifecycle or candidate positioning.
+  Closing this requires a platform accessibility bridge plus explicit IME
+  enablement, composition state, and rendering. Classic keyboard parity remains
+  covered, but screen-reader and international text-entry completeness must not
+  be claimed.
+- Open gap (found 2026-07-28, not closed): **material slots follow host
+  `readdir` order, so every landscape golden is host-specific and Linux CI
+  cannot pass them.** `C4Group`'s folder scan is unsorted — `DirectoryIterator`
+  wraps `DIR *`/`dirent` on Unix and `_finddata_t` on Windows (StdFile.h:102-126)
+  — and `C4MaterialMap::Load` takes material slots straight from that scan
+  (C4Material.cpp:263-299). `directory_entries` (`clonk-resources/src/group.rs`)
+  mirrors this faithfully via `WalkDir` with no sort, and
+  `MaterialLibrary::from_group` (`material.rs:204-219`) consumes that order. With
+  `content/` checked out **unpacked**, material indices therefore depend on the
+  filesystem: on APFS `Material.c4g` happens to enumerate case-insensitively
+  sorted, on ext4 it does not. Frame 0 of `tutorial01-idle` diverges in 277
+  leaves, all under `landscape/` — `liquids/*/material` reads 1 on macOS and 10
+  on Linux, and the texmap material names rotate (`Ice`/`Ashes`/`Vehicle`/
+  `Tunnel`). Consequence: `dev_feedback_replay::committed_real_scenario_replays_are_deterministic`
+  fails on Linux CI on **every** revision, and it only surfaced once the
+  `cargo fmt` gate stopped short-circuiting the rest of the parity job.
+  Sorting the folder listing was measured and **rejected**: it makes Rust
+  disagree with the C++ oracle on the recording host, breaking
+  `elevator_motion_oracle::tutorial07_seed_zero_landscape_matches_cpp_surface8`
+  (a whole-plane Surface8 hash, i.e. per-pixel material indices),
+  `real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence`, and three
+  real-scenario routes. C++ is right, so the engine keeps the unsorted scan.
+  Closing this belongs at the content/harness layer, not in the engine: pack
+  `content/*.c4g` so archive order fixes the enumeration (how LegacyClonk
+  shipped, and what the goldens already encode), or re-derive the goldens and
+  the C++ oracle together under one pinned order.
 - Open gap (found 2026-07-27, not closed): **scenario load is ~half the
   process cost and is unoptimized.** `ClonkMars/03_Chaos` takes 13.8-15.7 s to
   load on the reference machine — roughly two minutes on a Pi 4 — and 99% of
@@ -755,6 +794,18 @@ an ordered-map model gap.
   `high_dpi_cursor_tiers_climb_the_shipped_ladder_by_physical_width` and
   `high_dpi_cursor_tiers_reach_the_drawn_cursor_cell`.
 
+- **Scenario search uses a live catalog-wide product matcher while retaining
+  the C++ matcher as a testable oracle** (`MenuState::apply_enhanced_search`,
+  `MenuState::submit_search`; C++
+  `C4StartupScenSelDlg::OnSearchBarEnter`/`UpdateList`). Approved 2026-07-28.
+  C++ waits for Enter and searches only immediate-folder display titles; Rust
+  deliberately searches loaded catalog metadata live, ranks results
+  deterministically, and presents ancestor context and recovery feedback.
+  `scensel_search_does_not_recurse_into_unopened_folders` and
+  `scensel_search_applies_on_submit_case_insensitively` continue to pin the
+  oracle path independently of enhanced-search tests. This affects startup
+  discovery and presentation only; ordinary activation and simulation state
+  are unchanged.
 - **Guided missiles turn only while a turn key is held, and key-ups are
   synchronized in both control styles**
   (`planet/System.c4g/EkeGuidedMissile.c`, `planet/System.c4g/EkeSftRelease.c`,

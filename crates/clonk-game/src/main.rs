@@ -2574,14 +2574,27 @@ mod tests {
             binary_graphics.exists(),
             "graphics group should exist next to the binary"
         );
-        assert!(
-            bundle_system.exists(),
-            "system group should exist at mac bundle root"
-        );
-        assert!(
-            bundle_graphics.exists(),
-            "graphics group should exist at mac bundle root"
-        );
+        // Staging beside the `.app` is driven by a `#[cfg(target_os = "macos")]`
+        // arm in `ensure_runtime_assets`, so only macOS populates this root.
+        #[cfg(target_os = "macos")]
+        {
+            assert!(
+                bundle_system.exists(),
+                "system group should exist at mac bundle root"
+            );
+            assert!(
+                bundle_graphics.exists(),
+                "graphics group should exist at mac bundle root"
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(
+                !bundle_system.exists(),
+                "only macOS stages beside the bundle"
+            );
+            let _ = &bundle_graphics;
+        }
         assert_eq!(
             fs::read(&system_target).unwrap(),
             b"system payload",
@@ -2602,16 +2615,21 @@ mod tests {
             b"graphics payload",
             "graphics group adjacent to binary should match source"
         );
-        assert_eq!(
-            fs::read(&bundle_system).unwrap(),
-            b"system payload",
-            "system group at bundle root should match source"
-        );
-        assert_eq!(
-            fs::read(&bundle_graphics).unwrap(),
-            b"graphics payload",
-            "graphics group at bundle root should match source"
-        );
+        // Only macOS stages beside the `.app`, so only there is there anything
+        // at the bundle root to read back.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                fs::read(&bundle_system).unwrap(),
+                b"system payload",
+                "system group at bundle root should match source"
+            );
+            assert_eq!(
+                fs::read(&bundle_graphics).unwrap(),
+                b"graphics payload",
+                "graphics group at bundle root should match source"
+            );
+        }
     }
 
     #[test]
@@ -2622,7 +2640,11 @@ mod tests {
         // Shipped groups are directories, so a stale target is removed through
         // the `remove_dir_all` arm rather than `remove_file`.
         fs::create_dir_all(planet_dir.join("System.c4g")).unwrap();
-        fs::write(planet_dir.join("System.c4g").join("C4.c"), b"system payload").unwrap();
+        fs::write(
+            planet_dir.join("System.c4g").join("C4.c"),
+            b"system payload",
+        )
+        .unwrap();
         fs::create_dir_all(planet_dir.join("Graphics.c4g")).unwrap();
         fs::write(
             planet_dir.join("Graphics.c4g").join("Logo.png"),
@@ -3342,7 +3364,10 @@ mod tests {
         paths.ensure_user_dirs().unwrap();
         let logger = LauncherLogger::new(&paths).unwrap();
 
-        let start = SystemTime::now();
+        // Backdated deliberately: `collect_runtime_logs` skips anything whose
+        // mtime precedes `started_at`, and a filesystem timestamp can round
+        // below a `now()` captured moments earlier — coarsely so on Windows.
+        let start = SystemTime::now() - Duration::from_secs(1);
         fs::write(
             install_dir.path().join("Clonk.log"),
             b"legacy runtime log contents",

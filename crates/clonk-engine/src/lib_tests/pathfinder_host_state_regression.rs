@@ -1197,7 +1197,9 @@ fn effect_batch_threads_callback_final_contents_order() {
     // order before the deferred Rust batch folds authoritatively.
     let mut engine = Engine::with_seed(17);
     for id in ["BOX_", "HOLD", "ROCK", "GOLD", "PSTL"] {
-        engine.register_script_definition(id, id, "#strict\n").expect("definition registers");
+        engine
+            .register_script_definition(id, id, "#strict\n")
+            .expect("definition registers");
     }
     let mut actor_definition = Definition::from_script(
         "FXCO",
@@ -1338,8 +1340,12 @@ fn effect_batch_threads_dig_contents_shape_and_layer() {
     engine.set_materials(materials);
     engine.set_landscape(pixel_landscape(2, 1, vec![1, 1]));
 
-    engine.register_script_definition("LAYR", "Layer", "").expect("layer definition registers");
-    engine.register_script_definition("GEM_", "Gem", "").expect("gem definition registers");
+    engine
+        .register_script_definition("LAYR", "Layer", "")
+        .expect("layer definition registers");
+    engine
+        .register_script_definition("GEM_", "Gem", "")
+        .expect("gem definition registers");
     let mut digger = Definition::from_script(
         "FXDG",
         "Effect digger",

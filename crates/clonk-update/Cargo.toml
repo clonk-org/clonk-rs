@@ -1,0 +1,37 @@
+[package]
+name = "clonk-update"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+[dependencies]
+clonk-core = { path = "../clonk-core" }
+clonk-platform = { path = "../clonk-platform" }
+ring = "0.17"
+semver = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[target.'cfg(unix)'.dependencies]
+# `statvfs` for the free-space pre-check and `kill(pid, 0)` for the wait the
+# applier performs before it renames a tree out from under a running launcher.
+libc = { version = "0.2", features = ["use_std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+] }

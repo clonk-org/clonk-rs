@@ -26,7 +26,9 @@ fn border_engine(bottom_open: bool) -> (Engine, MaterialId) {
 }
 
 fn spawn_digger(engine: &mut Engine) -> ObjectId {
-    engine.register_script_definition("DGRR", "Digger", "#strict\n").expect("digger registers");
+    engine
+        .register_script_definition("DGRR", "Digger", "#strict\n")
+        .expect("digger registers");
     engine
         .spawn_object(SpawnConfig::new("DGRR"))
         .expect("digger spawns")

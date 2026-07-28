@@ -700,6 +700,7 @@ mod tests {
             pending_admissions: BTreeMap::new(),
             pending_post_mortems: BTreeMap::new(),
             removing_clients: BTreeSet::new(),
+            lobby_chat_history: VecDeque::new(),
             event_tx,
             config,
         }
@@ -8231,6 +8232,121 @@ mod tests {
         assert!(error.contains("authenticated author is 8"));
     }
 
+    #[tokio::test]
+    async fn lobby_team_messages_are_not_retained_for_future_clients() {
+        // Team messages are filtered against the receiving client's team
+        // (src/C4Control.cpp:1158-1189). Replaying their raw text to a client
+        // that was not present at send time would widen that audience.
+        let (outbound, _receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        let control = EngineControlPacket::Message(clonk_engine::MessageControlData {
+            message_type: clonk_engine::MESSAGE_TYPE_TEAM,
+            player: -1,
+            to_player: -1,
+            message: clonk_engine::LegacyCString::from_bytes(b"team secret".to_vec())
+                .expect("fixture is NUL-free"),
+            by_client: HOST_CLIENT_ID as i32,
+        });
+        let data = encode_control_entry_payload(&control).expect("encode CID_Message");
+
+        broadcast_packet(ControlDelivery::Private, data, None, &mut state).await;
+
+        assert!(state.lobby_chat_history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lobby_system_messages_are_not_retained_as_user_chat() {
+        // C++ treats host-authored system controls as network log output, not
+        // user chat (src/C4Control.cpp:1238-1243). The late-join transcript
+        // must not turn those one-shot notices into replayable conversation.
+        let (outbound, _receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        let control = EngineControlPacket::Message(clonk_engine::MessageControlData {
+            message_type: clonk_engine::MESSAGE_TYPE_SYSTEM,
+            player: -1,
+            to_player: -1,
+            message: clonk_engine::LegacyCString::from_bytes(b"network notice".to_vec())
+                .expect("fixture is NUL-free"),
+            by_client: HOST_CLIENT_ID as i32,
+        });
+        let data = encode_control_entry_payload(&control).expect("encode CID_Message");
+
+        broadcast_packet(ControlDelivery::Private, data, None, &mut state).await;
+
+        assert!(state.lobby_chat_history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn leaving_the_lobby_clears_retained_chat() {
+        // C++ creates the bounded chat TextWindow with each lobby dialog, so
+        // its contents end with that lobby's lifetime
+        // (src/C4GameLobby.cpp:269-280).
+        let (outbound, _receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state.lobby_chat_history.push_back(b"old lobby".to_vec());
+        let effects = state.status_barrier.change_status(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            ..state.status_barrier.status
+        });
+
+        apply_barrier_effects(effects, &mut state).await;
+
+        assert!(state.lobby_chat_history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lobby_chat_history_uses_a_bounded_transport_budget() {
+        // Borrow the lobby TextWindow's numeric 100/4096 ceilings as a
+        // conservative raw-packet budget (src/C4GameLobby.cpp:277-280);
+        // rendered entries/text bytes are not encoded control payloads.
+        let (outbound, _receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        for index in 0..=100 {
+            let control = EngineControlPacket::Message(clonk_engine::MessageControlData {
+                message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+                player: -1,
+                to_player: -1,
+                message: clonk_engine::LegacyCString::from_bytes(
+                    format!("message {index}").into_bytes(),
+                )
+                .expect("fixture is NUL-free"),
+                by_client: HOST_CLIENT_ID as i32,
+            });
+            let data = encode_control_entry_payload(&control).expect("encode CID_Message");
+            broadcast_packet(ControlDelivery::Private, data, None, &mut state).await;
+        }
+
+        assert_eq!(state.lobby_chat_history.len(), 100);
+        let first = state
+            .lobby_chat_history
+            .front()
+            .and_then(|data| decode_control_entry_payload(data).ok());
+        assert!(matches!(
+            first,
+            Some(EngineControlPacket::Message(message))
+                if message.message.as_bytes() == b"message 1"
+        ));
+
+        let mut newest = Vec::new();
+        for index in 0_u8..20 {
+            let mut text = vec![b'x'; 239];
+            text.push(b'a' + index);
+            let control = EngineControlPacket::Message(clonk_engine::MessageControlData {
+                message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+                player: -1,
+                to_player: -1,
+                message: clonk_engine::LegacyCString::from_bytes(text)
+                    .expect("fixture is NUL-free"),
+                by_client: HOST_CLIENT_ID as i32,
+            });
+            newest = encode_control_entry_payload(&control).expect("encode CID_Message");
+            broadcast_packet(ControlDelivery::Private, newest.clone(), None, &mut state).await;
+        }
+
+        assert!(state.lobby_chat_history.iter().map(Vec::len).sum::<usize>() <= 4096);
+        assert_eq!(state.lobby_chat_history.back(), Some(&newest));
+    }
+
     #[test]
     fn queued_message_board_answer_cannot_forge_host_author() {
         let packet = |by_client| {
@@ -12114,6 +12230,83 @@ mod tests {
         host.shutdown().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delayed_join_data_is_followed_by_prior_lobby_chat() {
+        // SendJoinData may wait for OnGameSynchronized to provide a dynamic
+        // (src/C4Network2.cpp:1099-1115,1768-1784,1820-1849). The
+        // presentation-only transcript extension must follow that delayed
+        // JoinData just as it follows an immediately available one.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut config = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
+        config.initial_join_snapshot = None;
+        let mut host = start_host(listener, config).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let client_task = tokio::spawn(connect_client(
+            addr,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        ));
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::JoinDataNeeded { client_id: 1, .. }) => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before JoinData was requested"),
+            }
+        }
+
+        let message = clonk_engine::MessageControlData {
+            message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+            player: -1,
+            to_player: -1,
+            message: clonk_engine::LegacyCString::from_bytes(b"during delayed join".to_vec())
+                .unwrap(),
+            by_client: HOST_CLIENT_ID as i32,
+        };
+        let data = encode_control_entry_payload(&EngineControlPacket::Message(message)).unwrap();
+        host.submit_packet(ControlDelivery::Private, data.clone())
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Direct {
+                    client_id: BROADCAST_CLIENT_ID,
+                    delivery: ControlDelivery::Private,
+                    data: received,
+                }) if received == data => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before accepting lobby chat"),
+            }
+        }
+
+        host.publish_join_snapshot(snapshot).await.unwrap();
+        let mut client = timeout(EVENT_WAIT, client_task)
+            .await
+            .expect("published JoinData did not release the client")
+            .unwrap()
+            .unwrap();
+        let mut client_events = client.take_event_receiver();
+        let replayed = timeout(EVENT_WAIT, async {
+            loop {
+                match client_events.recv().await {
+                    Some(ClientEvent::Direct {
+                        delivery: ControlDelivery::Private,
+                        data: received,
+                    }) if received == data => break Some(received),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+        assert_eq!(replayed, Some(data));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn accepted_host_route_measures_ping_while_join_data_is_delayed() {
         // C4Network2IO::Execute keeps CheckTimeout/Ping running for every open
@@ -12427,6 +12620,72 @@ mod tests {
         alpha.shutdown().await.unwrap();
         beta.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn joining_client_receives_prior_lobby_chat_after_join_data() {
+        // C++ sends lobby CID_Message as ephemeral CDT_Private controls only
+        // to clients connected at that instant (src/C4MessageInput.cpp:423-425;
+        // src/C4GameControlNetwork.cpp:225-237). Retaining those same raw
+        // controls for post-JoinData replay fixes the presentation-only gap
+        // without changing synchronized state or recipient-side filtering.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let source = connect_client(addr, ClientConfig::new("Source", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let source_id = source.client_id();
+        let message = clonk_engine::MessageControlData {
+            message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+            player: -1,
+            to_player: -1,
+            message: clonk_engine::LegacyCString::from_bytes(b"before join".to_vec()).unwrap(),
+            by_client: i32::try_from(source_id).unwrap(),
+        };
+        let data = encode_control_entry_payload(&EngineControlPacket::Message(message)).unwrap();
+
+        source
+            .submit_packet(ControlDelivery::Private, data.clone())
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Direct {
+                    client_id,
+                    delivery: ControlDelivery::Private,
+                    data: received,
+                }) if client_id == source_id && received == data => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before accepting lobby chat"),
+            }
+        }
+
+        let mut client = connect_client(addr, ClientConfig::new("Late", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut client_events = client.take_event_receiver();
+        let replayed = timeout(EVENT_WAIT, async {
+            loop {
+                match client_events.recv().await {
+                    Some(ClientEvent::Direct {
+                        delivery: ControlDelivery::Private,
+                        data: received,
+                    }) if received == data => break Some(received),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+
+        client.shutdown().await.unwrap();
+        source.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+        assert_eq!(replayed, Some(data));
     }
 
     #[tokio::test(start_paused = true)]

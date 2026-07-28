@@ -648,7 +648,9 @@ fn sim_flight_uses_vehicle_solid_mask_density() {
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(30, 30));
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
-    engine.register_script_definition("TFLT", "SimFlight probe", script).expect("probe registers");
+    engine
+        .register_script_definition("TFLT", "SimFlight probe", script)
+        .expect("probe registers");
     let mut platform =
         Definition::from_script("PLAT", "Vehicle mask", "#strict\n").expect("mask compiles");
     platform.set_category(CATEGORY_STATIC_BACK);

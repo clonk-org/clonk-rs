@@ -385,18 +385,19 @@ fn texmap_identity(
     material_names: &[Option<String>],
     texture_names: &[Option<String>],
 ) -> RuntimeTexmapIdentity {
-    let token = [material_names, texture_names]
-        .into_iter()
-        .fold(RENDER_TOKEN_OFFSET, |token, names| {
-            names.iter().fold(
-                render_token_bytes(token, (names.len() as u64).to_le_bytes()),
-                |token, name| {
-                    let length = name.as_ref().map_or(0, |name| name.len() as u64 + 1);
-                    let token = render_token_bytes(token, length.to_le_bytes());
-                    render_token_bytes(token, name.iter().flat_map(|name| name.bytes()))
-                },
-            )
-        });
+    let token =
+        [material_names, texture_names]
+            .into_iter()
+            .fold(RENDER_TOKEN_OFFSET, |token, names| {
+                names.iter().fold(
+                    render_token_bytes(token, (names.len() as u64).to_le_bytes()),
+                    |token, name| {
+                        let length = name.as_ref().map_or(0, |name| name.len() as u64 + 1);
+                        let token = render_token_bytes(token, length.to_le_bytes());
+                        render_token_bytes(token, name.iter().flat_map(|name| name.bytes()))
+                    },
+                )
+            });
     RuntimeTexmapIdentity(if token == 0 { 1 } else { token })
 }
 
@@ -7845,22 +7846,30 @@ mod tests {
                 2,
                 vec![0; 4],
                 vec![0; materials.len()],
-                materials.iter().map(|name| Some((*name).to_owned())).collect(),
-                textures.iter().map(|name| Some((*name).to_owned())).collect(),
+                materials
+                    .iter()
+                    .map(|name| Some((*name).to_owned()))
+                    .collect(),
+                textures
+                    .iter()
+                    .map(|name| Some((*name).to_owned()))
+                    .collect(),
             )
         }
         let cases = [
             (grid(&["Earth"], &["earth"]), grid(&["Earth"], &["earth"])),
             (grid(&["Earth"], &["earth"]), grid(&["Water"], &["earth"])),
             (grid(&["Earth"], &["earth"]), grid(&["Earth"], &["rock"])),
-            (grid(&["Earth"], &["earth"]), grid(&["Earth", "Water"], &["earth", "rock"])),
+            (
+                grid(&["Earth"], &["earth"]),
+                grid(&["Earth", "Water"], &["earth", "rock"]),
+            ),
             (grid(&[], &[]), grid(&["Earth"], &["earth"])),
             (grid(&[], &[]), grid(&[], &[])),
         ];
         for (left, right) in &cases {
-            let compared =
-                left.material_names() == right.material_names()
-                    && left.texture_names() == right.texture_names();
+            let compared = left.material_names() == right.material_names()
+                && left.texture_names() == right.texture_names();
             assert_eq!(
                 left.texmap_identity() == right.texmap_identity(),
                 compared,

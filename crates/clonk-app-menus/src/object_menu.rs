@@ -3984,7 +3984,9 @@ mod tests {
             "#
         );
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", &script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", &script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -4789,7 +4791,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -4968,7 +4972,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5011,7 +5017,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5109,7 +5117,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5256,7 +5266,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5361,7 +5373,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5403,7 +5417,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5443,7 +5459,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5518,7 +5536,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5618,7 +5638,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5659,7 +5681,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5706,7 +5730,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5769,7 +5795,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5830,7 +5858,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -5966,7 +5996,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -6214,7 +6246,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -6395,7 +6429,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");
@@ -6819,7 +6855,9 @@ mod tests {
         }
         "#;
         let mut engine = Engine::new();
-        engine.register_script_definition("MENU", "Menu", script).expect("definition registers");
+        engine
+            .register_script_definition("MENU", "Menu", script)
+            .expect("definition registers");
         let object = engine
             .spawn_object(SpawnConfig::new("MENU"))
             .expect("menu object spawns");

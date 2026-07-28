@@ -5,6 +5,13 @@
 
 use super::*;
 
+fn effect_callback_needs_owned_snapshot(effects: &[EffectState], event: &EffectEvent) -> bool {
+    matches!(event.kind, EffectEventKind::Stopped(_))
+        && !effects
+            .iter()
+            .any(|effect| effect.number == event.effect.number)
+}
+
 impl Engine {
     pub fn snapshot(&self) -> SimulationSnapshot {
         let mut objects = Vec::with_capacity(self.objects.len());
@@ -1974,23 +1981,21 @@ impl Engine {
                 }
                 _ => {}
             }
-            let mut snapshot_for_call = state_snapshot.clone();
-            if matches!(event.kind, EffectEventKind::Stopped(_))
-                && !snapshot_for_call
-                    .effects
-                    .iter()
-                    .any(|effect| effect.number == event.effect.number)
-            {
-                // C4Effect::Kill/ClearAll keep the dead list node linked
-                // throughout Fx*Stop (C4Effect.cpp:365-424). EffectVar and
-                // GetEffect must therefore still resolve the victim even
-                // though the Rust command fold already removed it.
-                let mut linked = event.effect.clone();
-                if clear_all_stop {
-                    linked.priority = 0;
-                }
-                insert_effect_into_stack(&mut snapshot_for_call.effects, linked);
-            }
+            let owned_snapshot_for_call =
+                effect_callback_needs_owned_snapshot(&state_snapshot.effects, &event).then(|| {
+                    let mut snapshot = state_snapshot.clone();
+                    // C4Effect::Kill/ClearAll keep the dead list node linked
+                    // throughout Fx*Stop (C4Effect.cpp:365-424). EffectVar and
+                    // GetEffect must therefore still resolve the victim even
+                    // though the Rust command fold already removed it.
+                    let mut linked = event.effect.clone();
+                    if clear_all_stop {
+                        linked.priority = 0;
+                    }
+                    insert_effect_into_stack(&mut snapshot.effects, linked);
+                    snapshot
+                });
+            let snapshot_for_call = owned_snapshot_for_call.as_ref().unwrap_or(&state_snapshot);
             let dispatch_definition = resolve_effect_dispatch_definition(
                 &event.effect,
                 &world,
@@ -2036,7 +2041,7 @@ impl Engine {
             let call_result = match event.kind {
                 EffectEventKind::Started => dispatch_definition
                     .call_effect_start(
-                        Some((&snapshot_for_call, object_id)),
+                        Some((snapshot_for_call, object_id)),
                         &event.effect,
                         &event.constructor_values,
                         rng,
@@ -2060,7 +2065,7 @@ impl Engine {
                     }),
                 EffectEventKind::Timer => dispatch_definition
                     .call_effect_timer(
-                        Some((&snapshot_for_call, object_id)),
+                        Some((snapshot_for_call, object_id)),
                         &event.effect,
                         frame,
                         rng,
@@ -2086,7 +2091,7 @@ impl Engine {
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition
                     .call_effect_stop(
-                        Some((&snapshot_for_call, object_id)),
+                        Some((snapshot_for_call, object_id)),
                         &event.effect,
                         reason,
                         rng,
@@ -2117,7 +2122,7 @@ impl Engine {
                     }),
                 EffectEventKind::Check { ref pending } => dispatch_definition
                     .call_effect_effect(
-                        Some((&snapshot_for_call, object_id)),
+                        Some((snapshot_for_call, object_id)),
                         &event.effect,
                         pending,
                         &event.constructor_values,
@@ -2168,7 +2173,7 @@ impl Engine {
                     }),
                 EffectEventKind::AddTo { ref pending } => dispatch_definition
                     .call_effect_add(
-                        Some((&snapshot_for_call, object_id)),
+                        Some((snapshot_for_call, object_id)),
                         &event.effect,
                         pending,
                         &event.constructor_values,
@@ -2191,7 +2196,7 @@ impl Engine {
                     }),
                 EffectEventKind::TempRemoved => dispatch_definition
                     .call_effect_stop(
-                        Some((&snapshot_for_call, object_id)),
+                        Some((snapshot_for_call, object_id)),
                         &event.effect,
                         EffectStopReason::Temp,
                         rng,
@@ -2210,7 +2215,7 @@ impl Engine {
                     }),
                 EffectEventKind::TempReadded => dispatch_definition
                     .call_effect_temp_readd(
-                        Some((&snapshot_for_call, object_id)),
+                        Some((snapshot_for_call, object_id)),
                         &event.effect,
                         rng,
                         &global_view,
@@ -4708,5 +4713,33 @@ impl Engine {
         if moved {
             self.update_sector_for_index(idx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effect_callbacks_only_need_an_owned_snapshot_for_an_unlinked_stop_victim() {
+        // C4Effect construction, Check, and Execute call Start/Effect/Add/Timer
+        // against the live target and linked list (C4Effect.cpp:96-152,
+        // 271-317,339-360). Kill/ClearAll alone keep a removed victim linked
+        // through its Stop callback (:365-424).
+        let mut effect = EffectState::new("Pulse");
+        effect.number = 7;
+
+        let timer = EffectEvent::timer(effect.clone());
+        assert!(!effect_callback_needs_owned_snapshot(
+            &[effect.clone()],
+            &timer
+        ));
+
+        let stopped = EffectEvent::stopped(effect.clone(), EffectStopReason::Removed);
+        assert!(!effect_callback_needs_owned_snapshot(
+            &[effect.clone()],
+            &stopped
+        ));
+        assert!(effect_callback_needs_owned_snapshot(&[], &stopped));
     }
 }

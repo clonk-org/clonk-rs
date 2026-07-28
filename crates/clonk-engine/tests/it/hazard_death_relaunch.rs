@@ -27,7 +27,9 @@ fn hazard_death_relaunch_enters_the_holder_created_after_the_clonk() {
     let victim = engine
         .crew_cursor(victim_owner)
         .expect("AH - Predator joins a HazardClonk");
-    engine.register_script_definition("KILP", "Kill probe", KILL_PROBE).expect("probe registers");
+    engine
+        .register_script_definition("KILP", "Kill probe", KILL_PROBE)
+        .expect("probe registers");
     let probe = engine
         .spawn_object(SpawnConfig::new("KILP"))
         .expect("probe spawns");
