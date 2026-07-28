@@ -1,0 +1,90 @@
+# Local quality gates. These mirror the cheap, deterministic parts of
+# `.github/workflows/rust.yml` so a mistake is caught before it reaches CI —
+# they do not replace it. Everything here is check-only and fast.
+#
+# This checkout is shared with concurrent sessions and worktrees (`.git` is
+# common to all of them), so no hook here may write to a tracked file, run
+# `cargo fmt --all` as a fixer, stage anything, or touch the stash. A hook that
+# "helpfully" reformats would sweep another session's in-progress work.
+#
+# Bootstrap: `lefthook install`. If hooks appear to do nothing, check
+# `git config core.hooksPath` — a stale absolute path silently disables every
+# hook in the repository.
+
+pre-commit:
+  parallel: true
+  jobs:
+    # Whole-repo `cargo fmt --all -- --check` belongs in pre-push, not here:
+    # it fails on drift in files another session left dirty, which just trains
+    # everyone to pass --no-verify. Staged files only keeps this honest.
+    #
+    # `third_party/` is vendored and is not a workspace member, so
+    # `cargo fmt --all` never sees it and it is not rustfmt-clean. Excluded so
+    # the hook agrees exactly with the CI gate.
+    - name: rustfmt-staged
+      glob: "*.rs"
+      exclude:
+        - "third_party/**/*.rs"
+      run: rustfmt --edition 2021 --check {staged_files}
+
+    # `content/` is a pinned, read-only parity submodule and the engine's data
+    # root. Staging it is always a mistake. Note this deliberately reads the
+    # index rather than `git status`, which errors out on the `content` symlink
+    # that worktrees use and can truncate its own output.
+    - name: no-content-in-index
+      run: |
+        if git diff --cached --name-only | grep -qE '^content(/|$)'; then
+          echo "lefthook: refusing to commit content/ — it is pinned read-only parity input."
+          echo "           unstage it with: git restore --staged content"
+          exit 1
+        fi
+
+commit-msg:
+  # Merges and rebases generate their own subjects ("Merge branch 'main' into
+  # ...", "fixup! ..."), which the rule below would reject.
+  skip:
+    - merge
+    - rebase
+  jobs:
+    # CLAUDE.md: Conventional Commits, no scope, subject line only. Structural
+    # changes go under `refactor:`; behavioural work uses the rest.
+    - name: conventional-subject-only
+      run: |
+        message="{1}"
+        subject="$(sed -n '1p' "$message")"
+
+        case "$subject" in
+          Merge*|Revert*|fixup!*|squash!*) exit 0 ;;
+        esac
+
+        if ! printf '%s' "$subject" | grep -qE '^(feat|fix|refactor|perf|test|docs|chore|ci)!?: .+'; then
+          echo "lefthook: subject must be '<type>: <description>' with no scope."
+          echo "           types: feat fix refactor perf test docs chore ci"
+          echo "           got: $subject"
+          exit 1
+        fi
+
+        # Strip trailing blank lines git itself adds, then require a single line.
+        if [ "$(sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba' "$message" | grep -c '')" -ne 1 ]; then
+          echo "lefthook: subject line only — no body, no footer."
+          exit 1
+        fi
+
+pre-push:
+  jobs:
+    # Cheap (~4s, rustfmt only parses) and currently clean, so it stays clean.
+    # This is the whole-repo check the staged-only pre-commit job cannot do, and
+    # it is what keeps the `formatting` CI job green.
+    - name: rustfmt-workspace
+      run: cargo fmt --all -- --check
+
+# `cargo dev-check` is deliberately NOT a hook. Measured in a worktree with a
+# warm target dir: 187s wall, and it `bail!`s on budget exhaustion
+# (xtask/src/dev_check.rs:1519) — so `--budget-seconds 90` exits 1 with zero
+# failures, i.e. it would reject every push. It is also unavoidably heavy here:
+# the `content` symlink that worktrees use reads as a changed path, which pulls
+# in the content-gated replay and scenario suites on every run.
+#
+# Run it by hand before opening a pull request instead:
+#   cargo dev-check --base origin/main
+# CI's focused-feedback job runs it unbounded on every push.

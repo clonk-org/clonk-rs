@@ -62,6 +62,33 @@ Separate **structural** changes (rename/extract/move, no behavior change) from
 - This checkout is shared with concurrent sessions: run `git diff --stat` and
   stage explicit paths — never `git add -A`. Never stage `content/`.
 
+### Local hooks
+
+`lefthook.yml` enforces the two rules above mechanically — rustfmt on staged
+`.rs` files, a subject-line-only Conventional Commit, no `content/` in the
+index, and `cargo fmt --all -- --check` on push. Bootstrap with:
+
+```sh
+lefthook install
+```
+
+Two traps, both already hit here:
+
+- If hooks appear to do nothing, check `git config core.hooksPath`. A stale
+  absolute path silently disables every hook — and `lefthook install` will
+  happily *create* that directory and install into it instead of `.git/hooks`.
+- In a worktree, lefthook's own `git status --short` probe fails on the
+  `content` symlink (`expected submodule path 'content' not to be a symbolic
+  link`). The jobs still run correctly and the error is only noise, but it means
+  lefthook cannot detect partially staged files here — so never add a job that
+  rewrites files or sets `stage_fixed`.
+
+`cargo dev-check` is deliberately not a hook: 187s warm, and it exits non-zero
+on budget exhaustion. Run it by hand before opening a pull request.
+
+Hooks are advisory (`--no-verify` exists, and agents drive git
+non-interactively). CI remains the gate.
+
 ## Rust style
 
 - Prefer functional combinators (`map`/`and_then`/`unwrap_or`/`ok_or`/`filter`)
