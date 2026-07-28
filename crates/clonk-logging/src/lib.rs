@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::Path,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -121,17 +121,25 @@ fn install(
     capture: Option<ConsoleLogCapture>,
     game_log: Option<GameLogCapture>,
 ) -> Result<(), TryInitError> {
-    let diagnostics = io::stderr.and(Optional(file.map(Mutex::new)));
     let gui = Optional(capture).and(message_board_sink(game_log));
     tracing_subscriber::registry()
         .with(env_filter(default_level))
         .with(
             fmt::layer()
-                .with_writer(diagnostics)
-                .with_ansi(false)
+                .with_writer(io::stderr)
+                // Colour helps a developer reading a terminal and corrupts
+                // every other consumer, so it follows the stream itself.
+                .with_ansi(io::stderr().is_terminal())
                 .with_target(false)
                 .with_level(true),
         )
+        .with(file.map(|file| {
+            fmt::layer()
+                .with_writer(Mutex::new(file))
+                .with_ansi(false)
+                .with_target(false)
+                .with_level(true)
+        }))
         .with(fmt::layer().with_writer(gui).event_format(GuiSinkFormat))
         .try_init()
 }
@@ -327,13 +335,9 @@ fn env_filter(default_level: &'static str) -> EnvFilter {
 }
 
 fn init_with_default_level(default_level: &'static str) {
-    INITIALIZED.get_or_init(|| {
-        let _ = fmt()
-            .with_env_filter(env_filter(default_level))
-            .with_target(false)
-            .with_level(true)
-            .try_init();
-    });
+    if claim_initialization().is_ok() {
+        let _ = install(default_level, None, None, None);
+    }
 }
 
 #[doc(hidden)]
