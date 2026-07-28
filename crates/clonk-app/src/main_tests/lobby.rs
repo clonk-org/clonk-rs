@@ -10975,6 +10975,122 @@
         assert!(parameters.teams.teams[1].player_ids.is_empty());
     }
 
+    // C4Menu::Execute refills every active menu when Game.iTick35 wraps
+    // (C4Menu.cpp:990-1000), and C4MainMenu's team case rebuilds every caption
+    // plus the generated-team row from live state (C4MainMenu.cpp:175-232).
+    // ClearItems keeps the numeric selection; only AdjustSelection clamps it
+    // (C4Menu.cpp:947-987).
+    #[test]
+    fn team_switch_menu_refills_membership_and_preserves_selection_like_tick35() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        app.engine
+            .player_mut(owner)
+            .expect("sandbox player")
+            .set_name(clonk_script::c4_string_from_bytes(b"Chooser"));
+        app.engine.set_teams(vec![
+            clonk_engine::TeamInfo::new(1, "Alpha", 0x0011_2233),
+            clonk_engine::TeamInfo::new(2, "Beta", 0x0044_5566),
+        ]);
+        let mut configuration = app.engine.team_configuration();
+        configuration.allow_team_switch = true;
+        app.engine.set_team_configuration(configuration);
+
+        app.apply_ingame_menu_action_for_player(owner, MenuAction::ActivateTeamSelection)
+            .expect("open the mid-round team switch page");
+        {
+            let menu = app.ingame_menu.get(owner).expect("team switch page");
+            assert_eq!(menu.page(), ingame_menu::MenuPage::TeamSelection);
+            assert!(menu.is_team_switch());
+            assert_eq!(
+                menu.items()
+                    .iter()
+                    .map(|item| item.caption.clone())
+                    .collect::<Vec<_>>(),
+                ["Alpha", "Beta"]
+            );
+        }
+        app.ingame_menu
+            .get_mut(owner)
+            .expect("team switch page")
+            .set_selection(1);
+
+        // Membership changes without any menu control executing.
+        app.engine
+            .player_mut(owner)
+            .expect("sandbox player")
+            .set_team(Some(2));
+
+        assert_eq!(
+            app.ingame_menu.get(owner).expect("team switch page").items()[1].caption,
+            "Beta",
+            "native waits for the periodic refill"
+        );
+        app.refresh_team_menus();
+        let menu = app.ingame_menu.get(owner).expect("refilled page");
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.caption.clone())
+                .collect::<Vec<_>>(),
+            ["Alpha", "Beta (Chooser)"]
+        );
+        assert!(
+            menu.is_team_switch(),
+            "a refill keeps dispatching TeamSwitch:<id>"
+        );
+        assert_eq!(menu.selection(), 1, "ClearItems(false) keeps the row index");
+
+        // Auto-generated teams add the New Team row only while no configured
+        // team is empty (C4MainMenu.cpp:182-197), so the row appears and
+        // disappears across refills.
+        let mut configuration = app.engine.team_configuration();
+        configuration.auto_generate_teams = true;
+        app.engine.set_team_configuration(configuration);
+        app.refresh_team_menus();
+        assert_eq!(
+            app.ingame_menu
+                .get(owner)
+                .expect("refilled page")
+                .items()
+                .len(),
+            2,
+            "team Alpha is still empty, so no New Team row is offered"
+        );
+
+        app.engine.set_teams(vec![
+            clonk_engine::TeamInfo::new(1, "Alpha", 0x0011_2233).with_player_ids(vec![41]),
+            clonk_engine::TeamInfo::new(2, "Beta", 0x0044_5566).with_player_ids(vec![42]),
+        ]);
+        app.refresh_team_menus();
+        let menu = app.ingame_menu.get(owner).expect("refilled page");
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.action.clone())
+                .collect::<Vec<_>>(),
+            [
+                MenuAction::SwitchTeam(1),
+                MenuAction::SwitchTeam(2),
+                MenuAction::SwitchTeam(-1),
+            ]
+        );
+        assert_eq!(menu.selection(), 1);
+
+        // A shrinking refill clamps an out-of-range selection exactly like
+        // AdjustSelection.
+        app.ingame_menu
+            .get_mut(owner)
+            .expect("team switch page")
+            .set_selection(2);
+        app.engine
+            .set_teams(vec![clonk_engine::TeamInfo::new(1, "Alpha", 0x0011_2233)]);
+        app.refresh_team_menus();
+        let menu = app.ingame_menu.get(owner).expect("refilled page");
+        assert_eq!(menu.items().len(), 1);
+        assert_eq!(menu.selection(), 0);
+    }
+
     #[test]
     fn l135_team_selection_entries_cache_icon_specs_and_player_info_occupancy() {
         let mut app = new_running_sandbox_app();
@@ -11274,8 +11390,15 @@
                 .all(|owner| app.ingame_menu_belongs_to(owner)),
             "both local players retain their own initial team menu"
         );
+        // The team page is a five-column C4MN_Style_Normal grid, so COM_MenuDown
+        // on a two-item menu computes iData = 0 and MoveSelection returns
+        // without moving; COM_MenuRight is the within-row step
+        // (C4Menu.cpp:444-473).
         assert!(app
             .handle_menu_command(first, ControlCommand::MenuDown, CommandKind::Press,)
+            .expect("first player consumes the vertical command"));
+        assert!(app
+            .handle_menu_command(first, ControlCommand::MenuRight, CommandKind::Press,)
             .expect("first player navigates own menu"));
         assert!(app
             .handle_menu_command(first, ControlCommand::MenuEnter, CommandKind::Press,)

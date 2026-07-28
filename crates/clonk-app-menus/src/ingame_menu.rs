@@ -519,6 +519,11 @@ pub struct IngameMenuState {
     /// Normal menus keep their initialized row count when a refill shrinks;
     /// C4Menu only invalidates `LocationSet` on growth (C4Menu.cpp:961-968).
     normal_lines: Cell<Option<i32>>,
+    /// `Alignment == 0`: `InitLocation` centers the menu in the viewport
+    /// instead of anchoring it at `Left|Bottom` (C4Menu.cpp:722-741). Every
+    /// C4MainMenu page sets `Left|Bottom`; only the initial team selection
+    /// leaves the alignment at zero (C4Player.cpp:1802).
+    centered: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -554,6 +559,7 @@ impl IngameMenuState {
             location: Cell::new(None),
             last_area: Cell::new(None),
             normal_lines: Cell::new(None),
+            centered: false,
         }
     }
 
@@ -572,8 +578,8 @@ impl IngameMenuState {
         self.player
     }
 
-    fn team_menu(teams: &[TeamSelectionEntry], switching: bool, return_to_main: bool) -> Self {
-        let items = teams
+    fn team_items(teams: &[TeamSelectionEntry], switching: bool) -> Vec<MenuItem> {
+        teams
             .iter()
             .map(|team| {
                 MenuItem::new(
@@ -587,15 +593,58 @@ impl IngameMenuState {
                     Some(&format!("Join team {}", team.caption)),
                 )
             })
-            .collect();
-        Self::new(
+            .collect()
+    }
+
+    fn team_menu(teams: &[TeamSelectionEntry], switching: bool, return_to_main: bool) -> Self {
+        let mut menu = Self::new(
             MenuPage::TeamSelection,
             "Select team",
             MenuSymbol::GuiIcon(ICO_TEAM),
-            items,
+            Self::team_items(teams, switching),
             false,
             return_to_main.then_some(MenuAction::ActivateMain),
-        )
+        );
+        // `ActivateMenuTeamSelection` passes no `iStyle`, so both team menus
+        // take `DoInitRefSym`'s `C4MN_Style_Normal` default
+        // (C4Player.cpp:1801; C4Menu.h:221). Only the alignment differs:
+        // `SetAlignment(fSwitch ? Left|Bottom : 0)` (C4Player.cpp:1802), and
+        // `fSwitch` is false exactly while the player is still in
+        // PS_TeamSelection.
+        menu.style = MenuStyle::Normal;
+        menu.centered = !switching;
+        menu
+    }
+
+    /// Native `ClearItems(false)` + `AdjustSelection` refill of an open team
+    /// page. `C4Menu::Execute` runs this for every active menu whenever
+    /// `Game.iTick35` wraps (C4Menu.cpp:990-1000), so membership captions and
+    /// the generated-team row follow live joins and switches.
+    pub fn refill_team(&mut self, teams: &[TeamSelectionEntry], switching: bool) {
+        debug_assert_eq!(self.page, MenuPage::TeamSelection);
+        let previous_count = self.items.len();
+        self.items = Self::team_items(teams, switching);
+        if self.selection >= self.items.len() {
+            self.selection = self.items.len().saturating_sub(1);
+            self.time_on_selection = 0;
+            self.scroll_selection.set(None);
+        } else if previous_count == 0 && !self.items.is_empty() {
+            self.time_on_selection = 0;
+        }
+        if self.items.len() > previous_count {
+            self.location.set(None);
+            self.last_area.set(None);
+            self.normal_lines.set(None);
+            self.scroll_selection.set(None);
+        }
+    }
+
+    /// Whether the open team page dispatches `TeamSwitch:` rather than
+    /// `TeamSel:` actions, which is also what its refill must reproduce.
+    pub fn is_team_switch(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item.action, MenuAction::SwitchTeam(_)))
     }
 
     /// Initial `C4Player::ActivateMenuTeamSelection(false)` and
@@ -1481,10 +1530,14 @@ impl IngameMenuState {
         let width = client_width + 2 * MN_FRAME_WIDTH;
         let height = lines * item_height + title_height + extra_height + MN_FRAME_WIDTH;
 
-        // Alignment Left|Bottom (C4Menu.cpp:734-745): X = C4SymbolSize,
-        // Y = areaH - C4SymbolSize - height, centered when oversized.
-        let mut x = SYMBOL_SIZE;
-        let mut y = area_h - SYMBOL_SIZE - height;
+        // Alignment 0 centers in the viewport; Left|Bottom sets
+        // X = C4SymbolSize and Y = areaH - C4SymbolSize - height. Either way an
+        // oversized menu falls back to centered (C4Menu.cpp:722-741).
+        let (mut x, mut y) = if self.centered {
+            ((area_w - width) / 2, (area_h - height) / 2)
+        } else {
+            (SYMBOL_SIZE, area_h - SYMBOL_SIZE - height)
+        };
         if width > area_w - 2 * SYMBOL_SIZE {
             x = (area_w - width) / 2;
         }
@@ -2593,7 +2646,10 @@ mod tests {
         let mut menu = IngameMenuState::team_selection_menu(&teams);
 
         assert_eq!(menu.page(), MenuPage::TeamSelection);
-        assert_eq!(menu.caption(), "Select team");
+        // C4MN_Style_Normal installs the selected row's caption as the title
+        // (C4Menu.cpp:580-586); the "Select team" text is only the fallback
+        // for an empty selection.
+        assert_eq!(menu.caption(), "Blue Team (Clonko)");
         assert_eq!(captions(&menu), vec!["Blue Team (Clonko)", "Red Team"]);
         assert_eq!(menu.items()[0].action, MenuAction::SelectTeam(7));
         assert_eq!(menu.items()[1].action, MenuAction::SelectTeam(3));
@@ -2918,6 +2974,59 @@ mod tests {
             3,
             "growth invalidates LocationSet and recomputes the normal grid"
         );
+    }
+
+    // Both team pages take DoInitRefSym's C4MN_Style_Normal default
+    // (C4Player.cpp:1801; C4Menu.h:221), and only the switch page sets
+    // `Alignment = Left|Bottom` — the initial selection leaves it at zero,
+    // which centers it (C4Player.cpp:1802; C4Menu.cpp:722-741).
+    #[test]
+    fn l175_team_pages_use_the_normal_grid_and_only_switching_anchors_bottom_left() {
+        use clonk_graphics::BitmapFont;
+
+        let teams = (0..7)
+            .map(|id| TeamSelectionEntry {
+                id,
+                caption: format!("Team {id}"),
+                icon_spec: None,
+                color: 0,
+                has_participants: false,
+            })
+            .collect::<Vec<_>>();
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let gfx = IngameMenuGraphics::default();
+        let area = Rect::new(0, 0, 640, 480);
+
+        let initial = IngameMenuState::team_selection_menu(&teams);
+        let switching = IngameMenuState::team_switch_menu(&teams);
+        let initial_bounds = initial.layout(area, &font, &gfx).bounds;
+        let switch_bounds = switching.layout(area, &font, &gfx).bounds;
+
+        // Five-column normal grid, not the one-column context list.
+        assert_eq!(initial.layout(area, &font, &gfx).lines, 2);
+        assert_eq!(switch_bounds.width, initial_bounds.width);
+        assert_eq!(
+            initial_bounds.x,
+            (640 - initial_bounds.width as i32) / 2,
+            "alignment zero centers horizontally"
+        );
+        assert_eq!(
+            initial_bounds.y,
+            (480 - initial_bounds.height as i32) / 2,
+            "alignment zero centers vertically"
+        );
+        assert_eq!(switch_bounds.x, SYMBOL_SIZE);
+        assert_eq!(
+            switch_bounds.y,
+            480 - SYMBOL_SIZE - switch_bounds.height as i32
+        );
+
+        // Vertical movement steps a whole grid row on both pages.
+        let mut initial = initial;
+        initial.set_selection(0);
+        initial.move_selection_vertical(1);
+        assert_eq!(initial.selection(), 5);
     }
 
     #[test]

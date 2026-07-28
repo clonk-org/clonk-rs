@@ -591,6 +591,30 @@ impl GameApp {
         self.ingame_menu.replace(player, menu);
     }
 
+    /// `C4Menu::Execute` refills *every* active menu when `Game.iTick35`
+    /// wraps, not just the hostility page (C4Menu.cpp:990-1000), so an open
+    /// team page follows live joins, switches and the generated-team row.
+    pub(crate) fn refresh_team_menus(&mut self) {
+        let players = self
+            .ingame_menu
+            .iter()
+            .filter_map(|(player, menu)| {
+                (menu.page() == ingame_menu::MenuPage::TeamSelection)
+                    .then_some((player, menu.is_team_switch()))
+            })
+            .collect::<Vec<_>>();
+        if players.is_empty() {
+            return;
+        }
+        let entries = self.team_selection_entries();
+        self.cache_team_selection_icons(&entries);
+        for (player, switching) in players {
+            if let Some(menu) = self.ingame_menu.get_mut(player) {
+                menu.refill_team(&entries, switching);
+            }
+        }
+    }
+
     pub(crate) fn refresh_hostility_menus(&mut self) {
         let players = self
             .ingame_menu

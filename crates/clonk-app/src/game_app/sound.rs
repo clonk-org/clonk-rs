@@ -861,11 +861,12 @@ impl GameApp {
                     self.handle_game_over()?;
                 }
                 self.refresh_object_menu();
-                // C4Menu::Execute refills permanent hostility pages whenever
+                // C4Menu::Execute refills every active menu whenever
                 // Game.iTick35 wraps, picking up joins, removals and changed
-                // visibility even when no hostility control just executed.
+                // visibility even when no control just executed.
                 if self.engine.frame().is_multiple_of(35) {
                     self.refresh_hostility_menus();
+                    self.refresh_team_menus();
                 }
                 // Tooltip delay counter (C4Menu::Draw, C4Menu.cpp:805).
                 for menu in self.ingame_menu.values_mut() {

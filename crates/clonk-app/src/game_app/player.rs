@@ -662,12 +662,6 @@ impl GameApp {
             .ingame_menu
             .get(owner)
             .filter(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection);
-        let selected_team = existing
-            .and_then(|menu| menu.items().get(menu.selection()))
-            .and_then(|item| match &item.action {
-                MenuAction::SelectTeam(team) => Some(*team),
-                _ => None,
-            });
         let unchanged = existing.is_some_and(|menu| {
             menu.items().len() == entries.len()
                 && menu.items().iter().zip(&entries).all(|(item, entry)| {
@@ -676,20 +670,26 @@ impl GameApp {
                         && item.action == MenuAction::SelectTeam(entry.id)
                 })
         });
+        let already_open = existing.is_some();
         if unchanged {
             return;
         }
         self.cache_team_selection_icons(&entries);
+        // An already-open page is refilled in place. C4Menu keeps the menu
+        // instance across `ClearItems(false)`, so its dragged position,
+        // scroll, tooltip age and numeric selection survive; only
+        // `AdjustSelection` clamps an out-of-range row (C4Menu.cpp:947-973).
+        if already_open {
+            if let Some(menu) = self.ingame_menu.get_mut(owner) {
+                menu.refill_team(&entries, false);
+            }
+            return;
+        }
         if owner == self.local_owner {
             self.close_object_menu();
         }
-        let mut menu = IngameMenuState::team_selection_menu(&entries);
-        if let Some(selection) =
-            selected_team.and_then(|team| entries.iter().position(|entry| entry.id == team))
-        {
-            menu.set_selection(selection);
-        }
-        self.ingame_menu.replace(owner, Some(menu));
+        self.ingame_menu
+            .replace(owner, Some(IngameMenuState::team_selection_menu(&entries)));
     }
 
     /// `C4Player::Execute`'s PS_TeamSelection branch: a sole joinable team
