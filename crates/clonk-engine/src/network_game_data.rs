@@ -1605,10 +1605,7 @@ mod tests {
             message_board_commands: Vec::new(),
             script_go: true,
             script_counter: 15,
-            environment: EnvironmentSettings::default(),
-            gamma: GammaControlState::default(),
-            landscape: None,
-            compiled_sections: InitialNetworkCompiledSections::default(),
+            ..Default::default()
         };
         data.environment.season = 16;
         data.environment.year_speed = 17;

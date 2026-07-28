@@ -188,15 +188,11 @@ pub fn build_host_resource_core(
     let mut core = NetworkResourceCore {
         resource_type: spec.resource_type as u8,
         id: spec.resource_id,
-        derived_id: -1,
-        loadable: false,
-        file_size: u32::MAX,
-        file_crc: u32::MAX,
         chunk_size: STOCK_CHUNK_SIZE,
         contents_crc,
-        file_sha: None,
         filename: spec.resource_name,
         author,
+        ..Default::default()
     };
 
     // AddByFile deliberately skips GetStandalone for NRT_System, so the core

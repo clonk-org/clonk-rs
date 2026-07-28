@@ -1544,24 +1544,16 @@ RandomTeamCount=2
             crate::player_file::CrewInfo {
                 id: "CLNK".to_string(),
                 name: name.to_string(),
-                death_message: String::new(),
                 core: Default::default(),
-                rank: 0,
                 rank_name: "Clonk".to_string(),
-                experience: 0,
                 rounds,
                 physical: Default::default(),
-                death_count: 0,
                 total_playing_time,
-                birthday: 0,
-                age: 0,
-                participation: 1,
                 in_action,
                 was_in_action,
                 in_action_time,
-                has_died: false,
-                extra_data: Vec::new(),
                 portraits: Default::default(),
+                ..Default::default()
             }
         }
 

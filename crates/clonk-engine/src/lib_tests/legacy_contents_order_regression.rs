@@ -300,24 +300,11 @@ fn objects_info_name_binds_the_named_idle_crew_entry_after_players_exist() {
         vec![player_file::CrewInfo {
             id: "OTHR".to_string(),
             name: "Captain".to_string(),
-            death_message: String::new(),
-            core: CrewInfoCoreFields::default(),
             rank: 3,
             rank_name: "Captain".to_string(),
             experience: 123,
-            rounds: 0,
             physical,
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
-            participation: 1,
-            in_action: false,
-            was_in_action: false,
-            in_action_time: 0,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: CrewPortraitState::default(),
+            ..Default::default()
         }],
     );
     engine.crew_info_order.insert(0, vec![0]);

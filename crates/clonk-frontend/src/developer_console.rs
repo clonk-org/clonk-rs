@@ -2535,26 +2535,21 @@ mod tests {
             caption: "Round.c4s".to_owned(),
             current_scenario_path: Some(PathBuf::from("Round.c4s")),
             game_open: true,
-            lobby_active: false,
-            editing: true,
             halted: false,
             runtime_record_possible: true,
-            network_enabled: false,
-            network_host: false,
             players: vec![ConsolePlayerRow {
                 number: 3,
                 quit_label: "Remove Ada".to_owned(),
                 quit_enabled: true,
                 viewport_label: "New for Ada".to_owned(),
             }],
-            clients: Vec::new(),
-            completions: Vec::new(),
             edit_mode: ConsoleEditMode::Edit,
             cursor_text: "X: 12 Y: 34".to_owned(),
             frame: 123,
             script_counter: 7,
             time_seconds: 3_661,
             frames_per_second: 36,
+            ..Default::default()
         }
     }
 

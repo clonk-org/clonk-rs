@@ -8837,7 +8837,6 @@ mod tests {
             .parameters
             .clone();
         let summary = clonk_network::NetworkGameReference {
-            icon: 0,
             title: clonk_resources::decode_legacy_script_text(parameters.title.as_bytes()),
             host_name: clonk_resources::decode_legacy_script_text(
                 config.local_core.name.as_bytes(),
@@ -8847,12 +8846,8 @@ mod tests {
             ),
             state: "Lobby".to_string(),
             control_mode: config.initial_status.control_mode,
-            time: 0,
             start_time: 1,
-            comment: String::new(),
             join_allowed: false,
-            password_needed: false,
-            official_server: false,
             use_fair_crew: parameters.use_fair_crew,
             goals: parameters
                 .goals
@@ -8864,34 +8859,21 @@ mod tests {
                 parameters.league_address.as_bytes(),
             ),
             max_players: parameters.max_players,
-            player_names: Vec::new(),
             game: "LegacyClonk".to_string(),
             version: clonk_network::CURRENT_GAME_VERSION,
             build: clonk_network::CURRENT_GAME_BUILD,
-            addresses: Vec::new(),
             source_address: SocketAddr::V6(std::net::SocketAddrV6::new(
                 std::net::Ipv6Addr::UNSPECIFIED,
                 0,
                 0,
                 0,
             )),
-            netpuncher_ipv4: 0,
-            netpuncher_ipv6: 0,
-            netpuncher_address: String::new(),
-            tcp_addresses: Vec::new(),
+            ..Default::default()
         };
         clonk_network::HostGameReference::new(
             summary,
             clonk_network::HostGameReferenceMetadata {
-                icon: 0,
-                time: 0,
-                frame: 0,
-                league_performance: 0,
-                comment: clonk_engine::LegacyCString::default(),
-                addresses: Vec::new(),
-                netpuncher_ipv4: 0,
-                netpuncher_ipv6: 0,
-                netpuncher_address: clonk_engine::LegacyCString::default(),
+                ..Default::default()
             },
             parameters,
         )

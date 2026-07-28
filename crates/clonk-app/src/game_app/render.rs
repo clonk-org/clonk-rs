@@ -132,8 +132,6 @@ impl GameApp {
                 .unwrap_or_default();
             self.ingame_menu_gfx = Some(IngameMenuGraphics {
                 hud: hud.as_ref().clone(),
-                owner_colors: HashMap::new(),
-                hostility_big_icons: HashMap::new(),
                 menu: hud
                     .menu
                     .clone()
@@ -149,19 +147,13 @@ impl GameApp {
                     .clone()
                     .or_else(|| self.assets.dialog_image("Player.png")),
                 caption_bar: self.assets.dialog_image("GUICaption.png"),
-                definition_icons: HashMap::new(),
-                team_icons: HashMap::new(),
-                font_images: HashMap::new(),
-                frame_decoration: None,
-                menu_location: None,
-                menu_scroll_y: 0,
                 show_commands: self.display_flags.show_commands,
                 show_portraits: self.display_flags.portraits,
-                show_close_button: false,
                 show_command_keys: self.display_flags.show_command_keys,
                 throw_key,
                 special2_key,
                 dig_key,
+                ..Default::default()
             });
         }
         self.ingame_menu_gfx

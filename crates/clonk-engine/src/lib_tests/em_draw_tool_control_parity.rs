@@ -12,15 +12,11 @@ fn control(action: u8) -> EmDrawToolControlData {
     EmDrawToolControlData {
         action,
         mode: LANDSCAPE_MODE_EXACT,
-        x: 0,
-        y: 0,
-        x2: 0,
-        y2: 0,
         grade: 1,
-        ift: false,
         material: bytes("Earth"),
         texture: bytes("Rough"),
         by_client: 7,
+        ..Default::default()
     }
 }
 

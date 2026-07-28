@@ -1476,7 +1476,6 @@ global func InitializePlayer(int player)
             let crew_info = |id: &str, name: &str, rank: i32| player_file::CrewInfo {
                 id: id.to_string(),
                 name: name.to_string(),
-                death_message: String::new(),
                 core: Default::default(),
                 rank,
                 rank_name: match rank {
@@ -1485,20 +1484,8 @@ global func InitializePlayer(int player)
                     _ => "Clonk",
                 }
                 .to_string(),
-                experience: 0,
-                rounds: 0,
-                physical: PhysicalInfo::default(),
-                death_count: 0,
-                total_playing_time: 0,
-                birthday: 0,
-                age: 0,
-                participation: 1,
-                in_action: false,
-                was_in_action: false,
-                in_action_time: 0,
-                has_died: false,
-                extra_data: Vec::new(),
                 portraits: Default::default(),
+                ..Default::default()
             };
             let player = engine
                 .join_player(lifecycle_join_config(

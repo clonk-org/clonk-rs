@@ -2523,14 +2523,11 @@
             720,
             AudioOptions {
                 max_channels: 37,
-                prefer_linear_resampling: false,
                 sound_enabled: false,
-                music_enabled: true,
                 menu_music_enabled: false,
-                menu_sound_enabled: true,
-                mute_sound_command: false,
                 sound_volume: 0.27,
                 music_volume: 0.83,
+                ..Default::default()
             },
             Some(&paths),
             RuntimeConfig {

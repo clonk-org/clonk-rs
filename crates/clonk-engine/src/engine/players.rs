@@ -1608,24 +1608,10 @@ impl Engine {
         roster.push(player_file::CrewInfo {
             id: id.to_string(),
             name,
-            death_message: String::new(),
             core,
-            rank: 0,
             rank_name,
-            experience: 0,
-            rounds: 0,
             physical,
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
-            participation: 1,
-            in_action: false,
-            was_in_action: false,
-            in_action_time: 0,
-            has_died: false,
-            extra_data: Vec::new(),
-            portraits: CrewPortraitState::default(),
+            ..Default::default()
         });
         let index = roster.len() - 1;
         self.crew_info_order

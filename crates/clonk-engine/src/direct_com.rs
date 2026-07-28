@@ -7869,24 +7869,13 @@ public func Activate(object clonk)
         let roster_entry = |name: &str, experience: i32| crate::player_file::CrewInfo {
             id: "Test".to_string(),
             name: name.to_string(),
-            death_message: String::new(),
             core: Default::default(),
-            rank: 0,
             rank_name: "Clonk".to_string(),
             experience,
-            rounds: 0,
-            physical: PhysicalInfo::default(),
-            death_count: 0,
-            total_playing_time: 0,
-            birthday: 0,
-            age: 0,
-            participation: 1,
             in_action: true,
             was_in_action: true,
-            in_action_time: 0,
-            has_died: false,
-            extra_data: Vec::new(),
             portraits: Default::default(),
+            ..Default::default()
         };
         engine
             .crew_rosters

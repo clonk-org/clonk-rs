@@ -7354,13 +7354,10 @@ mod tests {
             total_playing_time: 1_234,
             pref_color: 4,
             pref_color_dw: 0x00aa_bbcc,
-            pref_color2_dw: 0,
             pref_position: 2,
-            pref_control: 0,
-            pref_mouse: true,
             pref_control_style: true,
-            pref_auto_context_menu: false,
             crew: crew.clone(),
+            ..Default::default()
         };
         let join = JoinPlayerControlData {
             info_id: 7,

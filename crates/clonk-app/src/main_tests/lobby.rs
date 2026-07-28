@@ -12448,15 +12448,10 @@
                 clonk_engine::EmDrawToolControlData {
                     action: clonk_engine::EMDT_SET_MODE,
                     mode: clonk_engine::LANDSCAPE_MODE_EXACT,
-                    x: 0,
-                    y: 0,
-                    x2: 0,
-                    y2: 0,
-                    grade: 0,
-                    ift: false,
                     material: clonk_engine::LegacyCString::default(),
                     texture: clonk_engine::LegacyCString::default(),
                     by_client: 0,
+                    ..Default::default()
                 },
             )],
         )

@@ -2226,26 +2226,9 @@ mod tests {
             player.info_core,
             PlayerInfoCoreState {
                 pref_name: "Neuling".to_string(),
-                comment: String::new(),
-                rank: 0,
                 rank_name: "Rank".to_string(),
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                extra_data: Vec::new(),
-                pref_color: 0,
                 pref_color_dw: 0xff,
-                pref_color2_dw: 0,
                 pref_control: 1,
-                pref_control_style: false,
-                pref_control_style_value: 0,
-                pref_auto_context_menu: false,
-                pref_auto_context_menu_value: 0,
-                pref_position: 0,
-                pref_mouse: true,
-                pref_mouse_value: 1,
                 last_round: PlayerLastRoundState {
                     title: String::new(),
                     date: 0,
@@ -2257,6 +2240,7 @@ mod tests {
                     bonus: 0,
                     level: 0,
                 },
+                ..Default::default()
             }
         );
     }

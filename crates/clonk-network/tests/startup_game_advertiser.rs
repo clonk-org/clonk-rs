@@ -10,24 +10,13 @@ use clonk_network::{
 
 fn advertised_game() -> NetworkGameReference {
     NetworkGameReference {
-        icon: 0,
         title: "Gold Rush".into(),
         host_name: "Host One".into(),
         host_nick: "OracleNick".into(),
         state: "Lobby".into(),
         control_mode: 2,
-        time: 0,
         start_time: 1234,
-        comment: String::new(),
-        join_allowed: true,
-        password_needed: false,
-        official_server: false,
-        use_fair_crew: false,
-        goals: Vec::new(),
-        league: String::new(),
-        league_address: String::new(),
         max_players: 13,
-        player_names: Vec::new(),
         game: "LegacyClonk".into(),
         version: [4, 9, 11, 0],
         build: 362,
@@ -40,6 +29,7 @@ fn advertised_game() -> NetworkGameReference {
         netpuncher_ipv6: 0x9abc_def0,
         netpuncher_address: "puncher.invalid:11115".into(),
         tcp_addresses: vec!["0.0.0.0:11112".parse().unwrap()],
+        ..Default::default()
     }
 }
 

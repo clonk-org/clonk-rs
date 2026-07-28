@@ -377,20 +377,10 @@ mod tests {
         let player_file = PlayerFile {
             info_core: Default::default(),
             name: "Alice".to_string(),
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
             pref_color: 4,
             pref_color_dw: 0x12_34_56,
             pref_color2_dw: 0x00ab_cdef,
-            pref_position: 0,
-            pref_control: 0,
-            pref_mouse: true,
-            pref_control_style: false,
-            pref_auto_context_menu: false,
-            crew: Vec::new(),
+            ..Default::default()
         };
         let selected = super::SelectedClientPlayer::new(
             source_path.clone(),
@@ -466,20 +456,9 @@ mod tests {
             PlayerFile {
                 info_core: Default::default(),
                 name: "Runtime".to_string(),
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
                 pref_color: 4,
                 pref_color_dw: 0x65_43_21,
-                pref_color2_dw: 0,
-                pref_position: 0,
-                pref_control: 0,
-                pref_mouse: true,
-                pref_control_style: false,
-                pref_auto_context_menu: false,
-                crew: Vec::new(),
+                ..Default::default()
             },
         );
         let resource = NetworkResourceCore {
@@ -539,20 +518,8 @@ mod tests {
         let player = |name: &str| PlayerFile {
             info_core: Default::default(),
             name: name.to_string(),
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            pref_color: 0,
             pref_color_dw: 0x11_22_33,
-            pref_color2_dw: 0,
-            pref_position: 0,
-            pref_control: 0,
-            pref_mouse: true,
-            pref_control_style: false,
-            pref_auto_context_menu: false,
-            crew: Vec::new(),
+            ..Default::default()
         };
         let selected = [
             super::SelectedClientPlayer::new(
@@ -628,20 +595,8 @@ mod tests {
         let player_file = |name: &str| PlayerFile {
             info_core: Default::default(),
             name: name.to_string(),
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            pref_color: 0,
             pref_color_dw: 0x11_22_33,
-            pref_color2_dw: 0,
-            pref_position: 0,
-            pref_control: 0,
-            pref_mouse: true,
-            pref_control_style: false,
-            pref_auto_context_menu: false,
-            crew: Vec::new(),
+            ..Default::default()
         };
         let raw = |bytes: &[u8]| LegacyCString::from_bytes(bytes.to_vec()).unwrap();
         let players = vec![
