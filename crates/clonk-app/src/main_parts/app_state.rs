@@ -422,6 +422,9 @@ pub(crate) struct GameApp {
     /// Frozen `C4GameParameters::AutoFrameSkip` for the active round. Unlike
     /// the startup option, this must not change while a game is running.
     pub(crate) auto_frame_skip: bool,
+    /// Presentation detail the event loop's [`PresentationDetailGovernor`]
+    /// currently allows. Presentation only — never consulted by simulation.
+    pub(crate) presentation_detail: PresentationDetail,
     /// Process-local Config.Graphics.MaxRefreshDelay used by the application
     /// timer divisor. It is read once, then refreshed only after Options saves.
     pub(crate) max_refresh_delay_ms: u64,
@@ -2688,6 +2691,110 @@ impl AutomaticFrameSkip {
     ) {
         // Native uses `(pre_gfx + tick_delay) < now`, not `<=`.
         self.skip_next_graphics = enabled && graphics_duration > game_tick_delay;
+    }
+}
+
+/// How much presentation detail a machine that cannot draw fast enough gives
+/// up so the frame budget goes to simulation instead.
+///
+/// Both steps are things C++ already exposes as static `[Graphics]` config
+/// (`FireParticles`, `DisableGamma`); the divergence is choosing them
+/// automatically from measured cost. Nothing here reaches the simulation, so
+/// two clients at different detail levels stay in lockstep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PresentationDetail {
+    #[default]
+    Full,
+    /// Fire particles off. Each one is an independent unbatched draw call.
+    NoFireParticles,
+    /// ...and the monitor-gamma resolve dropped. That pass is a whole extra
+    /// full-screen fill doing three dependent texture fetches per pixel, which
+    /// is pure memory bandwidth on a tile-based GPU.
+    NoGammaPass,
+}
+
+impl PresentationDetail {
+    const LADDER: [Self; 3] = [Self::Full, Self::NoFireParticles, Self::NoGammaPass];
+
+    fn step_down(self) -> Self {
+        let rung = Self::LADDER.iter().position(|step| *step == self);
+        rung.and_then(|rung| Self::LADDER.get(rung + 1).copied())
+            .unwrap_or(self)
+    }
+
+    fn step_up(self) -> Self {
+        let rung = Self::LADDER.iter().position(|step| *step == self);
+        rung.filter(|rung| *rung > 0)
+            .and_then(|rung| Self::LADDER.get(rung - 1).copied())
+            .unwrap_or(Self::Full)
+    }
+
+    pub(crate) fn draws_fire_particles(self) -> bool {
+        self == Self::Full
+    }
+
+    pub(crate) fn resolves_monitor_gamma(self) -> bool {
+        self < Self::NoGammaPass
+    }
+}
+
+/// Consecutive graphics passes over budget before detail is reduced. Long
+/// enough that a shader compile or a texture upload cannot cost the player a
+/// visual feature.
+pub(crate) const DETAIL_STEP_DOWN_PASSES: u32 = 30;
+/// Consecutive comfortable passes before detail is restored. Deliberately much
+/// longer than the step down: re-adding cost is what caused the overrun.
+pub(crate) const DETAIL_STEP_UP_PASSES: u32 = 120;
+/// A pass only counts as comfortable below this share of the budget, so
+/// recovery cannot oscillate around the threshold that triggered it.
+const DETAIL_HEADROOM_PERCENT: u32 = 50;
+
+/// Picks a [`PresentationDetail`] from measured graphics cost, with hysteresis
+/// in both directions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PresentationDetailGovernor {
+    detail: PresentationDetail,
+    over_budget: u32,
+    comfortable: u32,
+}
+
+impl PresentationDetailGovernor {
+    pub(crate) fn detail(&self) -> PresentationDetail {
+        self.detail
+    }
+
+    /// Feed one completed graphics pass. `enabled` mirrors the same
+    /// `Graphics.AutoFrameSkip` game parameter that governs the existing
+    /// automatic skip; turning it off restores full detail at once.
+    pub(crate) fn record_graphics_pass(
+        &mut self,
+        enabled: bool,
+        graphics_duration: Duration,
+        budget: Duration,
+    ) {
+        if !enabled {
+            *self = Self::default();
+            return;
+        }
+        let comfortable_ceiling = budget
+            .saturating_mul(DETAIL_HEADROOM_PERCENT)
+            .checked_div(100)
+            .unwrap_or(Duration::ZERO);
+        if graphics_duration > budget {
+            self.comfortable = 0;
+            self.over_budget = self.over_budget.saturating_add(1);
+            if self.over_budget >= DETAIL_STEP_DOWN_PASSES {
+                self.over_budget = 0;
+                self.detail = self.detail.step_down();
+            }
+        } else if graphics_duration <= comfortable_ceiling {
+            self.over_budget = 0;
+            self.comfortable = self.comfortable.saturating_add(1);
+            if self.comfortable >= DETAIL_STEP_UP_PASSES {
+                self.comfortable = 0;
+                self.detail = self.detail.step_up();
+            }
+        }
     }
 }
 

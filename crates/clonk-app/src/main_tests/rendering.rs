@@ -626,6 +626,74 @@
     }
 
     #[test]
+    fn presentation_detail_steps_down_only_on_a_sustained_overrun() {
+        // Quality reduction must be invisible on hardware that copes: a single
+        // slow frame (a shader compile, a texture upload, an OS hiccup) must
+        // never cost the player fire particles.
+        let budget = Duration::from_millis(28);
+        let mut governor = PresentationDetailGovernor::default();
+        assert_eq!(governor.detail(), PresentationDetail::Full);
+
+        for _ in 0..DETAIL_STEP_DOWN_PASSES - 1 {
+            governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+            assert_eq!(
+                governor.detail(),
+                PresentationDetail::Full,
+                "an overrun shorter than the streak must not degrade anything"
+            );
+        }
+        governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+        assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+
+        // Still over budget after the first step: give up the gamma resolve
+        // pass too, then stop — there is nothing cheaper left to trade.
+        for _ in 0..DETAIL_STEP_DOWN_PASSES {
+            governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+        }
+        assert_eq!(governor.detail(), PresentationDetail::NoGammaPass);
+        for _ in 0..DETAIL_STEP_DOWN_PASSES * 4 {
+            governor.record_graphics_pass(true, Duration::from_millis(400), budget);
+        }
+        assert_eq!(
+            governor.detail(),
+            PresentationDetail::NoGammaPass,
+            "the ladder has a bottom; it must not wrap or keep counting"
+        );
+    }
+
+    #[test]
+    fn presentation_detail_recovers_only_with_real_headroom() {
+        let budget = Duration::from_millis(28);
+        let mut governor = PresentationDetailGovernor::default();
+        for _ in 0..DETAIL_STEP_DOWN_PASSES {
+            governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+        }
+        assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+
+        // Just inside budget is the deadband: recovering there would step back
+        // up into the very cost that caused the overrun and oscillate.
+        for _ in 0..DETAIL_STEP_UP_PASSES * 2 {
+            governor.record_graphics_pass(true, Duration::from_millis(27), budget);
+        }
+        assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+
+        // Comfortable headroom restores detail, one step at a time.
+        for _ in 0..DETAIL_STEP_UP_PASSES {
+            governor.record_graphics_pass(true, Duration::from_millis(5), budget);
+        }
+        assert_eq!(governor.detail(), PresentationDetail::Full);
+
+        // Disabling automatic degradation restores full detail immediately.
+        let mut governor = PresentationDetailGovernor::default();
+        for _ in 0..DETAIL_STEP_DOWN_PASSES * 2 {
+            governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+        }
+        assert_ne!(governor.detail(), PresentationDetail::Full);
+        governor.record_graphics_pass(false, Duration::from_millis(400), budget);
+        assert_eq!(governor.detail(), PresentationDetail::Full);
+    }
+
+    #[test]
     fn framebuffer_backends_widen_to_gl_before_giving_up() {
         use pixels::wgpu::Backends;
 

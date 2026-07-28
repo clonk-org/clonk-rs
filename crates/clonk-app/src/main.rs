@@ -532,6 +532,7 @@ fn main() -> Result<()> {
     let mut next_graphics_deadline = previous_instant + frame_schedule.refresh_interval;
     let mut automatic_frame_skip = AutomaticFrameSkip::default();
     let mut render_floor = RenderFloor::default();
+    let mut presentation_detail = PresentationDetailGovernor::default();
     let mut presentation_benchmark = presentation_benchmark_from_env();
     let presentation_benchmark_asserts_native_tick = presentation_benchmark_asserts_native_tick();
     let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
@@ -798,6 +799,12 @@ fn main() -> Result<()> {
                             );
                             render_floor
                                 .record_presentation(graphics_started, graphics_duration);
+                            presentation_detail.record_graphics_pass(
+                                app.mode == AppMode::Running && app.auto_frame_skip,
+                                graphics_duration,
+                                frame_schedule.simulation_interval,
+                            );
+                            app.presentation_detail = presentation_detail.detail();
                             if let Some(benchmark) = presentation_benchmark.as_mut() {
                                 let completed_at = Instant::now();
                                 benchmark.record_successful_presentation(
@@ -1001,6 +1008,12 @@ fn main() -> Result<()> {
                             frame_schedule.simulation_interval,
                         );
                         render_floor.record_presentation(graphics_started, graphics_duration);
+                        presentation_detail.record_graphics_pass(
+                            app.mode == AppMode::Running && app.auto_frame_skip,
+                            graphics_duration,
+                            frame_schedule.simulation_interval,
+                        );
+                        app.presentation_detail = presentation_detail.detail();
                         if let Some(benchmark) = presentation_benchmark.as_mut() {
                             let completed_at = Instant::now();
                             benchmark.record_successful_presentation(
@@ -1635,6 +1648,7 @@ impl GameApp {
             full_speed: false,
             frame_skip: 1,
             auto_frame_skip: configured_auto_frame_skip(&native_config),
+            presentation_detail: PresentationDetail::default(),
             max_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
             network_stats: None,
             network_stats_clients: HashSet::new(),
