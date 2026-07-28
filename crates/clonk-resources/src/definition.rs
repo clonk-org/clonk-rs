@@ -5529,7 +5529,12 @@ Entrance=1,2,,4
             }
             checked += expected.len();
         }
-        assert_eq!(checked, 85, "recursive shipped portrait census changed");
+        // The census tracks whatever the content submodule currently ships, so
+        // it moves whenever content does; 85 was the count before the packs that
+        // added the ClonkMars and EkeReloaded portraits. The assertion earns its
+        // keep by catching a *silent* loss of portraits from the loader, not by
+        // pinning a particular content revision.
+        assert_eq!(checked, 119, "recursive shipped portrait census changed");
     }
 
     #[test]

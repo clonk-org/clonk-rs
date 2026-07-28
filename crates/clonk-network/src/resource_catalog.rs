@@ -12,12 +12,26 @@ use crate::resource_packet::{
 };
 use clonk_engine::NetworkResourceCore;
 
-pub const RESOURCE_MAX_LOAD_PER_PEER_PER_FILE: usize = 3;
-/// Concurrent chunk requests across all resources (C++ `C4NetResMaxLoad`).
+/// Concurrent chunk requests to one peer for one file (C++
+/// `C4NetResMaxLoadPerPeerPerFile`).
 ///
-/// Kept at C++'s 20 rather than OpenClonk's 5: the swarm behaviour here is
-/// pinned by tests against C++, and the smaller `STOCK_CHUNK_SIZE` already cuts
-/// the bulk that can sit ahead of control from 2 MB to 200 KB without diverging.
+/// **This, not `RESOURCE_MAX_LOADS`, is the constant that governs head-of-line
+/// blocking.** Resource chunks and control share one strictly-ordered
+/// reliable-UDP sequence space whenever a peer has no TCP route — the ordinary
+/// internet topology, since NAT punch-through is UDP-only; see
+/// `STOCK_CHUNK_SIZE`. The bulk that can sit ahead of a control packet *on a
+/// given connection* is therefore this cap times the chunk size, and nothing
+/// else. The global cap below spreads work across different peers, which are
+/// different connections, so lowering that one does not shrink this window.
+///
+/// Left at C++'s 3: with 10 KiB chunks the window is already down from 618
+/// datagrams to 63. Dropping this to 1 would take it to 21, at the cost of
+/// tripling transfer time from each peer — a trade worth measuring against a
+/// swarm-throughput profile the chaos harness does not model yet.
+pub const RESOURCE_MAX_LOAD_PER_PEER_PER_FILE: usize = 3;
+/// Concurrent chunk requests across all resources and peers (C++
+/// `C4NetResMaxLoad`). Bounds aggregate bandwidth, not per-connection latency,
+/// so it is left at C++'s value.
 pub const RESOURCE_MAX_LOADS: usize = 20;
 pub const RESOURCE_LOAD_TIMEOUT_SECONDS: u64 = 60;
 pub const RESOURCE_DELETE_TIME_SECONDS: u64 = 60;
