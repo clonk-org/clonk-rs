@@ -1672,6 +1672,22 @@ fn write_macos_icon(paths: &WorkspacePaths, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The drag-to-Applications shortcut a disk image opens with.
+///
+/// Only ever reached on macOS — `hdiutil` exists nowhere else — but this tool
+/// now also *compiles* on Windows, where the release runs natively, and
+/// `std::os::unix` does not exist there.
+#[cfg(unix)]
+fn link_applications_shortcut(staging: &Path) -> Result<()> {
+    std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
+        .context("failed to create the /Applications shortcut")
+}
+
+#[cfg(not(unix))]
+fn link_applications_shortcut(_staging: &Path) -> Result<()> {
+    bail!("macOS disk images can only be built on a unix host")
+}
+
 /// Wrap the bundle in a compressed disk image with the conventional
 /// drag-to-Applications layout.
 fn create_dmg(paths: &WorkspacePaths, app_dir: &Path) -> Result<PathBuf> {
@@ -1691,8 +1707,7 @@ fn create_dmg(paths: &WorkspacePaths, app_dir: &Path) -> Result<PathBuf> {
             staged_app.display()
         )
     })?;
-    std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
-        .context("failed to create the /Applications shortcut")?;
+    link_applications_shortcut(&staging)?;
 
     let image_path = dist_dir.join(format!(
         "clonk-rust-{}-{}.dmg",
