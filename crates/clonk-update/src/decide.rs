@@ -278,6 +278,9 @@ mod tests {
     fn target(name: &str, sha: &str, install: &str) -> TargetArchive {
         TargetArchive {
             archive: format!("{name}-{sha}.zip"),
+            // Where a component is published does not enter the decision: what
+            // to fetch is decided by the digest, not by who hosts it.
+            source: None,
             sha256: sha.repeat(32),
             size: 1024,
             install: install.to_string(),

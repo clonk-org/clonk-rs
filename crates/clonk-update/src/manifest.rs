@@ -17,11 +17,38 @@ use thiserror::Error;
 /// interpreting a partially-understood manifest.
 pub const SUPPORTED_SCHEMA: u32 = 1;
 
+/// The release an archive is published in, when that is not the clonk-rs
+/// release the manifest describes.
+///
+/// `content` is built and published by the repository the game data lives in,
+/// so the engine repository stops re-uploading 225 MB of unchanged bytes on
+/// every daily release. Neither field is ever pasted into a URL unchecked —
+/// see `clonk_update_net::urls`, which rejects anything that could leave the
+/// release it names.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ArchiveSource {
+    /// `owner/name` of the GitHub repository holding the release.
+    pub repo: String,
+    /// The release tag inside `repo`, which names the exact content commit the
+    /// engine repository's submodule pins.
+    pub tag: String,
+}
+
 /// What one target triple downloads for a component, and where it lands.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct TargetArchive {
     /// Release-asset file name; the fetching layer turns this into a URL.
     pub archive: String,
+    /// Where `archive` was published, when that is not this release.
+    ///
+    /// Optional *within* [`SUPPORTED_SCHEMA`] rather than a schema bump: a
+    /// client too old to read it would resolve `content` against a clonk-rs
+    /// release, which is wrong — but bumping the schema makes that same client
+    /// refuse the whole manifest, so it would stop seeing engine updates too.
+    /// The narrower failure is the better one while no shipped build downloads
+    /// components at all.
+    #[serde(default)]
+    pub source: Option<ArchiveSource>,
     /// Lowercase hex SHA-256 of the archive bytes. With no manifest signature
     /// this is the whole integrity story for the payload.
     pub sha256: String,
@@ -204,6 +231,35 @@ mod tests {
         assert_ne!(linux.sha256, macos.sha256);
         // Its archive already carries `bin/…` or `Contents/…`.
         assert!(linux.install.is_empty());
+    }
+
+    #[test]
+    fn a_component_published_elsewhere_names_the_release_it_came_from() {
+        let published = VALID.replace(
+            r#""archive": "content-0123456789abcdef.zip","#,
+            r#""archive": "content.zip",
+             "source": {"repo": "syb0rg/clonk-rs-content", "tag": "content-abc"},"#,
+        );
+        let manifest = Manifest::parse(published.as_bytes()).expect("valid manifest");
+        let source = manifest
+            .component("content")
+            .and_then(|entry| entry.target_for("x86_64-unknown-linux-gnu"))
+            .and_then(|target| target.source.as_ref())
+            .expect("content names its release");
+        assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+        assert_eq!(source.tag, "content-abc");
+    }
+
+    #[test]
+    fn a_component_without_a_source_belongs_to_this_release() {
+        // The field is absent for everything this repository builds, and its
+        // absence is the instruction to resolve against the clonk-rs release.
+        let manifest = Manifest::parse(VALID.as_bytes()).expect("valid manifest");
+        assert!(manifest
+            .components
+            .iter()
+            .flat_map(|entry| entry.targets.values())
+            .all(|target| target.source.is_none()));
     }
 
     #[test]
