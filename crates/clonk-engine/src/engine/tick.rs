@@ -96,10 +96,13 @@ impl Engine {
             .copied()
             .enumerate()
             .map(|(index, id)| (id, index))
-            .collect::<HashMap<_, _>>();
+            .collect::<rustc_hash::FxHashMap<_, _>>();
         let command_snapshot_object_count = self.objects.len();
-        let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
-            HashMap::with_capacity(command_snapshot_object_count);
+        let mut command_snapshots: CommandObjectSnapshots =
+            CommandObjectSnapshots::with_capacity_and_hasher(
+                command_snapshot_object_count,
+                Default::default(),
+            );
         for fallback_order in 0..command_snapshot_object_count {
             let physical = self.object_physical_without_fair_fill(fallback_order);
             let object = &self.objects[fallback_order];

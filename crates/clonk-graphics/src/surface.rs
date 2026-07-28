@@ -5,7 +5,8 @@ use crate::gpu_scene::{
     GpuSolidOuterModulation, GpuSolidVertex, GpuTextureId, GpuTextureResource, GpuVertex,
 };
 use crate::snapshot::{checksum_update, SurfaceSnapshot, FNV_OFFSET};
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -490,13 +491,98 @@ impl SurfaceDrawTarget for RgbaSurfaceViewMut<'_> {
     }
 }
 
+/// The zeroed `stride * height` pixel plane, allocated on first pixel access.
+///
+/// Under GPU scene capture every drawing primitive appends to the recorder and
+/// returns before it touches a byte, so a full-viewport render target can live
+/// an entire frame without one read or write. Deferring the allocation spares
+/// that frame a `width * height * 4` zeroed heap block — 1.23 MB on a 640x480
+/// viewport. Materialisation happens inside the accessors that hand the bytes
+/// out, so a path that does touch pixels allocates rather than misreading.
+#[derive(Debug)]
+struct PixelPlane {
+    len: usize,
+    plane: OnceCell<Arc<[u8]>>,
+}
+
+/// Planes created without storage, and how many of those had to materialize.
+/// Deferral only pays off if a scene-capture frame trips the second pair zero
+/// times, so [`pixel_plane_stats`] lets tests and profiling runs measure that
+/// instead of assuming it.
+static DEFERRED_PLANES: AtomicU64 = AtomicU64::new(0);
+static DEFERRED_PLANE_BYTES: AtomicU64 = AtomicU64::new(0);
+static MATERIALIZED_PLANES: AtomicU64 = AtomicU64::new(0);
+static MATERIALIZED_PLANE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Process-wide deferred-pixel-plane tallies since start. The difference
+/// between the deferred and materialized byte counts is the zeroed heap
+/// traffic that never happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelPlaneStats {
+    pub deferred: u64,
+    pub deferred_bytes: u64,
+    pub materialized: u64,
+    pub materialized_bytes: u64,
+}
+
+impl PixelPlaneStats {
+    /// Plane bytes created but never allocated or zeroed, as of this reading.
+    pub fn avoided_bytes(self) -> u64 {
+        self.deferred_bytes.saturating_sub(self.materialized_bytes)
+    }
+}
+
+pub fn pixel_plane_stats() -> PixelPlaneStats {
+    PixelPlaneStats {
+        deferred: DEFERRED_PLANES.load(Ordering::Relaxed),
+        deferred_bytes: DEFERRED_PLANE_BYTES.load(Ordering::Relaxed),
+        materialized: MATERIALIZED_PLANES.load(Ordering::Relaxed),
+        materialized_bytes: MATERIALIZED_PLANE_BYTES.load(Ordering::Relaxed),
+    }
+}
+
+impl PixelPlane {
+    fn deferred(len: usize) -> Self {
+        DEFERRED_PLANES.fetch_add(1, Ordering::Relaxed);
+        DEFERRED_PLANE_BYTES.fetch_add(len as u64, Ordering::Relaxed);
+        Self {
+            len,
+            plane: OnceCell::new(),
+        }
+    }
+
+    fn from_arc(plane: Arc<[u8]>) -> Self {
+        let len = plane.len();
+        let cell = OnceCell::new();
+        let _ = cell.set(plane);
+        Self { len, plane: cell }
+    }
+
+    fn is_allocated(&self) -> bool {
+        self.plane.get().is_some()
+    }
+
+    fn get(&self) -> &Arc<[u8]> {
+        self.plane.get_or_init(|| {
+            MATERIALIZED_PLANES.fetch_add(1, Ordering::Relaxed);
+            MATERIALIZED_PLANE_BYTES.fetch_add(self.len as u64, Ordering::Relaxed);
+            Arc::from(vec![0; self.len].into_boxed_slice())
+        })
+    }
+
+    fn get_mut(&mut self) -> &mut Arc<[u8]> {
+        self.get();
+        self.plane.get_mut().expect("materialized above")
+    }
+}
+
 #[derive(Debug)]
 pub struct Surface {
     width: u32,
     height: u32,
     format: PixelFormat,
     stride: usize,
-    data: Arc<[u8]>,
+    data: PixelPlane,
     /// Active clipping rectangle (C++ `SetPrimaryClipper`); `None` = full surface.
     /// All draws are restricted to `clip ∩ bounds`.
     clip: Option<Rect>,
@@ -518,7 +604,10 @@ impl Clone for Surface {
             height: self.height,
             format: self.format,
             stride: self.stride,
-            data: Arc::clone(&self.data),
+            // Materialize before sharing. `mark_gpu_dirty` forks the retained
+            // identity off `Arc::strong_count`, so a clone that kept its own
+            // deferred plane would let both copies mutate under one texture id.
+            data: PixelPlane::from_arc(Arc::clone(self.data.get())),
             clip: self.clip,
             clonk_text_capture: self.clonk_text_capture.clone(),
             // Clones initially describe the same immutable retained resource.
@@ -538,7 +627,7 @@ impl Clone for Surface {
 impl Surface {
     pub fn new(width: u32, height: u32, format: PixelFormat) -> Self {
         let stride = width as usize * format.bytes_per_pixel();
-        let data = Arc::from(vec![0; stride * height as usize].into_boxed_slice());
+        let data = PixelPlane::deferred(stride * height as usize);
         Self {
             width,
             height,
@@ -574,7 +663,7 @@ impl Surface {
             height,
             format,
             stride,
-            data: Arc::from(data.into_boxed_slice()),
+            data: PixelPlane::from_arc(Arc::from(data.into_boxed_slice())),
             clip: None,
             clonk_text_capture: None,
             gpu_texture_id: GpuTextureId::fresh(),
@@ -661,7 +750,7 @@ impl Surface {
             revision: self.gpu_revision,
             base_revision,
             format: crate::gpu_scene::GpuTextureFormat::Rgba8,
-            pixels: Arc::clone(&self.data),
+            pixels: Arc::clone(self.data.get()),
             dirty,
         }
     }
@@ -847,13 +936,20 @@ impl Surface {
     }
 
     pub fn pixels(&self) -> &[u8] {
-        &self.data
+        self.data.get()
+    }
+
+    /// Whether the pixel plane is currently backed by heap storage. A surface
+    /// that only records GPU commands never rasterises, so callers use this to
+    /// assert that a capture frame paid for no `width * height * 4` buffer.
+    pub fn has_pixel_plane(&self) -> bool {
+        self.data.is_allocated()
     }
 
     pub fn pixels_mut(&mut self) -> &mut [u8] {
         let bounds = self.bounds();
         self.mark_gpu_dirty(bounds);
-        Arc::make_mut(&mut self.data)
+        Arc::make_mut(self.data.get_mut())
     }
 
     pub fn snapshot(&self) -> SurfaceSnapshot {
@@ -867,10 +963,11 @@ impl Surface {
         }
         let bpp = self.format.bytes_per_pixel();
         let mut hash = FNV_OFFSET;
+        let data = self.data.get();
         for row in 0..region.height {
             let y = (region.y + row as i32) as u32;
             let offset = self.pixel_offset(region.x as u32, y);
-            let span = &self.data[offset..offset + region.width as usize * bpp];
+            let span = &data[offset..offset + region.width as usize * bpp];
             hash = checksum_update(hash, span);
         }
         Some(SurfaceSnapshot::from_parts(
@@ -898,7 +995,7 @@ impl Surface {
         }
         self.mark_gpu_dirty(bounds);
         let bpp = self.format.bytes_per_pixel();
-        for chunk in Arc::make_mut(&mut self.data).chunks_exact_mut(bpp) {
+        for chunk in Arc::make_mut(self.data.get_mut()).chunks_exact_mut(bpp) {
             Self::write_color(self.format, chunk, color);
         }
     }
@@ -925,7 +1022,7 @@ impl Surface {
         }
         self.mark_gpu_dirty(region);
         let bpp = self.format.bytes_per_pixel();
-        let data = Arc::make_mut(&mut self.data);
+        let data = Arc::make_mut(self.data.get_mut());
         for row in 0..region.height {
             let y = (region.y + row as i32) as u32;
             let row_off =
@@ -969,7 +1066,7 @@ impl Surface {
         self.mark_gpu_dirty(Rect::new(x as i32, y as i32, 1, 1));
         let bpp = self.format.bytes_per_pixel();
         let offset = self.pixel_offset(x, y);
-        let slice = &mut Arc::make_mut(&mut self.data)[offset..offset + bpp];
+        let slice = &mut Arc::make_mut(self.data.get_mut())[offset..offset + bpp];
         Self::write_color(self.format, slice, color);
         Ok(())
     }
@@ -1004,7 +1101,7 @@ impl Surface {
         self.mark_gpu_dirty(Rect::new(x as i32, y as i32, 1, 1));
         let bpp = self.format.bytes_per_pixel();
         let offset = self.pixel_offset(x, y);
-        let slice = &mut Arc::make_mut(&mut self.data)[offset..offset + bpp];
+        let slice = &mut Arc::make_mut(self.data.get_mut())[offset..offset + bpp];
         let existing = Self::read_color(self.format, slice);
         let blended = color.blend_over(existing);
         Self::write_color(self.format, slice, blended);
@@ -1017,7 +1114,7 @@ impl Surface {
         }
         let bpp = self.format.bytes_per_pixel();
         let offset = self.pixel_offset(x, y);
-        let slice = &self.data[offset..offset + bpp];
+        let slice = &self.data.get()[offset..offset + bpp];
         Some(Self::read_color(self.format, slice))
     }
 
@@ -1168,7 +1265,8 @@ impl Surface {
         let format = self.format;
         let bpp = format.bytes_per_pixel();
         let stride = self.stride;
-        let data = Arc::make_mut(&mut self.data);
+        let src_data = src.data.get();
+        let data = Arc::make_mut(self.data.get_mut());
         for row in 0..src_rect.height {
             let src_y = (src_rect.y + row as i32) as u32;
             let dest_y = (dest.y + row as i32) as u32;
@@ -1179,7 +1277,7 @@ impl Surface {
                 let src_offset = src_row_offset + col as usize * bpp;
                 let dest_offset = dest_row_offset + col as usize * bpp;
 
-                let slice = &src.data[src_offset..src_offset + bpp];
+                let slice = &src_data[src_offset..src_offset + bpp];
                 let raw = Self::read_color(src.format, slice);
                 let source = mode.prepare_source(raw, modulation);
                 let destination = {
@@ -1371,7 +1469,8 @@ impl Surface {
         let format = self.format;
         let bpp = format.bytes_per_pixel();
         let stride = self.stride;
-        let data = Arc::make_mut(&mut self.data);
+        let src_data = src.data.get();
+        let data = Arc::make_mut(self.data.get_mut());
         for row in 0..clipped.height {
             let dest_y = clipped.y + row as i32;
             for col in 0..clipped.width {
@@ -1391,7 +1490,7 @@ impl Surface {
                 let src_x = src_rect.x as u32 + lx as u32;
                 let src_y = src_rect.y as u32 + ly as u32;
                 let off = src.pixel_offset(src_x, src_y);
-                let raw = Self::read_color(src.format, &src.data[off..off + bpp]);
+                let raw = Self::read_color(src.format, &src_data[off..off + bpp]);
                 let dest_off = dest_y as usize * stride + dest_x as usize * bpp;
                 let output = if let Some((modulation, mode)) = composite {
                     let source = mode.prepare_source(raw, modulation);
@@ -1481,7 +1580,8 @@ impl Surface {
         let format = self.format;
         let bpp = format.bytes_per_pixel();
         let stride = self.stride;
-        let data = Arc::make_mut(&mut self.data);
+        let src_data = src.data.get();
+        let data = Arc::make_mut(self.data.get_mut());
         for row in 0..clipped.height {
             let dest_y = (clipped.y + row as i32) as u32;
             let local_y = (clipped.y - dest_rect.y) as u32 + row;
@@ -1491,7 +1591,7 @@ impl Surface {
                 let local_x = (clipped.x - dest_rect.x) as u32 + col;
                 let src_x = src_rect.x as u32 + (local_x * src_rect.width) / dest_rect.width;
                 let off = src.pixel_offset(src_x, src_y);
-                let raw = Self::read_color(src.format, &src.data[off..off + bpp]);
+                let raw = Self::read_color(src.format, &src_data[off..off + bpp]);
                 let source = mode.prepare_source(raw, modulation);
                 let dest_off = dest_y as usize * stride + dest_x as usize * bpp;
                 let destination = Self::read_color(format, &data[dest_off..dest_off + bpp]);
@@ -1510,7 +1610,14 @@ impl Surface {
         if rect.width == 0 || rect.height == 0 {
             return;
         }
-        if Arc::strong_count(&self.data) > 1 {
+        // A deferred plane has never been shared (`Clone` materializes first),
+        // so its count is known to be one without forcing the allocation.
+        if self
+            .data
+            .plane
+            .get()
+            .is_some_and(|plane| Arc::strong_count(plane) > 1)
+        {
             self.gpu_texture_id = GpuTextureId::fresh();
             self.gpu_revision = 0;
             self.gpu_published_revision.set(0);
@@ -1790,6 +1897,83 @@ mod tests {
                 Color::transparent(),
                 &crate::GammaRamp::from_control_points([0, 0x80_80_80, 0xff_ff_ff]),
             )
+    }
+
+    /// Exercise every primitive that short-circuits into the recorder
+    /// (`Surface::fill`, `fill_rect`, `set_pixel`, `blend_pixel`,
+    /// `blit_region_ex`, `blit_transformed`, `blit_stretched`,
+    /// `blend_fragment*`) and leave `destination` in scene-capture mode.
+    fn record_full_draw_sequence(destination: &mut Surface, source: &Surface) {
+        destination.fill(Color::opaque(10, 20, 30));
+        destination.fill_rect(Rect::new(1, 1, 4, 4), Color::new(1, 2, 3, 128));
+        destination.set_pixel(2, 2, Color::opaque(4, 5, 6)).unwrap();
+        destination
+            .blend_pixel(3, 3, Color::new(7, 8, 9, 64))
+            .unwrap();
+        destination.blit(source, Point::new(5, 5)).unwrap();
+        destination
+            .blit_transformed(
+                source,
+                source.bounds(),
+                Point::new(9, 9),
+                &crate::transform::Transform::identity(),
+                Color::opaque(255, 255, 255),
+                BlitMode::Normal,
+            )
+            .unwrap();
+        destination
+            .blit_stretched(
+                source,
+                source.bounds(),
+                Rect::new(12, 12, 16, 16),
+                Color::opaque(255, 255, 255),
+                BlitMode::Additive,
+            )
+            .unwrap();
+        let gamma = crate::GammaRamp::identity();
+        SurfaceDrawTarget::blend_fragment(destination, 0, 1, [1.0, 2.0, 3.0, 200.0], Some(&gamma))
+            .unwrap();
+        SurfaceDrawTarget::blend_fragment_over(destination, 0, 2, [4.0, 5.0, 6.0, 90.0], None)
+            .unwrap();
+        SurfaceDrawTarget::blend_fragment_additive(destination, 0, 3, [7.0, 8.0, 9.0, 30.0], None)
+            .unwrap();
+    }
+
+    /// A scene-capture render target rasterises nothing: every primitive
+    /// appends to the recorder instead. It must therefore never allocate the
+    /// `width * height * 4` pixel plane, which on a 640x480 viewport is
+    /// 1.23 MB of zeroing per frame.
+    #[test]
+    fn gpu_capture_surface_allocates_no_pixel_plane() {
+        let mut source = Surface::new(8, 8, PixelFormat::Rgba8888);
+        source.fill(Color::opaque(40, 80, 120));
+        let mut destination = Surface::new(640, 480, PixelFormat::Rgba8888);
+        destination.begin_gpu_scene_capture();
+
+        record_full_draw_sequence(&mut destination, &source);
+
+        assert!(
+            !destination.has_pixel_plane(),
+            "capture-armed surface allocated a pixel plane no primitive writes"
+        );
+        assert!(!finish_gpu_scene(&mut destination).commands.is_empty());
+    }
+
+    /// The deferred plane must be indistinguishable from an eagerly zeroed
+    /// one: an unarmed surface still rasterises byte-identical pixels.
+    #[test]
+    fn deferred_pixel_plane_rasterizes_identically_to_an_eager_one() {
+        let mut source = Surface::new(8, 8, PixelFormat::Rgba8888);
+        source.fill(Color::new(40, 80, 120, 200));
+
+        let mut deferred = Surface::new(32, 32, PixelFormat::Rgba8888);
+        let mut eager =
+            Surface::from_bytes(32, 32, PixelFormat::Rgba8888, vec![0; 32 * 32 * 4]).unwrap();
+        record_full_draw_sequence(&mut deferred, &source);
+        record_full_draw_sequence(&mut eager, &source);
+
+        assert!(deferred.has_pixel_plane());
+        assert_eq!(deferred.pixels(), eager.pixels());
     }
 
     #[test]

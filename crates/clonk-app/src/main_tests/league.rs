@@ -19,7 +19,8 @@
         update_app
             .apply_classic_command_line(&update)
             .expect("queue classic update hand-off");
-        assert!(update_app.auto_open_update_dialog);
+        assert!(update_app.update_check_requested);
+        assert_eq!(update_app.incoming_update, None);
 
         let direct = parse_classic_command_line(
             &[

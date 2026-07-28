@@ -42,6 +42,7 @@ clonk-script = { path = "../clonk-script" }
 # does not import these directly; they prevent a second focused dependency set.
 memchr = "2"
 once_cell = "1"
+rustc-hash = "2"
 proptest = { version = "1", default-features = false, features = ["std"] }
 rand = { version = "0.9", default-features = false, features = ["std"] }
 rand_core = "0.6"

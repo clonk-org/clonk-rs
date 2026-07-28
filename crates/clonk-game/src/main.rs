@@ -367,7 +367,7 @@ fn ensure_runtime_asset(
         }
     }
 
-    fs::copy(source, target).with_context(|| {
+    copy_runtime_asset(source, target).with_context(|| {
         format!(
             "failed to copy {label} from {} to {}",
             source.display(),
@@ -377,6 +377,25 @@ fn ensure_runtime_asset(
     logger
         .log_line(&format!("copied {label} into {}", target.display()))
         .context("failed to log asset copy")?;
+    Ok(())
+}
+
+/// Copies a runtime asset that may be a C4Group *directory* such as
+/// `planet/System.c4g`.
+///
+/// `fs::copy` fails on a directory, and Windows reaches this fallback for every
+/// group: it cannot hard link a directory and the symlink recovery above is
+/// `#[cfg(unix)]`.
+fn copy_runtime_asset(source: &Path, target: &Path) -> io::Result<()> {
+    if !source.is_dir() {
+        return fs::copy(source, target).map(|_| ());
+    }
+
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        copy_runtime_asset(&entry.path(), &target.join(entry.file_name()))?;
+    }
     Ok(())
 }
 
@@ -2600,8 +2619,16 @@ mod tests {
         let install_dir = TempDir::new().unwrap();
         let planet_dir = install_dir.path().join("planet");
         fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
-        fs::write(planet_dir.join("Graphics.c4g"), b"graphics payload").unwrap();
+        // Shipped groups are directories, so a stale target is removed through
+        // the `remove_dir_all` arm rather than `remove_file`.
+        fs::create_dir_all(planet_dir.join("System.c4g")).unwrap();
+        fs::write(planet_dir.join("System.c4g").join("C4.c"), b"system payload").unwrap();
+        fs::create_dir_all(planet_dir.join("Graphics.c4g")).unwrap();
+        fs::write(
+            planet_dir.join("Graphics.c4g").join("Logo.png"),
+            b"graphics payload",
+        )
+        .unwrap();
 
         let binary_path = install_dir.path().join("clonk-app.exe");
         fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
@@ -2626,12 +2653,12 @@ mod tests {
             .expect("runtime assets should be refreshed");
 
         assert_eq!(
-            fs::read(&stale_system).unwrap(),
+            fs::read(stale_system.join("C4.c")).unwrap(),
             b"system payload",
             "system target should match updated source"
         );
         assert_eq!(
-            fs::read(&stale_graphics).unwrap(),
+            fs::read(stale_graphics.join("Logo.png")).unwrap(),
             b"graphics payload",
             "graphics target should match updated source"
         );
@@ -2649,6 +2676,35 @@ mod tests {
 
         // A second run should succeed even when the targets already point at the source.
         assert!(ensure_runtime_assets(&paths, &binary_path, &logger).is_ok());
+    }
+
+    #[test]
+    fn l004_runtime_asset_copy_materialises_a_group_directory() {
+        // `planet/System.c4g` is a C4Group *directory*, not a file. Windows can
+        // neither hard link a directory nor reach the `#[cfg(unix)]` symlink
+        // arm, so the terminal copy fallback is the only path it has — and
+        // `fs::copy` fails on a directory.
+        let source_dir = TempDir::new().unwrap();
+        let source = source_dir.path().join("System.c4g");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("C4.c"), b"root script").unwrap();
+        fs::write(source.join("nested").join("Extra.c"), b"nested script").unwrap();
+
+        let target_dir = TempDir::new().unwrap();
+        let target = target_dir.path().join("System.c4g");
+
+        copy_runtime_asset(&source, &target).expect("group directory should be copied");
+
+        assert_eq!(
+            fs::read(target.join("C4.c")).unwrap(),
+            b"root script",
+            "top level group entry should be copied"
+        );
+        assert_eq!(
+            fs::read(target.join("nested").join("Extra.c")).unwrap(),
+            b"nested script",
+            "nested group entry should be copied"
+        );
     }
 
     #[test]

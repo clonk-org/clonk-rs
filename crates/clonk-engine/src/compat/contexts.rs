@@ -4592,7 +4592,7 @@ impl EffectHostContext {
         physicals: &HashMap<ObjectId, PhysicalInfo>,
         deferred_physical_actor: Option<ObjectId>,
     ) -> (
-        HashMap<ObjectId, CommandObjectSnapshot>,
+        CommandObjectSnapshots,
         HashMap<i32, CommandPlayerSnapshot>,
         HashMap<DefinitionId, CommandDefinitionSnapshot>,
         TransferZoneTable,

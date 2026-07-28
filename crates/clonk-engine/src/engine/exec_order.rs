@@ -1523,3 +1523,27 @@ impl Engine {
         }
     }
 }
+
+#[cfg(test)]
+mod hasher_tests {
+    use super::*;
+    use std::hash::BuildHasher;
+
+    /// The per-frame lookup tables are only ever probed by key: every consumer
+    /// that ranks their contents sorts on an explicit total order (master-list
+    /// rank then `ObjectId`). `RandomState` reseeds per process, so a
+    /// simulation outcome that read iteration order would already desync
+    /// between two runs of one seed. The engine hasher therefore carries no
+    /// per-process seed, which is strictly more reproducible.
+    #[test]
+    fn per_frame_lookup_tables_hash_without_a_per_process_seed() {
+        let id = ObjectId::new(7);
+        let first = rustc_hash::FxBuildHasher;
+        let second = rustc_hash::FxBuildHasher;
+        assert_eq!(first.hash_one(id), second.hash_one(id));
+
+        let seeded = std::hash::RandomState::new();
+        let reseeded = std::hash::RandomState::new();
+        assert_ne!(seeded.hash_one(id), reseeded.hash_one(id));
+    }
+}

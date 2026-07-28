@@ -65,7 +65,7 @@ pub fn c4_string_from_bytes(bytes: &[u8]) -> String {
 /// Borrow the native byte spelling when the Rust string needs no raw-byte
 /// projection. Ordinary UTF-8 is already the exact C4 string byte sequence;
 /// only the private-use escape range requires decoding into owned storage.
-pub(crate) fn c4_string_bytes_cow(value: &str) -> Cow<'_, [u8]> {
+pub fn c4_string_bytes_cow(value: &str) -> Cow<'_, [u8]> {
     if !c4_string_has_raw_byte_escape(value) {
         return Cow::Borrowed(value.as_bytes());
     }

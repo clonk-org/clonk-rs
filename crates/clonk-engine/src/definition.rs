@@ -1191,7 +1191,7 @@ impl Definition {
     /// Shares the System.c4g global-function table into this script host.
     pub(crate) fn set_global_functions(
         &mut self,
-        functions: Option<Arc<HashMap<String, clonk_script::Function>>>,
+        functions: Option<Arc<rustc_hash::FxHashMap<String, clonk_script::Function>>>,
     ) {
         Arc::make_mut(&mut self.script).set_global_functions(functions);
     }

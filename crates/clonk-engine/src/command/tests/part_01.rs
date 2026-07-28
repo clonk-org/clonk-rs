@@ -236,7 +236,7 @@
 
     fn jump_ctx<'a>(
         walker: &'a CommandObjectSnapshot,
-        objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
+        objects: &'a CommandObjectSnapshots,
         players: &'a HashMap<i32, CommandPlayerSnapshot>,
         definitions: &'a HashMap<DefinitionId, CommandDefinitionSnapshot>,
         landscape: &'a crate::Landscape,
@@ -258,7 +258,7 @@
 
     fn command_ctx_at_frame<'a>(
         object: &'a CommandObjectSnapshot,
-        objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
+        objects: &'a CommandObjectSnapshots,
         players: &'a HashMap<i32, CommandPlayerSnapshot>,
         definitions: &'a HashMap<DefinitionId, CommandDefinitionSnapshot>,
         frame: u64,
@@ -288,7 +288,7 @@
         // (C4Command.cpp:286-306; Case.c4d/Script.c:171-220).
         let mut clonk = walking_jumper(Vector2::new(156, 100));
         clonk.shape = DefinitionRect::new(-4, -9, 8, 18);
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = command_ctx_at_frame(&clonk, &objects, &players, &definitions, 1);
@@ -312,7 +312,7 @@
     fn move_to_missing_coordinates_still_reads_free_move_physical() {
         let mut actor = walking_jumper(Vector2::new(20, 20));
         actor.physical_deferred = true;
-        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let objects = CommandObjectSnapshots::from_iter([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let landscape = crate::Landscape::flat(100, 60);
@@ -353,7 +353,7 @@
         ] {
             let mut clonk = walking_jumper(Vector2::new(target.x + offset.x, target.y + offset.y));
             clonk.shape = DefinitionRect::new(-5, -9, 10, 18);
-            let objects = HashMap::new();
+            let objects = CommandObjectSnapshots::default();
             let players = HashMap::new();
             let definitions = HashMap::new();
             let ctx = command_ctx_at_frame(&clonk, &objects, &players, &definitions, 1);
@@ -412,7 +412,7 @@
             vec![None; 2],
         ));
         let walker = walking_jumper(Vector2::new(10, 50));
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
@@ -504,7 +504,7 @@
         assert_eq!(direct_path.waypoints.len(), 2, "start and target only");
 
         let walker = walking_jumper(start);
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let mut ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
@@ -556,7 +556,7 @@
         ));
         assert_eq!((x, y), (142, 75));
 
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
@@ -586,7 +586,7 @@
         // zone must remain one direct MoveTo (C4Command.cpp:235-252).
         let landscape = crate::Landscape::flat(200, 100);
         let walker = walking_jumper(Vector2::new(20, 50));
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let mut transfer_zones = TransferZoneTable::default();
@@ -648,7 +648,7 @@
         mover.position = Vector2::new(10, 50);
         mover.action_procedure = ActionProcedure::Walk;
         mover.pathfinder = 27;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let zone_owner = ObjectId::new(9);
@@ -732,7 +732,7 @@
         mover.action_name = "Walk".into();
         mover.action_procedure = ActionProcedure::Walk;
         mover.move_to_range = 20;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let request = CommandRequest::new(CommandId::MoveTo)
@@ -764,7 +764,7 @@
         swimmer.action_procedure = ActionProcedure::Swim;
         swimmer.crew_member = true;
         swimmer.ocf |= ocf::CREW_MEMBER;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
 
@@ -808,7 +808,7 @@
         floater.fixed_velocity = FixedVec2::from_ints(0, -1);
         floater.action_procedure = ActionProcedure::Float;
         floater.physical.float = 100;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = command_ctx_at_frame(&floater, &objects, &players, &definitions, 1);
@@ -855,7 +855,7 @@
         floater.action_procedure = ActionProcedure::Float;
         floater.command_direction = CommandDirection::Right;
         floater.physical.float = 100;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = command_ctx_at_frame(&floater, &objects, &players, &definitions, 1);
@@ -884,7 +884,7 @@
         scaler.action_procedure = ActionProcedure::Scale;
         scaler.crew_member = true;
         scaler.ocf |= ocf::CREW_MEMBER;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = command_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
@@ -918,7 +918,7 @@
         scaler.direction = Direction::Left;
         scaler.crew_member = true;
         scaler.ocf |= ocf::CREW_MEMBER;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = command_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
@@ -951,7 +951,7 @@
         scaler.contact = crate::CNAT_LEFT;
         scaler.crew_member = true;
         scaler.ocf |= ocf::CREW_MEMBER;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
 
@@ -1004,7 +1004,7 @@
         hangler.action_procedure = ActionProcedure::Hang;
         hangler.crew_member = true;
         hangler.ocf |= ocf::CREW_MEMBER;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
 
@@ -1055,7 +1055,7 @@
         flyer.physical.can_fly = 1;
         flyer.shape_top = -10;
         assert_eq!(flyer.ocf & ocf::CREW_MEMBER, 0);
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let mut ctx = command_ctx_at_frame(&flyer, &objects, &players, &definitions, 1);
@@ -1117,7 +1117,7 @@
         let landscape = crate::Landscape::flat(300, 110);
         // Standing walker: center y 100, feet on the 110 surface.
         let walker = walking_jumper(Vector2::new(100, 100));
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let mut ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
@@ -1178,7 +1178,7 @@
         let target_id = ObjectId::new(9);
         let mut target = snapshot_with_id(9);
         target.position = Vector2::new(200, 100);
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(target_id, target);
         let players = HashMap::new();
         let definitions = HashMap::new();
@@ -1211,7 +1211,7 @@
         // C4Command::Execute decrements UpdateInterval as a lifetime, but
         // still executes MoveTo on every non-expiring frame
         // (C4Command.cpp:1545-1555).
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let request = CommandRequest::new(CommandId::MoveTo)
@@ -1260,7 +1260,7 @@
         let container_id = ObjectId::new(9);
         let mut walker = walking_jumper(Vector2::new(100, 100));
         walker.container = Some(container_id);
-        let objects = HashMap::from([(container_id, snapshot_with_id(9))]);
+        let objects = CommandObjectSnapshots::from_iter([(container_id, snapshot_with_id(9))]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
@@ -1295,7 +1295,7 @@
         let mut pusher = walking_jumper(Vector2::new(100, 100));
         pusher.action_procedure = ActionProcedure::Push;
         pusher.action_target = Some(vehicle_id);
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(vehicle_id, vehicle);
         let players = HashMap::new();
         let mut definitions = HashMap::new();
@@ -1344,7 +1344,7 @@
         let mut pusher = walking_jumper(Vector2::new(100, 100));
         pusher.action_procedure = ActionProcedure::Push;
         pusher.action_target = Some(vehicle_id);
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(vehicle_id, vehicle);
         let players = HashMap::new();
         let mut definitions = HashMap::new();
@@ -1404,7 +1404,7 @@
         let mut pusher = walking_jumper(Vector2::new(100, 100));
         pusher.action_procedure = ActionProcedure::Push;
         pusher.action_target = Some(vehicle_id);
-        let objects = HashMap::from([(vehicle_id, vehicle)]);
+        let objects = CommandObjectSnapshots::from_iter([(vehicle_id, vehicle)]);
         let players = HashMap::new();
         let definitions = HashMap::from([(
             "DEF7".to_string(),
@@ -1483,7 +1483,7 @@
     fn move_to_noncrew_pathfinder_diagonal_free_jump_like_cpp() {
         let landscape = crate::Landscape::flat(300, 110);
         let walker = pathfinder_jumper(Vector2::new(100, 100));
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
@@ -1512,7 +1512,7 @@
         let landscape = crate::Landscape::flat(300, 110);
         let mut walker = pathfinder_jumper(Vector2::new(100, 100));
         walker.physical.can_fly = 1;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
@@ -1562,7 +1562,7 @@
         let landscape = crate::Landscape::flat(300, 110);
         let mut walker = pathfinder_jumper(Vector2::new(100, 100));
         walker.physical_deferred = true;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
@@ -1630,7 +1630,7 @@
         let landscape = crate::Landscape::flat(300, 110);
         let mut walker = pathfinder_jumper(Vector2::new(100, 100));
         walker.contact = crate::CNAT_RIGHT;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
@@ -1667,7 +1667,7 @@
         let landscape =
             crate::Landscape::with_default_material(300, surface, None).expect("landscape");
         let walker = pathfinder_jumper(Vector2::new(140, 100));
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
@@ -1706,7 +1706,7 @@
         idle.position = Vector2::new(100, 100);
         idle.action_idle = true;
         idle.action_procedure = ActionProcedure::Undefined;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
 
@@ -1763,7 +1763,7 @@
     fn move_to_walk_vertical_offset_leaves_command_direction_untouched() {
         let mut walker = walking_jumper(Vector2::new(100, 100));
         walker.command_direction = CommandDirection::Left;
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
@@ -1800,7 +1800,7 @@
         target.position = Vector2::new(20, 0);
         target.crew_member = true;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(follower.id, follower.clone());
         objects.insert(target.id, target);
 
@@ -1836,7 +1836,7 @@
         follower.action_procedure = ActionProcedure::Walk;
         follower.command_direction = CommandDirection::DownRight;
 
-        let objects = HashMap::from([(follower_id, follower)]);
+        let objects = CommandObjectSnapshots::from_iter([(follower_id, follower)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let follower = objects.get(&follower_id).expect("follower present");
@@ -1887,7 +1887,7 @@
         hut.entrance_status = true;
         hut.category = CATEGORY_STRUCTURE;
 
-        let objects = HashMap::from([(follower_id, follower), (target_id, target), (hut_id, hut)]);
+        let objects = CommandObjectSnapshots::from_iter([(follower_id, follower), (target_id, target), (hut_id, hut)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let follower = objects.get(&follower_id).expect("follower present");
@@ -1959,7 +1959,7 @@
         target.command_direction = CommandDirection::Right;
 
         let lorry = snapshot_with_id(lorry_id.as_u64());
-        let mut objects = HashMap::from([
+        let mut objects = CommandObjectSnapshots::from_iter([
             (follower_id, follower),
             (target_id, target),
             (lorry_id, lorry),
@@ -2044,7 +2044,7 @@
         target.crew_member = true;
         target.alive = false;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(follower.id, follower.clone());
         objects.insert(target.id, target);
 
@@ -2161,7 +2161,7 @@
         let target_id = ObjectId::new(9);
         let mut target = snapshot_with_id(9);
         target.position = Vector2::new(200, 100);
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(target_id, target);
         let players = HashMap::new();
         let definitions = HashMap::new();
@@ -2203,7 +2203,7 @@
         assert_eq!((views[0].tx, views[0].ty), (None, None));
 
         let actor = snapshot_with_id(7);
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
@@ -2279,7 +2279,7 @@
     #[test]
     fn negative_wait_intervals_survive_evaluation_execution_and_snapshot_restore() {
         let actor = snapshot_with_id(52);
-        let objects = HashMap::new();
+        let objects = CommandObjectSnapshots::default();
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
@@ -2342,7 +2342,7 @@
         actor.action_procedure = ActionProcedure::Dig;
         actor.command_direction = CommandDirection::Left;
 
-        let mut objects = HashMap::new();
+        let mut objects = CommandObjectSnapshots::default();
         objects.insert(actor.id, actor.clone());
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();

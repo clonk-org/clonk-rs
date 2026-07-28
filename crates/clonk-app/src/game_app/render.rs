@@ -2366,7 +2366,14 @@ impl GameApp {
     ) -> Result<RetainedGpuFrame> {
         let gamma = self.retained_gpu_frame_gamma();
         let renderer_config = self.graphics.advanced_renderer_config();
-        let gamma_mode = retained_gpu_gamma_mode(renderer_config);
+        // The monitor resolve is a second full-screen pass; the detail
+        // governor drops it before it drops anything the player controls.
+        let gamma_mode = match retained_gpu_gamma_mode(renderer_config) {
+            GpuGammaMode::Monitor if !self.presentation_detail.resolves_monitor_gamma() => {
+                GpuGammaMode::Disabled
+            }
+            mode => mode,
+        };
         let ordered_native = !self.console_mode
             && (self.can_present_ordered_native_text(presentation.scale)
                 || self.can_defer_native_loader_text(presentation.scale));
@@ -2550,7 +2557,8 @@ impl GameApp {
         self.graphics.set_renderer_config(
             self.display_flags.show_player_hud_always,
             self.display_flags.splitscreen_dividers,
-            self.display_flags.fire_particles,
+            self.display_flags.fire_particles
+                && self.presentation_detail.draws_fire_particles(),
         );
         // C4Viewport suppresses only its gameplay overlays for a film replay;
         // game messages and C4GraphicsSystem-owned chrome remain independent.

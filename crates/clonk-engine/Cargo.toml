@@ -27,6 +27,10 @@ clonk-engine-core = { path = "../clonk-engine-core" }
 clonk-script = { path = "../clonk-script" }
 clonk-resources = { path = "../clonk-resources" }
 indexmap = { version = "2", features = ["serde"] }
+# Fixed-seed hashing for the per-frame lookup tables. `RandomState` reseeds per
+# process, so nothing in the simulation may read HashMap iteration order today;
+# a seedless hasher is strictly more reproducible and skips SipHash per probe.
+rustc-hash = "2"
 rand = { version = "0.9", default-features = false, features = ["std"] }
 rand_core = "0.6"
 thiserror = "1"

@@ -4,6 +4,12 @@
 
 use super::*;
 
+/// The per-frame `ObjectId -> CommandObjectSnapshot` table. It is only ever
+/// probed by key: every consumer that ranks its contents sorts on an explicit
+/// total order (`master_list_order` then `ObjectId`), so the fixed-seed hasher
+/// changes nothing but the cost of a probe.
+pub type CommandObjectSnapshots = rustc_hash::FxHashMap<ObjectId, CommandObjectSnapshot>;
+
 #[derive(Debug, Clone)]
 pub struct CommandObjectSnapshot {
     pub id: ObjectId,

@@ -7,8 +7,8 @@ use crate::action::{ScriptCallbackTarget, SharedActionLibrary};
 use crate::command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
     CommandDefinitionSnapshot, CommandEvent, CommandEventInstanceKind, CommandFailureFeedback,
-    CommandFailureReason, CommandId, CommandMode, CommandObjectSnapshot, CommandOperation,
-    CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
+    CommandFailureReason, CommandId, CommandMode, CommandObjectSnapshot, CommandObjectSnapshots,
+    CommandOperation, CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
     CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};

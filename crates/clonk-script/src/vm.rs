@@ -1,3 +1,4 @@
+use rustc_hash::FxHashMap;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
@@ -216,9 +217,12 @@ fn concat_type_name(value: &Value) -> &'static str {
 }
 
 pub type ValueCell = Rc<RefCell<Value>>;
-type SlotMap = Rc<RefCell<HashMap<i32, ValueCell>>>;
-type NamedLocalMap = Rc<RefCell<HashMap<String, ValueCell>>>;
-type FunctionVarMap = Rc<RefCell<HashMap<String, Binding>>>;
+/// The per-call variable tables. Every read is a probe by name or slot and
+/// every fold over them writes into another name-keyed map, so the fixed-seed
+/// hasher changes nothing but the cost of a lookup.
+type SlotMap = Rc<RefCell<FxHashMap<i32, ValueCell>>>;
+type NamedLocalMap = Rc<RefCell<FxHashMap<String, ValueCell>>>;
+type FunctionVarMap = Rc<RefCell<FxHashMap<String, Binding>>>;
 
 pub fn value_cell(value: Value) -> ValueCell {
     Rc::new(RefCell::new(value))
@@ -2935,7 +2939,7 @@ impl Drop for GlobalCallContextGuard<'_> {
 }
 
 pub struct Vm<'a> {
-    functions: &'a HashMap<String, Function>,
+    functions: &'a FxHashMap<String, Function>,
     host_identity: ScriptHostIdentity,
     /// Destination definition name for local-function diagnostics.
     owner_definition_name: Option<&'a str>,
@@ -2952,17 +2956,17 @@ pub struct Vm<'a> {
     /// this bare VM has no configured base script; Some(None) is an
     /// explicitly NONSTRICT destination.
     owner_strict_level: Option<Option<u8>>,
-    host_functions: &'a HashMap<String, RegisteredHostFunction>,
-    host_reference_functions: Option<&'a HashMap<String, HostReferenceFunction>>,
-    host_function_parameter_types: Option<&'a HashMap<String, Arc<[C4VType]>>>,
+    host_functions: &'a FxHashMap<String, RegisteredHostFunction>,
+    host_reference_functions: Option<&'a FxHashMap<String, HostReferenceFunction>>,
+    host_function_parameter_types: Option<&'a FxHashMap<String, Arc<[C4VType]>>>,
     var_decls: &'a [VarDecl], // Script-level variable declarations
     debugger: Option<DebuggerHooks>,
     /// Engine-registered script constants (`RegisterGlobalConstant`,
     /// C4Script.cpp:6581): consulted when an identifier matches no variable.
-    constants: Option<&'a HashMap<String, Value>>,
+    constants: Option<&'a FxHashMap<String, Value>>,
     /// Engine-global script functions (System.c4g `global func`s): the
     /// resolution fallback between the own script and host functions.
-    global_functions: Option<&'a HashMap<String, Function>>,
+    global_functions: Option<&'a FxHashMap<String, Function>>,
     /// Exact retained engine-global callback mode. Ordinary Engine::call
     /// keeps the historical own-root dispatch used by synthetic callbacks;
     /// a captured C4AulFunc pointer skips unnamed own global links.
@@ -3018,8 +3022,8 @@ pub struct Vm<'a> {
 
 impl<'a> Vm<'a> {
     pub(crate) fn new(
-        functions: &'a HashMap<String, Function>,
-        host_functions: &'a HashMap<String, RegisteredHostFunction>,
+        functions: &'a FxHashMap<String, Function>,
+        host_functions: &'a FxHashMap<String, RegisteredHostFunction>,
         var_decls: &'a [VarDecl],
         debugger: Option<DebuggerHooks>,
     ) -> Self {
@@ -3061,7 +3065,7 @@ impl<'a> Vm<'a> {
 
     pub(crate) fn with_host_reference_functions(
         mut self,
-        functions: &'a HashMap<String, HostReferenceFunction>,
+        functions: &'a FxHashMap<String, HostReferenceFunction>,
     ) -> Self {
         self.host_reference_functions = Some(functions);
         self
@@ -3069,7 +3073,7 @@ impl<'a> Vm<'a> {
 
     pub(crate) fn with_host_function_parameter_types(
         mut self,
-        parameter_types: &'a HashMap<String, Arc<[C4VType]>>,
+        parameter_types: &'a FxHashMap<String, Arc<[C4VType]>>,
     ) -> Self {
         self.host_function_parameter_types = Some(parameter_types);
         self
@@ -3113,7 +3117,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Attach the engine constants table consulted on variable-lookup misses.
-    pub fn with_constants(mut self, constants: &'a HashMap<String, Value>) -> Self {
+    pub fn with_constants(mut self, constants: &'a FxHashMap<String, Value>) -> Self {
         self.constants = Some(constants);
         self
     }
@@ -3122,7 +3126,7 @@ impl<'a> Vm<'a> {
     /// `None` = no globals installed.
     pub fn with_optional_globals(
         mut self,
-        functions: Option<&'a HashMap<String, Function>>,
+        functions: Option<&'a FxHashMap<String, Function>>,
     ) -> Self {
         self.global_functions = functions;
         self
@@ -9371,7 +9375,7 @@ fn hoist_function_vars(body: &[Stmt], env: &mut Environment) {
 }
 
 struct Environment {
-    scopes: Vec<HashMap<String, Binding>>,
+    scopes: Vec<FxHashMap<String, Binding>>,
     /// Per-invocation storage for `Func->VarNamed`/`cthr->Vars`. A separate
     /// table is required because parameters win bare-name lookup while VarN
     /// can still address a same-name function variable.
@@ -9446,20 +9450,20 @@ impl Environment {
         }
         #[cfg(test)]
         record_call_arg_heap_spill(call_args.spilled());
-        let mut scopes = vec![HashMap::new()];
+        let mut scopes = vec![FxHashMap::default()];
         let base = scopes.last_mut().unwrap();
         for (param, binding) in params.iter().zip(call_args.iter()) {
             base.insert(param.name.clone(), binding.clone());
         }
         Ok(Self {
             scopes,
-            function_vars: Rc::new(RefCell::new(HashMap::new())),
+            function_vars: Rc::new(RefCell::new(FxHashMap::default())),
             strict_level,
             caller_owner_strict_level: strict_level,
             // invoke_script_function stamps the owning VM before executing the
             // body; zero is only the construction sentinel.
             caller_host_identity: ScriptHostIdentity(0),
-            var_slots: Rc::new(RefCell::new(HashMap::new())),
+            var_slots: Rc::new(RefCell::new(FxHashMap::default())),
             object_state,
             call_args: Rc::new(call_args),
             named_param_count: params.len(),
@@ -9502,7 +9506,7 @@ impl Environment {
     }
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(FxHashMap::default());
     }
 
     fn pop_scope(&mut self) {
@@ -9614,12 +9618,12 @@ mod tests {
         let script = Parser::new(source)
             .parse_script()
             .expect("parse should succeed");
-        let functions: HashMap<String, Function> = script
+        let functions: FxHashMap<String, Function> = script
             .functions
             .into_iter()
             .map(|f| (f.name.clone(), f))
             .collect();
-        let host_functions = HashMap::new();
+        let host_functions = FxHashMap::default();
         let var_decls: Vec<VarDecl> = Vec::new();
         let vm = Vm::new(&functions, &host_functions, &var_decls, None);
         vm.call(entry_point, args)
@@ -9665,7 +9669,7 @@ mod tests {
         )
         .parse_script()
         .expect("object script parses");
-        let object_functions: HashMap<String, Function> = object_script
+        let object_functions: FxHashMap<String, Function> = object_script
             .functions
             .into_iter()
             .map(|function| (function.name.clone(), function))
@@ -9678,12 +9682,12 @@ mod tests {
         )
         .parse_script()
         .expect("global script parses");
-        let global_functions: HashMap<String, Function> = global_script
+        let global_functions: FxHashMap<String, Function> = global_script
             .functions
             .into_iter()
             .map(|function| (function.name.clone(), function))
             .collect();
-        let host_functions = HashMap::new();
+        let host_functions = FxHashMap::default();
         let var_decls = Vec::new();
         let vm = Vm::new(&object_functions, &host_functions, &var_decls, None)
             .with_optional_globals(Some(&global_functions));
@@ -9709,12 +9713,12 @@ mod tests {
         let script = Parser::new(source)
             .parse_script()
             .expect("parse should succeed");
-        let functions: HashMap<String, Function> = script
+        let functions: FxHashMap<String, Function> = script
             .functions
             .into_iter()
             .map(|f| (f.name.clone(), f))
             .collect();
-        let host_functions = HashMap::new();
+        let host_functions = FxHashMap::default();
         let var_decls: Vec<VarDecl> = Vec::new();
         let cell = value_cell(Value::Nil);
         let hook_cell = cell.clone();
@@ -9770,12 +9774,12 @@ mod tests {
         .parse_script()
         .expect("script parses");
         let var_decls = script.var_decls.clone();
-        let functions: HashMap<String, Function> = script
+        let functions: FxHashMap<String, Function> = script
             .functions
             .into_iter()
             .map(|function| (function.name.clone(), function))
             .collect();
-        let host_functions = HashMap::new();
+        let host_functions = FxHashMap::default();
         let vm = Vm::new(&functions, &host_functions, &var_decls, None);
         let cells = LocalCells::from_local_vars(&HashMap::from([(
             "pClonk".to_string(),
@@ -9813,12 +9817,12 @@ mod tests {
         .parse_script()
         .expect("script parses");
         let var_decls = script.var_decls.clone();
-        let functions: HashMap<String, Function> = script
+        let functions: FxHashMap<String, Function> = script
             .functions
             .into_iter()
             .map(|function| (function.name.clone(), function))
             .collect();
-        let host_functions = HashMap::new();
+        let host_functions = FxHashMap::default();
         let vm = Vm::new(&functions, &host_functions, &var_decls, None);
 
         assert_eq!(
@@ -10184,8 +10188,8 @@ mod tests {
 
     #[test]
     fn host_direct_exec_reads_internal_byte_projection_as_source_bytes() {
-        let functions = HashMap::new();
-        let host_functions = HashMap::new();
+        let functions = FxHashMap::default();
+        let host_functions = FxHashMap::default();
         let var_decls = Vec::new();
         let vm = Vm::new(&functions, &host_functions, &var_decls, None);
         let source = c4_string_from_bytes(&[b'\"', 0xff, b'\"']);

@@ -4992,6 +4992,83 @@ mod tests {
         );
     }
 
+    /// A GPU scene-capture frame records commands instead of rasterizing, so
+    /// the per-viewport content surface `render_viewport` allocates every frame
+    /// is never read or written. Deferring the pixel plane must therefore cost
+    /// a steady-state frame zero materializations; each avoided 640x480 plane
+    /// is 1.23 MB of allocate-and-zero, roughly 0.5 ms of Raspberry Pi 4
+    /// memory bandwidth.
+    #[test]
+    fn gpu_capture_frames_materialize_no_viewport_pixel_planes() {
+        const WIDTH: u32 = 640;
+        const HEIGHT: u32 = 480;
+        const FRAMES: u64 = 60;
+
+        let mut snapshot = make_snapshot();
+        // A world larger than the viewport removes the letterbox borders, so
+        // the content surface is the full viewport the shipping game renders.
+        snapshot.landscape = Some(Landscape::flat(WIDTH * 2, HEIGHT as i32 * 2));
+        let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
+        let mut graphics = GraphicsSystem::new(
+            WIDTH,
+            HEIGHT,
+            120,
+            "Deferred pixel plane probe",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let gamma = clonk_graphics::GammaRamp::identity();
+        let capture_frame = |graphics: &mut GraphicsSystem| {
+            graphics.begin_gpu_scene_capture();
+            graphics.render_frame_without_atlas_deferred_monitor_gamma(&snapshot, &viewports);
+            graphics.finish_gpu_scene_capture(&gamma)
+        };
+        // Warm the retained caches so the measured window is steady state.
+        assert!(capture_frame(&mut graphics).is_some());
+
+        let before = clonk_graphics::pixel_plane_stats();
+        let start = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            capture_frame(&mut graphics);
+        }
+        let elapsed = start.elapsed();
+        let stats = clonk_graphics::pixel_plane_stats();
+
+        // The work the deferral removes, timed on this machine: allocating,
+        // zeroing and freeing one viewport-sized plane per frame is exactly
+        // what `Surface::new` used to do unconditionally.
+        let start = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            let surface = Surface::new(WIDTH, HEIGHT, clonk_graphics::PixelFormat::Rgba8888);
+            std::hint::black_box(surface.pixels()[0]);
+        }
+        let eager_plane = start.elapsed();
+
+        let deferred_bytes = stats.deferred_bytes - before.deferred_bytes;
+        let materialized = stats.materialized - before.materialized;
+        let materialized_bytes = stats.materialized_bytes - before.materialized_bytes;
+        println!(
+            "{FRAMES} capture frames at {WIDTH}x{HEIGHT}: {:.3} ms/frame; \
+             {} deferred plane bytes/frame, {materialized} materializations \
+             ({materialized_bytes} bytes); the removed allocate+zero+free costs \
+             {:.3} ms/frame here",
+            elapsed.as_secs_f64() * 1000.0 / FRAMES as f64,
+            deferred_bytes / FRAMES,
+            eager_plane.as_secs_f64() * 1000.0 / FRAMES as f64,
+        );
+        assert_eq!(
+            materialized, 0,
+            "a scene-capture frame rasterized into a deferred pixel plane"
+        );
+        assert!(
+            deferred_bytes / FRAMES >= u64::from(WIDTH * HEIGHT * 4),
+            "expected at least one full viewport plane deferred per frame, got {} bytes",
+            deferred_bytes / FRAMES
+        );
+    }
+
     #[test]
     fn no_atlas_completions_match_snapshot_render_state() {
         let snapshot = make_snapshot();
@@ -16313,6 +16390,182 @@ mod tests {
             render_rows(&high_to_threshold, true)[8],
             Color::opaque(100, 100, 100),
             "the asymmetric above-darkening arm excludes own placement 30"
+        );
+    }
+
+    /// `draw_definition_particles` filters the whole particle slice on every
+    /// call and an object pass calls it up to twice per object, so a frame's
+    /// particle walk was O(objects * particles). Grouping the slice by layer
+    /// once per object list makes the pass O(particles).
+    #[test]
+    fn object_pass_examines_the_particle_slice_once() {
+        const OBJECTS: usize = 40;
+        const PARTICLES: usize = 200;
+
+        let template = make_snapshot().objects.remove(0);
+        let objects = (0..OBJECTS)
+            .map(|index| {
+                let mut object = template.clone();
+                object.id = ObjectId::new(index as u64 + 1);
+                object.position = Vector2::new(index as i32 * 2, 8);
+                object
+            })
+            .collect::<Vec<_>>();
+        // Every particle sits on the global layer, so no object draws one and
+        // the whole cost of the old walk was the membership test itself.
+        let particles = (0..PARTICLES)
+            .map(|index| ParticleSnapshot {
+                definition_id: "Smoke".to_string(),
+                position: FloatVector2::new(index as f32, 4.0),
+                velocity: FloatVector2::new(0.0, 0.0),
+                life: 10,
+                parameter_a: 2.0,
+                parameter_b: 0x00ff_ffff,
+                layer: ParticleLayer::Global,
+                pxs_fixed: None,
+                pxs_slot: None,
+            })
+            .collect::<Vec<_>>();
+        let mut graphics = GraphicsSystem::new(
+            160,
+            120,
+            120,
+            "particle layer index",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        let pass = |graphics: &mut GraphicsSystem| {
+            graphics.draw_objects_at_frame(
+                0,
+                &objects,
+                &[],
+                &HashMap::new(),
+                &particles,
+                &[],
+                0,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                None,
+            );
+        };
+        pass(&mut graphics);
+
+        reset_particle_layer_scans();
+        let start = std::time::Instant::now();
+        const PASSES: u32 = 100;
+        for _ in 0..PASSES {
+            pass(&mut graphics);
+        }
+        let elapsed = start.elapsed();
+        let scans = particle_layer_scans();
+        println!(
+            "{OBJECTS} objects x {PARTICLES} particles: {:.3} us/pass, {} particle \
+             examinations/pass",
+            elapsed.as_secs_f64() * 1e6 / f64::from(PASSES),
+            scans / PASSES as usize,
+        );
+        assert_eq!(
+            scans,
+            PARTICLES * PASSES as usize,
+            "an object pass examined the particle slice more than once"
+        );
+    }
+
+    /// The landscape cache re-anchors to the byte plane the frame presented so
+    /// the engine's next write forks a distinct COW generation
+    /// (clonk-engine landscape.rs:550-554). A frame that changed nothing is
+    /// already anchored to that exact `Arc`, yet re-cloning still deep-copies
+    /// the grid's texture names, material names, densities, materials, dirty
+    /// generations and pending relights (landscape.rs:290-348).
+    #[test]
+    fn unchanged_landscape_reuses_its_anchored_cache_grid() {
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 64;
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT as i32);
+        let texture_names = (0..128)
+            .map(|index| (index > 0).then(|| format!("Texture{index}")))
+            .collect::<Vec<_>>();
+        let material_names = (0..128)
+            .map(|index| (index > 0).then(|| format!("Material{index}")))
+            .collect::<Vec<_>>();
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![1; (WIDTH * HEIGHT) as usize],
+            (0..128)
+                .map(|index| if index == 0 { 0 } else { 50 })
+                .collect(),
+            material_names,
+            texture_names,
+        ));
+        let mut graphics = GraphicsSystem::new(
+            WIDTH,
+            HEIGHT,
+            HEIGHT as i32,
+            "landscape cache anchor",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "texture1".to_string(),
+            ImageData::new(1, 1, vec![128, 128, 128, 255]),
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "material1".to_string(),
+            MaterialRenderInfo::new([100, 100, 100, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 50),
+        )])));
+
+        let anchor = |graphics: &GraphicsSystem| {
+            let cache = graphics.landscape_cache.as_ref().expect("cache built");
+            (
+                cache.grid.texture_names().as_ptr(),
+                cache.grid.material_names().as_ptr(),
+                cache.grid.bytes().as_ptr(),
+            )
+        };
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        let first = anchor(&graphics);
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        let second = anchor(&graphics);
+        assert_eq!(
+            (first.0, first.1),
+            (second.0, second.1),
+            "an unchanged landscape re-cloned its cache grid"
+        );
+        // The whole point of the anchor: the cache still shares the presented
+        // byte plane, so the engine's next write cannot mutate it in place.
+        let presented = landscape.pixel_grid().expect("grid").bytes().as_ptr();
+        assert_eq!(second.2, presented, "cache lost the presented byte plane");
+
+        landscape.grid_write_byte(4, 4, 2);
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        let third = anchor(&graphics);
+        assert_ne!(
+            (second.0, second.1),
+            (third.0, third.1),
+            "a changed landscape must re-anchor its cache grid"
+        );
+        assert_eq!(
+            third.2,
+            landscape.pixel_grid().expect("grid").bytes().as_ptr(),
+            "cache lost the rewritten byte plane"
+        );
+
+        let grid = landscape.pixel_grid().expect("grid");
+        let start = std::time::Instant::now();
+        const CLONES: u32 = 1000;
+        for _ in 0..CLONES {
+            std::hint::black_box(grid.clone());
+        }
+        println!(
+            "PixelGrid::clone with 128 texture and 128 material names: {:.3} us",
+            start.elapsed().as_secs_f64() * 1e6 / f64::from(CLONES)
         );
     }
 

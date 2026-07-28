@@ -420,7 +420,7 @@
         let globals = script
             .global_access_functions()
             .map(|(name, function)| (name.clone(), function.clone()))
-            .collect::<HashMap<_, _>>();
+            .collect::<rustc_hash::FxHashMap<_, _>>();
         script.set_global_functions(Some(Arc::new(globals)));
         let script = Arc::new(script);
         let world = HostWorldContext::default().with_scenario_script(Some(Arc::clone(&script)));

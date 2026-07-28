@@ -460,21 +460,7 @@ fn main() -> Result<()> {
     }
 
     let size = enforce_min_size(window.inner_size());
-    let surface = SurfaceTexture::new(size.width, size.height, &window);
-    // Restrict wgpu to the primary backends: the GL backend probes for libEGL,
-    // which does not exist on macOS, and logs a spurious "Unable to open
-    // libEGL" before falling back to Metal.
-    let mut pixels = PixelsBuilder::new(size.width, size.height, surface)
-        .wgpu_backend(
-            pixels::wgpu::util::backend_bits_from_env().unwrap_or(pixels::wgpu::Backends::PRIMARY),
-        )
-        // StdGLCtx::PageFlip calls SDL_GL_SwapWindow without ever selecting
-        // a swap interval. Do not make drawable acquisition serialize the
-        // independently scheduled simulation and graphics timers behind an
-        // implicit FIFO-vsync wait that the C++ application does not request.
-        .enable_vsync(false)
-        .build()
-        .context("failed to create pixel framebuffer")?;
+    let mut pixels = build_framebuffer(&window, size)?;
     let mut retained_gpu_renderer = gpu_renderer::RetainedGpuRenderer::new(
         pixels.device(),
         pixels.queue(),
@@ -545,6 +531,8 @@ fn main() -> Result<()> {
     );
     let mut next_graphics_deadline = previous_instant + frame_schedule.refresh_interval;
     let mut automatic_frame_skip = AutomaticFrameSkip::default();
+    let mut render_floor = RenderFloor::default();
+    let mut presentation_detail = PresentationDetailGovernor::default();
     let mut presentation_benchmark = presentation_benchmark_from_env();
     let presentation_benchmark_asserts_native_tick = presentation_benchmark_asserts_native_tick();
     let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
@@ -675,10 +663,13 @@ fn main() -> Result<()> {
                     accumulator = Duration::ZERO;
                 }
 
-                let simulation_pass = match advance_simulation_pass(
+                let burst_budget =
+                    render_floor.simulation_burst_budget(frame_schedule.simulation_interval);
+                let simulation_pass = match advance_simulation_pass_within(
                     &mut app,
                     &mut frame_schedule,
                     &mut accumulator,
+                    burst_budget,
                 ) {
                     Ok(outcome) => outcome,
                     Err(err) => {
@@ -715,7 +706,13 @@ fn main() -> Result<()> {
                 // graphics still run only on the application timer, so keep
                 // an absolute deadline instead of treating every wake as a
                 // decoupled graphics opportunity.
+                // The repaint floor outranks every skip decision: `/fast N`,
+                // the network catch-up divisor and a long burst can each
+                // suppress graphics indefinitely, and a frozen window is worse
+                // than a late one.
+                let repaint_overdue = render_floor.must_present(graphics_now);
                 let graphics_due = simulation_pass.immediate_network_retry
+                    || repaint_overdue
                     || graphics_now >= next_graphics_deadline;
                 if graphics_due {
                     next_graphics_deadline = if simulation_pass.immediate_network_retry {
@@ -727,11 +724,23 @@ fn main() -> Result<()> {
                             frame_schedule.refresh_interval,
                         )
                     };
-                    if simulation_pass.skip_redraw {
+                    if simulation_pass.skip_redraw && !repaint_overdue {
                         // Native's manual/network DoSkipFrame takes this same
                         // graphics opportunity and clears the shared latch.
                         automatic_frame_skip.consume_suppressed_graphics_pass();
                     } else {
+                        if repaint_overdue {
+                            // An overdue repaint must also outrank the
+                            // automatic latch, or a slow graphics pass keeps
+                            // re-arming the very skip the floor exists to stop.
+                            automatic_frame_skip.consume_suppressed_graphics_pass();
+                            // `apply_render_floor` counts frames since the last
+                            // redraw and has already run for this pass. Drawing
+                            // on the wall-clock floor instead would otherwise
+                            // leave its counter climbing against a screen that
+                            // did update, firing it a second time for nothing.
+                            app.frames_since_redraw = 0;
+                        }
                         window.request_redraw();
                     }
                 }
@@ -794,6 +803,14 @@ fn main() -> Result<()> {
                                 graphics_duration,
                                 frame_schedule.simulation_interval,
                             );
+                            render_floor
+                                .record_presentation(graphics_started, graphics_duration);
+                            presentation_detail.record_graphics_pass(
+                                app.mode == AppMode::Running && app.auto_frame_skip,
+                                graphics_duration,
+                                frame_schedule.simulation_interval,
+                            );
+                            app.presentation_detail = presentation_detail.detail();
                             if let Some(benchmark) = presentation_benchmark.as_mut() {
                                 let completed_at = Instant::now();
                                 benchmark.record_successful_presentation(
@@ -996,6 +1013,13 @@ fn main() -> Result<()> {
                             graphics_duration,
                             frame_schedule.simulation_interval,
                         );
+                        render_floor.record_presentation(graphics_started, graphics_duration);
+                        presentation_detail.record_graphics_pass(
+                            app.mode == AppMode::Running && app.auto_frame_skip,
+                            graphics_duration,
+                            frame_schedule.simulation_interval,
+                        );
+                        app.presentation_detail = presentation_detail.detail();
                         if let Some(benchmark) = presentation_benchmark.as_mut() {
                             let completed_at = Instant::now();
                             benchmark.record_successful_presentation(
@@ -1632,6 +1656,7 @@ impl GameApp {
             full_speed: false,
             frame_skip: 1,
             auto_frame_skip: configured_auto_frame_skip(&native_config),
+            presentation_detail: PresentationDetail::default(),
             max_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
             network_stats: None,
             network_stats_clients: HashSet::new(),
@@ -1679,7 +1704,8 @@ impl GameApp {
             boot_loading,
             auto_start_sandbox: false,
             auto_start_classic_command_line_scenario: false,
-            auto_open_update_dialog: false,
+            incoming_update: None,
+            update_check_requested: false,
             ingame_gui_pointer: None,
             ingame_pointer: None,
             ingame_mouse_help: false,
@@ -1815,8 +1841,8 @@ impl GameApp {
                 .transpose()?;
         }
         self.apply_classic_game_option_overrides();
-        self.auto_open_update_dialog =
-            classic.update_requested || classic.incoming_update.is_some();
+        self.incoming_update = classic.incoming_update.clone();
+        self.update_check_requested = classic.update_requested;
 
         if let Some(screen) = classic.startup_screen.as_deref() {
             tracing::warn!(

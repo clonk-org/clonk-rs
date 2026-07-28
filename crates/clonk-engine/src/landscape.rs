@@ -345,6 +345,59 @@ pub struct PixelGrid {
     /// resolution and updated incrementally on every pixel write.
     #[serde(skip)]
     material_counts: Vec<u32>,
+    /// Content-derived identity of [`Self::material_names`] and
+    /// [`Self::texture_names`], recomputed only where those tables are
+    /// assigned. `render_dirty_rects_since` runs on every presented frame and
+    /// used to compare both ~128-entry `Vec<Option<String>>` element by
+    /// element to answer one yes/no question; this answers it with a `u64`.
+    ///
+    /// Derived rather than a counter on purpose: two grids that never synced a
+    /// texmap would share any naive generation, and the frontend may be handed
+    /// grids from unrelated landscapes.
+    #[serde(skip)]
+    texmap_identity: RuntimeTexmapIdentity,
+}
+
+/// Runtime-only identity of the texmap name tables.
+///
+/// Not serialized and deliberately equal to every other value: it is a cache
+/// of what the tables already say, so a grid that carries it must stay equal
+/// to the identical grid a save round-trip produces without it. Zero means
+/// "not computed" — a deserialized grid — and
+/// [`PixelGrid::texmap_tables_match`] then falls back to comparing the tables,
+/// so a save can never take a wrong fast path.
+#[derive(Debug, Clone, Copy, Default)]
+struct RuntimeTexmapIdentity(u64);
+
+impl PartialEq for RuntimeTexmapIdentity {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for RuntimeTexmapIdentity {}
+
+/// Identity of the two texmap name tables: FNV-1a over their bytes, with each
+/// table's length and each entry's length folded in so that `["ab", "c"]` and
+/// `["a", "bc"]`, and `[None]` and `[Some("")]`, all differ. Never zero, which
+/// [`RuntimeTexmapIdentity`] reserves for "not computed".
+fn texmap_identity(
+    material_names: &[Option<String>],
+    texture_names: &[Option<String>],
+) -> RuntimeTexmapIdentity {
+    let token = [material_names, texture_names]
+        .into_iter()
+        .fold(RENDER_TOKEN_OFFSET, |token, names| {
+            names.iter().fold(
+                render_token_bytes(token, (names.len() as u64).to_le_bytes()),
+                |token, name| {
+                    let length = name.as_ref().map_or(0, |name| name.len() as u64 + 1);
+                    let token = render_token_bytes(token, length.to_le_bytes());
+                    render_token_bytes(token, name.iter().flat_map(|name| name.bytes()))
+                },
+            )
+        });
+    RuntimeTexmapIdentity(if token == 0 { 1 } else { token })
 }
 
 impl PixelGrid {
@@ -359,7 +412,9 @@ impl PixelGrid {
         debug_assert_eq!(bytes.len(), width as usize * height as usize);
         let materials = vec![None; material_names.len()];
         let render_token = initial_render_token(width, height, &bytes);
+        let identity = texmap_identity(&material_names, &texture_names);
         Self {
+            texmap_identity: identity,
             width,
             height,
             bytes: Arc::new(bytes),
@@ -543,6 +598,27 @@ impl PixelGrid {
         &self.material_names
     }
 
+    /// Identity of the texmap name tables, or zero for a grid that came from a
+    /// save and has not recomputed one. Two grids with nonzero identities
+    /// share them exactly when their `material_names` and `texture_names` are
+    /// equal.
+    pub fn texmap_identity(&self) -> u64 {
+        self.texmap_identity.0
+    }
+
+    /// Whether two grids describe the same texmap. Uses the cached identity
+    /// when both sides have one and falls back to the tables themselves when
+    /// either came from a save.
+    fn texmap_tables_match(&self, other: &Self) -> bool {
+        match (self.texmap_identity.0, other.texmap_identity.0) {
+            (0, _) | (_, 0) => {
+                self.material_names == other.material_names
+                    && self.texture_names == other.texture_names
+            }
+            (left, right) => left == right,
+        }
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -554,8 +630,7 @@ impl PixelGrid {
     /// COW generation that cloned snapshots can identify safely.
     pub fn render_dirty_rects_since(&self, previous: &Self) -> Option<Vec<PixelGridDirtyRect>> {
         if (self.width, self.height) != (previous.width, previous.height)
-            || self.material_names != previous.material_names
-            || self.texture_names != previous.texture_names
+            || !self.texmap_tables_match(previous)
         {
             return None;
         }
@@ -775,6 +850,8 @@ impl PixelGrid {
         self.densities.clone_from(&texmap.densities);
         self.material_names.clone_from(&texmap.material_names);
         self.texture_names.clone_from(&texmap.texture_names);
+        // The only site that moves either name table after construction.
+        self.texmap_identity = texmap_identity(&self.material_names, &self.texture_names);
         if material_mapping_changed {
             self.rebuild_material_counts();
         }
@@ -7750,6 +7827,158 @@ mod tests {
             "capturing a simulation snapshot must not copy the byte plane"
         );
         assert_eq!(captured, live);
+    }
+
+    /// `render_dirty_rects_since` ran on every presented frame and compared
+    /// two ~128-entry `Vec<Option<String>>` element by element to decide
+    /// whether the texmap had changed. The tables only move when
+    /// `sync_runtime_texmap` installs a new texmap, so a content-derived
+    /// identity answers the same question with one `u64` compare. This pins
+    /// the new predicate against the compare it replaces, including the case
+    /// the identity must NOT get wrong: unrelated grids that have never
+    /// synced a texmap and would share any naive generation counter.
+    #[test]
+    fn texmap_identity_agrees_with_the_name_table_compare() {
+        fn grid(materials: &[&str], textures: &[&str]) -> PixelGrid {
+            PixelGrid::new(
+                2,
+                2,
+                vec![0; 4],
+                vec![0; materials.len()],
+                materials.iter().map(|name| Some((*name).to_owned())).collect(),
+                textures.iter().map(|name| Some((*name).to_owned())).collect(),
+            )
+        }
+        let cases = [
+            (grid(&["Earth"], &["earth"]), grid(&["Earth"], &["earth"])),
+            (grid(&["Earth"], &["earth"]), grid(&["Water"], &["earth"])),
+            (grid(&["Earth"], &["earth"]), grid(&["Earth"], &["rock"])),
+            (grid(&["Earth"], &["earth"]), grid(&["Earth", "Water"], &["earth", "rock"])),
+            (grid(&[], &[]), grid(&["Earth"], &["earth"])),
+            (grid(&[], &[]), grid(&[], &[])),
+        ];
+        for (left, right) in &cases {
+            let compared =
+                left.material_names() == right.material_names()
+                    && left.texture_names() == right.texture_names();
+            assert_eq!(
+                left.texmap_identity() == right.texmap_identity(),
+                compared,
+                "texmap identity must answer exactly what the name-table compare answered"
+            );
+        }
+
+        // A texmap sync that really changes the tables must move the identity,
+        // and one that changes nothing must leave it alone.
+        let mut synced = grid(&["Earth"], &["earth"]);
+        let before = synced.texmap_identity();
+        let mut texmap = RuntimeTexMapState::default();
+        texmap.densities = synced.densities.clone();
+        texmap.material_names = synced.material_names.clone();
+        texmap.texture_names = synced.texture_names.clone();
+        synced.sync_runtime_texmap(&texmap);
+        assert_eq!(
+            synced.texmap_identity(),
+            before,
+            "a no-op texmap sync must not invalidate the frontend's cache"
+        );
+
+        texmap.material_names = vec![Some("Water".to_owned())];
+        synced.sync_runtime_texmap(&texmap);
+        assert_ne!(
+            synced.texmap_identity(),
+            before,
+            "a texmap sync that renames a slot must force the full rebuild"
+        );
+        assert!(
+            grid(&["Earth"], &["earth"])
+                .render_dirty_rects_since(&synced)
+                .is_none(),
+            "a changed texmap still rejects the incremental path"
+        );
+
+        // The identity is runtime-only, so a grid restored from a save carries
+        // none. That must degrade to the old table compare, never to a wrong
+        // fast path, and must not make an otherwise-identical grid unequal.
+        let live = grid(&["Earth"], &["earth"]);
+        let restored: PixelGrid =
+            serde_json::from_str(&serde_json::to_string(&live).expect("grid serializes"))
+                .expect("grid deserializes");
+        assert_eq!(restored.texmap_identity(), 0);
+        assert_eq!(
+            restored, live,
+            "a runtime-only identity must not make a save round-trip unequal"
+        );
+        assert!(
+            live.render_dirty_rects_since(&restored).is_some(),
+            "a restored grid with the same tables still takes the incremental path"
+        );
+        assert!(
+            grid(&["Water"], &["earth"])
+                .render_dirty_rects_since(&restored)
+                .is_none(),
+            "a restored grid with different tables still forces the rebuild"
+        );
+    }
+
+    /// The frontend calls `render_dirty_rects_since` once per presented frame
+    /// on a fully populated texmap. Times the identity check against the
+    /// element-by-element name compare it replaced, on the shipped table size.
+    #[test]
+    fn texmap_identity_costs_less_than_the_name_table_compare() {
+        const SLOTS: usize = C4M_MAX_TEX_INDEX + 1;
+        const ROUNDS: u32 = 10_000;
+
+        let names = |prefix: &str| {
+            (0..SLOTS)
+                .map(|slot| Some(format!("{prefix}Material{slot:03}")))
+                .collect::<Vec<_>>()
+        };
+        let materials = names("Mat");
+        let textures = names("Tex");
+        let grid = PixelGrid::new(
+            2,
+            2,
+            vec![0; 4],
+            vec![0; SLOTS],
+            materials.clone(),
+            textures.clone(),
+        );
+        let previous = grid.clone();
+
+        // Worst case for the compare it replaces: equal tables, so every one
+        // of the 2 x 128 entries is examined before it can answer "same".
+        let started = std::time::Instant::now();
+        let mut compared = 0_u32;
+        for _ in 0..ROUNDS {
+            compared += u32::from(
+                grid.material_names == previous.material_names
+                    && grid.texture_names == previous.texture_names,
+            );
+        }
+        let compare = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let mut matched = 0_u32;
+        for _ in 0..ROUNDS {
+            matched += u32::from(grid.texmap_tables_match(&previous));
+        }
+        let identity = started.elapsed();
+
+        assert_eq!(compared, ROUNDS);
+        assert_eq!(matched, ROUNDS);
+        println!(
+            "{SLOTS}-slot texmap, {ROUNDS} checks: name compare {:?} ({:.3} us/frame), \
+             identity {:?} ({:.3} us/frame)",
+            compare,
+            compare.as_secs_f64() * 1e6 / f64::from(ROUNDS),
+            identity,
+            identity.as_secs_f64() * 1e6 / f64::from(ROUNDS),
+        );
+        assert!(
+            identity < compare,
+            "the identity check must beat the compare it replaced: {identity:?} vs {compare:?}"
+        );
     }
 
     #[test]

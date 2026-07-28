@@ -690,7 +690,7 @@ impl Engine {
 
     pub(crate) fn refresh_command_master_list_order(
         exec_list: &[ObjectId],
-        command_snapshots: &mut HashMap<ObjectId, CommandObjectSnapshot>,
+        command_snapshots: &mut CommandObjectSnapshots,
     ) {
         for snapshot in command_snapshots.values_mut() {
             snapshot.master_list_order = usize::MAX;
@@ -983,7 +983,10 @@ impl Engine {
         // Structural command snapshots never trigger FairCrew promotion.
         // The exact handler branch that reaches GetPhysical emits a live
         // continuation event; that event rebuilds this table after the hook.
-        let mut command_snapshots = HashMap::with_capacity(self.objects.len());
+        let mut command_snapshots = CommandObjectSnapshots::with_capacity_and_hasher(
+            self.objects.len(),
+            Default::default(),
+        );
         for index in 0..self.objects.len() {
             let id = self.objects[index].id;
             command_snapshots.insert(id, self.live_command_snapshot(index));
