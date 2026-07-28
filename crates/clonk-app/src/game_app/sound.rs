@@ -697,8 +697,10 @@ impl GameApp {
                         else {
                             self.waiting_network_control =
                                 Some(NetworkControlWait::ReadyTick(tick));
+                            self.announce_network_stall(Instant::now())?;
                             return Ok(());
                         };
+                        self.network_stall_since = None;
                         // C++ CalcPerformance runs in GetControl, before the
                         // decoded controls execute. Freeze the receiver-local
                         // wait sample at the same consumption boundary.

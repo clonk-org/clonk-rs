@@ -1252,6 +1252,30 @@ impl GameApp {
         }
     }
 
+    /// How long the game may sit on an unarrived control tick before saying so.
+    ///
+    /// Long enough that ordinary jitter never trips it, short enough that a
+    /// player does not conclude the game has crashed. LegacyClonk issue #28's
+    /// reporter proposed 100 ms; that is well inside normal stall duration on a
+    /// bad link and would flash constantly.
+    const NETWORK_STALL_NOTICE_AFTER: Duration = Duration::from_millis(1_500);
+
+    /// Says once, per stall, that the session is waiting on the network.
+    ///
+    /// Deliberately not a modal: the game is still running, it is simply not
+    /// advancing, and a dialog would be a worse lie than silence. The per-client
+    /// detail — who is behind and by how much — is already in the F7 client list
+    /// as "(wait N ms, behind M)".
+    pub(crate) fn announce_network_stall(&mut self, now: Instant) -> Result<(), EngineError> {
+        let (since, announced) = *self.network_stall_since.get_or_insert((now, false));
+        if announced || now.saturating_duration_since(since) < Self::NETWORK_STALL_NOTICE_AFTER {
+            return Ok(());
+        }
+        self.network_stall_since = Some((since, true));
+        let text = self.runtime_resource_text("IDS_NET_WAITFORTHER", "Waiting for network...");
+        self.set_network_pacing_flash(&text)
+    }
+
     pub(crate) fn set_network_pacing_flash(&mut self, text: &str) -> Result<(), EngineError> {
         self.set_runtime_flash_message(text, RuntimeHelpCharset::Windows1252)
             .map_err(|error| {

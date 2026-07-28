@@ -374,6 +374,15 @@ pub(crate) struct GameApp {
     pub(crate) sync_checks: SyncCheckState,
     pub(crate) network_ticks: NetworkTickGate,
     pub(crate) waiting_network_control: Option<NetworkControlWait>,
+    /// When the current lockstep stall began, and whether it has been announced.
+    ///
+    /// A control stall is completely silent in C++: `DrawHoldMessages` prints
+    /// only "Pause", and only for `HaltCount`, which a stall never sets. The
+    /// world therefore freezes while rendering carries on at full frame rate,
+    /// which is indistinguishable from a hang — the symptom behind LegacyClonk
+    /// issue #28, "network games stop randomly". There is no C++ behaviour to
+    /// preserve here, so the port says something.
+    pub(crate) network_stall_since: Option<(Instant, bool)>,
     pub(crate) network_control_retry_pending: bool,
     pub(crate) network_sync: NetworkSyncGate,
     /// `C4GameControl::Input` packets produced outside the simulation in a
