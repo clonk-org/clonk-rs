@@ -785,27 +785,11 @@
             8,
             false,
         );
-        let object_context = HostObjectContext::new(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(4, 6),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object_context = HostObjectContext {
+            id: object_id,
+            position: Vector2::new(4, 6),
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(Some(object_context), &[], world, 9, || {
             g_back_solid(&[Value::Int(0), Value::Int(7)])
         });
@@ -899,27 +883,12 @@
             false,
         );
         let object_id = ObjectId::new(11);
-        let object_context = HostObjectContext::new(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(3, 4),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object_context = HostObjectContext {
+            id: object_id,
+            position: Vector2::new(3, 4),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(Some(object_context), &[], world, 6, || {
             get_material(&[Value::Int(0), Value::Int(8)])
         });
@@ -1340,27 +1309,12 @@
         // FnGetTexture reads GLOBAL GBackPix coordinates even in an object
         // context, strips the IFT bit through PixCol2Tex, and returns null for
         // sky or an unmapped TextureMap slot (C4Script.cpp:2222-2232).
-        let object_context = HostObjectContext::new(
-            ObjectId::new(11),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(5, 4),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object_context = HostObjectContext {
+            id: ObjectId::new(11),
+            position: Vector2::new(5, 4),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(
             Some(object_context),
             &[],
@@ -2783,27 +2737,12 @@
             .landscape_mut()
             .is_some_and(|landscape| { landscape.set_surface32_pixel(6, 2, 0x0011_2233) }));
         let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
-        let object_context = HostObjectContext::new(
-            ObjectId::new(91),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(30, 40),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object_context = HostObjectContext {
+            id: ObjectId::new(91),
+            position: Vector2::new(30, 40),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
         let seed = 73;
         let mut expected_rng = LcgRng::new(seed);
         let expected_after = expected_rng.random(1_000);

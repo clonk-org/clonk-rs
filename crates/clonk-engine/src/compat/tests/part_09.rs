@@ -744,27 +744,12 @@ public func Probe(object carrier)
                 build_script(false, target_reject_body),
             ),
         ]));
-        let caller = HostObjectContext::new(
-            caller_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Walk",
-            0,
-            0,
-            library,
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+        let caller = HostObjectContext {
+            id: caller_id,
+            action_name: "Walk".to_string(),
+            action_library: library.into(),
+            ..idle_object_context()
+        }
         .with_definition_id("CLNK")
         .with_ocf(caller_ocf);
 
@@ -1207,27 +1192,11 @@ public func Probe(object carrier)
     #[test]
     fn get_owner_returns_current_owner() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                5,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                owner: 5,
+                controller: 5,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1353,27 +1322,10 @@ func ChangeAndProbe()
             .call_object_function(caller_index, "ChangeAndProbe", vec![])
             .expect("ChangeDef probe runs");
 
-        let carrier = HostObjectContext::new(
-            ObjectId::new(99),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+        let carrier = HostObjectContext {
+            id: ObjectId::new(99),
+            ..idle_object_context()
+        }
         .with_definition_id("RAWW");
         let (global, _) = with_effect_context_with_state_and_definition(
             Some(carrier),
@@ -1449,27 +1401,11 @@ func ChangeAndProbe()
     #[test]
     fn set_owner_records_owner_update() {
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                1,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                owner: 1,
+                controller: 1,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::from_objects_with_players(
                 Vec::<HostWorldObject>::new(),
@@ -1697,27 +1633,7 @@ func ChangeAndProbe()
     fn set_alive_records_alive_update() {
         let (result, outcome) = with_effect_context(
             Some(
-                HostObjectContext::new(
-                    ObjectId::new(1),
-                    None,
-                    ObjectStatus::Normal,
-                    100,
-                    OWNER_NONE,
-                    Vector2::ZERO,
-                    Vector2::ZERO,
-                    &[],
-                    "Idle",
-                    0,
-                    0,
-                    ActionLibrary::default(),
-                    Direction::Left,
-                    CommandDirection::Stop,
-                    0,
-                    None,
-                    None,
-                    &[],
-                    crate::FULL_CON,
-                )
+                idle_object_context()
                 .with_alive(true),
             ),
             &[],
@@ -1827,27 +1743,7 @@ func ChangeAndProbe()
     fn get_alive_returns_current_state() {
         let (result, _) = with_effect_context(
             Some(
-                HostObjectContext::new(
-                    ObjectId::new(1),
-                    None,
-                    ObjectStatus::Normal,
-                    100,
-                    OWNER_NONE,
-                    Vector2::ZERO,
-                    Vector2::ZERO,
-                    &[],
-                    "Idle",
-                    0,
-                    0,
-                    ActionLibrary::default(),
-                    Direction::Left,
-                    CommandDirection::Stop,
-                    0,
-                    None,
-                    None,
-                    &[],
-                    crate::FULL_CON,
-                )
+                idle_object_context()
                 .with_alive(false),
             ),
             &[],
@@ -1963,27 +1859,11 @@ func ChangeAndProbe()
             DefinitionId::from("Dummy"),
             DefinitionMetadata::default(),
         )])));
-        let caller = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            0,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let caller = HostObjectContext {
+            owner: 0,
+            controller: 0,
+            ..idle_object_context()
+        };
         let (result, outcome) = with_effect_context(Some(caller), &[], world, 8, || {
             assert_eq!(
                 kill(&[object_reference_value(ObjectId::new(7))])?,

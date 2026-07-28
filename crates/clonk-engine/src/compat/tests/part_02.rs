@@ -439,27 +439,10 @@
         energy: i32,
         maximum: i32,
     ) -> HostObjectContext<'static> {
-        HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
+        HostObjectContext {
             energy,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+            ..idle_object_context()
+        }
         .with_physicals(
             None,
             None,
@@ -494,27 +477,11 @@
             .map(|name| ((*name).to_string(), ActionSpec::default()))
             .collect();
         with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
+            Some(HostObjectContext {
                 action_ticks,
-                0,
-                ActionLibrary::new(None, specs),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+                action_library: ActionLibrary::new(None, specs).into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -541,27 +508,7 @@
         F: FnOnce() -> Result<T, RuntimeError>,
     {
         with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context()),
             &[],
             world,
             next_object_id,

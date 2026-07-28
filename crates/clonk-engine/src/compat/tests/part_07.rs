@@ -434,27 +434,10 @@ func Probe(state) {
 
         let state = empty_state();
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &effects,
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                effects: &effects,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -514,27 +497,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library.clone(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.clone().into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -546,27 +512,11 @@ func Probe(state) {
         assert!(outcome.object_update.is_none());
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(2),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: ObjectId::new(2),
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -593,27 +543,10 @@ func Probe(state) {
             clonk_script::c4_string_from_bytes(&[0xbf])
         );
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -639,27 +572,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -909,27 +825,10 @@ func Probe(state) {
                 &materials,
             ))));
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                loam,
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: loam,
+                ..idle_object_context()
+            }),
             &[],
             world,
             1,
@@ -985,27 +884,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1069,27 +951,7 @@ func Probe(state) {
     #[test]
     fn get_action_data_reflects_pending_update() {
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context()),
             &[],
             HostWorldContext::default(),
             1,
@@ -1171,27 +1033,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1215,27 +1060,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1256,27 +1084,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1301,27 +1112,10 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1456,27 +1250,10 @@ func Probe(state) {
     #[test]
     fn get_act_time_reflects_pending_update() {
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                7,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_ticks: 7,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1503,27 +1280,11 @@ func Probe(state) {
         let library = ActionLibrary::new(Some("Idle".to_string()), specs);
 
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                5,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_ticks: 5,
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1581,27 +1342,7 @@ func Probe(state) {
     fn get_vertex_num_counts_vertices() {
         let vertices = [ObjectVertex::new(0, 0), ObjectVertex::new(1, -1)];
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -1663,27 +1404,11 @@ func Probe(state) {
         let world =
             HostWorldContext::from_objects(vec![other]).with_definition_metadata(definitions);
         let live_vertices = [ObjectVertex::new(0, 1_000)];
-        let object = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            0,
-            OWNER_NONE,
-            Vector2::new(100, 200),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &live_vertices,
-            crate::FULL_CON,
-        )
+        let object = HostObjectContext {
+            energy: 0,
+            position: Vector2::new(100, 200),
+            ..idle_object_context_with_vertices(&live_vertices)
+        }
         .with_definition_id("SELF");
         let (result, _) = with_effect_context(Some(object), &[], world, 1, || {
             Ok::<_, RuntimeError>(Value::Array(vec![
@@ -1734,27 +1459,10 @@ func Probe(state) {
             },
         )]));
         let world = HostWorldContext::default().with_definition_metadata(definitions);
-        let object = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            0,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+        let object = HostObjectContext {
+            energy: 0,
+            ..idle_object_context()
+        }
         .with_definition_id("SELF");
         let (result, _) =
             with_effect_context(Some(object), &[], world, 1, || script.call("Probe", &[]));
@@ -1807,27 +1515,10 @@ func Probe(state) {
         let run = |function| {
             let world =
                 HostWorldContext::default().with_definition_metadata(Rc::clone(&definitions));
-            let object = HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                0,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )
+            let object = HostObjectContext {
+                energy: 0,
+                ..idle_object_context()
+            }
             .with_definition_id("SELF");
             with_effect_context(Some(object), &[], world, 1, || script.call(function, &[]))
         };
@@ -2428,27 +2119,7 @@ func Probe(state) {
         F: FnOnce() -> Result<T, RuntimeError>,
     {
         with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2667,27 +2338,7 @@ func Probe(state) {
             .with_friction(7);
         let vertices = [vertex];
         let (x, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2712,27 +2363,7 @@ func Probe(state) {
             ])
         );
         let (y, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2740,27 +2371,7 @@ func Probe(state) {
         );
         assert_eq!(y.expect("y succeeds"), Value::Int(-3));
         let (cnat, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2771,27 +2382,7 @@ func Probe(state) {
             Value::Int((CNAT_CENTER | CNAT_BOTTOM) as i32)
         );
         let (friction, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             HostWorldContext::default(),
             1,
@@ -2815,27 +2406,7 @@ func Probe(state) {
             false,
         );
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             world,
             1,
@@ -2865,27 +2436,7 @@ func Probe(state) {
         );
         let object = object_reference_value(ObjectId::new(1));
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &vertices,
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&vertices)),
             &[],
             world,
             1,

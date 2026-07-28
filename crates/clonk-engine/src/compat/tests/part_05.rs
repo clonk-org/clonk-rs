@@ -392,27 +392,12 @@ func ProbeDrawDefMap() {
 
     #[test]
     fn blast_free_offsets_coordinates_without_explicit_controller() {
-        let object_context = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            4,
-            Vector2::new(5, 10),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            FULL_CON,
-        )
+        let object_context = HostObjectContext {
+            owner: 4,
+            controller: 4,
+            position: Vector2::new(5, 10),
+            ..idle_object_context()
+        }
         .with_controller(9);
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -463,27 +448,12 @@ func ProbeDrawDefMap() {
         // Only caused_by_plus_one == 0 selects the caller-relative fallback.
         // A negative explicit value remains global and maps to value-1
         // (C4Script.cpp:2284-2294).
-        let object_context = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            4,
-            Vector2::new(5, 10),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            FULL_CON,
-        )
+        let object_context = HostObjectContext {
+            owner: 4,
+            controller: 4,
+            position: Vector2::new(5, 10),
+            ..idle_object_context()
+        }
         .with_controller(9);
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -729,27 +699,10 @@ func ProbeDrawDefMap() {
             false,
         )
         .with_materials(Some(Rc::new(materials)));
-        let object = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(4, 8),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object = HostObjectContext {
+            position: Vector2::new(4, 8),
+            ..idle_object_context()
+        };
         let mut script = clonk_script::Engine::new();
         register_host_functions(&mut script);
         script

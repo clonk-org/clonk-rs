@@ -38,27 +38,10 @@
             false,
         )
         .with_materials(Some(Rc::new(materials)));
-        let caller = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(200, 150),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            FULL_CON,
-        );
+        let caller = HostObjectContext {
+            position: Vector2::new(200, 150),
+            ..idle_object_context()
+        };
         let mut expected_rng = LcgRng::new(17);
         assert_eq!(expected_rng.random(200), 94);
         assert_eq!(expected_rng.random(200), 2);
@@ -2545,27 +2528,11 @@ protected func Construction()
                 Some(container_id),
             ),
         ]);
-        let context = HostObjectContext::new(
-            object_id,
-            Some(container_id),
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: object_id,
+            container: Some(container_id),
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(Some(context), &[], world, 100, || contained(&[]));
         let value = result.expect("Contained with container succeeds");
         assert_eq!(value, object_reference_value(container_id));
@@ -2682,27 +2649,12 @@ protected func Construction()
             deleted,
             second_item,
         ]);
-        let context = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Walk",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: container_id,
+            action_name: "Walk".to_string(),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
 
         let call_contents = |index, include_attached| {
             let args = [Value::Int(index), Value::Nil, Value::Bool(include_attached)];
@@ -2786,27 +2738,12 @@ protected func Construction()
         );
 
         let world = HostWorldContext::from_objects(vec![container, attached]);
-        let context = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Walk",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: container_id,
+            action_name: "Walk".to_string(),
+            direction: Direction::Right,
+            ..idle_object_context()
+        };
 
         let args = [Value::Nil, Value::Nil, Value::Bool(true)];
         let (result, _) = with_effect_context(Some(context), &[], world, 200, || contents(&args));
@@ -2879,48 +2816,14 @@ protected func Construction()
         );
 
         let world = HostWorldContext::from_objects(vec![container, gem, hammer]);
-        let context_all = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
-        let context_filtered = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context_all = HostObjectContext {
+            id: container_id,
+            ..idle_object_context()
+        };
+        let context_filtered = HostObjectContext {
+            id: container_id,
+            ..idle_object_context()
+        };
 
         let (result, _) = with_effect_context(Some(context_all), &[], world.clone(), 300, || {
             contents_count(&[])
@@ -3001,27 +2904,10 @@ protected func Construction()
         );
 
         let world = HostWorldContext::from_objects(vec![container, hammer, gem]);
-        let context = HostObjectContext::new(
-            container_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: container_id,
+            ..idle_object_context()
+        };
 
         let args = [Value::C4Id("GEM1".into())];
         let (result, _) =
@@ -3099,27 +2985,12 @@ protected func Construction()
                 (DefinitionId::from("GEM1"), DefinitionMetadata::default()),
                 (DefinitionId::from("HAMR"), DefinitionMetadata::default()),
             ])));
-        let context = HostObjectContext::new(
-            hammer_id,
-            Some(container_id),
-            ObjectStatus::Normal,
-            0,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        )
+        let context = HostObjectContext {
+            id: hammer_id,
+            container: Some(container_id),
+            energy: 0,
+            ..idle_object_context()
+        }
         .with_definition_id("HAMR");
 
         let args = [

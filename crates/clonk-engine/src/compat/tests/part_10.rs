@@ -1427,27 +1427,10 @@ protected func Death()
     #[test]
     fn get_con_returns_current_construction() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON / 2,
-            )),
+            Some(HostObjectContext {
+                construction: (crate::FULL_CON / 2).max(0),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1514,27 +1497,11 @@ protected func Death()
     #[test]
     fn get_energy_converts_raw_units_to_percent() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(3),
-                None,
-                ObjectStatus::Normal,
-                LEGACY_MAX_PHYSICAL / 2,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: ObjectId::new(3),
+                energy: LEGACY_MAX_PHYSICAL / 2,
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,

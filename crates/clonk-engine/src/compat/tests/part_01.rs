@@ -2,6 +2,43 @@
 // `include!` from compat.rs so every test id stays `compat::tests::*`.
 // Mostly: host registration, object state, players.
 
+    /// The idle object scope these tests hand to `with_effect_context`: one
+    /// object at rest with no effects and full construction. Sites that need
+    /// a different channel override it through a record update, so the
+    /// shared defaults stay in one place.
+    ///
+    /// Vertices are a parameter rather than an overridable field because the
+    /// constructor derives `shape_vertices` from them. Overriding `owner`
+    /// must also set `controller`, which the constructor seeds from it
+    /// (C4Object.cpp:162), and `construction` is clamped at zero.
+    fn idle_object_context_with_vertices(vertices: &[ObjectVertex]) -> HostObjectContext<'_> {
+        HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            vertices,
+            crate::FULL_CON,
+        )
+    }
+
+    fn idle_object_context() -> HostObjectContext<'static> {
+        idle_object_context_with_vertices(&[])
+    }
+
     #[test]
     fn cpp_add_func_argument_extraction_canonicalizes_scalar_and_pointer_slots() {
         let raw_bool = Value::from_c4_bool_raw(2);
@@ -1348,27 +1385,10 @@
         engine
             .load_script("#strict 2\nfunc Probe(x, y) { return Find_AtPoint(x, y); }")
             .expect("Find_AtPoint probe compiles");
-        let object = HostObjectContext::new(
-            ObjectId::new(1),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::new(320, -50),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object = HostObjectContext {
+            position: Vector2::new(320, -50),
+            ..idle_object_context()
+        };
         let definition_commanded_carrier = object.clone();
         let (local, _) =
             with_effect_context(Some(object), &[], HostWorldContext::default(), 1, || {

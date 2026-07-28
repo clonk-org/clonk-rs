@@ -1468,7 +1468,10 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub vertices: &'a [ObjectVertex],
-    shape_vertices: ShapeVertexBuffer,
+    /// `pub(in crate::compat)` so the sibling `compat::tests` module can
+    /// build a scope through a record update; the field stays invisible
+    /// outside this subtree.
+    pub(in crate::compat) shape_vertices: ShapeVertexBuffer,
     pub construction: i32,
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     pub draw_transform: Option<DrawTransform>,

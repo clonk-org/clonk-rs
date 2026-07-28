@@ -269,27 +269,11 @@
         );
         let library = ActionLibrary::new(Some("Walk".to_string()), specs);
         with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Walk",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_name: "Walk".to_string(),
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -442,27 +426,11 @@
         );
         let library = ActionLibrary::new(Some("Walk".to_string()), specs);
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Walk",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_name: "Walk".to_string(),
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -503,27 +471,11 @@
             )]),
         );
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Odd",
-                0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                action_name: "Odd".to_string(),
+                action_library: library.into(),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1699,27 +1651,10 @@
     #[test]
     fn get_x_returns_current_position() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::new(42, -7),
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                position: Vector2::new(42, -7),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1733,27 +1668,11 @@
     #[test]
     fn get_y_returns_current_position() {
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(2),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::new(-5, 63),
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: ObjectId::new(2),
+                position: Vector2::new(-5, 63),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             1,
@@ -1845,27 +1764,11 @@
         ]);
         let args = [object_reference_value(other_id)];
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                context_id,
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::new(10, 15),
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: context_id,
+                position: Vector2::new(10, 15),
+                ..idle_object_context()
+            }),
             &[],
             world,
             3,
@@ -1930,27 +1833,11 @@
     fn object_distance_returns_nil_when_other_missing() {
         let args = [object_reference_value(ObjectId::new(99))];
         let (result, _) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(3),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::new(0, 0),
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
+            Some(HostObjectContext {
+                id: ObjectId::new(3),
+                position: Vector2::new(0, 0),
+                ..idle_object_context()
+            }),
             &[],
             HostWorldContext::default(),
             4,
@@ -2120,27 +2007,10 @@
                 None,
             ),
         ]);
-        let context = HostObjectContext::new(
-            caller,
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: caller,
+            ..idle_object_context()
+        };
         let (result, _) = with_effect_context(Some(context), &[], world, 1_204, || {
             let mut script = clonk_script::Engine::new();
             register_host_functions(&mut script);
@@ -2200,27 +2070,11 @@
         // without consulting Status (C4Object.cpp:281-315;
         // C4Script.cpp:3321-3325).
         let deleted_caller = ObjectId::new(73);
-        let context = HostObjectContext::new(
-            deleted_caller,
-            None,
-            ObjectStatus::Deleted,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: deleted_caller,
+            status: ObjectStatus::Deleted,
+            ..idle_object_context()
+        };
         let (result, _) =
             with_effect_context(Some(context), &[], HostWorldContext::default(), 74, || {
                 let mut script = clonk_script::Engine::new();
@@ -2238,27 +2092,11 @@
 
     #[test]
     fn get_x_dir_returns_object_velocity() {
-        let context = HostObjectContext::new(
-            ObjectId::new(7),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::new(12, -3),
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: ObjectId::new(7),
+            velocity: Vector2::new(12, -3),
+            ..idle_object_context()
+        };
         let (result, _) =
             with_effect_context(Some(context), &[], HostWorldContext::default(), 1, || {
                 get_x_dir(&[])
@@ -2271,27 +2109,11 @@
 
     #[test]
     fn get_y_dir_applies_precision_scaling() {
-        let context = HostObjectContext::new(
-            ObjectId::new(8),
-            None,
-            ObjectStatus::Normal,
-            100,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::new(0, 25),
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let context = HostObjectContext {
+            id: ObjectId::new(8),
+            velocity: Vector2::new(0, 25),
+            ..idle_object_context()
+        };
         let args = [Value::Nil, Value::Int(5)];
         let (result, _) =
             with_effect_context(Some(context), &[], HostWorldContext::default(), 1, || {
@@ -2721,27 +2543,7 @@ func Probe(object other)
             Value::Bool(true),
         ];
         let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[ObjectVertex::new(0, 0)],
-                crate::FULL_CON,
-            )),
+            Some(idle_object_context_with_vertices(&[ObjectVertex::new(0, 0)])),
             &[],
             world,
             1,

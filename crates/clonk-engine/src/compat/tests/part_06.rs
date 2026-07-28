@@ -1794,27 +1794,13 @@ func Missing() { return ComponentAll(0, WOOD); }
                          old_target, GetPlrView(15)];\n}",
             )
             .expect("pointer-clear probe compiles");
-        let object = HostObjectContext::new(
-            removed,
-            None,
-            ObjectStatus::Normal,
-            100,
-            15,
-            Vector2::new(20, 30),
-            Vector2::ZERO,
-            &[],
-            "Idle",
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            crate::FULL_CON,
-        );
+        let object = HostObjectContext {
+            id: removed,
+            owner: 15,
+            controller: 15,
+            position: Vector2::new(20, 30),
+            ..idle_object_context()
+        };
 
         let (result, outcome) = with_effect_context(Some(object), &[], world, 1, || {
             let result = script.call("Probe", &[Value::Object(removed.as_u64())]);
@@ -2648,27 +2634,7 @@ public func Trigger()
     {
         with_effect_context(
             Some(
-                HostObjectContext::new(
-                    ObjectId::new(1),
-                    None,
-                    ObjectStatus::Normal,
-                    100,
-                    OWNER_NONE,
-                    Vector2::ZERO,
-                    Vector2::ZERO,
-                    &[],
-                    "Idle",
-                    0,
-                    0,
-                    ActionLibrary::default(),
-                    Direction::Left,
-                    CommandDirection::Stop,
-                    0,
-                    None,
-                    None,
-                    &[],
-                    crate::FULL_CON,
-                )
+                idle_object_context()
                 .with_physicals(
                     None,
                     None,
