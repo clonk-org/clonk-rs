@@ -704,6 +704,27 @@ impl GameApp {
         }
     }
 
+    /// `C4Menu::Lines` as last written by `C4Menu::SetSize`.
+    ///
+    /// `SetMenuSize` writes `Lines` and reruns only `InitSize`, leaving
+    /// `LocationSet` alone (C4Menu.cpp:635-640), so an explicit row count
+    /// issued while the menu is already on screen survives. A row count set
+    /// before the first draw is discarded by that draw's `InitLocation`,
+    /// which recomputes `Lines` from the item count (C4Menu.cpp:713-721,
+    /// 796-797) - the freshly created presentation state reproduces that by
+    /// starting without one.
+    pub(crate) fn script_menu_explicit_lines(
+        &self,
+        owner: i32,
+        target: ObjectId,
+        menu: &clonk_engine::ObjectMenuState,
+    ) -> Option<i32> {
+        self.script_menu_presentations
+            .get(&owner)
+            .filter(|state| same_script_menu_presentation(state, target, menu))
+            .and_then(|state| state.explicit_lines)
+    }
+
     /// `C4Menu::Execute` refills *every* active menu when `Game.iTick35`
     /// wraps, not just the hostility page (C4Menu.cpp:990-1000), so an open
     /// team page follows live joins, switches and the generated-team row.
@@ -2240,7 +2261,7 @@ impl GameApp {
             selection: menu.selection,
             location: menu.location,
         };
-        let next = match self.script_menu_presentations.remove(&owner) {
+        let mut next = match self.script_menu_presentations.remove(&owner) {
             Some(state) if state.key == key => state,
             Some(mut state) if same_script_menu_presentation(&state, target, &menu) => {
                 state.key = key;
@@ -2262,8 +2283,19 @@ impl GameApp {
                 scroll_y: 0,
                 scroll_selection: menu.selection,
                 selection_needs_adjustment: true,
+                // A row count set before the first draw is discarded by that
+                // draw's InitLocation (C4Menu.cpp:713-721,796-797).
+                explicit_lines: None,
+                applied_menu_lines: menu.lines,
             },
         };
+        // C4Menu::SetSize assigns Lines without clearing LocationSet, so a
+        // SetMenuSize on an already-displayed menu keeps its explicit row
+        // count (C4Menu.cpp:635-640).
+        if next.applied_menu_lines != menu.lines {
+            next.explicit_lines = (menu.lines > 0).then_some(menu.lines);
+            next.applied_menu_lines = menu.lines;
+        }
         self.script_menu_presentations.insert(owner, next);
         true
     }
@@ -2317,6 +2349,7 @@ impl GameApp {
         let use_free_anchor = presentation.map_or(location.is_some(), |state| {
             state.location_needs_initialization
         });
+        let explicit_lines = presentation.and_then(|state| state.explicit_lines);
         let layout = if use_free_anchor {
             engine_script_menu_layout_with_free_anchor(
                 area,
@@ -2327,6 +2360,7 @@ impl GameApp {
                 location.expect("free anchor has a location"),
                 scroll_y,
                 adjust_selection,
+                explicit_lines,
             )
         } else {
             engine_script_menu_layout_with_presentation(
@@ -2338,6 +2372,7 @@ impl GameApp {
                 location,
                 scroll_y,
                 adjust_selection,
+                explicit_lines,
             )
         };
         Ok(Some((target, layout)))
@@ -2382,6 +2417,7 @@ impl GameApp {
             .and_then(|state| state.location)
             .or_else(|| self.script_menu_free_location(owner, menu));
         let scroll_y = presentation.map_or(0, |state| state.scroll_y);
+        let explicit_lines = presentation.and_then(|state| state.explicit_lines);
         if presentation.map_or(location.is_some(), |state| {
             state.location_needs_initialization
         }) {
@@ -2394,6 +2430,7 @@ impl GameApp {
                 location.expect("free anchor has a location"),
                 scroll_y,
                 false,
+                explicit_lines,
             );
             return Ok(geometry.map(|geometry| (target, geometry)));
         }
@@ -2405,6 +2442,7 @@ impl GameApp {
             &font_images,
             location,
             scroll_y,
+            explicit_lines,
         )
         .map(|geometry| (target, geometry)))
     }

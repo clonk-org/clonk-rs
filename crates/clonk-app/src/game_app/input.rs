@@ -9455,6 +9455,7 @@ impl GameApp {
             .and_then(|state| state.location)
             .or_else(|| self.script_menu_free_location(owner, menu));
         let scroll_y = presentation.map_or(0, |state| state.scroll_y);
+        let explicit_lines = presentation.and_then(|state| state.explicit_lines);
         let use_free_anchor = presentation.map_or(location.is_some(), |state| {
             state.location_needs_initialization
         });
@@ -9470,6 +9471,7 @@ impl GameApp {
                     &font_images,
                     free_location,
                     scroll_y,
+                    explicit_lines,
                 )
             })
         } else {
@@ -9483,6 +9485,7 @@ impl GameApp {
                 &font_images,
                 location,
                 scroll_y,
+                explicit_lines,
             )
         })
     }

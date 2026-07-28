@@ -2947,6 +2947,11 @@ impl GameApp {
                                     scroll_y: 0,
                                     scroll_selection: menu.selection,
                                     selection_needs_adjustment: true,
+                                    // A row count set before the first draw is
+                                    // discarded by that draw's InitLocation
+                                    // (C4Menu.cpp:713-721,796-797).
+                                    explicit_lines: None,
+                                    applied_menu_lines: menu.lines,
                                 },
                             );
                             time_on_selection
@@ -3059,19 +3064,37 @@ impl GameApp {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let (menu_location, retained_scroll_y, adjust_selection, initialize_location) =
-                    self.script_menu_presentations
-                        .get(&script_menu_owner)
-                        .filter(|state| same_script_menu_presentation(state, *target, menu))
-                        .map(|state| {
-                            (
-                                state.location,
-                                state.scroll_y,
-                                state.selection_needs_adjustment,
-                                state.location_needs_initialization,
-                            )
-                        })
-                        .unwrap_or((None, 0, true, false));
+                // C4Menu::SetSize assigns Lines without clearing LocationSet,
+                // so a SetMenuSize on an already-displayed menu keeps its
+                // explicit row count (C4Menu.cpp:635-640).
+                if let Some(state) = self
+                    .script_menu_presentations
+                    .get_mut(&script_menu_owner)
+                    .filter(|state| state.applied_menu_lines != menu.lines)
+                {
+                    state.explicit_lines = (menu.lines > 0).then_some(menu.lines);
+                    state.applied_menu_lines = menu.lines;
+                }
+                let (
+                    menu_location,
+                    retained_scroll_y,
+                    adjust_selection,
+                    initialize_location,
+                    explicit_lines,
+                ) = self
+                    .script_menu_presentations
+                    .get(&script_menu_owner)
+                    .filter(|state| same_script_menu_presentation(state, *target, menu))
+                    .map(|state| {
+                        (
+                            state.location,
+                            state.scroll_y,
+                            state.selection_needs_adjustment,
+                            state.location_needs_initialization,
+                            state.explicit_lines,
+                        )
+                    })
+                    .unwrap_or((None, 0, true, false, None));
                 let area = self
                     .graphics
                     .viewport_rect(script_menu_owner)
@@ -3092,6 +3115,7 @@ impl GameApp {
                             menu_location.expect("free anchor has a location"),
                             retained_scroll_y,
                             adjust_selection,
+                            explicit_lines,
                         )
                     } else {
                         engine_script_menu_layout_with_presentation(
@@ -3103,6 +3127,7 @@ impl GameApp {
                             menu_location,
                             retained_scroll_y,
                             adjust_selection,
+                            explicit_lines,
                         )
                     };
                     (
@@ -3121,6 +3146,7 @@ impl GameApp {
                         menu_location.expect("free anchor has a location"),
                         retained_scroll_y,
                         adjust_selection,
+                        explicit_lines,
                     )
                     .expect("supported dialog menu has presentation geometry");
                     (
@@ -3222,6 +3248,7 @@ impl GameApp {
                             script_menu_accepts_mouse,
                             script_menu_time,
                             Some(&frame_gamma),
+                            explicit_lines,
                         );
                         let modulation = Color::new(255, 255, 255, 0xaf);
                         surface.blit_region_modulated(
@@ -3253,6 +3280,7 @@ impl GameApp {
                             script_menu_accepts_mouse,
                             script_menu_time,
                             Some(&frame_gamma),
+                            explicit_lines,
                         );
                     }
                 }

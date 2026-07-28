@@ -3592,6 +3592,21 @@ pub(crate) struct ScriptMenuPresentationState {
     /// C4Menu::AdjustPosition runs after a selection/location update, not on
     /// every draw (otherwise wheel scrolling would immediately be undone).
     pub(crate) selection_needs_adjustment: bool,
+    /// `C4Menu::Lines` as last written by `C4Menu::SetSize`.
+    ///
+    /// `InitLocation` recomputes `Lines` from the item count, but only while
+    /// `LocationSet` is false, and `Draw` sets `LocationSet` on the first
+    /// frame (C4Menu.cpp:713-721,796-797). `SetSize` writes `Lines` directly
+    /// and does *not* clear `LocationSet` (C4Menu.cpp:635-640), so a
+    /// `SetMenuSize` row count issued while the menu is already on screen
+    /// survives until something invalidates the location. A row count set
+    /// before the first draw is discarded by that first `InitLocation`,
+    /// which is why this starts as `None`.
+    pub(crate) explicit_lines: Option<i32>,
+    /// The `menu.lines` value already folded into `explicit_lines`, so a
+    /// later `SetMenuSize` is recognised by the change rather than by the
+    /// value alone.
+    pub(crate) applied_menu_lines: i32,
 }
 
 pub(crate) fn reset_script_menu_presentation_location(state: &mut ScriptMenuPresentationState) {
