@@ -8110,20 +8110,36 @@ pub(crate) fn load_advanced_renderer_config(
     }
 }
 
+/// `Graphics.Remaster`: the master switch for every presentation-only
+/// divergence from the oracle. Each individual key still wins where the player
+/// set it explicitly, so this only supplies their default.
+pub(crate) fn configured_remaster(config: &[u8]) -> bool {
+    clonk_app_netplay::configured_native_boolean(config, "Graphics", "Remaster").unwrap_or(false)
+}
+
+fn configured_remaster_feature(config: &[u8], key: &str) -> bool {
+    clonk_app_netplay::configured_native_boolean(config, "Graphics", key)
+        .unwrap_or_else(|| configured_remaster(config))
+}
+
 /// `Graphics.HighDpiCursor`: opt in to the physical-width cursor ladder. This
 /// has no C++ counterpart — the oracle only grows the pointer with
-/// `Graphics.Scale` — so it defaults off and is recorded as a deliberate
-/// divergence in `PORT_STATUS.md`.
+/// `Graphics.Scale` — so it is off unless the remaster is on.
 pub(crate) fn configured_high_dpi_cursor(config: &[u8]) -> bool {
-    clonk_app_netplay::configured_native_boolean(config, "Graphics", "HighDpiCursor")
-        .unwrap_or(false)
+    configured_remaster_feature(config, "HighDpiCursor")
+}
+
+/// `Graphics.Mipmaps`: opt in to trilinear + anisotropic minification of
+/// retained art. C++ binds GL_LINEAR with no mip chain.
+pub(crate) fn configured_mipmaps(config: &[u8]) -> bool {
+    configured_remaster_feature(config, "Mipmaps")
 }
 
 /// `Graphics.SkyDither`: opt in to sub-LSB dithering of the sky gradient.
 /// C++ emits the fade as a plain interpolated quad, so this defaults off and
 /// is recorded as a deliberate divergence in `PORT_STATUS.md`.
 pub(crate) fn configured_sky_dither(config: &[u8]) -> bool {
-    clonk_app_netplay::configured_native_boolean(config, "Graphics", "SkyDither").unwrap_or(false)
+    configured_remaster_feature(config, "SkyDither")
 }
 
 pub(crate) fn configured_max_refresh_delay_ms(config: &[u8]) -> u64 {

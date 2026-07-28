@@ -590,6 +590,28 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **Retained art may be minified through a mip chain**
+  (`wants_mipmaps`/`generate_mip_chain` + `linear_mip_sampler`,
+  `crates/clonk-app-render`; opt-in `Graphics.Mipmaps`). Approved 2026-07-28.
+  C++ binds GL_LINEAR with no mip levels, so every minified draw is a single
+  bilinear tap and aliases — which penalises exactly the higher-resolution art
+  a `DefCore Scale=` pack would ship, and shimmers on the 3840x2880 loader
+  backgrounds. Levels are box-filtered on the CPU from the complete backing a
+  resource always carries, in premultiplied space so transparent surrounds do
+  not bleed into minified sprite edges, and only for resources that never
+  change (`base_revision.is_none() && dirty.is_empty()`) — the landscape cache
+  and liquid animation keep one level and bind Nearest regardless. Pinned by
+  `mip_chain_averages_in_premultiplied_space_and_halves_to_one_texel` and
+  `only_unchanging_sources_get_a_mip_chain`.
+
+- **All presentation-only divergences share one master switch**
+  (`Graphics.Remaster`, `configured_remaster_feature`,
+  `crates/clonk-app/src/main_parts/assets.rs`). Approved 2026-07-28. It only
+  supplies the default for `HighDpiCursor`, `SkyDither` and `Mipmaps`; a key
+  the player wrote explicitly still wins in both directions, and with nothing
+  configured every one of them is off and the renderer stays C++-exact. Pinned
+  by `the_remaster_switch_supplies_a_default_that_each_key_can_override`.
+
 - **The sky gradient may be dithered below the 8-bit step**
   (`GpuSolidStyle::dither` + `SOLID_SHADER`, `crates/clonk-app-render`; opt-in
   `Graphics.SkyDither`, default off). Approved 2026-07-28. C++ emits the sky

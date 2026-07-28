@@ -872,6 +872,25 @@
     }
 
     #[test]
+    fn the_remaster_switch_supplies_a_default_that_each_key_can_override() {
+        // One switch turns the presentation-only divergences on together, but
+        // a key the player wrote by hand still wins in both directions.
+        assert!(!configured_high_dpi_cursor(b""));
+        assert!(!configured_sky_dither(b""));
+        assert!(!configured_mipmaps(b""));
+
+        let remastered = b"[Graphics]\nRemaster=1\n";
+        assert!(configured_high_dpi_cursor(remastered));
+        assert!(configured_sky_dither(remastered));
+        assert!(configured_mipmaps(remastered));
+
+        assert!(!configured_sky_dither(
+            b"[Graphics]\nRemaster=1\nSkyDither=0\n"
+        ));
+        assert!(configured_mipmaps(b"[Graphics]\nRemaster=0\nMipmaps=1\n"));
+    }
+
+    #[test]
     fn sky_dither_defaults_off_and_reads_the_native_boolean() {
         // C++ draws the sky fade as a plain interpolated quad, so the
         // byte-exact gradient has to stay the default.

@@ -734,6 +734,10 @@ pub struct RetainedGpuRenderer {
 
     nearest_sampler: wgpu::Sampler,
     linear_sampler: wgpu::Sampler,
+    /// Trilinear + anisotropic variant used when `mipmaps` is on. Kept beside
+    /// the C++-exact sampler so the policy is one bind-time choice.
+    linear_mip_sampler: wgpu::Sampler,
+    mipmaps: bool,
     repeat_nearest_sampler: wgpu::Sampler,
     present_sampler: wgpu::Sampler,
     _fallback_mask_texture: wgpu::Texture,
@@ -975,6 +979,17 @@ impl RetainedGpuRenderer {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        let linear_mip_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lc_gpu_linear_clamp_mip"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            anisotropy_clamp: 16,
+            ..Default::default()
+        });
         let repeat_nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("lc_gpu_nearest_repeat"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -1044,6 +1059,8 @@ impl RetainedGpuRenderer {
             present_pipeline,
             nearest_sampler,
             linear_sampler,
+            linear_mip_sampler,
+            mipmaps: false,
             repeat_nearest_sampler,
             present_sampler,
             _fallback_mask_texture: fallback_mask_texture,
@@ -1338,6 +1355,19 @@ impl RetainedGpuRenderer {
         self.gamma_revision = Some(scene.gamma.revision);
     }
 
+    /// Opt in to trilinear + anisotropic minification for retained art. C++
+    /// binds GL_LINEAR with no mip chain, so this is off unless configured.
+    pub fn set_mipmaps(&mut self, mipmaps: bool) {
+        if self.mipmaps == mipmaps {
+            return;
+        }
+        self.mipmaps = mipmaps;
+        // Level counts are fixed at creation and bind groups cache the
+        // sampler, so both have to be rebuilt against the new policy.
+        self.textures.clear();
+        self.quad_bind_groups.clear();
+    }
+
     fn sync_textures(
         &mut self,
         device: &wgpu::Device,
@@ -1364,7 +1394,7 @@ impl RetainedGpuRenderer {
                 cached.extent != resource.extent || cached.format != resource.format
             });
             if recreate {
-                let texture = create_source_texture(device, resource);
+                let texture = create_source_texture(device, resource, self.mipmaps);
                 upload_full(queue, &texture, resource);
                 self.last_stats.created_source_textures += 1;
                 self.last_stats.full_upload_bytes = self
@@ -1708,6 +1738,8 @@ impl RetainedGpuRenderer {
                         .ok_or(GpuRendererError::MissingTexture(key.texture))?;
                     let sampler = if key.sampler == sampler_key(GpuSampler::Nearest) {
                         &self.nearest_sampler
+                    } else if self.mipmaps {
+                        &self.linear_mip_sampler
                     } else {
                         &self.linear_sampler
                     };
@@ -2939,7 +2971,27 @@ const fn fragment_gamma_flag(mode: GpuGammaMode, command_gamma: bool) -> bool {
     mode.fragment_lookup() && command_gamma
 }
 
-fn create_source_texture(device: &wgpu::Device, resource: &GpuTextureResource) -> wgpu::Texture {
+/// Mips are built once, on the CPU, from the complete backing a resource
+/// always carries — and only for resources that never change. A revisioned
+/// surface (the landscape cache, the liquid animation) would have to rebuild
+/// its whole chain on every dirty rect, and it binds the nearest sampler
+/// anyway, so it never samples one.
+fn wants_mipmaps(resource: &GpuTextureResource) -> bool {
+    resource.base_revision.is_none()
+        && resource.dirty.is_empty()
+        && mip_level_count(resource.extent) > 1
+}
+
+fn create_source_texture(
+    device: &wgpu::Device,
+    resource: &GpuTextureResource,
+    mipmaps: bool,
+) -> wgpu::Texture {
+    let levels = if mipmaps && wants_mipmaps(resource) {
+        mip_level_count(resource.extent)
+    } else {
+        1
+    };
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("lc_gpu_retained_source"),
         size: wgpu::Extent3d {
@@ -2947,13 +2999,92 @@ fn create_source_texture(device: &wgpu::Device, resource: &GpuTextureResource) -
             height: resource.extent[1],
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        mip_level_count: levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: texture_format(resource.format),
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
+}
+
+/// Number of mip levels a source of this extent can hold, base included.
+fn mip_level_count(extent: [u32; 2]) -> u32 {
+    let longest = extent[0].max(extent[1]).max(1);
+    1 + longest.ilog2()
+}
+
+/// Box-filter the complete CPU backing down to 1x1, returning every level
+/// below the base.
+///
+/// RGBA is averaged in premultiplied space: sprite sheets are surrounded by
+/// fully transparent texels whose colour bytes are arbitrary, and averaging
+/// those straight would bleed them into every minified edge.
+fn generate_mip_chain(
+    pixels: &[u8],
+    extent: [u32; 2],
+    format: GpuTextureFormat,
+) -> Vec<([u32; 2], Vec<u8>)> {
+    let bytes = format.bytes_per_pixel();
+    let mut levels = Vec::new();
+    let mut source = pixels.to_vec();
+    let [mut width, mut height] = [extent[0].max(1), extent[1].max(1)];
+    while width > 1 || height > 1 {
+        let next_width = (width / 2).max(1);
+        let next_height = (height / 2).max(1);
+        // An axis that has already bottomed out samples the same row/column
+        // twice, which averages to itself.
+        let step_x = if width > 1 { 1 } else { 0 };
+        let step_y = if height > 1 { 1 } else { 0 };
+        let mut level = vec![0_u8; next_width as usize * next_height as usize * bytes];
+        for y in 0..next_height as usize {
+            for x in 0..next_width as usize {
+                let source_x = x * (1 + step_x as usize);
+                let source_y = y * (1 + step_y as usize);
+                let texel = |dx: usize, dy: usize| {
+                    let sx = (source_x + dx).min(width as usize - 1);
+                    let sy = (source_y + dy).min(height as usize - 1);
+                    let offset = (sy * width as usize + sx) * bytes;
+                    &source[offset..offset + bytes]
+                };
+                let quad = [
+                    texel(0, 0),
+                    texel(step_x as usize, 0),
+                    texel(0, step_y as usize),
+                    texel(step_x as usize, step_y as usize),
+                ];
+                let destination = (y * next_width as usize + x) * bytes;
+                match format {
+                    GpuTextureFormat::R8 => {
+                        let sum: u32 = quad.iter().map(|texel| u32::from(texel[0])).sum();
+                        level[destination] = ((sum + 2) / 4) as u8;
+                    }
+                    GpuTextureFormat::Rgba8 => {
+                        let alpha: u32 = quad.iter().map(|texel| u32::from(texel[3])).sum();
+                        let channel = |index: usize| {
+                            if alpha == 0 {
+                                return 0;
+                            }
+                            let weighted: u32 = quad
+                                .iter()
+                                .map(|texel| u32::from(texel[index]) * u32::from(texel[3]))
+                                .sum();
+                            ((weighted + alpha / 2) / alpha) as u8
+                        };
+                        level[destination] = channel(0);
+                        level[destination + 1] = channel(1);
+                        level[destination + 2] = channel(2);
+                        level[destination + 3] = ((alpha + 2) / 4) as u8;
+                    }
+                }
+            }
+        }
+        levels.push(([next_width, next_height], level.clone()));
+        source = level;
+        width = next_width;
+        height = next_height;
+    }
+    levels
 }
 
 fn texture_format(format: GpuTextureFormat) -> wgpu::TextureFormat {
@@ -2984,6 +3115,38 @@ fn upload_full(queue: &wgpu::Queue, texture: &wgpu::Texture, resource: &GpuTextu
             depth_or_array_layers: 1,
         },
     );
+    if texture.mip_level_count() > 1 {
+        upload_mip_chain(queue, texture, resource);
+    }
+}
+
+fn upload_mip_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, resource: &GpuTextureResource) {
+    let bytes = resource.format.bytes_per_pixel() as u32;
+    for (level, (extent, pixels)) in
+        generate_mip_chain(&resource.pixels, resource.extent, resource.format)
+            .into_iter()
+            .enumerate()
+    {
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture,
+                mip_level: level as u32 + 1,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(extent[0] * bytes),
+                rows_per_image: Some(extent[1]),
+            },
+            wgpu::Extent3d {
+                width: extent[0],
+                height: extent[1],
+                depth_or_array_layers: 1,
+            },
+        );
+    }
 }
 
 fn upload_dirty(
@@ -3484,6 +3647,84 @@ mod tests {
             packed_point_rect(solid_vertex(2.001, 1.0, color), false, &projection)
                 .expect("outside right point")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn mip_chain_averages_in_premultiplied_space_and_halves_to_one_texel() {
+        // Straight-alpha averaging is the classic sprite-halo bug: three
+        // transparent black texels would drag an opaque white one to grey and
+        // the minified edge would darken. Weighting by coverage keeps the
+        // colour and only lowers alpha.
+        let transparent = [0, 0, 0, 0];
+        let white = [255, 255, 255, 255];
+        let pixels: Vec<u8> = [white, transparent, transparent, transparent].concat();
+        let chain = generate_mip_chain(&pixels, [2, 2], GpuTextureFormat::Rgba8);
+        assert_eq!(chain.len(), 1, "2x2 has exactly one level below the base");
+        assert_eq!(chain[0].0, [1, 1]);
+        assert_eq!(
+            chain[0].1,
+            vec![255, 255, 255, 64],
+            "colour survives; only coverage drops"
+        );
+
+        // A plain opaque average stays the arithmetic mean.
+        let opaque: Vec<u8> = [[0, 0, 0, 255], [255, 255, 255, 255]].concat();
+        let chain = generate_mip_chain(&opaque, [2, 1], GpuTextureFormat::Rgba8);
+        assert_eq!(chain[0].1, vec![128, 128, 128, 255]);
+
+        // Level extents halve and clamp at one, so a non-square source keeps
+        // reducing its long axis after the short one bottoms out.
+        assert_eq!(mip_level_count([8, 2]), 4);
+        let wide = vec![255_u8; 8 * 2 * 4];
+        let chain = generate_mip_chain(&wide, [8, 2], GpuTextureFormat::Rgba8);
+        assert_eq!(
+            chain.iter().map(|(extent, _)| *extent).collect::<Vec<_>>(),
+            vec![[4, 1], [2, 1], [1, 1]]
+        );
+        for (extent, level) in &chain {
+            assert_eq!(level.len(), (extent[0] * extent[1] * 4) as usize);
+        }
+
+        // Single-channel masks average directly.
+        let mask = vec![0_u8, 255, 255, 255];
+        let chain = generate_mip_chain(&mask, [2, 2], GpuTextureFormat::R8);
+        assert_eq!(chain[0].1, vec![191]);
+
+        // A 1x1 source has no chain at all.
+        assert_eq!(mip_level_count([1, 1]), 1);
+        assert!(generate_mip_chain(&[1, 2, 3, 4], [1, 1], GpuTextureFormat::Rgba8).is_empty());
+    }
+
+    #[test]
+    fn only_unchanging_sources_get_a_mip_chain() {
+        let pixels: Arc<[u8]> = vec![255_u8; 64 * 64 * 4].into();
+        let art = GpuTextureResource::immutable_rgba(GpuTextureId::fresh(), 64, 64, pixels.clone());
+        assert!(
+            wants_mipmaps(&art),
+            "retained art is uploaded once and is exactly what minifies"
+        );
+
+        // A revisioned surface would have to rebuild its whole chain per dirty
+        // rect; the landscape cache is one of these and binds Nearest anyway.
+        let revisioned = GpuTextureResource {
+            base_revision: Some(3),
+            revision: 4,
+            ..art.clone()
+        };
+        assert!(!wants_mipmaps(&revisioned));
+
+        let partial = GpuTextureResource {
+            dirty: vec![Rect::new(0, 0, 4, 4)],
+            ..art.clone()
+        };
+        assert!(!wants_mipmaps(&partial));
+
+        let single =
+            GpuTextureResource::immutable_rgba(GpuTextureId::fresh(), 1, 1, vec![0_u8; 4].into());
+        assert!(
+            !wants_mipmaps(&single),
+            "a 1x1 source has no level below it"
         );
     }
 
