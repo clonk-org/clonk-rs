@@ -37,6 +37,17 @@ use crate::{ClientId, Tick};
 /// control tick two frames, which is the 55 ms [`CONTROL_PERIOD`].
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(28);
 
+/// How long one control tick lasts at a given `ControlRate`.
+///
+/// A control tick is `ControlRate` simulation frames, so the period scales with
+/// the rate: rate 2 gives 56 ms, which is the 55 ms [`CONTROL_PERIOD`] the
+/// transport model uses. Deriving it matters — holding the period fixed while
+/// varying the rate makes a higher rate look strictly worse, because the CPU
+/// cost per control tick rises with the rate while its budget does not.
+pub fn control_period(control_rate: u32) -> Duration {
+    FRAME_INTERVAL * control_rate.max(1)
+}
+
 /// How expensive one simulation frame is on a given machine.
 ///
 /// Multipliers are relative to the M4 Max reference the engine's
@@ -112,15 +123,22 @@ impl CpuProfile {
 
     /// What one control tick costs, at `control_rate` frames per control tick.
     ///
-    /// A machine is viable exactly when this stays under [`CONTROL_PERIOD`].
+    /// A machine is viable exactly when this stays under
+    /// [`control_period`] for the same rate.
     pub fn control_tick_cost(&self, control_rate: u32) -> Duration {
         self.frame_cost() * control_rate
     }
 
-    /// True when this machine cannot sustain the tick rate even on average, so
-    /// no amount of network tuning will keep it in the session.
+    /// True when this machine cannot sustain the tick rate even on average.
+    ///
+    /// Note what this does *not* depend on: `ControlRate` cancels out, because
+    /// a control tick costs `rate` frames and lasts `rate` frames. A machine
+    /// whose per-frame cost exceeds the per-frame budget is overloaded at every
+    /// rate, so widening the control cadence cannot rescue it — that lever buys
+    /// packet rate and jitter tolerance, not CPU. Only a slower *frame* rate
+    /// would, and that slows the game for everyone.
     pub fn is_overloaded(&self, control_rate: u32) -> bool {
-        self.control_tick_cost(control_rate) > CONTROL_PERIOD
+        self.control_tick_cost(control_rate) > control_period(control_rate)
     }
 
     fn io_stall(&self, rng: &mut SimRng) -> Duration {
@@ -910,6 +928,54 @@ mod tests {
             "async must reduce what the healthy players pay: {:.3} vs {:.3}",
             protected.worst_healthy_frozen_fraction(),
             blocking.worst_healthy_frozen_fraction()
+        );
+    }
+}
+
+#[cfg(test)]
+mod control_rate_tests {
+    use super::*;
+
+    #[test]
+    fn a_wider_control_cadence_cannot_rescue_a_cpu_bound_client() {
+        // Adaptive ControlRate is the classic Age-of-Empires answer to a slow
+        // participant, and it does not apply here. A control tick costs
+        // `ControlRate` frames *and lasts* `ControlRate` frames, so the rate
+        // cancels: a machine whose per-frame cost exceeds the per-frame budget
+        // is overloaded at every rate. Widening the cadence buys packet rate and
+        // jitter tolerance -- both real, both useful on a narrow link -- but not
+        // a single millisecond of CPU.
+        //
+        // Only a slower *frame* rate would help, and that slows the game for
+        // everyone, which is the trade this work exists to avoid.
+        let potato = CpuProfile::potato();
+        for rate in [1u32, 2, 3, 4, 6, 8, 20] {
+            assert!(
+                potato.is_overloaded(rate),
+                "rate {rate} must not disguise an overloaded machine"
+            );
+        }
+
+        let reference = CpuProfile::reference();
+        for rate in [1u32, 2, 3, 4, 6, 8, 20] {
+            assert!(
+                !reference.is_overloaded(rate),
+                "rate {rate} must not make a capable machine look overloaded"
+            );
+        }
+    }
+
+    #[test]
+    fn the_control_period_tracks_the_rate() {
+        // Holding the period fixed while varying the rate was a real bug in this
+        // harness: it made a higher rate measure as strictly worse, because the
+        // cost per control tick rose with the rate while its budget did not.
+        assert_eq!(control_period(2), Duration::from_millis(56));
+        assert_eq!(control_period(6), Duration::from_millis(168));
+        assert_eq!(
+            control_period(1),
+            FRAME_INTERVAL,
+            "rate 1 is one frame per control tick"
         );
     }
 }

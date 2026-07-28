@@ -356,6 +356,38 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
+- **Drawing has a floor while catching up**
+  (`crates/clonk-app/src/main_parts/app_state.rs`, `apply_render_floor`;
+  `NETWORK_RENDER_FLOOR_FRAMES` = 18). Approved 2026-07-27. No C++ equivalent.
+  C++ thins rendering during catch-up by `(behind + 15) / 20`
+  (C4GameControl.cpp:334-342), so at a large backlog it draws one frame in
+  twenty or worse, and because the port coalesces several simulation frames into
+  one pass, consecutive passes can each decide to draw nothing at all. A
+  recovering client then shows a completely static picture — the same "is it
+  hung?" symptom a silent control stall produces, and the reason LegacyClonk
+  issue #28 reads the way it does.
+  A pass that would draw nothing draws anyway once 18 simulation frames have
+  gone by undrawn: 2 Hz at the 28 ms in-game tick, which is the floor Spring
+  pins while fast-forwarding rather than giving the simulation everything.
+  Counted in frames rather than wall time so the behaviour is deterministic and
+  testable. Applied after the pass has decided, so the per-frame accounting that
+  mirrors C++ is untouched.
+
+- **Adaptive `ControlRate` was investigated and rejected — it cannot help a
+  CPU-bound client.** Not a divergence; recorded so it is not attempted again.
+  Widening the control cadence is the classic Age of Empires answer to a slow
+  participant, and it does not apply to this failure. A control tick costs
+  `ControlRate` simulation frames *and lasts* `ControlRate` frames, so the rate
+  cancels out: a machine whose per-frame cost exceeds the per-frame budget is
+  overloaded at every rate. `ControlRate` buys packet rate and jitter tolerance,
+  both genuinely useful on a narrow link, but not one millisecond of CPU. The
+  only lever that would help is a slower *frame* rate, which slows the game for
+  everyone — precisely the outcome the straggler work exists to avoid.
+  Pinned by `sim_session::control_rate_tests`. Finding it required fixing a
+  fidelity bug in the harness: `control_period` now derives from the rate rather
+  than being hardcoded at rate 2's 55 ms, without which a higher rate measured as
+  strictly worse because the cost per control tick rose while its budget did not.
+
 - **Control redundancy is now per peer, and a lossless link pays nothing**
   (`crates/clonk-network/src/udp_runtime.rs`, `ReliableUdpPeer::reconsider_redundancy`;
   extends the fixed-count entry below). Approved 2026-07-27.

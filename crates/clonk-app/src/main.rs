@@ -1610,6 +1610,7 @@ impl GameApp {
             network_ticks: NetworkTickGate::default(),
             waiting_network_control: None,
             network_stall_since: None,
+            frames_since_redraw: 0,
             network_control_retry_pending: false,
             network_sync: NetworkSyncGate::default(),
             offline_control_input: Vec::new(),

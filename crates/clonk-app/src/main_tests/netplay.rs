@@ -19438,3 +19438,45 @@ fn a_lockstep_stall_announces_itself_once_after_a_grace_period() {
         "a fresh stall must be announced again"
     );
 }
+
+#[test]
+fn a_long_catch_up_still_draws_at_the_render_floor() {
+    // C++ thins rendering during catch-up by (behind + 15) / 20, so at a large
+    // backlog it draws one frame in twenty or worse. Because a pass coalesces
+    // several frames, consecutive passes can each decide to draw nothing, and a
+    // recovering client shows a completely static picture -- the same "is it
+    // hung?" symptom a silent stall produces. Spring pins draw to 2 Hz while
+    // fast-forwarding instead; NETWORK_RENDER_FLOOR_FRAMES is that 2 Hz at the
+    // 28 ms tick.
+    let mut app = new_running_sandbox_app();
+
+    // A pass that skipped everything, just under the floor, stays skipped: the
+    // floor must not steal frames from the simulation while it is catching up.
+    app.frames_since_redraw = NETWORK_RENDER_FLOOR_FRAMES - 1;
+    let mut outcome = SimulationPassOutcome {
+        did_update: true,
+        executed_frames: 0,
+        skipped_render_frames: 0,
+        skip_redraw: true,
+        immediate_network_retry: false,
+    };
+    apply_render_floor(&mut app, &mut outcome);
+    assert!(
+        outcome.skip_redraw,
+        "the floor must not fire before the backlog of undrawn frames reaches it"
+    );
+
+    // One more executed frame crosses it, and the pass draws.
+    outcome.executed_frames = 1;
+    outcome.skip_redraw = true;
+    apply_render_floor(&mut app, &mut outcome);
+    assert!(
+        !outcome.skip_redraw,
+        "a client that has gone {NETWORK_RENDER_FLOOR_FRAMES} frames without \
+         drawing must draw regardless of how far behind it is"
+    );
+    assert_eq!(
+        app.frames_since_redraw, 0,
+        "drawing resets the counter, so the floor is a rate and not a one-shot"
+    );
+}
