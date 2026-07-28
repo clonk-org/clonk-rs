@@ -17107,6 +17107,88 @@ mod tests {
         );
     }
 
+    /// `draw_definition_particles` filters the whole particle slice on every
+    /// call and an object pass calls it up to twice per object, so a frame's
+    /// particle walk was O(objects * particles). Grouping the slice by layer
+    /// once per object list makes the pass O(particles).
+    #[test]
+    fn object_pass_examines_the_particle_slice_once() {
+        const OBJECTS: usize = 40;
+        const PARTICLES: usize = 200;
+
+        let template = make_snapshot().objects.remove(0);
+        let objects = (0..OBJECTS)
+            .map(|index| {
+                let mut object = template.clone();
+                object.id = ObjectId::new(index as u64 + 1);
+                object.position = Vector2::new(index as i32 * 2, 8);
+                object
+            })
+            .collect::<Vec<_>>();
+        // Every particle sits on the global layer, so no object draws one and
+        // the whole cost of the old walk was the membership test itself.
+        let particles = (0..PARTICLES)
+            .map(|index| ParticleSnapshot {
+                definition_id: "Smoke".to_string(),
+                position: FloatVector2::new(index as f32, 4.0),
+                velocity: FloatVector2::new(0.0, 0.0),
+                life: 10,
+                parameter_a: 2.0,
+                parameter_b: 0x00ff_ffff,
+                layer: ParticleLayer::Global,
+                pxs_fixed: None,
+                pxs_slot: None,
+            })
+            .collect::<Vec<_>>();
+        let mut graphics = GraphicsSystem::new(
+            160,
+            120,
+            120,
+            "particle layer index",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        let pass = |graphics: &mut GraphicsSystem| {
+            graphics.draw_objects_at_frame(
+                0,
+                &objects,
+                &[],
+                &HashMap::new(),
+                &particles,
+                &[],
+                0,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                None,
+            );
+        };
+        pass(&mut graphics);
+
+        reset_particle_layer_scans();
+        let start = std::time::Instant::now();
+        const PASSES: u32 = 100;
+        for _ in 0..PASSES {
+            pass(&mut graphics);
+        }
+        let elapsed = start.elapsed();
+        let scans = particle_layer_scans();
+        println!(
+            "{OBJECTS} objects x {PARTICLES} particles: {:.3} us/pass, {} particle \
+             examinations/pass",
+            elapsed.as_secs_f64() * 1e6 / f64::from(PASSES),
+            scans / PASSES as usize,
+        );
+        assert_eq!(
+            scans,
+            PARTICLES * PASSES as usize,
+            "an object pass examined the particle slice more than once"
+        );
+    }
+
     /// The landscape cache re-anchors to the byte plane the frame presented so
     /// the engine's next write forks a distinct COW generation
     /// (clonk-engine landscape.rs:550-554). A frame that changed nothing is
