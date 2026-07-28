@@ -4,6 +4,85 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-28
+
+### Bug fixes
+
+- Copy runtime asset groups recursively
+- Widen the GPU backend set instead of aborting startup without an adapter
+- Tag a release only after every platform builds
+- Narrow the chunk window on the client that is actually downloading
+- Stop extending the async deadline for a persistent straggler
+- Publish resources in 10KiB chunks to unblock control behind bulk
+- Size presend from measured control lateness, not ping alone
+
+### Documentation
+
+- Describe the game and show it in the README
+- Attribute the per-commit engine measurements and the gate environment traps
+- Record the texmap identity measurement and close its open gap
+- Record the measured frontend allocation savings and the texmap name compare gap
+- Record the low-power hardware profile, its measurements and the new levers
+- Restore the landscape-extent hook's own doc comment
+- Fold the unreleased 0.2.0 notes into 0.2.1
+- Describe the real packaging outputs per platform
+
+### Features
+
+- Reduce presentation detail automatically when drawing cannot hold the frame budget
+- Reserve wall-clock for drawing and force a repaint floor on slow hardware
+- Hold a draw floor while catching up and pin the control-rate limit
+- Carry capability announcements through the session transport
+- Negotiate port protocol capabilities without breaking cpp interop
+- Announce a lockstep stall instead of freezing silently
+- Add a report-only chaos harness with recorded baselines
+- Simulate whole lockstep sessions with per-client cpu profiles
+- Model link capacity, queueing and competing traffic in the sim
+- Construct plain procedure action specs through one constructor
+- Compile and register a script definition in one engine call
+
+### Performance
+
+- Identify the texmap name tables instead of comparing them every frame
+- Hash the per-frame and script name tables without a per-process seed
+- Group particles by layer once per object pass
+- Skip re-cloning the landscape cache grid it is already anchored to
+- Defer the surface pixel plane until something touches pixels
+- Compare C4 material names without owning their folded bytes
+- Borrow the landscape for read-only host queries instead of copying it
+- Narrow the per-peer chunk window while a game is running
+- Spend control redundancy only on peers that report loss
+
+### Refactoring
+
+- Extract the per-particle draw from the layer walk
+- Promote the link impairment model into a library module
+- Build app runtime tests from one shared game app fixture
+- Build compat test world contexts from one shared scaffold
+- Build categorized test object scopes from one shared default
+- Build render test graphics systems from one shared fixture
+- Build compat test world objects from one shared default
+- Fill unset struct fields from their default instead of restating them
+- Build definition metadata from its derived default
+- Give crew roster entries their cpp default construction
+- Build compat test object scopes from one shared default
+- Build command test runtime contexts through the shared builder
+- Name the shared command runtime context builder for every command
+- Run pending command continuations through one shared seam
+- Share one scaled text caret across the classic dialogs
+- Assemble the script host vm once for every call path
+- Share one host object context builder across definition callbacks
+
+### Styling
+
+- Wrap the landscape cache anchor test density map
+- Order the chaos imports
+
+### Testing
+
+- Refresh the shipped portrait census for the current content
+- Assert script compilation through one shared helper
+
 ## [0.2.1] - 2026-07-28
 
 Includes everything prepared for 0.2.0, which was never published.
