@@ -671,6 +671,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    // Only the `#[cfg(unix)]` fd-readiness tests below poll on a deadline.
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     struct CountingProc {
