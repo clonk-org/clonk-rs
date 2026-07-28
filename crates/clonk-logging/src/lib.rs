@@ -7,6 +7,8 @@ use std::{
 
 use tracing::Metadata;
 use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt, OptionalWriter};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::{SubscriberInitExt, TryInitError};
 use tracing_subscriber::{fmt, EnvFilter};
 
 static INITIALIZED: OnceLock<()> = OnceLock::new();
@@ -69,26 +71,70 @@ impl<'a> MakeWriter<'a> for GameLogCapture {
     }
 }
 
-/// The GuiSink's message-board attachment: it receives the C4Script logger and
-/// nothing else, so engine-internal Rust tracing — which has no C++ `Log()`
-/// counterpart — never reaches `C4MessageBoard::AddLog`.
+/// A destination that may be absent. Wrapping each optional sink lets one
+/// writer chain serve every binary instead of one builder per combination.
 #[derive(Clone, Debug, Default)]
-struct ScriptLogSink(Option<GameLogCapture>);
+struct Optional<M>(Option<M>);
 
-impl<'a> MakeWriter<'a> for ScriptLogSink {
-    type Writer = OptionalWriter<ConsoleLogWriter>;
+impl<'a, M> MakeWriter<'a> for Optional<M>
+where
+    M: MakeWriter<'a>,
+{
+    type Writer = OptionalWriter<M::Writer>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        OptionalWriter::none()
+        self.0
+            .as_ref()
+            .map(|make| OptionalWriter::some(make.make_writer()))
+            .unwrap_or_else(OptionalWriter::none)
     }
 
     fn make_writer_for(&'a self, meta: &Metadata<'_>) -> Self::Writer {
         self.0
             .as_ref()
-            .filter(|_| meta.target() == SCRIPT_LOG_TARGET)
-            .map(|capture| OptionalWriter::some(capture.make_writer()))
+            .map(|make| OptionalWriter::some(make.make_writer_for(meta)))
             .unwrap_or_else(OptionalWriter::none)
     }
+}
+
+/// The GuiSink's message-board attachment: it receives the C4Script logger and
+/// nothing else, so engine-internal Rust tracing — which has no C++ `Log()`
+/// counterpart — never reaches `C4MessageBoard::AddLog`
+/// (`src/C4Log.cpp:226-240`).
+fn message_board_sink(
+    game_log: Option<GameLogCapture>,
+) -> impl for<'a> MakeWriter<'a> + Send + Sync + 'static {
+    Optional(game_log).with_filter(|meta: &Metadata<'_>| meta.target() == SCRIPT_LOG_TARGET)
+}
+
+/// Install the process-wide subscriber. Every event fans out to stderr and the
+/// session log; the developer console and the message board attach only when
+/// the application opened them.
+fn install(
+    default_level: &'static str,
+    file: Option<File>,
+    capture: Option<ConsoleLogCapture>,
+    game_log: Option<GameLogCapture>,
+) -> Result<(), TryInitError> {
+    let diagnostics = io::stderr.and(Optional(file.map(Mutex::new)));
+    let gui = Optional(capture).and(message_board_sink(game_log));
+    tracing_subscriber::registry()
+        .with(env_filter(default_level))
+        .with(
+            fmt::layer()
+                .with_writer(diagnostics)
+                .with_ansi(false)
+                .with_target(false)
+                .with_level(true),
+        )
+        .with(
+            fmt::layer()
+                .with_writer(gui)
+                .with_ansi(false)
+                .with_target(false)
+                .with_level(true),
+        )
+        .try_init()
 }
 
 pub struct ConsoleLogWriter {
@@ -196,29 +242,11 @@ pub fn init_verbose_with_file_and_capture(
         ));
     }
 
-    let file = open_session_log(log_path);
     let default_level = if verbose { "debug" } else { "info" };
-    let board = ScriptLogSink(game_log);
 
-    match file {
+    match open_session_log(log_path) {
         Ok(file) => {
-            let init_result = if let Some(capture) = capture {
-                fmt()
-                    .with_env_filter(env_filter(default_level))
-                    .with_writer(io::stderr.and(Mutex::new(file)).and(capture).and(board))
-                    .with_ansi(false)
-                    .with_target(false)
-                    .with_level(true)
-                    .try_init()
-            } else {
-                fmt()
-                    .with_env_filter(env_filter(default_level))
-                    .with_writer(io::stderr.and(Mutex::new(file)).and(board))
-                    .with_ansi(false)
-                    .with_target(false)
-                    .with_level(true)
-                    .try_init()
-            };
+            let init_result = install(default_level, Some(file), capture, game_log);
             let _ = INITIALIZED.set(());
             init_result.map_err(|err| {
                 io::Error::new(
@@ -229,23 +257,7 @@ pub fn init_verbose_with_file_and_capture(
         }
         Err(err) => {
             INITIALIZED.get_or_init(|| {
-                if let Some(capture) = capture {
-                    let _ = fmt()
-                        .with_env_filter(env_filter(default_level))
-                        .with_writer(io::stderr.and(capture).and(board))
-                        .with_ansi(false)
-                        .with_target(false)
-                        .with_level(true)
-                        .try_init();
-                } else {
-                    let _ = fmt()
-                        .with_env_filter(env_filter(default_level))
-                        .with_writer(io::stderr.and(board))
-                        .with_ansi(false)
-                        .with_target(false)
-                        .with_level(true)
-                        .try_init();
-                }
+                let _ = install(default_level, None, capture, game_log);
             });
             Err(err)
         }
@@ -260,26 +272,9 @@ pub fn init_verbose_with_capture(
     capture: Option<ConsoleLogCapture>,
     game_log: Option<GameLogCapture>,
 ) {
-    let board = ScriptLogSink(game_log);
     let default_level = if verbose { "debug" } else { "info" };
     INITIALIZED.get_or_init(|| {
-        if let Some(capture) = capture {
-            let _ = fmt()
-                .with_env_filter(env_filter(default_level))
-                .with_writer(io::stderr.and(capture).and(board))
-                .with_ansi(false)
-                .with_target(false)
-                .with_level(true)
-                .try_init();
-        } else {
-            let _ = fmt()
-                .with_env_filter(env_filter(default_level))
-                .with_writer(io::stderr.and(board))
-                .with_ansi(false)
-                .with_target(false)
-                .with_level(true)
-                .try_init();
-        }
+        let _ = install(default_level, None, capture, game_log);
     });
 }
 
