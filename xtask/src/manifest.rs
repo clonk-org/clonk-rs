@@ -1,16 +1,26 @@
-//! The signed update manifest a client fetches before downloading anything.
+//! The update manifest a client fetches before downloading anything.
 //!
-//! Clients read `releases/latest/download/manifest.json` anonymously, verify
-//! its Ed25519 signature against a key compiled into the binary, and only then
-//! parse it. Verifying the exact bytes that were downloaded — rather than a
-//! re-serialisation of a parsed structure — means a parser disagreement can
-//! never become a signature bypass, and removes every canonicalisation
-//! question (key order, whitespace, number formatting) from the trust path.
+//! # Trust model
+//!
+//! Clients read `releases/latest/download/manifest.json` anonymously over TLS
+//! (rustls with bundled roots) and verify every component against the SHA-256
+//! the manifest records. That covers tampering in transit and a corrupted or
+//! substituted component archive.
+//!
+//! It deliberately does **not** cover a malicious manifest published by
+//! whoever controls the repository. Signing was considered and dropped: with
+//! automated daily releases the private key would have to live in CI, so an
+//! attacker who could publish a release could equally invoke the workflow that
+//! signs — the signature would guard almost nothing while adding a key that,
+//! once lost, would permanently stop shipped clients from updating. Offline
+//! signing is the variant that would actually help, and it is incompatible
+//! with hands-off releases.
+//!
+//! The manifest is a plain document with a detached-signature-shaped future:
+//! adding `manifest.json.sig` later needs no schema change here.
 
 use crate::components::{ComponentId, EmittedComponent};
-use anyhow::{bail, Context, Result};
-// `public_key()` is a trait method, not inherent.
-use ring::signature::KeyPair as _;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -18,16 +28,11 @@ use std::path::Path;
 /// Bumped only when an older client must refuse to read a newer manifest.
 pub const MANIFEST_SCHEMA: u32 = 1;
 
-/// Domain separation, so a signature over some other clonk-rs artifact can
-/// never be replayed as a manifest signature.
-const SIGNING_DOMAIN: &[u8] = b"clonk-rs/update-manifest/v1\0";
-
-const SIGNATURE_MAGIC: &str = "clonk-rs-signature v1";
-
 /// One downloadable unit.
 ///
-/// `BTreeMap` and declaration order throughout: the serialised bytes are the
-/// signed artifact, so they must not depend on hash iteration order.
+/// `BTreeMap` and declaration order throughout, so the serialised bytes do not
+/// depend on hash iteration order — a client caching by digest would otherwise
+/// see spurious changes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComponentEntry {
     pub name: String,
@@ -47,16 +52,16 @@ pub struct Manifest {
     pub version: String,
     /// `ENGINE_VERSION`, the C4XVer tuple — deliberately *not* the release
     /// version. A client whose engine is older must refuse `content`, because
-    /// `definition_requires_newer_engine` would silently prune definitions
-    /// that declare a newer engine rather than report an error.
+    /// `definition_requires_newer_engine` silently *prunes* definitions that
+    /// declare a newer engine rather than reporting an error.
     pub engine_version: [i32; 5],
     pub released_at: String,
     pub components: Vec<ComponentEntry>,
 }
 
 impl Manifest {
-    /// Serialises to the exact bytes that get signed and published.
-    pub fn to_signed_bytes(&self) -> Result<Vec<u8>> {
+    /// Serialises to the exact bytes that get published.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut bytes = serde_json::to_vec_pretty(self).context("failed to serialise manifest")?;
         bytes.push(b'\n');
         Ok(bytes)
@@ -123,83 +128,11 @@ pub fn build_manifest(
     }
 }
 
-/// Detached signature file: three lines, human-inspectable, trivially parsed.
-pub fn signature_document(key_id: &str, signature: &[u8]) -> String {
-    format!(
-        "{SIGNATURE_MAGIC}\nkeyid: {key_id}\nsig: {}\n",
-        crate::components::hex_digest(signature)
-    )
-}
-
-pub fn parse_signature_document(document: &str) -> Result<(String, Vec<u8>)> {
-    let mut key_id = None;
-    let mut signature = None;
-    let mut lines = document.lines();
-    match lines.next() {
-        Some(first) if first.trim() == SIGNATURE_MAGIC => {}
-        other => bail!("unrecognised signature header: {:?}", other.unwrap_or("")),
-    }
-    for line in lines {
-        if let Some(rest) = line.strip_prefix("keyid:") {
-            key_id = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("sig:") {
-            signature = Some(decode_hex(rest.trim())?);
-        }
-    }
-    match (key_id, signature) {
-        (Some(key_id), Some(signature)) => Ok((key_id, signature)),
-        _ => bail!("signature document is missing a keyid or sig line"),
-    }
-}
-
-fn decode_hex(text: &str) -> Result<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        bail!("hex payload has an odd length");
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|index| {
-            u8::from_str_radix(&text[index..index + 2], 16)
-                .with_context(|| format!("invalid hex at offset {index}"))
-        })
-        .collect()
-}
-
-/// The key identity a client logs, derived so rotation stays interoperable.
-pub fn key_id(public_key: &[u8]) -> String {
-    let digest = ring::digest::digest(&ring::digest::SHA256, public_key);
-    crate::components::hex_digest(&digest.as_ref()[..8])
-}
-
-pub fn sign_manifest(pkcs8: &[u8], manifest_bytes: &[u8]) -> Result<Vec<u8>> {
-    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8)
-        .map_err(|error| anyhow::anyhow!("update signing key is not a valid Ed25519 pkcs8: {error}"))?;
-    let mut payload = SIGNING_DOMAIN.to_vec();
-    payload.extend_from_slice(manifest_bytes);
-    Ok(pair.sign(&payload).as_ref().to_vec())
-}
-
-pub fn verify_manifest(public_key: &[u8], manifest_bytes: &[u8], signature: &[u8]) -> Result<()> {
-    let mut payload = SIGNING_DOMAIN.to_vec();
-    payload.extend_from_slice(manifest_bytes);
-    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key)
-        .verify(&payload, signature)
-        .map_err(|_| anyhow::anyhow!("manifest signature does not verify against the trusted key"))
-}
-
-pub fn write_manifest(directory: &Path, manifest: &Manifest, pkcs8: &[u8]) -> Result<()> {
-    let bytes = manifest.to_signed_bytes()?;
+pub fn write_manifest(directory: &Path, manifest: &Manifest) -> Result<()> {
+    let bytes = manifest.to_bytes()?;
     let manifest_path = directory.join("manifest.json");
     std::fs::write(&manifest_path, &bytes)
         .with_context(|| format!("failed to write {}", manifest_path.display()))?;
-
-    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8)
-        .map_err(|error| anyhow::anyhow!("update signing key is not a valid Ed25519 pkcs8: {error}"))?;
-    let signature = sign_manifest(pkcs8, &bytes)?;
-    let document = signature_document(&key_id(pair.public_key().as_ref()), &signature);
-    let signature_path = directory.join("manifest.json.sig");
-    std::fs::write(&signature_path, document)
-        .with_context(|| format!("failed to write {}", signature_path.display()))?;
     Ok(())
 }
 
@@ -207,17 +140,8 @@ pub fn write_manifest(directory: &Path, manifest: &Manifest, pkcs8: &[u8]) -> Re
 mod tests {
     use super::*;
     use crate::components::ComponentId;
-    use ring::signature::KeyPair;
     use std::path::PathBuf;
     use tempfile::TempDir;
-
-    fn keypair() -> (Vec<u8>, Vec<u8>) {
-        let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("generate key");
-        let pair =
-            ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("parse key");
-        (pkcs8.as_ref().to_vec(), pair.public_key().as_ref().to_vec())
-    }
 
     fn emitted() -> Vec<EmittedComponent> {
         vec![
@@ -248,10 +172,10 @@ mod tests {
 
     #[test]
     fn manifest_bytes_are_stable_across_runs() {
-        // The bytes are the signed artifact, so any iteration-order dependence
-        // would make a signature unreproducible.
-        let first = manifest().to_signed_bytes().expect("serialise");
-        let second = manifest().to_signed_bytes().expect("serialise");
+        // A client caches by digest, so iteration-order dependence would look
+        // like the manifest changing when nothing had.
+        let first = manifest().to_bytes().expect("serialise");
+        let second = manifest().to_bytes().expect("serialise");
         assert_eq!(first, second);
     }
 
@@ -275,6 +199,17 @@ mod tests {
     }
 
     #[test]
+    fn every_component_records_the_digest_a_client_verifies() {
+        // With no signature, the recorded hash is the whole integrity story
+        // for the payload; an entry without one would be unverifiable.
+        for entry in manifest().components {
+            assert_eq!(entry.sha256.len(), 64, "{} needs a full SHA-256", entry.name);
+            assert!(entry.size > 0, "{} needs a size", entry.name);
+            assert!(!entry.archive.is_empty(), "{} needs an archive", entry.name);
+        }
+    }
+
+    #[test]
     fn macos_installs_shared_components_inside_the_bundle() {
         let manifest = manifest();
         let content = manifest
@@ -287,84 +222,34 @@ mod tests {
             Some("Contents/Resources/content")
         );
         assert_eq!(
-            content.install.get("x86_64-unknown-linux-gnu").map(String::as_str),
+            content
+                .install
+                .get("x86_64-unknown-linux-gnu")
+                .map(String::as_str),
             Some("content")
         );
     }
 
     #[test]
-    fn a_signature_verifies_over_the_exact_manifest_bytes() {
-        let (pkcs8, public) = keypair();
-        let bytes = manifest().to_signed_bytes().expect("serialise");
-        let signature = sign_manifest(&pkcs8, &bytes).expect("sign");
-        verify_manifest(&public, &bytes, &signature).expect("verify");
+    fn the_engine_component_unpacks_at_the_install_root() {
+        // Its archive already carries `bin/…` or `Contents/…`, so it needs no
+        // destination prefix of its own.
+        let manifest = manifest();
+        let engine = manifest
+            .components
+            .iter()
+            .find(|entry| entry.name == "engine")
+            .expect("engine entry");
+        assert!(engine.install.values().all(|destination| destination.is_empty()));
     }
 
     #[test]
-    fn a_single_flipped_byte_fails_verification() {
-        let (pkcs8, public) = keypair();
-        let bytes = manifest().to_signed_bytes().expect("serialise");
-        let signature = sign_manifest(&pkcs8, &bytes).expect("sign");
-
-        let mut tampered = bytes.clone();
-        let last = tampered.len() - 2;
-        tampered[last] ^= 0x01;
-        verify_manifest(&public, &tampered, &signature)
-            .expect_err("a tampered manifest must not verify");
-    }
-
-    #[test]
-    fn another_keys_signature_is_refused() {
-        let (pkcs8, _) = keypair();
-        let (_, other_public) = keypair();
-        let bytes = manifest().to_signed_bytes().expect("serialise");
-        let signature = sign_manifest(&pkcs8, &bytes).expect("sign");
-        verify_manifest(&other_public, &bytes, &signature)
-            .expect_err("an untrusted key must not verify");
-    }
-
-    #[test]
-    fn a_signature_over_a_different_domain_is_refused() {
-        // Guards replay of a signature made over some other clonk-rs artifact.
-        let (pkcs8, public) = keypair();
-        let bytes = manifest().to_signed_bytes().expect("serialise");
-        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8).expect("parse key");
-        let foreign = pair.sign(&bytes).as_ref().to_vec();
-        verify_manifest(&public, &bytes, &foreign)
-            .expect_err("a signature without our domain prefix must not verify");
-    }
-
-    #[test]
-    fn the_signature_document_round_trips() {
-        let (pkcs8, public) = keypair();
-        let bytes = manifest().to_signed_bytes().expect("serialise");
-        let signature = sign_manifest(&pkcs8, &bytes).expect("sign");
-        let document = signature_document(&key_id(&public), &signature);
-
-        let (parsed_id, parsed_sig) = parse_signature_document(&document).expect("parse");
-        assert_eq!(parsed_id, key_id(&public));
-        assert_eq!(parsed_sig, signature);
-    }
-
-    #[test]
-    fn a_garbled_signature_document_is_an_error_not_a_panic() {
-        parse_signature_document("not a signature").expect_err("header is checked");
-        parse_signature_document("clonk-rs-signature v1\nkeyid: aa\n")
-            .expect_err("a missing sig line is an error");
-        parse_signature_document("clonk-rs-signature v1\nkeyid: aa\nsig: xyz\n")
-            .expect_err("non-hex payloads are rejected");
-    }
-
-    #[test]
-    fn writing_emits_a_manifest_and_a_detached_signature_that_verify_together() {
-        let (pkcs8, public) = keypair();
+    fn a_written_manifest_round_trips() {
         let out = TempDir::new().expect("output");
-        write_manifest(out.path(), &manifest(), &pkcs8).expect("write manifest");
+        write_manifest(out.path(), &manifest()).expect("write manifest");
 
         let bytes = std::fs::read(out.path().join("manifest.json")).expect("read manifest");
-        let document =
-            std::fs::read_to_string(out.path().join("manifest.json.sig")).expect("read signature");
-        let (_, signature) = parse_signature_document(&document).expect("parse signature");
-        verify_manifest(&public, &bytes, &signature).expect("published pair verifies");
+        let parsed: Manifest = serde_json::from_slice(&bytes).expect("parse manifest");
+        assert_eq!(parsed, manifest());
     }
 }
