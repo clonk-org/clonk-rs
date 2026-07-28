@@ -31,7 +31,7 @@ resolver = "2"
 default-members = ["crates/clonk-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.97.1"
 description = "Clonk Rust game engine and application"
