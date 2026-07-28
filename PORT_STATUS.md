@@ -356,6 +356,29 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
+- **Control redundancy is now per peer, and a lossless link pays nothing**
+  (`crates/clonk-network/src/udp_runtime.rs`, `ReliableUdpPeer::reconsider_redundancy`;
+  extends the fixed-count entry below). Approved 2026-07-27.
+  Each copy is a whole extra datagram, and on a narrow uplink the ~35 bytes of
+  IPv4/UDP/PPP framing per datagram dominate the 10-27 byte control payload: at
+  ControlRate 2 the fixed 3x costs roughly 22 kbit/s per peer per direction, two
+  thirds of a 33.6 kbit/s uplink, to protect a stream that may not be losing
+  anything at all.
+  Each peer now counts the data fragments it sent and the fragments that peer
+  re-asked for — the `Check` missing list is the peer telling us exactly what it
+  lost — and re-decides every 128 fragments. A peer that reported no loss over
+  the window drops to zero extra copies; any loss at all restores the measured
+  default of two extras. A peer that has not been observed yet keeps the default,
+  since the opening datagrams of a session are the ones a stall is most expensive
+  on.
+  The threshold is deliberately "any loss" rather than a congestion-style 2%:
+  the entry below records redundancy paying for itself at 1% loss, so a
+  percentage threshold would switch it off exactly where it was proven to help.
+  The size gate is unchanged, so bulk transfer is still never duplicated.
+  Invisible to a C++ peer for the same reason as the fixed count: the copies are
+  byte-identical and carry the same packet number, so both engines discard the
+  duplicate.
+
 - **The host stops extending the async deadline for a persistent straggler**
   (`crates/clonk-network/src/session/host_loop.rs`, `force_expired_async_control`;
   `HostConfig::straggler_patience`, default 4). Approved 2026-07-27. No C++
