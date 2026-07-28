@@ -356,9 +356,10 @@ jobs:
       - name: Build the packaging tool
         run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
 
-      # The only pass that emits `planet` and `content`. Their archives are
-      # prefix-free and therefore byte-identical on every triple, so emitting
-      # them from every pass would spend the time to produce exact duplicates.
+      # The only pass that emits `planet`. Its archive is prefix-free and
+      # therefore byte-identical on every triple, so emitting it from every pass
+      # would spend the time to produce exact duplicates. `content` is not
+      # emitted by any pass — syb0rg/clonk-rs-content publishes it.
       - name: Package Linux
         if: matrix.runner == 'ubuntu-latest'
         run: ./target/release/xtask-engine-tools package --components=all
@@ -465,7 +466,7 @@ jobs:
           done
 
       # A gate of its own, because the 100 MB floor above is a statement about
-      # whole-payload archives and would reject every component but `content`.
+      # whole-payload archives and would reject every update component.
       # These floors are per kind and deliberately far below the real sizes:
       # they catch an empty container, not a few megabytes of drift.
       - name: Check the update components look real
@@ -479,7 +480,6 @@ jobs:
           for component in "${components[@]}"; do
             name=$(basename "$component")
             case "$name" in
-              content-*)  floor=150000000 ;;
               planet-*)   floor=10000000 ;;
               # The macOS engine carries two architectures, so its floor is
               # twice the others'. Still only an empty-container check — that
@@ -487,8 +487,10 @@ jobs:
               # the step above.
               *-engine-universal-*) floor=10000000 ;;
               *-engine-*) floor=5000000 ;;
-              # An archive no rule here recognises is also one the manifest
-              # generator refuses, so fail where the log is about it.
+              # `content-*` is deliberately not here: that archive is built and
+              # published by syb0rg/clonk-rs-content, and a second builder of
+              # content-addressed bytes is exactly what must not exist. The
+              # manifest generator refuses one too.
               *) echo "$name matches no known update component" >&2; exit 1 ;;
             esac
             size=$(wc -c < "$component")
@@ -573,11 +575,60 @@ jobs:
           name: release-tool
           path: release-tool
 
+      # `content.zip` is built and published by the repository the game data
+      # lives in, so this release references that artifact instead of
+      # re-uploading 225 MB of unchanged bytes daily. Resolving it here — before
+      # the tag — is also the link check: a content release deleted across a
+      # repository boundary would otherwise be discovered by clients, one failed
+      # update at a time.
+      - name: Resolve the published content release
+        id: content
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTENT_REPOSITORY: syb0rg/clonk-rs-content
+        run: |
+          # The submodule is not checked out in this job; this reads the gitlink
+          # straight out of the commit's tree, which *is* the pin. The content
+          # repository tags one release per commit, so the pin resolves with no
+          # lookup table in between.
+          commit=$(git rev-parse "HEAD:content")
+          tag="content-${commit}"
+          echo "content is pinned at ${commit}"
+
+          size=$(gh api "repos/${CONTENT_REPOSITORY}/releases/tags/${tag}" \
+            --jq '.assets[] | select(.name == "content.zip") | .size' || true)
+          if [[ ! "$size" =~ ^[0-9]+$ ]]; then
+            echo "${CONTENT_REPOSITORY} publishes no content.zip in ${tag}" >&2
+            echo "push that content commit to its main branch so the publish workflow runs" >&2
+            exit 1
+          fi
+
+          base="https://github.com/${CONTENT_REPOSITORY}/releases/download/${tag}"
+          digest=$(curl -fsSL "${base}/content.sha256" | cut -d' ' -f1)
+          if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "content.sha256 in ${tag} is not a digest: ${digest}" >&2
+            exit 1
+          fi
+
+          # One byte, through the same redirect a client follows: proves the
+          # asset is actually reachable and not merely listed by the API.
+          curl -fsSL --range 0-0 --output /dev/null "${base}/content.zip"
+
+          echo "resolved ${tag}: ${digest} (${size} bytes)"
+          {
+            echo "commit=${commit}"
+            echo "sha256=${digest}"
+            echo "size=${size}"
+          } >> "$GITHUB_OUTPUT"
+
       # Before the tag: a manifest that cannot be generated must not strand
       # `vX.Y.Z` on a commit whose release can then never be completed.
       - name: Generate the update manifest
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
+          CONTENT_COMMIT: ${{ steps.content.outputs.commit }}
+          CONTENT_SHA256: ${{ steps.content.outputs.sha256 }}
+          CONTENT_SIZE: ${{ steps.content.outputs.size }}
         run: |
           # upload-artifact does not preserve the executable bit.
           chmod +x release-tool/xtask-engine-tools
@@ -590,7 +641,10 @@ jobs:
             --version "$VERSION" \
             --released-at "$released_at" \
             --components components \
-            --out-dir manifest
+            --out-dir manifest \
+            --content-commit "$CONTENT_COMMIT" \
+            --content-sha256 "$CONTENT_SHA256" \
+            --content-size "$CONTENT_SIZE"
           cat manifest/manifest.json
 
       # Created through the API rather than `git push`. GITHUB_TOKEN is refused
