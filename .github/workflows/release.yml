@@ -501,19 +501,39 @@ jobs:
             --out-dir manifest
           cat manifest/manifest.json
 
+      # Created through the API rather than `git push`. GITHUB_TOKEN is refused
+      # any ref push whose commits add or update a file under
+      # `.github/workflows/`, and there is no permission that grants it — so a
+      # release whose history happens to touch a workflow could never be
+      # tagged. The commit itself is already on main, pushed by a human token;
+      # this only points a ref at it, which the restriction does not cover.
       - name: Tag the built commit
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.resolve.outputs.version }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Idempotent: a re-run after a partial publish must not fail here.
-          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+          if gh api "repos/${REPOSITORY}/git/ref/tags/v${VERSION}" >/dev/null 2>&1; then
             echo "v${VERSION} is already tagged"
-          else
-            git tag -a "v${VERSION}" -m "v${VERSION}"
-            git push origin "v${VERSION}"
+            exit 0
           fi
+
+          # Annotated, matching what `git tag -a` produced before: a tag object
+          # first, then the ref that points at it.
+          tag_sha=$(gh api "repos/${REPOSITORY}/git/tags" \
+            -f tag="v${VERSION}" \
+            -f message="v${VERSION}" \
+            -f object="${SHA}" \
+            -f type=commit \
+            --jq '.sha')
+
+          gh api "repos/${REPOSITORY}/git/refs" \
+            -f ref="refs/tags/v${VERSION}" \
+            -f sha="${tag_sha}" >/dev/null
+
+          echo "tagged v${VERSION} at ${SHA}"
 
       - name: Publish the release
         env:
