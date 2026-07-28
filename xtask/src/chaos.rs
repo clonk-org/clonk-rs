@@ -26,8 +26,8 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::time::Duration;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clonk_network::{
