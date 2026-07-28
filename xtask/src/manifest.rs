@@ -28,7 +28,24 @@ use std::path::Path;
 /// Bumped only when an older client must refuse to read a newer manifest.
 pub const MANIFEST_SCHEMA: u32 = 1;
 
-/// One downloadable unit.
+/// What one target triple downloads for a component, and where it lands.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetArchive {
+    pub archive: String,
+    pub sha256: String,
+    pub size: u64,
+    /// Destination relative to the install root. Empty for `engine`, whose
+    /// archive already carries `bin/` or `Contents/`.
+    pub install: String,
+}
+
+/// One downloadable unit, resolved per target triple.
+///
+/// Keyed by triple even for the shared components, which record the *same*
+/// archive under every triple. That redundancy is deliberate: `engine` ships
+/// four genuinely different archives, and a single `archive` field could not
+/// express which one a given client should fetch — a Windows client would
+/// otherwise read whichever archive happened to be recorded last.
 ///
 /// `BTreeMap` and declaration order throughout, so the serialised bytes do not
 /// depend on hash iteration order — a client caching by digest would otherwise
@@ -36,13 +53,7 @@ pub const MANIFEST_SCHEMA: u32 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComponentEntry {
     pub name: String,
-    pub archive: String,
-    pub sha256: String,
-    pub size: u64,
-    /// Where the archive's contents land, relative to the install root, per
-    /// target triple. Shared components differ per platform only in
-    /// destination, never in bytes.
-    pub install: BTreeMap<String, String>,
+    pub targets: BTreeMap<String, TargetArchive>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,48 +79,68 @@ impl Manifest {
     }
 }
 
-/// Destination of a component's contents per target triple.
+/// Where a component's contents land, relative to the install root.
 ///
 /// macOS keeps game data inside the bundle, so the same prefix-free archive
 /// unpacks to a different place there.
-fn install_targets(component: ComponentId, triples: &[&str]) -> BTreeMap<String, String> {
-    triples
-        .iter()
-        .map(|triple| {
-            let macos = triple.contains("apple-darwin");
-            let destination = match component {
-                // The engine archive already carries its platform layout.
-                ComponentId::Engine => String::new(),
-                ComponentId::Planet if macos => "Contents/Resources/planet".to_string(),
-                ComponentId::Planet => "planet".to_string(),
-                ComponentId::Content if macos => "Contents/Resources/content".to_string(),
-                ComponentId::Content => "content".to_string(),
-            };
-            ((*triple).to_string(), destination)
-        })
-        .collect()
+fn install_destination(component: ComponentId, triple: &str) -> String {
+    let macos = triple.contains("apple-darwin");
+    match component {
+        // The engine archive already carries its platform layout.
+        ComponentId::Engine => String::new(),
+        ComponentId::Planet if macos => "Contents/Resources/planet".to_string(),
+        ComponentId::Planet => "planet".to_string(),
+        ComponentId::Content if macos => "Contents/Resources/content".to_string(),
+        ComponentId::Content => "content".to_string(),
+    }
 }
 
+/// Builds a manifest from every emitted archive across all platform passes.
+///
+/// `emitted` may contain several `engine` archives — one per triple, produced
+/// on different runners — each keyed by the triple it was built for.
 pub fn build_manifest(
     version: &str,
     engine_version: [i32; 5],
     released_at: &str,
-    emitted: &[EmittedComponent],
+    emitted: &[(String, EmittedComponent)],
     triples: &[&str],
 ) -> Manifest {
-    let mut components: Vec<ComponentEntry> = emitted
-        .iter()
-        .map(|component| ComponentEntry {
-            name: component.id.name().to_string(),
-            archive: component
-                .path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            sha256: component.sha256.clone(),
-            size: component.size,
-            install: install_targets(component.id, triples),
-        })
+    let mut by_component: BTreeMap<String, BTreeMap<String, TargetArchive>> = BTreeMap::new();
+
+    for (built_for, component) in emitted {
+        let archive = component
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // A shared archive is byte-identical everywhere, so it is offered to
+        // every triple; an engine archive belongs only to the triple it was
+        // built for.
+        let claimed: Vec<&str> = if component.id.is_platform_independent() {
+            triples.to_vec()
+        } else {
+            vec![built_for.as_str()]
+        };
+        for triple in claimed {
+            by_component
+                .entry(component.id.name().to_string())
+                .or_default()
+                .insert(
+                    triple.to_string(),
+                    TargetArchive {
+                        archive: archive.clone(),
+                        sha256: component.sha256.clone(),
+                        size: component.size,
+                        install: install_destination(component.id, triple),
+                    },
+                );
+        }
+    }
+
+    let mut components: Vec<ComponentEntry> = by_component
+        .into_iter()
+        .map(|(name, targets)| ComponentEntry { name, targets })
         .collect();
     // Apply order, not emit order: data first, executables last, so an
     // interrupted apply leaves an older-but-working binary that can retry.
@@ -143,20 +174,35 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn emitted() -> Vec<EmittedComponent> {
+    fn emitted() -> Vec<(String, EmittedComponent)> {
         vec![
-            EmittedComponent {
-                id: ComponentId::Engine,
-                path: PathBuf::from("clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"),
-                sha256: "aa".repeat(32),
-                size: 24_000_000,
-            },
-            EmittedComponent {
-                id: ComponentId::Content,
-                path: PathBuf::from("content-bb.zip"),
-                sha256: "bb".repeat(32),
-                size: 250_000_000,
-            },
+            (
+                "x86_64-unknown-linux-gnu".to_string(),
+                EmittedComponent {
+                    id: ComponentId::Engine,
+                    path: PathBuf::from("clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"),
+                    sha256: "aa".repeat(32),
+                    size: 24_000_000,
+                },
+            ),
+            (
+                "aarch64-apple-darwin".to_string(),
+                EmittedComponent {
+                    id: ComponentId::Engine,
+                    path: PathBuf::from("clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip"),
+                    sha256: "cc".repeat(32),
+                    size: 18_000_000,
+                },
+            ),
+            (
+                "x86_64-unknown-linux-gnu".to_string(),
+                EmittedComponent {
+                    id: ComponentId::Content,
+                    path: PathBuf::from("content-bb.zip"),
+                    sha256: "bb".repeat(32),
+                    size: 250_000_000,
+                },
+            ),
         ]
     }
 
@@ -203,15 +249,48 @@ mod tests {
         // With no signature, the recorded hash is the whole integrity story
         // for the payload; an entry without one would be unverifiable.
         for entry in manifest().components {
-            assert_eq!(
-                entry.sha256.len(),
-                64,
-                "{} needs a full SHA-256",
-                entry.name
-            );
-            assert!(entry.size > 0, "{} needs a size", entry.name);
-            assert!(!entry.archive.is_empty(), "{} needs an archive", entry.name);
+            assert!(!entry.targets.is_empty(), "{} needs a target", entry.name);
+            for (triple, target) in &entry.targets {
+                assert_eq!(
+                    target.sha256.len(),
+                    64,
+                    "{}/{triple} needs a full SHA-256",
+                    entry.name
+                );
+                assert!(target.size > 0, "{}/{triple} needs a size", entry.name);
+                assert!(
+                    !target.archive.is_empty(),
+                    "{}/{triple} needs an archive",
+                    entry.name
+                );
+            }
         }
+    }
+
+    #[test]
+    fn each_triple_resolves_to_its_own_engine_archive() {
+        // A single `archive` field could not express four per-triple engine
+        // builds: a Windows client would fetch whichever was recorded last.
+        let manifest = manifest();
+        let engine = manifest
+            .components
+            .iter()
+            .find(|entry| entry.name == "engine")
+            .expect("engine entry");
+
+        assert_eq!(
+            engine.targets["x86_64-unknown-linux-gnu"].archive,
+            "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"
+        );
+        assert_eq!(
+            engine.targets["aarch64-apple-darwin"].archive,
+            "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip"
+        );
+        assert_ne!(
+            engine.targets["x86_64-unknown-linux-gnu"].sha256,
+            engine.targets["aarch64-apple-darwin"].sha256,
+            "different builds must not share a digest"
+        );
     }
 
     #[test]
@@ -223,18 +302,17 @@ mod tests {
             .find(|entry| entry.name == "content")
             .expect("content entry");
         assert_eq!(
-            content
-                .install
-                .get("aarch64-apple-darwin")
-                .map(String::as_str),
-            Some("Contents/Resources/content")
+            content.targets["aarch64-apple-darwin"].install,
+            "Contents/Resources/content"
         );
         assert_eq!(
-            content
-                .install
-                .get("x86_64-unknown-linux-gnu")
-                .map(String::as_str),
-            Some("content")
+            content.targets["x86_64-unknown-linux-gnu"].install,
+            "content"
+        );
+        // Same bytes on both platforms; only the destination differs.
+        assert_eq!(
+            content.targets["aarch64-apple-darwin"].sha256,
+            content.targets["x86_64-unknown-linux-gnu"].sha256
         );
     }
 
@@ -249,9 +327,9 @@ mod tests {
             .find(|entry| entry.name == "engine")
             .expect("engine entry");
         assert!(engine
-            .install
+            .targets
             .values()
-            .all(|destination| destination.is_empty()));
+            .all(|target| target.install.is_empty()));
     }
 
     #[test]
