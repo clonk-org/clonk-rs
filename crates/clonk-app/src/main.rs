@@ -416,6 +416,9 @@ fn main() -> Result<()> {
         })?;
     }
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
+    // Built before the window size is resolved: the event loop is what can be
+    // asked about the monitors the window will open on.
+    let event_loop = EventLoopBuilder::<NetworkEventWake>::with_user_event().build();
     let (initial_width, initial_height) = if classic.console {
         // C4Console's GTK shell uses a 320x320 native-pixel default and never
         // inherits the fullscreen game window configuration.
@@ -442,7 +445,6 @@ fn main() -> Result<()> {
             None
         }
     };
-    let event_loop = EventLoopBuilder::<NetworkEventWake>::with_user_event().build();
     // The stored resolution is in output pixels (ResX*Scale), like the C++
     // window setup (C4Application.cpp:183).
     let window = startup_window_builder(
