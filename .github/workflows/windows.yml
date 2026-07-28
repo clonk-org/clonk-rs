@@ -68,5 +68,8 @@ jobs:
       - name: Test the launcher and path resolution
         run: cargo nextest run -p clonk-game -p clonk-platform -p clonk-core --locked --no-fail-fast
 
+      # `--no-deps` keeps this scoped to the crates the job actually tests.
+      # Other workspace crates carry their own Windows-only lint debt, and
+      # inheriting it here would make the launcher signal unreadable.
       - name: Clippy
-        run: cargo clippy --profile test -p clonk-game -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
+        run: cargo clippy --profile test --no-deps -p clonk-game -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings

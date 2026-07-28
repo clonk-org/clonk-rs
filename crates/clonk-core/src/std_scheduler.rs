@@ -436,7 +436,7 @@ impl StdScheduler {
         let mut success = true;
         let mut signalled: Vec<usize> = Vec::new();
 
-        if handles.len() > 0 {
+        if !handles.is_empty() {
             let wait_result = unsafe {
                 WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, wait_timeout)
             };
@@ -457,11 +457,11 @@ impl StdScheduler {
         }
 
         if handles.len() > 1 {
-            for index in 1..handles.len() {
+            for (index, handle) in handles.iter().enumerate().skip(1) {
                 if signalled.contains(&index) {
                     continue;
                 }
-                let status = unsafe { WaitForSingleObject(handles[index], 0) };
+                let status = unsafe { WaitForSingleObject(*handle, 0) };
                 match status {
                     WAIT_FAILED => {
                         let err = io::Error::last_os_error();
@@ -493,11 +493,9 @@ impl StdScheduler {
         }
 
         for entry in &self.procs {
-            if entry.proc.get_timeout() == 0 {
-                if !entry.proc.execute(INFINITE_TIMEOUT) {
-                    success = false;
-                    self.handle_error(&entry.proc);
-                }
+            if entry.proc.get_timeout() == 0 && !entry.proc.execute(INFINITE_TIMEOUT) {
+                success = false;
+                self.handle_error(&entry.proc);
             }
         }
 

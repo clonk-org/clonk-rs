@@ -279,13 +279,11 @@ pub fn is_global_path(path: impl AsRef<Path>) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        if let Some(first) = path.components().next() {
-            if let std::path::Component::Prefix(prefix) = first {
-                return matches!(
-                    prefix.kind(),
-                    std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
-                );
-            }
+        if let Some(std::path::Component::Prefix(prefix)) = path.components().next() {
+            return matches!(
+                prefix.kind(),
+                std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+            );
         }
     }
     false
