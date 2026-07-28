@@ -646,9 +646,17 @@ mod tests {
         let result = AppPaths::discover();
         match result {
             Err(PathsError::SystemGroupMissing { probe, .. }) => {
+                // ENOTDIR is errno 20 on unix; Windows reports its own code for
+                // the same condition, so only the concreteness is portable.
+                #[cfg(unix)]
                 assert!(
                     probe.contains("os error 20"),
                     "probe must carry the concrete ENOTDIR io error, got {probe:?}"
+                );
+                #[cfg(not(unix))]
+                assert!(
+                    probe.contains("os error"),
+                    "probe must carry a concrete io error, got {probe:?}"
                 );
             }
             other => panic!("expected SystemGroupMissing, got {other:?}"),
