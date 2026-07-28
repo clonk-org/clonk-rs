@@ -209,6 +209,69 @@ mod tests {
         Color::new(v, v, v, 255)
     }
 
+    /// The lobby carried a pre-atlas copy of the caret routine. A
+    /// `width`-sized `ImageData` makes `cpp_texture_size` tile the glyph on
+    /// its narrow side, and every tile clamps its own bilinear edge, so each
+    /// bar of the broken-bar caret lost its outermost scaled row (12 px
+    /// instead of 13). The shared routine pads to a single power-of-two tile
+    /// like the real C4Surface font atlas, which is what the four other
+    /// dialogs already did.
+    #[test]
+    fn scaled_caret_keeps_whole_bars_through_one_atlas_tile() {
+        const WIDTH: i32 = 3;
+        const CELL_HEIGHT: i32 = 20;
+
+        let mut font = clonk_graphics::clonk_font::ClonkFont::new(CELL_HEIGHT - 1);
+        // U+00A6 is a BROKEN bar: opaque, gap, opaque.
+        let mut pixels = vec![Color::new(255, 255, 255, 255); (WIDTH * CELL_HEIGHT) as usize];
+        for row in 8..12 {
+            for column in 0..WIDTH {
+                pixels[(row * WIDTH + column) as usize] = Color::new(0, 0, 0, 0);
+            }
+        }
+        font.add_glyph(
+            '\u{a6}',
+            clonk_graphics::clonk_font::GlyphCell {
+                width: WIDTH,
+                pixels,
+            },
+        );
+
+        let mut surface = Surface::new(48, 48, PixelFormat::Rgba8888);
+        surface.fill(Color::new(0, 0, 0, 255));
+        draw_scaled_caret(
+            &mut surface,
+            &font,
+            4,
+            4,
+            crate::classic_gui::IntRect {
+                x: 0,
+                y: 0,
+                w: 48,
+                h: 48,
+            },
+            None,
+        );
+
+        let lit: Vec<bool> = (0..48)
+            .map(|y| surface.get_pixel(5, y).expect("in bounds").r > 0)
+            .collect();
+        let mut runs = Vec::new();
+        let mut run = 0;
+        for on in lit {
+            if on {
+                run += 1;
+            } else if run > 0 {
+                runs.push(run);
+                run = 0;
+            }
+        }
+        if run > 0 {
+            runs.push(run);
+        }
+        assert_eq!(runs, vec![13, 13], "tile-clamped caret bars");
+    }
+
     #[test]
     fn player_startup_name_decodes_native_bytes_only_for_presentation() {
         let raw = clonk_script::c4_string_from_bytes(b"Andr\xe9");

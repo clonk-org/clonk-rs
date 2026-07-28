@@ -16,6 +16,7 @@ use crate::classic_gui::{
     draw_3d_frame, draw_clipped_text_with_markup, draw_engine_box, draw_facet_stretch,
     ClassicButtonState, ClassicGuiSkin, IntRect,
 };
+use crate::draw_scaled_caret;
 use crate::message_dialog::break_message;
 use crate::{expand_hotkey_markup, ClonkFontSet, GuiPoint, ImageData, KeyCode};
 
@@ -2604,72 +2605,6 @@ fn render_edit(
             gamma,
         );
     }
-}
-
-fn draw_scaled_caret(
-    surface: &mut Surface,
-    font: &ClonkFont,
-    x: i32,
-    y: i32,
-    clip: IntRect,
-    gamma: Option<&GammaRamp>,
-) {
-    const SCALE: f32 = 1.5;
-    let Some(glyph) = font.glyph('\u{a6}') else {
-        return;
-    };
-    let Ok(width) = u32::try_from(glyph.width) else {
-        return;
-    };
-    let Ok(height) = u32::try_from(font.cell_height) else {
-        return;
-    };
-    if width == 0 || height == 0 || glyph.pixels.len() != width as usize * height as usize {
-        return;
-    }
-    let atlas_width = width.max(height).next_power_of_two();
-    let mut pixels = vec![255_u8; atlas_width as usize * height as usize * 4];
-    for pixel in pixels.chunks_exact_mut(4) {
-        pixel[3] = 0;
-    }
-    for source_y in 0..height as usize {
-        for source_x in 0..width as usize {
-            let pixel = glyph.pixels[source_y * width as usize + source_x];
-            let destination = (source_y * atlas_width as usize + source_x) * 4;
-            let (red, green, blue) = if pixel.a == 0 {
-                (255, 255, 255)
-            } else {
-                (pixel.r, pixel.g, pixel.b)
-            };
-            pixels[destination..destination + 4].copy_from_slice(&[red, green, blue, pixel.a]);
-        }
-    }
-    let image = ImageData::new(atlas_width, height, pixels);
-    let destination = (
-        x as f32,
-        y as f32,
-        width as f32 * SCALE,
-        height as f32 * SCALE,
-    );
-    let left = destination.0.max(clip.x as f32);
-    let top = destination.1.max(clip.y as f32);
-    let right = (destination.0 + destination.2).min((clip.x + clip.w) as f32);
-    let bottom = (destination.1 + destination.3).min((clip.y + clip.h) as f32);
-    if left >= right || top >= bottom {
-        return;
-    }
-    draw_facet_stretch(
-        surface,
-        &image,
-        (
-            (left - destination.0) / SCALE,
-            (top - destination.1) / SCALE,
-            (right - left) / SCALE,
-            (bottom - top) / SCALE,
-        ),
-        (left, top, right - left, bottom - top),
-        gamma,
-    );
 }
 
 #[cfg(test)]

@@ -1320,3 +1320,101 @@ pub(crate) fn draw_transform_at(matrix: [f32; 9], off_x: f32, off_y: f32) -> Gra
         i - g * off_x - h * off_y,
     )
 }
+
+/// The 1.5x-scaled text caret every editable classic dialog draws.
+///
+/// The five dialogs that own a text field each grew their own copy of this
+/// routine. They render the same glyph through the same atlas and the same
+/// clipped stretch, so they share one implementation here.
+pub(crate) fn draw_scaled_caret(
+    surface: &mut Surface,
+    font: &clonk_graphics::clonk_font::ClonkFont,
+    x: i32,
+    y: i32,
+    clip: crate::classic_gui::IntRect,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+) {
+    const SCALE: f32 = 1.5;
+    let Some(glyph) = font.glyph('\u{a6}') else {
+        return;
+    };
+    let Ok(width) = u32::try_from(glyph.width) else {
+        return;
+    };
+    let Ok(height) = u32::try_from(font.cell_height) else {
+        return;
+    };
+    if width == 0 || height == 0 || glyph.pixels.len() != width as usize * height as usize {
+        return;
+    }
+    // Keep the glyph inside one texture tile like the real font atlas. A
+    // narrow standalone image would otherwise be split into width-sized
+    // vertical tiles by the shared C4Surface blitter.
+    let atlas_width = width.max(height).next_power_of_two();
+    let mut glyph_hash = 0xcbf2_9ce4_8422_2325_u64;
+    for pixel in &glyph.pixels {
+        for byte in [pixel.r, pixel.g, pixel.b, pixel.a] {
+            glyph_hash = (glyph_hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    thread_local! {
+        /// The caret atlas is immutable for a given rasterized font. Reusing
+        /// its ImageData identity keeps the retained renderer from allocating
+        /// a fresh GPU texture cache entry on every blinking frame.
+        static CARET_ATLASES: std::cell::RefCell<
+            std::collections::HashMap<(u32, u32, u64), ImageData>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let image = CARET_ATLASES.with(|atlases| {
+        let key = (width, height, glyph_hash);
+        if let Some(image) = atlases.borrow().get(&key).cloned() {
+            return image;
+        }
+        let mut pixels = vec![255_u8; atlas_width as usize * height as usize * 4];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = 0;
+        }
+        for row in 0..height as usize {
+            for column in 0..width as usize {
+                let pixel = glyph.pixels[row * width as usize + column];
+                let destination = (row * atlas_width as usize + column) * 4;
+                // C4Surface initializes unused font-atlas pixels to transparent
+                // white. Preserve that RGB for the GL_LINEAR 1.5x sample.
+                let (red, green, blue) = if pixel.a == 0 {
+                    (255, 255, 255)
+                } else {
+                    (pixel.r, pixel.g, pixel.b)
+                };
+                pixels[destination..destination + 4].copy_from_slice(&[red, green, blue, pixel.a]);
+            }
+        }
+        let image = ImageData::new(atlas_width, height, pixels);
+        atlases.borrow_mut().insert(key, image.clone());
+        image
+    });
+    let destination = (
+        x as f32,
+        y as f32,
+        width as f32 * SCALE,
+        height as f32 * SCALE,
+    );
+    let left = destination.0.max(clip.x as f32);
+    let top = destination.1.max(clip.y as f32);
+    let right = (destination.0 + destination.2).min((clip.x + clip.w) as f32);
+    let bottom = (destination.1 + destination.3).min((clip.y + clip.h) as f32);
+    if left >= right || top >= bottom {
+        return;
+    }
+    crate::classic_gui::draw_facet_stretch(
+        surface,
+        &image,
+        (
+            (left - destination.0) / SCALE,
+            (top - destination.1) / SCALE,
+            (right - left) / SCALE,
+            (bottom - top) / SCALE,
+        ),
+        (left, top, right - left, bottom - top),
+        gamma,
+    );
+}
