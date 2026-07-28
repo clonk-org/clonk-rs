@@ -606,16 +606,7 @@ mod tests {
 
     #[test]
     fn fog_transparency_adds_to_sky_texture_transparency() {
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "FoW sky alpha",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "FoW sky alpha");
         graphics.surface_mut().fill(Color::opaque(0, 255, 0));
         graphics.active_fog_map = Some(Arc::new(ClrModMap {
             resolution_x: 64,
@@ -643,16 +634,7 @@ mod tests {
 
     #[test]
     fn sky_modulation_combines_with_fog_vertices_and_keeps_packed_alpha() {
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "FoW sky modulation",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "FoW sky modulation");
         graphics.surface_mut().fill(Color::opaque(0, 255, 0));
         graphics.active_fog_map = Some(Arc::new(ClrModMap {
             resolution_x: 64,
@@ -683,16 +665,7 @@ mod tests {
 
     #[test]
     fn fogged_sky_gradient_applies_global_modulation_before_the_map() {
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "FoW gradient modulation",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "FoW gradient modulation");
         graphics.active_fog_map = Some(Arc::new(ClrModMap {
             resolution_x: 64,
             resolution_y: 64,
@@ -717,16 +690,7 @@ mod tests {
 
     #[test]
     fn cropped_sky_tile_uses_visible_crop_edges_as_fog_vertices() {
-        let mut graphics = GraphicsSystem::new(
-            49,
-            1,
-            1,
-            "cropped FoW sky tile",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(49, 1, 1, "cropped FoW sky tile");
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         let row = [0x0064_6464, 0x00c8_c8c8, 0x0032_3232, 0x0032_3232];
         graphics.active_fog_map = Some(Arc::new(ClrModMap {
@@ -840,15 +804,11 @@ mod tests {
                 .collect(),
         });
         let make_graphics = || {
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics(
                 SURFACE_WIDTH,
                 SURFACE_HEIGHT,
                 SURFACE_HEIGHT as i32,
                 "parallel sky rows",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.viewport_x = 18.75;
             graphics.viewport_y = -7.25;
@@ -1522,16 +1482,7 @@ mod tests {
         };
         let background = Color::opaque(0, 0, 0);
         let render = |source, transform| {
-            let mut graphics = GraphicsSystem::new(
-                4,
-                2,
-                2,
-                "fractional object source",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(4, 2, 2, "fractional object source");
             graphics.set_point_filtering(true);
             graphics.surface_mut().fill(background);
             graphics.blit_face(
@@ -1792,16 +1743,7 @@ mod tests {
             picture: None,
         };
         let render = |transform| {
-            let mut graphics = GraphicsSystem::new(
-                24,
-                24,
-                24,
-                "Draw transform",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(24, 24, 24, "Draw transform");
             graphics.blit_face(
                 &sprite,
                 SourceRect::new(0, 0, 9, 3),
@@ -2208,15 +2150,11 @@ mod tests {
                       point_filtering: bool,
                       destination_extent: u32|
          -> (BlitSampling, Vec<Color>) {
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics(
                 destination_extent,
                 destination_extent,
                 0,
                 "runtime sprite filtering",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.set_runtime_sprite_filtering(application_scale, point_filtering);
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
@@ -2291,16 +2229,7 @@ mod tests {
         // A transform pointer makes identity, rotation, mirror and projective
         // calls alike non-exact; the shared selector then supplies StdGL's
         // default-linear / PointFiltering-nearest choice at scale one.
-        let mut graphics = GraphicsSystem::new(
-            2,
-            2,
-            0,
-            "transformed sampler selection",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(2, 2, 0, "transformed sampler selection");
         let source = FloatSourceRect::scaled(SourceRect::new(0, 0, 2, 2), 1.0);
         for point_filtering in [false, true] {
             graphics.set_runtime_sprite_filtering(1.0, point_filtering);
@@ -2412,16 +2341,7 @@ mod tests {
             assert_eq!(fog_fragment(shader, true, [0.0, 0.25, 0.25, 0.5]), 254);
 
             let gradient = |no_box_fades| {
-                let mut graphics = GraphicsSystem::new(
-                    1,
-                    3,
-                    0,
-                    "advanced renderer gradient",
-                    test_font(),
-                    empty_sprites(),
-                    empty_cursor_atlas(),
-                    empty_hud_graphics(),
-                );
+                let mut graphics = test_graphics(1, 3, 0, "advanced renderer gradient");
                 graphics.set_advanced_renderer_config(AdvancedRendererConfig {
                     shader,
                     no_box_fades,
@@ -2443,16 +2363,7 @@ mod tests {
             assert_eq!(gradient(true), vec![124, 124, 124]);
 
             let solid = |no_box_fades| {
-                let mut graphics = GraphicsSystem::new(
-                    1,
-                    1,
-                    0,
-                    "advanced renderer solid box",
-                    test_font(),
-                    empty_sprites(),
-                    empty_cursor_atlas(),
-                    empty_hud_graphics(),
-                );
+                let mut graphics = test_graphics(1, 1, 0, "advanced renderer solid box");
                 graphics.set_advanced_renderer_config(AdvancedRendererConfig {
                     shader,
                     no_box_fades,
@@ -2573,16 +2484,7 @@ mod tests {
 
         let sky_row = [0, 0, 0, 255, 50, 0, 0, 255, 100, 0, 0, 255, 150, 0, 0, 255];
         let sky_image = ImageData::new(4, 4, sky_row.repeat(4));
-        let mut clipped_sky = GraphicsSystem::new(
-            2,
-            4,
-            0,
-            "advanced renderer cropped sky",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut clipped_sky = test_graphics(2, 4, 0, "advanced renderer cropped sky");
         clipped_sky.set_advanced_renderer_config(AdvancedRendererConfig {
             tex_indent: 1000,
             ..AdvancedRendererConfig::DEFAULT
@@ -2712,16 +2614,7 @@ mod tests {
         for shader in [false, true] {
             for use_shader_gamma in [false, true] {
                 for disable_gamma in [false, true] {
-                    let mut graphics = GraphicsSystem::new(
-                        1,
-                        1,
-                        0,
-                        "advanced renderer gamma",
-                        test_font(),
-                        empty_sprites(),
-                        empty_cursor_atlas(),
-                        empty_hud_graphics(),
-                    );
+                    let mut graphics = test_graphics(1, 1, 0, "advanced renderer gamma");
                     graphics.set_advanced_renderer_config(AdvancedRendererConfig {
                         shader,
                         use_shader_gamma,
@@ -3408,6 +3301,28 @@ mod tests {
         Arc::new(HudGraphics::default())
     }
 
+    /// A graphics system with the empty test assets: no object sprites, no
+    /// cursor atlas and no HUD sheets. The render tests construct dozens of
+    /// these and only ever vary the surface size, ground height and label.
+    fn test_graphics(
+        surface_width: u32,
+        surface_height: u32,
+        fallback_ground_height: i32,
+        scenario_label: &str,
+    ) -> GraphicsSystem {
+        GraphicsSystem::new(
+            surface_width,
+            surface_height,
+            fallback_ground_height,
+            scenario_label,
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        )
+    }
+
+
     struct RepositoryContentResolver {
         root: PathBuf,
     }
@@ -3745,16 +3660,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(80, 60);
         let render = |show_net_status| {
-            let mut graphics = GraphicsSystem::new(
-                180,
-                110,
-                120,
-                "L140 network status",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(180, 110, 120, "L140 network status");
             graphics.set_debug_draw_flags(DebugDrawFlags {
                 show_net_status,
                 ..DebugDrawFlags::default()
@@ -3911,16 +3817,7 @@ mod tests {
         }];
         snapshot.environment.fow_color = 0x00ff_0000;
         let focus = &snapshot.objects[0];
-        let mut graphics = GraphicsSystem::new(
-            64,
-            40,
-            120,
-            "Full landscape capture",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(64, 40, 120, "Full landscape capture");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::new(0, focus.position, 1.0, focus)],
@@ -3950,16 +3847,7 @@ mod tests {
             .environment
             .gamma
             .set_ramp(0, [0x102030, 0x405060, 0x708090]);
-        let mut graphics = GraphicsSystem::new(
-            64,
-            40,
-            120,
-            "Full landscape gamma",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(64, 40, 120, "Full landscape gamma");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::from_focus(&snapshot.objects[0])],
@@ -3992,16 +3880,7 @@ mod tests {
         }];
 
         let render = |snapshot: &SimulationSnapshot| {
-            let mut graphics = GraphicsSystem::new(
-                128,
-                80,
-                120,
-                "FoW render",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(128, 80, 120, "FoW render");
             graphics.render_frame_with_gamma(
                 snapshot,
                 &[ViewportInput::new(
@@ -4241,16 +4120,7 @@ mod tests {
                 view_target: None,
             },
         );
-        let mut graphics = GraphicsSystem::new(
-            200,
-            120,
-            120,
-            "zoomed FoW border",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(200, 120, 120, "zoomed FoW border");
         graphics.render_frame_with_gamma(
             &snapshot,
             &[ViewportInput::new(
@@ -4548,16 +4418,7 @@ mod tests {
         let second_rng = second.rng.clone();
 
         let render = |snapshot: &SimulationSnapshot| {
-            let mut graphics = GraphicsSystem::new(
-                32,
-                16,
-                16,
-                "Lightning RNG",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(32, 16, 16, "Lightning RNG");
             graphics.presentation_rng = SafeRng::new(23);
             graphics.render_frame(snapshot, &[ViewportInput::from_focus(&snapshot.objects[0])]);
             (
@@ -4761,16 +4622,7 @@ mod tests {
                 line_intersect: 0,
             },
         )]);
-        let mut graphics = GraphicsSystem::new(
-            32,
-            16,
-            16,
-            "Audibility calls",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(32, 16, 16, "Audibility calls");
         graphics.content_audibility_facet = Some(AudibilityFacet {
             target_x: 20,
             target_y: 30,
@@ -4890,16 +4742,7 @@ mod tests {
             );
             objects.push(object);
         }
-        let mut graphics = GraphicsSystem::new(
-            32,
-            16,
-            16,
-            "Typed-line variants",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(32, 16, 16, "Typed-line variants");
         let black = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(black);
         graphics.draw_objects(
@@ -4966,16 +4809,7 @@ mod tests {
                 line_intersect: 0,
             },
         )]);
-        let mut graphics = GraphicsSystem::new(
-            12,
-            8,
-            8,
-            "Bent typed line",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(12, 8, 8, "Bent typed line");
         let background = Color::opaque(10, 20, 30);
         graphics.surface_mut().fill(background);
         graphics.draw_objects(
@@ -5082,16 +4916,7 @@ mod tests {
             .set_ramp(0, [0x102030, 0x405060, 0x708090]);
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
         let make_graphics = || {
-            let mut graphics = GraphicsSystem::new(
-                320,
-                180,
-                150,
-                "Gamma Seam",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(320, 180, 150, "Gamma Seam");
             graphics.set_advanced_renderer_config(AdvancedRendererConfig {
                 shader: true,
                 ..AdvancedRendererConfig::DEFAULT
@@ -5172,16 +4997,7 @@ mod tests {
         let snapshot = make_snapshot();
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
         let make_graphics = || {
-            GraphicsSystem::new(
-                128,
-                120,
-                120,
-                "No-atlas frame",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            )
+            test_graphics(128, 120, 120, "No-atlas frame")
         };
 
         let mut snapshot_render = make_graphics();
@@ -5456,16 +5272,7 @@ mod tests {
         // C4Sky::Draw emits its solid/fade colours through DrawBoxDw/Fade;
         // DummyShader samples three independent gamma textures before output
         // (C4Sky.cpp:206-225; StdGL.cpp:1185-1200).
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "Gamma Sky",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "Gamma Sky");
         let environment = EnvironmentFrame {
             sky_color: Some(RgbColor::new(0, 0, 0)),
             ..EnvironmentFrame::default()
@@ -5508,16 +5315,7 @@ mod tests {
     fn gamma_render_seam_encodes_tutorial_six_sky_gradient() {
         // DrawBoxFade interpolation is gamma sampled per fragment before the
         // framebuffer store (C4Sky.cpp:219-225; StdGL.cpp:846-889,1193-1200).
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "Gamma Gradient",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "Gamma Gradient");
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
 
         graphics.fill_vertical_gradient(
@@ -5535,16 +5333,7 @@ mod tests {
 
     #[test]
     fn gpu_capture_lowers_sky_gradient_to_one_gamma_solid_draw() {
-        let mut graphics = GraphicsSystem::new(
-            8,
-            6,
-            12,
-            "GPU Gradient",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(8, 6, 12, "GPU Gradient");
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
         graphics.begin_gpu_scene_capture();
         graphics.fill_vertical_gradient(
@@ -5580,16 +5369,7 @@ mod tests {
 
     #[test]
     fn advanced_lit_sky_keeps_one_texture_identity_and_revises_pixels() {
-        let mut graphics = GraphicsSystem::new(
-            8,
-            6,
-            12,
-            "retained advanced sky",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(8, 6, 12, "retained advanced sky");
         let image = ImageData::new(2, 2, [120, 80, 40, 255].repeat(4));
 
         let (_, initial) = graphics.retained_lit_sky_texture(&image, 1.0);
@@ -5613,16 +5393,7 @@ mod tests {
 
     #[test]
     fn gpu_capture_sections_fogged_solid_sky_into_gamma_quads() {
-        let mut graphics = GraphicsSystem::new(
-            130,
-            70,
-            70,
-            "GPU fogged solid sky",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(130, 70, 70, "GPU fogged solid sky");
         graphics.active_fog_map = Some(Arc::new(
             ClrModMap::reset(64, 64, 130, 70, 0, 0, 0, 0, 0).expect("valid fog map"),
         ));
@@ -5662,16 +5433,7 @@ mod tests {
         // C4Sky::Draw sends its tiled surface through BlitSurfaceTile2, whose
         // shader gamma-samples the source before blending (C4Sky.cpp:210-218;
         // StdGL.cpp:1068-1087).
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "Gamma Sky Image",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "Gamma Sky Image");
         graphics
             .surface_mut()
             .set_pixel(0, 0, Color::opaque(200, 200, 200))
@@ -5692,16 +5454,7 @@ mod tests {
         // The fallback painter stands in for the same landscape presentation
         // shader. Even black is sampled through MinGamma, yielding one rather
         // than a raw zero (StdGL.cpp:1139-1148; StdDDraw2.cpp:237-271).
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            0,
-            "Gamma Fallback Ground",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 0, "Gamma Fallback Ground");
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
 
         assert!(!graphics.draw_ground(0, None, 0.0, Some(&gamma)));
@@ -5717,16 +5470,7 @@ mod tests {
         let mut landscape = Landscape::flat(4, 2);
         landscape.set_liquid_column(1, vec![clonk_engine::landscape::LiquidSegment::new(0, 2)]);
         let make_graphics = || {
-            GraphicsSystem::new(
-                4,
-                4,
-                2,
-                "Column fallback",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            )
+            test_graphics(4, 4, 2, "Column fallback")
         };
 
         let mut cpu = make_graphics();
@@ -7463,16 +7207,7 @@ mod tests {
             Some(25)
         );
 
-        let mut graphics = GraphicsSystem::new(
-            80,
-            50,
-            50,
-            "Restored parallax",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(80, 50, 50, "Restored parallax");
         graphics.viewport_x = 20.0;
         graphics.viewport_y = 20.0;
         assert_eq!(graphics.object_target_position(&restored), (10.0, 5.0));
@@ -8278,16 +8013,7 @@ mod tests {
         // Tutorial07 Script.c:12 and AcidRain.c4m:3: the opaque old-style
         // PXS fragment (200,250,200) is sampled by the scenario's green-heavy
         // ramp before it replaces the framebuffer pixel.
-        let mut graphics = GraphicsSystem::new(
-            4,
-            4,
-            4,
-            "Tutorial 07 Acid Rain",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(4, 4, 4, "Tutorial 07 Acid Rain");
         let background = Color::opaque(7, 11, 13);
         graphics.surface_mut().fill(background);
         graphics.set_material_render_info(Arc::new(HashMap::from([(
@@ -8360,16 +8086,7 @@ mod tests {
         snapshot
             .particles
             .push(pxs_particle("acidrain", [100 << 16, 60 << 16, 0, 0], 0));
-        let mut graphics = GraphicsSystem::new(
-            120,
-            100,
-            100,
-            "Tutorial 07 Acid Rain",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(120, 100, 100, "Tutorial 07 Acid Rain");
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "acidrain".to_string(),
             MaterialRenderInfo::new(material_color, [0; 6], None, 0, 25),
@@ -8496,16 +8213,7 @@ mod tests {
                     snapshot.frame,
                 );
             }
-            let mut graphics = GraphicsSystem::new(
-                1024,
-                256,
-                256,
-                "Tutorial 07 Acid Rain",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(1024, 256, 256, "Tutorial 07 Acid Rain");
             graphics.surface_mut().fill(Color::opaque(7, 11, 13));
             graphics.set_material_render_info(Arc::new(HashMap::from([(
                 "acidrain".to_string(),
@@ -8633,16 +8341,7 @@ mod tests {
             acid.int("Density").unwrap_or(0),
         )
         .with_placement(acid.int("Placement").unwrap_or(0));
-        let mut graphics = GraphicsSystem::new(
-            16,
-            16,
-            16,
-            "Tutorial 07 Acid",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(16, 16, 16, "Tutorial 07 Acid");
         graphics.viewport_x = 196.0;
         graphics.viewport_y = 349.0;
         graphics.surface_mut().fill(Color::opaque(7, 11, 13));
@@ -8675,16 +8374,7 @@ mod tests {
     fn viewport_point_at_maps_screen_to_world() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Viewport Test",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Viewport Test");
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
@@ -8721,16 +8411,7 @@ mod tests {
         second.controller = 1;
         second.position = Vector2::new(180, 100);
         snapshot.objects.push(second);
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Mouse owner viewport",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Mouse owner viewport");
         graphics.render_frame(
             &snapshot,
             &[
@@ -8777,16 +8458,7 @@ mod tests {
         snapshot.objects[0].owner = 1;
         let focus = &snapshot.objects[0];
 
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Crew Pick",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Crew Pick");
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
@@ -8821,16 +8493,7 @@ mod tests {
         snapshot.render_order = vec![back_id, front_id];
 
         let focus = snapshot.objects[0].clone();
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Object Pick",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Object Pick");
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(&focus)]);
         let (screen_x, screen_y) = graphics
             .world_to_screen(1, focus.position)
@@ -9022,16 +8685,7 @@ mod tests {
     fn graphics_system_draws_ground() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Test Scenario",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
         graphics.set_world_width(256);
 
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -9062,16 +8716,7 @@ mod tests {
         // pixels into x-xdir/y-ydir velocity lines. Its Clonk transparency is
         // max(alpha, 195-(195-alpha)/fixtoi(|xdir|+|ydir|))
         // (C4PXS.cpp:242-275).
-        let mut graphics = GraphicsSystem::new(
-            12,
-            12,
-            12,
-            "PXS",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(12, 12, 12, "PXS");
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "rain".to_string(),
@@ -9228,16 +8873,7 @@ mod tests {
 
     #[test]
     fn stationary_pxs_samples_fog_before_rounding_its_raster_position() {
-        let mut graphics = GraphicsSystem::new(
-            3,
-            2,
-            2,
-            "fractional PXS fog",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(3, 2, 2, "fractional PXS fog");
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "rain".to_string(),
@@ -9398,16 +9034,7 @@ mod tests {
         // The enlarged VisibleRect checks fixtoi(x,y) before drawing the
         // x-xdir velocity line (C4PXS.cpp:245-275). This endpoint is far
         // outside that rect even though its 100px line crosses the surface.
-        let mut graphics = GraphicsSystem::new(
-            12,
-            12,
-            12,
-            "PXS",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(12, 12, 12, "PXS");
         graphics.surface_mut().fill(Color::opaque(1, 2, 3));
         graphics.set_material_render_info(Arc::new(HashMap::from([(
             "rain".to_string(),
@@ -9430,16 +9057,7 @@ mod tests {
         // the 500-entry chunk, then applies PXSGfxRt offsets and size
         // (C4PXS.cpp:280-307). A missing PXSGfx texture stays in the first,
         // old-style pass (C4Material.cpp:382-385; C4PXS.cpp:257-260).
-        let mut graphics = GraphicsSystem::new(
-            16,
-            16,
-            16,
-            "PXS",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(16, 16, 16, "PXS");
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         let mut snow_pixels = vec![0; 12 * 6 * 4];
         for y in 0..6usize {
@@ -9569,16 +9187,7 @@ mod tests {
         // into the simulation (C4Viewport.cpp:1056-1078; C4Weather.cpp:48-58,
         // 205-214). A scalar alone must not alter otherwise identical pixels.
         let render = |snapshot: &SimulationSnapshot| {
-            let mut graphics = GraphicsSystem::new(
-                80,
-                60,
-                60,
-                "Weather",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(80, 60, 60, "Weather");
             graphics.render_frame(snapshot, &[ViewportInput::from_focus(&snapshot.objects[0])]);
             graphics.surface().pixels().to_vec()
         };
@@ -9603,16 +9212,7 @@ mod tests {
         // Weather.Execute runs after ExecObjects (C4Game.cpp:811-835). The
         // launch-frame presentation therefore must not add a separate flash.
         let render = |snapshot: &SimulationSnapshot| {
-            let mut graphics = GraphicsSystem::new(
-                80,
-                60,
-                60,
-                "Weather lightning",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(80, 60, 60, "Weather lightning");
             graphics.set_sky(Some(SkyRenderState::new(
                 SkySettings {
                     fade_top: RgbColor::new(24, 48, 96),
@@ -9894,16 +9494,7 @@ mod tests {
     fn overlay_state_feeds_the_hud_render() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Test Scenario",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
         graphics.update_overlay(&GraphicsOverlay {
             frame_text: "FRAME",
             status_text: "STATUS",
@@ -10354,16 +9945,7 @@ mod tests {
         count: usize,
         splitscreen_dividers: bool,
     ) -> Vec<SurfaceRect> {
-        let mut graphics = GraphicsSystem::new(
-            width,
-            height,
-            height as i32,
-            "Viewport layout",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(width, height, height as i32, "Viewport layout");
         graphics.set_renderer_config(true, splitscreen_dividers, true);
         graphics.layout_viewports(count)
     }
@@ -10447,16 +10029,7 @@ mod tests {
             ObjectVertex::new(-4, 4),
         ];
         let focus = &snapshot.objects[0];
-        let mut graphics = GraphicsSystem::new(
-            120,
-            80,
-            60,
-            "Atlas Scenario",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(120, 80, 60, "Atlas Scenario");
 
         let viewports = vec![ViewportInput::from_focus(focus)];
         let atlas = graphics.render_frame(&snapshot, &viewports);
@@ -10475,16 +10048,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 260);
         snapshot.landscape = Some(Landscape::flat(256, 280));
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Test Scenario",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -10622,16 +10186,7 @@ mod tests {
     #[test]
     fn observer_scroll_uses_physical_classification_across_film_assignment() {
         let snapshot = camera_world_snapshot();
-        let mut graphics = GraphicsSystem::new(
-            100,
-            80,
-            80,
-            "Observer scroll",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(100, 80, 80, "Observer scroll");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::new(
@@ -10680,16 +10235,7 @@ mod tests {
     fn observer_scroll_queued_before_projection_moves_the_first_rendered_camera() {
         let snapshot = camera_world_snapshot();
         let new_graphics = || {
-            GraphicsSystem::new(
-                100,
-                80,
-                80,
-                "Queued observer scroll",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            )
+            test_graphics(100, 80, 80, "Queued observer scroll")
         };
         let input = || {
             ViewportInput::new(
@@ -10731,16 +10277,7 @@ mod tests {
     fn queued_observer_scroll_replaces_a_stale_owned_projection() {
         let snapshot = camera_world_snapshot();
         let new_graphics = || {
-            GraphicsSystem::new(
-                100,
-                80,
-                80,
-                "Stale observer projection",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            )
+            test_graphics(100, 80, 80, "Stale observer projection")
         };
         let ownerless = || {
             ViewportInput::ownerless(Vector2::new(500, 500), 1.0)
@@ -10777,16 +10314,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects.clear();
         snapshot.render_order.clear();
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Anchor-free observer",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Anchor-free observer");
         let input = ViewportInput::ownerless(Vector2::new(128, 75), 1.0)
             .with_camera_identity(OWNER_NONE, 0);
         assert!(input.focus.is_none());
@@ -10809,16 +10337,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects.clear();
         snapshot.render_order.clear();
-        let mut graphics = GraphicsSystem::new(
-            100,
-            80,
-            80,
-            "Focusless player scroll",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(100, 80, 80, "Focusless player scroll");
         let input = ViewportInput::owned_without_focus(0, Vector2::new(128, 60), 1.0)
             .with_scrolling(true)
             .with_camera_identity(0, 0);
@@ -10997,16 +10516,7 @@ mod tests {
         second.id = ObjectId::new(2);
         second.position = Vector2::new(900, 500);
         snapshot.objects.push(second);
-        let mut graphics = GraphicsSystem::new(
-            100,
-            80,
-            80,
-            "Camera focus",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(100, 80, 80, "Camera focus");
 
         graphics.render_frame(
             &snapshot,
@@ -11043,16 +10553,7 @@ mod tests {
         second.owner = 1;
         second.position = Vector2::new(900, 500);
         snapshot.objects.push(second);
-        let mut graphics = GraphicsSystem::new(
-            100,
-            80,
-            80,
-            "Film view",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(100, 80, 80, "Film view");
 
         graphics.render_frame(
             &snapshot,
@@ -11113,16 +10614,7 @@ mod tests {
     #[test]
     fn film_assigned_ownerless_tracks_player_and_applies_current_frame_offset() {
         let snapshot = camera_world_snapshot();
-        let mut graphics = GraphicsSystem::new(
-            100,
-            80,
-            80,
-            "Ownerless film camera",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(100, 80, 80, "Ownerless film camera");
         let mut input = ViewportInput::new(0, Vector2::new(900, 500), 1.0, &snapshot.objects[0])
             .with_offset(Vector2::new(7, -4))
             .with_physical_camera_identity(42, 0);
@@ -11152,16 +10644,7 @@ mod tests {
         // Earthquake shake must therefore move the current frame instantly
         // without feeding the displacement back into the smooth camera.
         let snapshot = camera_world_snapshot();
-        let mut graphics = GraphicsSystem::new(
-            100,
-            80,
-            80,
-            "Script view offset",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(100, 80, 80, "Script view offset");
         let base = ViewportInput::new(0, Vector2::new(500, 500), 1.0, &snapshot.objects[0]);
         graphics.render_frame(&snapshot, &[base]);
         let camera_before = *graphics
@@ -11196,16 +10679,7 @@ mod tests {
         second.id = ObjectId::new(2);
         second.position = Vector2::new(900, 500);
         snapshot.objects.push(second);
-        let mut graphics = GraphicsSystem::new(
-            100,
-            80,
-            80,
-            "Camera absence",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(100, 80, 80, "Camera absence");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::new(
@@ -11294,16 +10768,7 @@ mod tests {
         snapshot.objects[0].owner = OWNER_NONE;
         snapshot.objects[0].position = Vector2::new(0, 0);
         snapshot.landscape = Some(Landscape::flat(500, 500));
-        let mut graphics = GraphicsSystem::new(
-            100,
-            80,
-            80,
-            "Observer",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(100, 80, 80, "Observer");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::from_focus(&snapshot.objects[0])],
@@ -11321,16 +10786,7 @@ mod tests {
     #[test]
     fn viewport_zoom_uses_cpp_ceil_extent_without_resetting_fixed_state() {
         let snapshot = camera_world_snapshot();
-        let mut graphics = GraphicsSystem::new(
-            100,
-            80,
-            80,
-            "Camera scale",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(100, 80, 80, "Camera scale");
         graphics.render_frame(
             &snapshot,
             &[ViewportInput::new(
@@ -11353,16 +10809,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 30);
         snapshot.landscape = Some(Landscape::flat(256, 200));
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Test Scenario",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -11372,16 +10819,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 360);
         snapshot.landscape = Some(Landscape::flat(256, 360));
-        let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Test Scenario",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(320, 180, 150, "Test Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -11402,16 +10840,7 @@ mod tests {
         let mut landscape = Landscape::flat(640, 300);
         landscape.set_world_height(480);
         snapshot.landscape = Some(landscape);
-        let mut graphics = GraphicsSystem::new(
-            640,
-            480,
-            300,
-            "Tutorial",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(640, 480, 300, "Tutorial");
 
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &viewports);
@@ -11561,16 +10990,7 @@ mod tests {
         ];
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
-        let mut graphics = GraphicsSystem::new(
-            80,
-            60,
-            60,
-            "Polygon Scenario",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(80, 60, 60, "Polygon Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -11604,16 +11024,7 @@ mod tests {
         snapshot.objects[0].container = Some(ObjectId::new(999));
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
-        let mut graphics = GraphicsSystem::new(
-            80,
-            60,
-            60,
-            "Contained Scenario",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(80, 60, 60, "Contained Scenario");
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -12110,16 +11521,7 @@ mod tests {
         rotated.velocity = FloatVector2::new(1.0, 0.0);
         let parallax = particle("Parallax", 35.0, 7.0, 1.0);
 
-        let mut graphics = GraphicsSystem::new(
-            36,
-            16,
-            16,
-            "Std particle branches",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(36, 16, 16, "Std particle branches");
         graphics.viewport_x = 10.0;
         graphics.viewport_y = 6.0;
         graphics.set_particle_sprites(Arc::new(definitions));
@@ -14156,16 +13558,7 @@ mod tests {
     #[test]
     fn construction_drag_preview_uses_native_mod2_validity_colors() {
         let image = ImageData::new(1, 1, vec![128, 128, 128, 255]);
-        let mut graphics = GraphicsSystem::new(
-            3,
-            2,
-            2,
-            "Construction drag MOD2",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(3, 2, 2, "Construction drag MOD2");
         graphics.set_advanced_renderer_config(AdvancedRendererConfig {
             shader: true,
             ..AdvancedRendererConfig::DEFAULT
@@ -14203,16 +13596,7 @@ mod tests {
     #[test]
     fn construction_drag_preview_uses_cpp_hotspot_clipping_and_gamma() {
         let image = ImageData::new(4, 3, (0..12).flat_map(|_| [128, 128, 128, 255]).collect());
-        let mut graphics = GraphicsSystem::new(
-            4,
-            3,
-            3,
-            "Construction drag hotspot",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(4, 3, 3, "Construction drag hotspot");
         graphics.set_advanced_renderer_config(AdvancedRendererConfig {
             shader: true,
             ..AdvancedRendererConfig::DEFAULT
@@ -15739,16 +15123,7 @@ mod tests {
         };
 
         let focus = &snapshot.objects[0];
-        let mut graphics = GraphicsSystem::new(
-            120,
-            80,
-            60,
-            "Sky Fade",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(120, 80, 60, "Sky Fade");
         graphics.set_sky(Some(SkyRenderState::new(settings, None)));
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -15780,16 +15155,7 @@ mod tests {
         };
 
         let focus = &snapshot.objects[0];
-        let mut graphics = GraphicsSystem::new(
-            120,
-            80,
-            60,
-            "Unmodified Sky Fade",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(120, 80, 60, "Unmodified Sky Fade");
         graphics.set_sky(Some(SkyRenderState::new(settings, None)));
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -15807,16 +15173,7 @@ mod tests {
         daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
 
         let focus = &daytime.objects[0];
-        let mut day_view = GraphicsSystem::new(
-            120,
-            80,
-            60,
-            "Day",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut day_view = test_graphics(120, 80, 60, "Day");
         let day_viewports = vec![ViewportInput::from_focus(focus)];
         day_view.render_frame(&daytime, &day_viewports);
         let day_pixel = day_view.surface().get_pixel(0, 0).unwrap();
@@ -15824,16 +15181,7 @@ mod tests {
         let mut nighttime = daytime.clone();
         // 0 means "no day/night cycle" (full daylight); 1 is deepest night.
         nighttime.environment.settings.time_of_day = 1;
-        let mut night_view = GraphicsSystem::new(
-            120,
-            80,
-            60,
-            "Night",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut night_view = test_graphics(120, 80, 60, "Night");
         let night_focus = &nighttime.objects[0];
         let night_viewports = vec![ViewportInput::from_focus(night_focus)];
         night_view.render_frame(&nighttime, &night_viewports);
@@ -15860,16 +15208,7 @@ mod tests {
         // at the borders (C4Viewport.cpp:1035-1041).
         daytime.landscape = Some(Landscape::flat(256, 150));
 
-        let mut day_view = GraphicsSystem::new(
-            200,
-            150,
-            150,
-            "Day Object",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut day_view = test_graphics(200, 150, 150, "Day Object");
         let day_focus = &daytime.objects[0];
         let day_viewports = vec![ViewportInput::from_focus(day_focus)];
         day_view.render_frame(&daytime, &day_viewports);
@@ -15884,16 +15223,7 @@ mod tests {
         let mut nighttime = daytime.clone();
         // 0 means "no day/night cycle" (full daylight); 1 is deepest night.
         nighttime.environment.settings.time_of_day = 1;
-        let mut night_view = GraphicsSystem::new(
-            200,
-            150,
-            150,
-            "Night Object",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut night_view = test_graphics(200, 150, 150, "Night Object");
         let night_focus = &nighttime.objects[0];
         let night_viewports = vec![ViewportInput::from_focus(night_focus)];
         night_view.render_frame(&nighttime, &night_viewports);
@@ -15927,16 +15257,7 @@ mod tests {
         snapshot.objects[0].position = Vector2::new(20, 20);
 
         let focus = &snapshot.objects[0];
-        let mut graphics = GraphicsSystem::new(
-            120,
-            80,
-            40,
-            "Letterbox",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(120, 80, 40, "Letterbox");
         let viewports = vec![ViewportInput::new(0, Vector2::new(20, 20), 1.0, focus)];
         graphics.render_frame(&snapshot, &viewports);
 
@@ -15963,16 +15284,7 @@ mod tests {
             landscape.set_liquid_column(30, vec![LiquidSegment::new(40, 60)]);
         }
         let focus = &snapshot.objects[0];
-        let mut graphics = GraphicsSystem::new(
-            120,
-            80,
-            80,
-            "Liquid Scenario",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(120, 80, 80, "Liquid Scenario");
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
@@ -16033,16 +15345,7 @@ mod tests {
     #[test]
     fn liquid_animation_cycle_survives_texture_swaps_and_renderer_rebuilds() {
         let make_graphics = || {
-            GraphicsSystem::new(
-                1,
-                1,
-                1,
-                "Liquid phase",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            )
+            test_graphics(1, 1, 1, "Liquid phase")
         };
         let image = || ImageData::new(1, 1, vec![255, 128, 0, 255]);
         let mut original = make_graphics();
@@ -16142,16 +15445,7 @@ mod tests {
             ),
         ]));
         let make_graphics = || {
-            let mut graphics = GraphicsSystem::new(
-                2,
-                1,
-                1,
-                "Liquid animation",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(2, 1, 1, "Liquid animation");
             graphics.set_material_textures(Arc::clone(&textures));
             graphics.set_material_render_info(Arc::clone(&materials));
             graphics
@@ -16220,16 +15514,7 @@ mod tests {
             }
         }))
         .expect("PNG-backed exact landscape");
-        let mut graphics = GraphicsSystem::new(
-            2,
-            1,
-            1,
-            "Exact Landscape.png",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(2, 1, 1, "Exact Landscape.png");
 
         assert!(graphics.draw_ground_textured(Some(&landscape), None));
         assert_eq!(
@@ -16331,15 +15616,11 @@ mod tests {
             landscape.grid_vehicle_byte(),
         );
         let make_graphics = || {
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics(
                 SCREEN_WIDTH,
                 SCREEN_HEIGHT,
                 WORLD_HEIGHT as i32,
                 "parallel landscape rows",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.set_material_textures(Arc::clone(&textures));
             graphics.set_material_render_info(Arc::clone(&materials));
@@ -16478,15 +15759,11 @@ mod tests {
             landscape.grid_vehicle_byte(),
         );
         let make_graphics = || {
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics(
                 WIDTH,
                 HEIGHT,
                 HEIGHT as i32,
                 "parallel retained landscape cache",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
             );
             graphics.set_material_texture_surfaces(Arc::clone(&textures));
             graphics.set_material_render_info(Arc::clone(&materials));
@@ -16558,16 +15835,7 @@ mod tests {
 
         let mut snapshot = make_snapshot();
         snapshot.landscape = Some(landscape);
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "Acid color",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "Acid color");
         graphics.set_material_textures(Arc::new(textures));
         graphics.set_material_render_info(Arc::new(materials));
 
@@ -16762,16 +16030,7 @@ mod tests {
                 50,
             ),
         )]);
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "Material alpha",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "Material alpha");
         graphics
             .surface_mut()
             .set_pixel(0, 0, Color::opaque(10, 20, 30))
@@ -16807,16 +16066,7 @@ mod tests {
         }))
         .expect("pixel landscape");
         let cached_grid = landscape.pixel_grid().expect("pixel grid").clone();
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "Gamma Material",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "Gamma Material");
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "rough".to_string(),
             ImageData::new(1, 1, vec![255, 255, 255, 255]),
@@ -16880,16 +16130,7 @@ mod tests {
                 }
             }))
             .expect("pixel landscape");
-            let mut graphics = GraphicsSystem::new(
-                1,
-                1,
-                1,
-                "modulated landscape",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(1, 1, 1, "modulated landscape");
             graphics.set_material_textures(Arc::new(HashMap::from([(
                 "rough".to_string(),
                 ImageData::new(1, 1, vec![255, 255, 255, 255]),
@@ -16931,16 +16172,7 @@ mod tests {
             let mut landscape = Landscape::flat(1, 1);
             landscape.set_liquid_column(0, vec![LiquidSegment::new(0, 0)]);
             let landscape = with_modulation(landscape, modulation);
-            let mut graphics = GraphicsSystem::new(
-                1,
-                2,
-                2,
-                "modulated fallback landscape",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(1, 2, 2, "modulated fallback landscape");
             graphics.surface_mut().fill(background);
             assert!(!graphics.draw_ground(0, Some(&landscape), 1.0, Some(&gamma)));
             graphics.draw_liquids(0, Some(&landscape), 1.0, Some(&gamma));
@@ -17009,16 +16241,7 @@ mod tests {
             ));
             landscape.set_shade_materials(shade_materials);
 
-            let mut graphics = GraphicsSystem::new(
-                WIDTH,
-                height,
-                height as i32,
-                "placement shading",
-                test_font(),
-                empty_sprites(),
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
+            let mut graphics = test_graphics(WIDTH, height, height as i32, "placement shading");
             graphics.set_material_textures(Arc::new(HashMap::from([(
                 "neutral".to_string(),
                 ImageData::new(1, 1, vec![128, 128, 128, 255]),
@@ -17113,16 +16336,7 @@ mod tests {
             ],
         ));
         landscape.set_shade_materials(true);
-        let mut graphics = GraphicsSystem::new(
-            WIDTH,
-            HEIGHT,
-            HEIGHT as i32,
-            "placement shading cache",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(WIDTH, HEIGHT, HEIGHT as i32, "placement shading cache");
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "neutral".to_string(),
             ImageData::new(1, 1, vec![128, 128, 128, 255]),
@@ -17185,16 +16399,7 @@ mod tests {
             vec![None, Some("Rough".to_string())],
         ));
         landscape.set_shade_materials(false);
-        let mut graphics = GraphicsSystem::new(
-            WIDTH,
-            HEIGHT,
-            HEIGHT as i32,
-            "opaque landscape blit",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(WIDTH, HEIGHT, HEIGHT as i32, "opaque landscape blit");
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "rough".to_string(),
             ImageData::new(1, 1, vec![128, 96, 64, 255]),
@@ -17239,16 +16444,7 @@ mod tests {
             vec![None, Some("Rough".to_string())],
         ));
         landscape.set_shade_materials(false);
-        let mut graphics = GraphicsSystem::new(
-            WIDTH,
-            1,
-            1,
-            "direct Surface32 cache patch",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(WIDTH, 1, 1, "direct Surface32 cache patch");
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "rough".to_string(),
             ImageData::new(1, 1, vec![128, 96, 64, 255]),
@@ -17323,16 +16519,7 @@ mod tests {
             vec![None, Some("Rough".to_string()), Some("Smooth".to_string())],
         ));
         landscape.set_shade_materials(true);
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "sparse landscape cache patch",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "sparse landscape cache patch");
         graphics.set_material_textures(Arc::new(HashMap::from([
             (
                 "rough".to_string(),
@@ -17381,16 +16568,7 @@ mod tests {
             vec![None, Some("Rough".to_string()), Some("Smooth".to_string())],
         ));
         landscape.set_shade_materials(false);
-        let mut graphics = GraphicsSystem::new(
-            1,
-            1,
-            1,
-            "bounded landscape cache patch",
-            test_font(),
-            empty_sprites(),
-            empty_cursor_atlas(),
-            empty_hud_graphics(),
-        );
+        let mut graphics = test_graphics(1, 1, 1, "bounded landscape cache patch");
         graphics.set_material_textures(Arc::new(HashMap::from([
             (
                 "rough".to_string(),
