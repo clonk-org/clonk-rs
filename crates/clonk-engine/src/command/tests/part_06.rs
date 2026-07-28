@@ -121,7 +121,7 @@
         let definitions = HashMap::new();
 
         let objects = HashMap::from([(actor_id, actor.clone())]);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut missing_build = CommandStack::new();
         missing_build
             .push_front(CommandRequest::new(CommandId::Build).with_target(Some(target_id)))
@@ -136,7 +136,7 @@
             .all(|event| !matches!(event, CommandEvent::ResolveCommandPhysical { .. })));
 
         let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut expired_build = CommandStack::new();
         expired_build
             .push_front(
@@ -176,7 +176,7 @@
         let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -665,7 +665,7 @@
         let objects = HashMap::from([(target_id, target)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
         let mut state = EnergyState::from_request(
             &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
         )
@@ -717,7 +717,7 @@
         )
         .expect("energy state");
         let result = {
-            let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+            let mut ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
             ctx.structures_need_energy = true;
             state.step(&ctx)
         };
@@ -737,7 +737,7 @@
         )
         .expect("energy state");
         let continued = {
-            let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 1);
+            let mut ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 1);
             ctx.structures_need_energy = true;
             needs_energy_state.step(&ctx)
         };
@@ -771,7 +771,7 @@
         ]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let mut ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
         ctx.structures_need_energy = true;
         let mut state = EnergyState::from_request(
             &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
@@ -799,7 +799,7 @@
         let objects = HashMap::from([(target_id, target), (supply_id, supply)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let mut ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
         ctx.structures_need_energy = true;
         let mut state = EnergyState::from_request(
             &CommandRequest::new(CommandId::Energy)
@@ -887,7 +887,7 @@
         ]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let mut ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
         ctx.structures_need_energy = true;
         let mut state = EnergyState::from_request(
             &CommandRequest::new(CommandId::Energy)
@@ -940,7 +940,7 @@
         .expect("energy state");
         let moving = {
             let mut ctx =
-                move_to_ctx_at_frame(&moving_builder, &objects, &players, &definitions, 1);
+                command_ctx_at_frame(&moving_builder, &objects, &players, &definitions, 1);
             ctx.structures_need_energy = true;
             moving_state.step(&ctx)
         };
@@ -958,7 +958,7 @@
                 .action_name = "Idle".into();
         }
         let resumed = {
-            let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 2);
+            let mut ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 2);
             ctx.structures_need_energy = true;
             moving_state.step(&ctx)
         };
@@ -989,7 +989,7 @@
         )
         .expect("energy state");
         let malformed = {
-            let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 3);
+            let mut ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 3);
             ctx.structures_need_energy = true;
             malformed_state.step(&ctx)
         };

@@ -216,7 +216,7 @@
         let objects = HashMap::from([(actor_id, actor.clone()), (container_id, container.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut state =
             ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
 
@@ -285,7 +285,7 @@
                 ..CommandDefinitionSnapshot::default()
             },
         )]);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut state =
             ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
                 .expect("state created");
@@ -613,7 +613,7 @@
         .expect("state created");
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let first_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 100);
+        let first_ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 100);
         let first = state.step(&first_ctx);
         assert!(matches!(
             first.events.as_slice(),
@@ -625,7 +625,7 @@
             .expect("container present")
             .entrance_status = true;
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let next_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 101);
+        let next_ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 101);
         let next = state.step(&next_ctx);
         assert_eq!(next.status, CommandStatus::Running);
         assert!(matches!(
@@ -699,7 +699,7 @@
             (actor_id, callback_actor.clone()),
             (callback_container_id, callback_container),
         ]);
-        let callback_ctx = move_to_ctx_at_frame(
+        let callback_ctx = command_ctx_at_frame(
             &callback_actor,
             &callback_objects,
             &players,
@@ -921,7 +921,7 @@
                 },
             ),
         ]);
-        let ctx = move_to_ctx_at_frame(&attacker, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&attacker, &objects, &players, &definitions, 0);
         let mut state = AttackState::from_request(
             &CommandRequest::new(CommandId::Attack).with_target(Some(target_id)),
         )
@@ -953,7 +953,7 @@
         let definitions = HashMap::new();
         let request = CommandRequest::new(CommandId::Attack).with_target(Some(target_id));
 
-        let ctx = move_to_ctx_at_frame(&attacker, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&attacker, &objects, &players, &definitions, 0);
         let mut exiting = AttackState::from_request(&request).expect("state created");
         let exit = pushed_request(&exiting.step(&ctx).operations, CommandId::Exit);
         assert_eq!(exit.target, None);
@@ -962,7 +962,7 @@
 
         attacker.container = None;
         objects.insert(attacker_id, attacker.clone());
-        let ctx = move_to_ctx_at_frame(&attacker, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&attacker, &objects, &players, &definitions, 1);
         let mut entering = AttackState::from_request(&request).expect("state created");
         let enter = pushed_request(&entering.step(&ctx).operations, CommandId::Enter);
         assert_eq!(enter.target, Some(target_container));
@@ -973,7 +973,7 @@
         objects.insert(attacker_id, attacker.clone());
         target.container = Some(target_container);
         objects.insert(target_id, target);
-        let ctx = move_to_ctx_at_frame(&attacker, &objects, &players, &definitions, 2);
+        let ctx = command_ctx_at_frame(&attacker, &objects, &players, &definitions, 2);
         let mut moving = AttackState::from_request(&request).expect("state created");
         let move_to = pushed_request(&moving.step(&ctx).operations, CommandId::MoveTo);
         assert_eq!(move_to.target, None);
@@ -987,7 +987,7 @@
         let objects = HashMap::from([(actor.id, actor.clone()), (target.id, target.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let request = CommandRequest::new(CommandId::Call).with_target(Some(target.id));
         let mut state = CallState::from_request(&request).expect("textless Call materializes");
 

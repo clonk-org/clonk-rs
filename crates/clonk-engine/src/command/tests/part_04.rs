@@ -27,7 +27,7 @@
             .expect("C++ accepts a targetless Grab");
 
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 1);
         let first = stack.step(&ctx).expect("targetless Grab executes");
         assert_eq!(first.status, CommandStatus::Running);
         assert_eq!(
@@ -45,7 +45,7 @@
         actor.action_target = None;
 
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 2);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 2);
         let failed = stack.step(&ctx).expect("Grab re-executes");
         assert_eq!(failed.status, CommandStatus::Failed);
         let after_failure = stack.snapshot();
@@ -89,7 +89,7 @@
             .expect("Grab queues");
 
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 1);
         let first = stack.step(&ctx).expect("Grab executes");
         assert_eq!(
             first.events,
@@ -104,7 +104,7 @@
         actor.action_procedure = ActionProcedure::Push;
         actor.action_target = Some(target_id);
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 2);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 2);
         let fulfilled = stack.step(&ctx).expect("Grab rechecks");
         assert_eq!(fulfilled.status, CommandStatus::Completed);
 
@@ -898,7 +898,7 @@
             HashMap::from([(builder_id, builder.clone()), (primary_id, primary.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
         let request = CommandRequest::new(CommandId::Construct)
             .with_target(Some(primary_id))
             .with_data(CommandData::Text("MISSING".into()))
@@ -928,7 +928,7 @@
         objects.insert(primary_id, primary.clone());
         let mut wider_builder = builder.clone();
         wider_builder.move_to_range = 6;
-        let wider_ctx = move_to_ctx_at_frame(&wider_builder, &objects, &players, &definitions, 1);
+        let wider_ctx = command_ctx_at_frame(&wider_builder, &objects, &players, &definitions, 1);
         let mut waiting = ConstructState::from_request(&request);
         let waited = waiting.step(&wider_ctx);
         assert_eq!(waited.status, CommandStatus::Running);
@@ -938,7 +938,7 @@
 
         primary.commands = vec![command_view(CommandId::Build, Some(construction_id))];
         objects.insert(primary_id, primary);
-        let failed_ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 2);
+        let failed_ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 2);
         let mut orphaned = ConstructState::from_request(&request);
         let failed = orphaned.step(&failed_ctx);
         assert_eq!(failed.status, CommandStatus::Failed);
@@ -980,7 +980,7 @@
             .find_con_site_spot(50, 40, 20, 20, 20, |_, _, _, _| false)
             .map(|(x, y)| Vector2::new(x, y))
             .expect("flat landscape has a construction site");
-        let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let mut ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
         ctx.landscape = Some(&landscape);
         let request = CommandRequest::new(CommandId::Construct)
             .with_target2(Some(target2_id))
@@ -1061,7 +1061,7 @@
         let definitions = HashMap::from([(definition_id.clone(), definition.clone())]);
         let players = HashMap::new();
         let objects = HashMap::from([(builder_id, builder.clone()), (kit_id, kit.clone())]);
-        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
         let request = CommandRequest::new(CommandId::Construct)
             .with_data(CommandData::Text(definition_id.clone()))
             .with_tx(Some(6))
@@ -1080,7 +1080,7 @@
         let wider_objects =
             HashMap::from([(builder_id, wider_builder.clone()), (kit_id, kit.clone())]);
         let wider_ctx =
-            move_to_ctx_at_frame(&wider_builder, &wider_objects, &players, &definitions, 1);
+            command_ctx_at_frame(&wider_builder, &wider_objects, &players, &definitions, 1);
         let mut wider_state = ConstructState::from_request(&request);
         continue_construct_script(&mut wider_state);
         let spawned = wider_state.step(&wider_ctx);
@@ -1105,7 +1105,7 @@
             (kit_id, kit),
             (blocker_id, blocker),
         ]);
-        let mut blocked_ctx = move_to_ctx_at_frame(
+        let mut blocked_ctx = command_ctx_at_frame(
             &at_site_builder,
             &blocked_objects,
             &players,
@@ -1157,7 +1157,7 @@
         let players = HashMap::new();
         let definitions = HashMap::new();
         let mut objects = HashMap::from([(builder_id, builder.clone())]);
-        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
 
         assert!(ConstructState::overlaps_construction_rect(
             &ctx,
@@ -1177,7 +1177,7 @@
         short_blocker.shape_height = 5;
         short_blocker.shape = DefinitionRect::new(45, 42, 10, 18);
         objects.insert(blocker_id, short_blocker);
-        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&builder, &objects, &players, &definitions, 1);
         assert!(
             !ConstructState::overlaps_construction_rect(&ctx, 40, 30, 20, 20, CATEGORY_STRUCTURE,),
             "the eighteen-pixel action-area expansion is not C4Object::Shape"
@@ -1256,7 +1256,7 @@
         let players = HashMap::new();
         let definitions = HashMap::new();
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 10);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 10);
 
         let mut stack = CommandStack::new();
         stack
@@ -1444,7 +1444,7 @@
                     .with_ty(Some(50)),
             )
             .expect("PushTo queues");
-        let mut ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
+        let mut ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
         ctx.landscape = Some(&landscape);
         let evaluation = stack.step(&ctx).expect("PushTo evaluates");
         assert_eq!(evaluation.status, CommandStatus::Running);
@@ -1463,7 +1463,7 @@
             .expect("actor present")
             .shape_height = 40;
         let taller_actor = objects.get(&actor_id).expect("actor present");
-        let mut ctx = move_to_ctx_at_frame(taller_actor, &objects, &players, &definitions, 2);
+        let mut ctx = command_ctx_at_frame(taller_actor, &objects, &players, &definitions, 2);
         ctx.landscape = Some(&landscape);
         let handler = stack.step(&ctx).expect("PushTo handler executes");
         assert_eq!(handler.status, CommandStatus::Running);
@@ -1494,7 +1494,7 @@
                     .with_ty(Some(50)),
             )
             .expect("PushTo queues");
-        let mut ctx = move_to_ctx_at_frame(&flyer, &flyer_objects, &players, &definitions, 1);
+        let mut ctx = command_ctx_at_frame(&flyer, &flyer_objects, &players, &definitions, 1);
         ctx.landscape = Some(&landscape);
         let _ = free_stack.step(&ctx).expect("free PushTo evaluates");
         assert_eq!(

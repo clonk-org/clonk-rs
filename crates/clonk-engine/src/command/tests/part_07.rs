@@ -276,7 +276,7 @@
         let objects = HashMap::from([(actor_id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -327,7 +327,7 @@
         let objects = HashMap::from([(actor_id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -360,7 +360,7 @@
 
         let target = snapshot_with_id(target_id.as_u64());
         let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut enter = CommandStack::new();
         enter
             .push_front(
@@ -378,7 +378,7 @@
         let mut target = snapshot_with_id(target_id.as_u64());
         target.collectible = false;
         let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut get = CommandStack::new();
         get.push_front(
             CommandRequest::new(CommandId::Get)
@@ -543,7 +543,7 @@
         let objects = HashMap::from([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -567,7 +567,7 @@
         let objects = HashMap::from([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -611,7 +611,7 @@
         let objects = HashMap::from([(actor_id, actor.clone()), (pushed_id, pushed)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -647,7 +647,7 @@
         let objects = HashMap::from([(actor.id, actor.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let dig = DigState::from_request(&CommandRequest::new(CommandId::Dig))
             .expect("missing Dig coordinates are numeric zero");
@@ -657,7 +657,7 @@
         unselected.crew_member = true;
         unselected.owner = 7;
         unselected.selected = false;
-        let unselected_ctx = move_to_ctx_at_frame(&unselected, &objects, &players, &definitions, 0);
+        let unselected_ctx = command_ctx_at_frame(&unselected, &objects, &players, &definitions, 0);
         let mut follow = FollowState::from_request(&CommandRequest::new(CommandId::Follow))
             .expect("targetless Follow still links");
         assert_eq!(
@@ -992,7 +992,7 @@
             .contents
             .clear();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
         let result = stack.step(&ctx).expect("Put observes transferred item");
         assert_eq!(result.status, CommandStatus::Completed);
         assert_eq!(stack.len(), 0);
@@ -2251,7 +2251,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
         let result = stack.execute_front(&ctx).expect("restored MoveTo executes");
         assert_eq!(result.status, CommandStatus::Completed);
         assert_eq!(stack.legacy_save_commands()[0].update_interval, -4);

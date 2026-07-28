@@ -9,7 +9,7 @@
         let objects = HashMap::from([(actor_id, walking)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(
+        let ctx = command_ctx_at_frame(
             objects.get(&actor_id).expect("actor present"),
             &objects,
             &players,
@@ -75,7 +75,7 @@
         let objects = HashMap::from([(actor_id, walking)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(
+        let ctx = command_ctx_at_frame(
             objects.get(&actor_id).expect("actor present"),
             &objects,
             &players,
@@ -207,7 +207,7 @@
         let initial_objects = HashMap::from([(actor_id, digging.clone()), (item_id, item.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let initial_ctx = move_to_ctx_at_frame(
+        let initial_ctx = command_ctx_at_frame(
             initial_objects.get(&actor_id).expect("actor present"),
             &initial_objects,
             &players,
@@ -235,7 +235,7 @@
         walking.contents.clear();
         item.destroyed = true;
         let resumed_objects = HashMap::from([(actor_id, walking), (item_id, item)]);
-        let resumed_ctx = move_to_ctx_at_frame(
+        let resumed_ctx = command_ctx_at_frame(
             resumed_objects.get(&actor_id).expect("actor present"),
             &resumed_objects,
             &players,
@@ -266,7 +266,7 @@
         let objects = HashMap::from([(actor_id, actor), (item_id, item)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(
+        let ctx = command_ctx_at_frame(
             objects.get(&actor_id).expect("actor present"),
             &objects,
             &players,
@@ -321,7 +321,7 @@
             .with_tx(Some(11))
             .with_ty(Some(10));
         let mut state = DropState::from_request(&request);
-        let ctx = move_to_ctx_at_frame(
+        let ctx = command_ctx_at_frame(
             objects.get(&actor_id).expect("actor present"),
             &objects,
             &players,
@@ -346,7 +346,7 @@
             .get_mut(&actor_id)
             .expect("actor present")
             .action_procedure = ActionProcedure::Walk;
-        let ctx = move_to_ctx_at_frame(
+        let ctx = command_ctx_at_frame(
             objects.get(&actor_id).expect("actor present"),
             &objects,
             &players,
@@ -377,7 +377,7 @@
         let objects = HashMap::from([(actor_id, actor), (item_id, item)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(
+        let ctx = command_ctx_at_frame(
             objects.get(&actor_id).expect("actor present"),
             &objects,
             &players,
@@ -412,7 +412,7 @@
         let objects = HashMap::from([(actor_id, actor), (item_id, item)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(
+        let ctx = command_ctx_at_frame(
             objects.get(&actor_id).expect("actor present"),
             &objects,
             &players,
@@ -629,7 +629,7 @@
         objects.insert(actor_id, actor);
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        let ctx = move_to_ctx_at_frame(
+        let ctx = command_ctx_at_frame(
             objects.get(&actor_id).expect("actor present"),
             &objects,
             &players,
@@ -1122,7 +1122,7 @@
         let request = CommandRequest::new(CommandId::Enter).with_target(Some(target_id));
 
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 0);
         let mut state = EnterState::from_request(&request).expect("Enter state");
         let inactive = state.step(&ctx);
         assert_eq!(inactive.status, CommandStatus::Completed);
@@ -1136,7 +1136,7 @@
             .expect("target present")
             .container = Some(ObjectId::new(99));
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 1);
         let mut state = EnterState::from_request(&request).expect("Enter state");
         let contained = state.step(&ctx);
         assert_eq!(contained.status, CommandStatus::Running);
@@ -1161,7 +1161,7 @@
         let players = HashMap::new();
         let definitions = HashMap::new();
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 0);
 
         let mut nil_target = CommandStack::new();
         nil_target
@@ -1192,7 +1192,7 @@
         retained_target.destroyed = true;
         let retained_actor = retained_objects.get(&actor_id).expect("actor present");
         let retained_ctx =
-            move_to_ctx_at_frame(retained_actor, &retained_objects, &players, &definitions, 0);
+            command_ctx_at_frame(retained_actor, &retained_objects, &players, &definitions, 0);
         let mut retained = EnterState::from_request(
             &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
         )
@@ -1628,7 +1628,7 @@
             .expect("Enter queues");
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let first_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 100);
+        let first_ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 100);
         let first = stack.step(&first_ctx).expect("Enter executes");
         assert!(matches!(
             first.events.as_slice(),
@@ -1640,7 +1640,7 @@
             .expect("target present")
             .entrance_status = true;
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let next_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 101);
+        let next_ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 101);
         let next = stack.step(&next_ctx).expect("Enter rechecks");
         assert_eq!(next.status, CommandStatus::Completed);
         assert_eq!(
@@ -1685,7 +1685,7 @@
 
         for execution in 1..=49 {
             let actor = objects.get(&actor_id).expect("actor present");
-            let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+            let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 7);
             let result = stack.step(&ctx).expect("Enter executes");
             assert_eq!(result.status, CommandStatus::Running);
             assert!(matches!(
@@ -1703,7 +1703,7 @@
         }
 
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 7);
         let expired = stack.step(&ctx).expect("Enter expires");
         assert_eq!(expired.status, CommandStatus::Completed);
         assert!(expired.events.is_empty(), "expiry skips the handler");
@@ -1743,7 +1743,7 @@
             .expect("Enter queues");
 
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 7);
         let first = stack.step(&ctx).expect("Enter executes");
         assert_eq!(first.status, CommandStatus::Running);
         assert!(first.update.is_none(), "far Enter preserves ComDir");
@@ -1785,7 +1785,7 @@
         let players = HashMap::new();
         let definitions = HashMap::new();
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 9);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 9);
 
         let mut stack = CommandStack::new();
         stack
@@ -1888,7 +1888,7 @@
         for (grab, push_flag) in [(2, true), (1, false)] {
             let (actor, objects, definitions) =
                 enter_push_fixture(grab, vehicle_id, Vector2::ZERO, Vector2::new(100, 0));
-            let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
+            let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
             let mut request = CommandRequest::new(CommandId::Enter).with_target(Some(entrance_id));
             if push_flag {
                 request = request.with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
@@ -1904,7 +1904,7 @@
         let (actor, objects, definitions) =
             enter_push_fixture(1, entrance_id, Vector2::new(100, 0), Vector2::ZERO);
         let players = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
         let request = CommandRequest::new(CommandId::Enter)
             .with_target(Some(entrance_id))
             .with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
@@ -1924,7 +1924,7 @@
         // Actor inside but vehicle outside: the Enter must keep approaching.
         let (actor, objects, definitions) =
             enter_push_fixture(1, vehicle_id, Vector2::new(100, 0), Vector2::ZERO);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
         let mut state = EnterState::from_request(&request).expect("Enter state");
         let outside = state.step(&ctx);
         assert_eq!(outside.status, CommandStatus::Running);
@@ -1944,7 +1944,7 @@
         // finish the actor's command without entering the actor itself.
         let (actor, objects, definitions) =
             enter_push_fixture(1, vehicle_id, Vector2::ZERO, Vector2::new(100, 0));
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
         let mut state = EnterState::from_request(&request).expect("Enter state");
         let inside = state.step(&ctx);
         assert_eq!(inside.status, CommandStatus::Completed);
@@ -2080,7 +2080,7 @@
             .expect("Enter queues");
 
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 10);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 10);
         stack.step(&ctx).expect("Enter requests MoveTo");
         assert_eq!(stack.command_names(), vec!["MoveTo", "Enter"]);
         let first_move = stack
@@ -2090,7 +2090,7 @@
             .expect("MoveTo request retained");
         assert!(stack.complete_front_if(CommandId::MoveTo));
 
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 11);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 11);
         stack.step(&ctx).expect("Enter reissues MoveTo");
         assert_eq!(stack.command_names(), vec!["MoveTo", "Enter"]);
         assert_eq!(
@@ -2128,7 +2128,7 @@
         ]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 10);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 10);
         let mut state = EnterState::from_request(
             &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
         )
@@ -2241,7 +2241,7 @@
         let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut state = GrabState::from_request(
             &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
         )
@@ -2266,7 +2266,7 @@
             .expect("target remains addressable as a tombstone");
         deleted_target.status = crate::ObjectStatus::Deleted;
         deleted_target.destroyed = true;
-        let deleted_ctx = move_to_ctx_at_frame(
+        let deleted_ctx = command_ctx_at_frame(
             retained_deleted_objects
                 .get(&actor_id)
                 .expect("actor present"),
@@ -2367,7 +2367,7 @@
             let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
             let players = HashMap::new();
             let definitions = HashMap::new();
-            let ctx = move_to_ctx_at_frame(
+            let ctx = command_ctx_at_frame(
                 objects.get(&actor_id).expect("actor present"),
                 &objects,
                 &players,

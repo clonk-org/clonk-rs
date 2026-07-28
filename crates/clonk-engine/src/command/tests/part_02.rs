@@ -7,7 +7,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut stack = CommandStack::new();
         stack
             .push_front(CommandRequest::new(CommandId::Wait).with_data(CommandData::Integer(10)))
@@ -534,7 +534,7 @@
         let get_instance_id = stack.entries.front().expect("Get remains").instance_id;
 
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 4);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 4);
         let first = stack.step(&ctx).expect("Get executes");
         assert_eq!(
             first.events,
@@ -552,7 +552,7 @@
             .push(target_id);
         objects.get_mut(&target_id).expect("item present").container = Some(actor_id);
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 5);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 5);
         let collected = stack.step(&ctx).expect("Get rechecks");
         assert_eq!(collected.status, CommandStatus::Completed);
 
@@ -594,7 +594,7 @@
 
         for execution in 1..=39 {
             let actor = objects.get(&actor_id).expect("actor present");
-            let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+            let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 7);
             let result = stack.step(&ctx).expect("Get executes");
             assert_eq!(result.status, CommandStatus::Running);
             assert_eq!(
@@ -612,7 +612,7 @@
         }
 
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 7);
         let expired = stack.step(&ctx).expect("Get expires");
         assert_eq!(expired.status, CommandStatus::Completed);
         assert!(expired.events.is_empty());
@@ -720,7 +720,7 @@
         let players = HashMap::new();
         let definitions = HashMap::new();
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 0);
         let mut state = GetState::from_request(
             &CommandRequest::new(CommandId::Get)
                 .with_target2(Some(container_id))
@@ -774,7 +774,7 @@
             },
         )]);
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 0);
         let mut state =
             GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
                 .expect("state created");
@@ -798,7 +798,7 @@
             .expect("container present")
             .ocf &= !ocf::ENTRANCE;
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 1);
         let mut state =
             GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
                 .expect("state created");
@@ -813,7 +813,7 @@
             .expect("container definition present")
             .grab_put_get = crate::GRAB_PUT_GET_GET;
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 2);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 2);
         let mut state =
             GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
                 .expect("state created");
@@ -858,7 +858,7 @@
             },
         )]);
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 0);
         let mut state =
             GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
                 .expect("state created");
@@ -1036,7 +1036,7 @@
             },
         )]);
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 0);
         let mut state =
             GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
                 .expect("state created");
@@ -1058,7 +1058,7 @@
             .get_mut("BOX")
             .expect("container definition present")
             .grab_put_get = crate::GRAB_PUT_GET_GET;
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(actor, &objects, &players, &definitions, 1);
         let mut state =
             GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
                 .expect("state created");
@@ -1148,7 +1148,7 @@
         let players = HashMap::new();
         let definitions = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
         let mut state = PutState::from_request(
             &CommandRequest::new(CommandId::Put)
                 .with_target(Some(container_id))
@@ -1169,7 +1169,7 @@
             (container_id, snapshot_with_id(container_id.as_u64())),
         ]);
         let empty_ctx =
-            move_to_ctx_at_frame(&empty_actor, &empty_objects, &players, &definitions, 1);
+            command_ctx_at_frame(&empty_actor, &empty_objects, &players, &definitions, 1);
         let mut empty_state = PutState::from_request(
             &CommandRequest::new(CommandId::Put)
                 .with_target(Some(container_id))
@@ -1248,7 +1248,7 @@
             .contents
             .clear();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
         assert_eq!(state.step(&ctx).status, CommandStatus::Completed);
     }
 
@@ -1345,7 +1345,7 @@
 
         {
             let actor_snapshot = objects.get(&actor_id).expect("actor present");
-            let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
+            let ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
             for _ in 0..2 {
                 let waiting = state.step(&ctx);
                 assert_eq!(waiting.status, CommandStatus::Running);
@@ -1368,7 +1368,7 @@
                 item.ocf &= !ocf::HIT_SPEED1;
             }
             let actor_snapshot = objects.get(&actor_id).expect("actor present");
-            let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
+            let ctx = command_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
             let mut state = PutState::from_request(
                 &CommandRequest::new(CommandId::Put)
                     .with_target(Some(container_id))
@@ -1415,7 +1415,7 @@
             (container_id, container),
             (outer_id, outer),
         ]);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut state = PutState::from_request(
             &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
         )
@@ -1722,7 +1722,7 @@
         ]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut state = PutState::from_request(
             &CommandRequest::new(CommandId::Put)
                 .with_target(Some(target_id))
@@ -2294,7 +2294,7 @@
         let digging_objects = HashMap::from([(actor_id, digging.clone()), (item_id, item.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let digging_ctx = move_to_ctx_at_frame(
+        let digging_ctx = command_ctx_at_frame(
             digging_objects.get(&actor_id).expect("actor present"),
             &digging_objects,
             &players,
@@ -2304,7 +2304,7 @@
         let mut walking = digging;
         walking.action_procedure = ActionProcedure::Walk;
         let walking_objects = HashMap::from([(actor_id, walking), (item_id, item)]);
-        let walking_ctx = move_to_ctx_at_frame(
+        let walking_ctx = command_ctx_at_frame(
             walking_objects.get(&actor_id).expect("actor present"),
             &walking_objects,
             &players,
@@ -2403,7 +2403,7 @@
         let digging_objects = HashMap::from([(actor_id, digging.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let digging_ctx = move_to_ctx_at_frame(
+        let digging_ctx = command_ctx_at_frame(
             digging_objects.get(&actor_id).expect("actor present"),
             &digging_objects,
             &players,
@@ -2430,7 +2430,7 @@
         let mut walking = digging;
         walking.action_procedure = ActionProcedure::Walk;
         let walking_objects = HashMap::from([(actor_id, walking)]);
-        let walking_ctx = move_to_ctx_at_frame(
+        let walking_ctx = command_ctx_at_frame(
             walking_objects.get(&actor_id).expect("actor present"),
             &walking_objects,
             &players,

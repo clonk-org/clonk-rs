@@ -243,17 +243,7 @@
     ) -> CommandRuntimeContext<'a> {
         CommandRuntimeContext {
             landscape: Some(landscape),
-            frame: 0,
-            position: walker.position,
-            object: walker,
-            objects,
-            players,
-            definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            ..command_ctx_at_frame(walker, objects, players, definitions, 0)
         }
     }
 
@@ -266,7 +256,7 @@
         state
     }
 
-    fn move_to_ctx_at_frame<'a>(
+    fn command_ctx_at_frame<'a>(
         object: &'a CommandObjectSnapshot,
         objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
         players: &'a HashMap<i32, CommandPlayerSnapshot>,
@@ -301,7 +291,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&clonk, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&clonk, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(160))
@@ -366,7 +356,7 @@
             let objects = HashMap::new();
             let players = HashMap::new();
             let definitions = HashMap::new();
-            let ctx = move_to_ctx_at_frame(&clonk, &objects, &players, &definitions, 1);
+            let ctx = command_ctx_at_frame(&clonk, &objects, &players, &definitions, 1);
             let mut stack = CommandStack::new();
             stack
                 .push_back(
@@ -775,12 +765,12 @@
         let request = CommandRequest::new(CommandId::MoveTo)
             .with_tx(Some(115))
             .with_ty(Some(100));
-        let ctx = move_to_ctx_at_frame(&mover, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&mover, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(&request);
         assert_eq!(state.step(&ctx).status, CommandStatus::Completed);
 
         mover.move_to_range = -3;
-        let ctx = move_to_ctx_at_frame(&mover, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&mover, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(&request);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -811,7 +801,7 @@
             .with_ty(Some(140));
 
         // Odd frame (iTick2 == 1): horizontal arm -> COMD_Right.
-        let ctx = move_to_ctx_at_frame(&swimmer, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&swimmer, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(&request);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -822,7 +812,7 @@
         );
 
         // Even frame (iTick2 == 0): vertical arm -> COMD_Down (cy < Ty).
-        let ctx = move_to_ctx_at_frame(&swimmer, &objects, &players, &definitions, 2);
+        let ctx = command_ctx_at_frame(&swimmer, &objects, &players, &definitions, 2);
         let mut state = evaluated_move_to(&request);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -848,7 +838,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&floater, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&floater, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(200))
@@ -868,7 +858,7 @@
         // the object's pre-existing Right ComDir with COMD_None/Stop.
         floater.command_direction = CommandDirection::Right;
         floater.fixed_velocity = FixedVec2::from_ints(1, 0);
-        let ctx = move_to_ctx_at_frame(&floater, &objects, &players, &definitions, 2);
+        let ctx = command_ctx_at_frame(&floater, &objects, &players, &definitions, 2);
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(200))
@@ -895,7 +885,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&floater, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&floater, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(100))
@@ -924,7 +914,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
 
         // Target above and well to the right: DFA_SCALE ignores Tx for
         // steering (no horizontal branch in the arm) and heads Up. The
@@ -958,7 +948,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
 
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
@@ -999,7 +989,7 @@
 
         // Action.Time == 2: too fresh, keep scaling.
         scaler.action_time = 2;
-        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(&request);
         let result = state.step(&ctx);
         assert!(
@@ -1013,7 +1003,7 @@
 
         // Action.Time == 3 with contact: let go against the facing (-1).
         scaler.action_time = 3;
-        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(&request);
         let result = state.step(&ctx);
         let update = result.update.expect("let-go update");
@@ -1047,7 +1037,7 @@
 
         // Target right, slightly below: Angle = 99 <= 110 keeps hangling;
         // steer Right. No vertical branch in the arm.
-        let ctx = move_to_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(160))
@@ -1059,7 +1049,7 @@
         assert!(update.action.is_none(), "within LetGoHangleAngle: no drop");
 
         // Target straight below: Angle = 180 > 110 -> ObjectComLetGo(0).
-        let ctx = move_to_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(100))
@@ -1095,7 +1085,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let mut ctx = move_to_ctx_at_frame(&flyer, &objects, &players, &definitions, 1);
+        let mut ctx = command_ctx_at_frame(&flyer, &objects, &players, &definitions, 1);
         ctx.landscape = Some(&landscape);
 
         // Target up and slightly right (angle 9, distance 70, sky above):
@@ -1127,7 +1117,7 @@
         let mut disabled_flyer = flyer.clone();
         disabled_flyer.action_disabled = true;
         let mut disabled_ctx =
-            move_to_ctx_at_frame(&disabled_flyer, &objects, &players, &definitions, 1);
+            command_ctx_at_frame(&disabled_flyer, &objects, &players, &definitions, 1);
         disabled_ctx.landscape = Some(&landscape);
         let mut disabled_state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
@@ -1157,7 +1147,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let mut ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
         ctx.landscape = Some(&landscape);
 
         // Mid-air target straight up: AdjustMoveToTarget drops it to the
@@ -1177,7 +1167,7 @@
             first.update.is_none() && first.operations.is_empty(),
             "the evaluation Execute does nothing else (C4Command.cpp:1555)"
         );
-        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        let mut ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
         ctx.landscape = Some(&landscape);
         let second = state.step(&ctx);
         assert_eq!(second.status, CommandStatus::Completed);
@@ -1191,10 +1181,10 @@
         // steering arm: the command remains pending without touching ComDir.
         let request = request.with_data(CommandData::Integer(1));
         let mut state = MoveToState::from_request(&request); // unevaluated
-        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let mut ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
         ctx.landscape = Some(&landscape);
         let _ = state.step(&ctx);
-        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        let mut ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
         ctx.landscape = Some(&landscape);
         let second = state.step(&ctx);
         assert!(
@@ -1222,9 +1212,9 @@
 
         let request = CommandRequest::new(CommandId::MoveTo).with_target(Some(target_id));
         let mut state = MoveToState::from_request(&request); // unevaluated
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
         let _ = state.step(&ctx); // evaluation frame
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
         let result = state.step(&ctx);
         assert_eq!(
             result.update.and_then(|update| update.command_direction),
@@ -1234,7 +1224,7 @@
 
         // Target teleports left; the command keeps heading for 200.
         objects.get_mut(&target_id).expect("target").position = Vector2::new(0, 100);
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 3);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 3);
         let result = state.step(&ctx);
         assert_ne!(
             result.update.and_then(|update| update.command_direction),
@@ -1259,13 +1249,13 @@
         stack.push_front(request).expect("MoveTo queues");
 
         let mut walker = walking_jumper(Vector2::new(100, 100));
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 0);
         assert_eq!(
             stack.step(&ctx).expect("evaluation executes").status,
             CommandStatus::Running
         );
 
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
         let result = stack.step(&ctx).expect("MoveTo executes");
         assert_eq!(
             result.update.and_then(|update| update.command_direction),
@@ -1273,7 +1263,7 @@
         );
 
         walker.position = Vector2::new(210, 100);
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
         let result = stack.step(&ctx).expect("MoveTo executes again");
         assert_eq!(
             result.update.and_then(|update| update.command_direction),
@@ -1281,7 +1271,7 @@
             "MoveTo executes again on the next frame"
         );
 
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 3);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 3);
         assert_eq!(
             stack.step(&ctx).expect("interval expires").status,
             CommandStatus::Completed
@@ -1300,7 +1290,7 @@
         let objects = HashMap::from([(container_id, snapshot_with_id(9))]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(200))
@@ -1354,7 +1344,7 @@
                 .with_tx(Some(200))
                 .with_ty(Some(100)),
         );
-        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         match result.operations.first() {
@@ -1405,7 +1395,7 @@
                 .with_ty(Some(160))
                 .with_data(CommandData::Integer(2)),
         );
-        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty(), "no UnGrab with PushTarget");
@@ -1423,7 +1413,7 @@
                 .with_ty(Some(100))
                 .with_data(CommandData::Integer(2)),
         );
-        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
         let result = state.step(&ctx);
         match result.operations.first() {
             Some(CommandOperation::PushFront(request)) => {
@@ -1454,7 +1444,7 @@
                 ..CommandDefinitionSnapshot::default()
             },
         )]);
-        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
         let mut stack = CommandStack::new();
         stack
             .push_back(
@@ -1489,14 +1479,14 @@
         let mut pusher_at_waypoint = pusher.clone();
         pusher_at_waypoint.position = Vector2::new(95, 160);
         let waypoint_ctx =
-            move_to_ctx_at_frame(&pusher_at_waypoint, &objects, &players, &definitions, 2);
+            command_ctx_at_frame(&pusher_at_waypoint, &objects, &players, &definitions, 2);
         let waypoint = stack
             .step(&waypoint_ctx)
             .expect("intermediate MoveTo completes");
         assert_eq!(waypoint.status, CommandStatus::Completed);
         assert_eq!(stack.command_names(), vec!["MoveTo"]);
 
-        let final_ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 3);
+        let final_ctx = command_ctx_at_frame(&pusher, &objects, &players, &definitions, 3);
         let final_result = stack.step(&final_ctx).expect("final MoveTo executes");
         assert_eq!(final_result.status, CommandStatus::Running);
         assert!(
@@ -1764,7 +1754,7 @@
                     .with_mode(CommandMode::SilentSub),
             )
             .expect("MoveTo queues");
-        let ctx = move_to_ctx_at_frame(&idle, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&idle, &objects, &players, &definitions, 1);
         let result = stack.execute_front(&ctx).expect("MoveTo executes");
         assert_eq!(result.status, CommandStatus::Failed);
         assert_eq!(stack.entries[1].failures, 1);
@@ -1787,7 +1777,7 @@
         // the string, distinguishes it from the built-in inactive slot.
         let mut active_idle = idle.clone();
         active_idle.action_idle = false;
-        let ctx = move_to_ctx_at_frame(&active_idle, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&active_idle, &objects, &players, &definitions, 1);
         let mut moving = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(200))
@@ -1803,7 +1793,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(100))
@@ -1882,7 +1872,7 @@
         let players = HashMap::new();
         let definitions = HashMap::new();
         let follower = objects.get(&follower_id).expect("follower present");
-        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(follower, &objects, &players, &definitions, 0);
 
         let mut stack = CommandStack::new();
         stack
@@ -1933,7 +1923,7 @@
         let players = HashMap::new();
         let definitions = HashMap::new();
         let follower = objects.get(&follower_id).expect("follower present");
-        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(follower, &objects, &players, &definitions, 0);
         let mut follow = FollowState::from_request(
             &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
         )
@@ -1968,7 +1958,7 @@
         let contained_follower = contained_objects
             .get(&follower_id)
             .expect("follower present");
-        let contained_ctx = move_to_ctx_at_frame(
+        let contained_ctx = command_ctx_at_frame(
             contained_follower,
             &contained_objects,
             &players,
@@ -2014,7 +2004,7 @@
         .expect("Follow state");
 
         let follower = objects.get(&follower_id).expect("follower present");
-        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(follower, &objects, &players, &definitions, 0);
         let grab_result = follow.step(&ctx);
         assert_eq!(grab_result.status, CommandStatus::Running);
         assert!(grab_result.update.is_none());
@@ -2028,7 +2018,7 @@
         follower.action_target = Some(lorry_id);
         follower.command_direction = CommandDirection::Left;
         let follower = objects.get(&follower_id).expect("follower present");
-        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(follower, &objects, &players, &definitions, 1);
         let copy_result = follow.step(&ctx);
         assert!(copy_result.operations.is_empty());
         assert_eq!(
@@ -2047,7 +2037,7 @@
             .expect("target present")
             .command_direction = CommandDirection::DownRight;
         let follower = objects.get(&follower_id).expect("follower present");
-        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 2);
+        let ctx = command_ctx_at_frame(follower, &objects, &players, &definitions, 2);
         let next_copy = follow.step(&ctx);
         assert_eq!(
             next_copy.update.and_then(|update| update.command_direction),
@@ -2060,7 +2050,7 @@
             .expect("target present")
             .action_procedure = ActionProcedure::Walk;
         let follower = objects.get(&follower_id).expect("follower present");
-        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 3);
+        let ctx = command_ctx_at_frame(follower, &objects, &players, &definitions, 3);
         let ungrab_result = follow.step(&ctx);
         assert_eq!(ungrab_result.status, CommandStatus::Running);
         assert!(ungrab_result.update.is_none());
@@ -2140,7 +2130,7 @@
 
         objects.get_mut(&target_id).expect("target present").status = ObjectStatus::Deleted;
         let follower = objects.get(&follower_id).expect("follower present");
-        let removed_ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 1);
+        let removed_ctx = command_ctx_at_frame(follower, &objects, &players, &definitions, 1);
         let removed = state.step(&removed_ctx);
         assert_eq!(removed.status, CommandStatus::Running);
         assert!(removed.update.is_none());
@@ -2218,7 +2208,7 @@
             .push_front(CommandRequest::new(CommandId::MoveTo).with_target(Some(target_id)))
             .expect("push");
 
-        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
         let _ = stack.step(&ctx); // InitEvaluation execute
 
         let views = stack.command_views();
@@ -2253,7 +2243,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
         let evaluation = stack.step(&ctx).expect("Acquire evaluates");
         assert_eq!(evaluation.status, CommandStatus::Running);
         assert!(evaluation.update.is_none());
@@ -2329,7 +2319,7 @@
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let ctx = command_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
 
         let mut direct = CommandStack::new();
         direct
