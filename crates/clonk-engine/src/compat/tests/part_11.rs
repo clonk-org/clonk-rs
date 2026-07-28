@@ -3175,35 +3175,11 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         )
         .with_ocf(ocf_mask)]);
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            100,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = HostObjectContext {
+            energy: 100,
+            direction: Direction::Left,
+            ..idle_object_scope(object_id)
+        }
         .with_alive(true)
         .with_base_graphics(None)
         .with_ocf(ocf_mask);
@@ -3223,35 +3199,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_graphics_records_overlay_update() {
         let object_id = ObjectId::new(42);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(Vec::new())
         .with_base_graphics(None);
 
@@ -3323,35 +3271,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         existing.color_modulation = 0x0012_3456;
         existing.phase = 7;
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(vec![existing])
         .with_base_graphics(None);
 
@@ -3405,35 +3325,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             .with_definition(Some("Clonk".into()))
             .with_action(Some("Pointer".into()));
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(vec![existing])
         .with_base_graphics(None);
 
@@ -3469,35 +3361,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let object_id = ObjectId::new(7);
         let overlay = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
             .with_definition(Some("Clonk".into()));
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(vec![overlay])
         .with_base_graphics(None);
 
@@ -3545,35 +3409,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             false,
         );
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        );
+        let object_context = idle_object_scope(object_id);
 
         let (result, outcome) = with_effect_context(
             Some(object_context.with_base_graphics(None)),
@@ -3626,35 +3462,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             blit_mode: 0,
         };
 
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_base_graphics(Some(base));
 
         let (result, outcome) = with_effect_context(Some(object_context), &[], world, 100, || {
@@ -3670,35 +3478,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_obj_draw_transform_updates_object_transform() {
         let object_id = ObjectId::new(1);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        );
+        let object_context = idle_object_scope(object_id);
 
         let object_context = object_context.with_base_graphics(None);
 
@@ -3747,35 +3527,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_obj_draw_transform_default_matrix_resets_base() {
         let object_id = ObjectId::new(2);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            Some(DrawTransform::from_components(2.0, 3.0, 4.0, 5.0)),
-            None,
-        );
+        let object_context = HostObjectContext {
+            draw_transform: Some(DrawTransform::from_components(2.0, 3.0, 4.0, 5.0)),
+            ..idle_object_scope(object_id)
+        };
 
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -3803,35 +3558,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let object_id = ObjectId::new(5);
         let overlay = ObjectGraphicsOverlay::new(-2, GraphicsOverlayMode::Base);
         let zero_overlay = ObjectGraphicsOverlay::new(-3, GraphicsOverlayMode::Base);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0, // action_phase
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object_context = idle_object_scope(object_id)
         .with_graphics_overlays(vec![overlay, zero_overlay])
         .with_base_graphics(None);
 
@@ -3987,35 +3714,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_obj_draw_transform2_retains_identity_matrix() {
         let object_id = ObjectId::new(7);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        );
+        let object_context = idle_object_scope(object_id);
 
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -4053,35 +3752,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     #[test]
     fn set_obj_draw_transform2_tenth_argument_is_the_overlay_id() {
         let object_id = ObjectId::new(8);
-        let object_context = HostObjectContext::with_category(
-            object_id,
-            None,
-            ObjectStatus::Normal,
-            0,
-            0,
-            crate::FULL_CON,
-            OWNER_NONE,
-            Vector2::ZERO,
-            Vector2::ZERO,
-            0,
-            &[],
-            "Idle",
-            0,
-            0,
-            0,
-            ActionLibrary::default(),
-            Direction::Right,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            DEFAULT_CATEGORY,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        );
+        let object_context = idle_object_scope(object_id);
         let with_overlay =
             object_context
                 .clone()

@@ -64,6 +64,41 @@
         )
     }
 
+    /// The idle object scope with an explicit category, for the sites that
+    /// exercise category-dependent behaviour. Same defaults as
+    /// [`idle_object_context`], stated once through `with_category`.
+    fn idle_object_scope(object_id: ObjectId) -> HostObjectContext<'static> {
+        HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            crate::FULL_CON,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            None,
+            None,
+        )
+    }
+
     #[test]
     fn cpp_add_func_argument_extraction_canonicalizes_scalar_and_pointer_slots() {
         let raw_bool = Value::from_c4_bool_raw(2);

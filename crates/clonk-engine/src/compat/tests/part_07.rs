@@ -1716,35 +1716,24 @@ func Probe(state) {
         )]));
         let world = HostWorldContext::from_objects(vec![world_object])
             .with_definition_metadata(definitions);
-        let object = HostObjectContext::with_category(
-            target,
-            None,
-            ObjectStatus::Normal,
-            state.energy,
-            state.damage,
-            state.construction,
-            state.owner,
-            state.position,
-            state.velocity,
-            state.rotation,
-            &[],
-            action.name,
-            action.time,
-            action.data,
-            action.phase,
-            action_library,
-            Direction::Left,
-            CommandDirection::Stop,
-            0,
-            None,
-            None,
-            &[],
-            state.category,
-            ocf::NORMAL,
-            false,
-            None,
-            None,
-        )
+        let object = HostObjectContext {
+            energy: state.energy,
+            damage: state.damage,
+            construction: (state.construction).max(0),
+            owner: state.owner,
+            controller: state.owner,
+            position: state.position,
+            velocity: state.velocity,
+            rotation: state.rotation,
+            action_name: action.name,
+            action_ticks: action.time,
+            action_data: action.data,
+            action_phase: action.phase,
+            action_library: action_library.into(),
+            direction: Direction::Left,
+            category: state.category,
+            ..idle_object_scope(target)
+        }
         .with_definition_id("SELF")
         .with_script_fixed_position(Some(fixed_position))
         .with_script_fixed_velocity(Some(fixed_velocity))
