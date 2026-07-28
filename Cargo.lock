@@ -1158,6 +1158,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clonk-update-net"
+version = "0.3.0"
+dependencies = [
+ "clonk-update",
+ "reqwest",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
