@@ -2200,15 +2200,11 @@ func Probe(state) {
     fn get_vertex_contact_uses_landscape_sampling() {
         let vertices = [ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM)];
         let landscape = Landscape::flat(8, 0);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(
             Some(idle_object_context_with_vertices(&vertices)),
@@ -2229,15 +2225,11 @@ func Probe(state) {
             ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM),
         ];
         let landscape = Landscape::flat(4, 0);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let object = object_reference_value(ObjectId::new(1));
         let (result, _) = with_effect_context(

@@ -2811,15 +2811,11 @@ public func RecordSale(int wealth, int stock)
                 },
             ),
         ]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let mut expected_rng = LcgRng::new(41);
         let _ = expected_rng.random(20);

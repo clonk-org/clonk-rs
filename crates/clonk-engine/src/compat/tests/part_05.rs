@@ -631,15 +631,11 @@ func ProbeDrawDefMap() {
     #[test]
     fn g_back_liquid_returns_false_in_height_landscape() {
         let landscape = Landscape::flat(8, 4);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_liquid(&[Value::Int(1), Value::Int(6)])
@@ -652,15 +648,11 @@ func ProbeDrawDefMap() {
     fn g_back_liquid_detects_liquid_column() {
         let mut landscape = Landscape::flat(8, 4);
         landscape.set_liquid_column(1, vec![LiquidSegment::new(5, 9)]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_liquid(&[Value::Int(1), Value::Int(6)])
@@ -751,15 +743,11 @@ func ProbeDrawDefMap() {
             vec![None; 2],
         ));
         landscape.resolve_grid_materials(|name| materials.id_of(name));
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         )
         .with_materials(Some(Rc::new(materials)));
         let mut script = clonk_script::Engine::new();
@@ -849,15 +837,11 @@ func ProbeDrawDefMap() {
             vec![None; 3],
         ));
         landscape.resolve_grid_materials(|name| materials.id_of(name));
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         )
         .with_materials(Some(Rc::new(materials)));
 
@@ -932,15 +916,11 @@ func ProbeDrawDefMap() {
             ));
             landscape.set_border_open(0, 0, false, false);
             landscape.resolve_grid_materials(|name| materials.id_of(name));
-            HostWorldContext::with_landscape(
+            world_with(
                 Vec::<HostWorldObject>::new(),
                 Some(landscape),
                 HashMap::new(),
-                Vec::new(),
                 HashMap::new(),
-                HashMap::new(),
-                1,
-                false,
             )
             .with_scenario_values(Rc::new(
                 ScenarioValueStore::with_landscape_push_pull_for_test(push_pull),
@@ -1092,15 +1072,11 @@ func ProbeDrawDefMap() {
                 )
             })
             .collect();
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(4, player), (2, opponent)]),
-            HashMap::new(),
-            1,
-            false,
         );
 
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
@@ -2757,15 +2733,11 @@ func Transfer(object donor, object recipient)
                 ..DefinitionMetadata::default()
             },
         );
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut script = clonk_script::Engine::new();

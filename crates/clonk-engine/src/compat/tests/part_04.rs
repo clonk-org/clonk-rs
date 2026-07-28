@@ -615,15 +615,11 @@
             }],
         );
         let world = || {
-            HostWorldContext::with_landscape(
+            world_with(
                 Vec::<HostWorldObject>::new(),
                 Some(landscape.clone()),
                 HashMap::new(),
-                Vec::new(),
                 HashMap::new(),
-                HashMap::new(),
-                1,
-                false,
             )
         };
         let (semi, _) = with_effect_context(None, &[], world(), 1, || {
@@ -734,15 +730,11 @@
     #[test]
     fn g_back_solid_detects_surface_in_landscape() {
         let landscape = Landscape::flat(32, 10);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_solid(&[Value::Int(5), Value::Int(12)])
@@ -754,15 +746,11 @@
     #[test]
     fn g_back_solid_respects_surface_height() {
         let landscape = Landscape::flat(16, 20);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_solid(&[Value::Int(3), Value::Int(15)])
@@ -805,15 +793,11 @@
         let mut landscape = Landscape::flat(20, 5);
         landscape.set_height(2, 2);
         landscape.set_tunnel_column(3, vec![(0, 4)]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (ordinary_solid, _) = with_effect_context(None, &[], world.clone(), 1, || {
             g_back_sky(&[Value::Int(2), Value::Int(2)])
@@ -847,15 +831,11 @@
         let material = crate::MaterialId::new(3).expect("material id");
         let mut landscape = Landscape::flat_with_material(32, 10, Some(material));
         landscape.set_world_height(20);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             get_material(&[Value::Int(5), Value::Int(12)])
@@ -910,15 +890,11 @@
         landscape.set_world_height(20);
         landscape.set_vehicle_material(Some(vehicle));
         landscape.set_border_open(8, 0, false, false);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let query = |x, y| {
             let (result, _) = with_effect_context(None, &[], world.clone(), 1, || {
@@ -972,16 +948,7 @@
         ));
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     fn draw_mat_chunks_world() -> HostWorldContext {
@@ -1022,16 +989,7 @@
         ));
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 9, texmap));
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     fn draw_mat_chunks_masked_world() -> HostWorldContext {
@@ -1104,16 +1062,7 @@
         ));
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     fn draw_map_world(
@@ -1187,16 +1136,7 @@
         raster.set_map_creator(retain_creator.then_some(retained));
         landscape.set_raster_state(raster);
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     fn draw_map_masked_world() -> HostWorldContext {
@@ -1292,16 +1232,7 @@
         ));
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
         landscape.refresh_all_raster_columns();
-        HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        world_with(Vec::<HostWorldObject>::new(), Some(landscape), HashMap::new(), HashMap::new())
     }
 
     #[test]
@@ -1385,15 +1316,11 @@
             "the frontend still sees the remapped Liquid render surface"
         );
         landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
 
         let (result, _) = with_effect_context(None, &[], world, 1, || {

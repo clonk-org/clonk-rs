@@ -151,15 +151,11 @@
                 ..Default::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(5, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [Value::Int(5), Value::C4Id("BRIK".into())];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_knowledge(&args));
@@ -188,15 +184,11 @@
                 },
             ),
         ]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(6, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [Value::Int(6), Value::Nil, Value::Int(0), Value::Int(0x2)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_knowledge(&args));
@@ -224,15 +216,11 @@
                 },
             ),
         ]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(26, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             Ok::<Value, RuntimeError>(Value::Array(vec![
@@ -265,15 +253,11 @@
                 ..Default::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(7, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         // Parse_Params pads omitted parameters with nil, whose bool
         // conversion is false (C4AulParse.cpp:2342-2344; C4Value.h:325-330).
@@ -308,15 +292,11 @@
                 ..Default::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(8, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [Value::Int(8), Value::C4Id("BRIK".into()), Value::Int(1)];
         let (result, outcome) =
@@ -544,15 +524,11 @@
             ..Default::default()
         };
         metadata.components = vec![("WOOD".to_string(), 3), ("METL".to_string(), 1)];
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             None,
             HashMap::from([(DefinitionId::from("HUTT"), metadata)]),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world.clone(), 1, || {
             let count = get_component(&[
@@ -656,16 +632,7 @@ func Missing() { return ComponentAll(0, WOOD); }
                 .expect("library builds");
         let materials = MaterialSet::from_resource_library(&library);
         let expected = materials.get("Earth").expect("earth exists").id().index() as i32;
-        let world = HostWorldContext::with_landscape(
-            Vec::<HostWorldObject>::new(),
-            None,
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        )
+        let world = world_with(Vec::<HostWorldObject>::new(), None, HashMap::new(), HashMap::new())
         .with_materials(Some(Rc::new(materials)));
         let (result, _) = with_effect_context(None, &[], world.clone(), 1, || {
             let known = material(&[Value::String("Earth".into())])?;
@@ -751,15 +718,11 @@ func Missing() { return ComponentAll(0, WOOD); }
         ));
         landscape.resolve_grid_materials(|name| materials.id_of(name));
 
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         )
         .with_materials(Some(Rc::new(materials)));
         let mut engine = clonk_script::Engine::new();
@@ -812,16 +775,7 @@ func Missing() { return ComponentAll(0, WOOD); }
             let mut player = PlayerState::default();
             player.id = 1;
             player.crew = crew_ids.iter().map(|&id| ObjectId::new(id)).collect();
-            let world = HostWorldContext::with_landscape(
-                objects,
-                None,
-                HashMap::new(),
-                Vec::new(),
-                HashMap::from([(1, player)]),
-                HashMap::new(),
-                1,
-                false,
-            )
+            let world = world_with(objects, None, HashMap::new(), HashMap::from([(1, player)]))
             .with_crew_ranks(std::rc::Rc::new(HashMap::from([
                 (11_u64, 5),
                 (22_u64, 3),
@@ -895,16 +849,7 @@ func Missing() { return ComponentAll(0, WOOD); }
         player.id = 1;
         player.crew = vec![ObjectId::new(crew_ids[0]), ObjectId::new(crew_ids[1])];
 
-        let world = HostWorldContext::with_landscape(
-            objects,
-            None,
-            HashMap::new(),
-            Vec::new(),
-            HashMap::from([(1, player)]),
-            HashMap::new(),
-            1,
-            false,
-        );
+        let world = world_with(objects, None, HashMap::new(), HashMap::from([(1, player)]));
         let args = [Value::Int(1), Value::Int(1)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_crew(&args));
 
@@ -923,16 +868,7 @@ func Missing() { return ComponentAll(0, WOOD); }
         player.id = 3;
         player.crew = vec![ObjectId::new(crew_ids[0])];
 
-        let world = HostWorldContext::with_landscape(
-            objects,
-            None,
-            HashMap::new(),
-            Vec::new(),
-            HashMap::from([(3, player)]),
-            HashMap::new(),
-            1,
-            false,
-        );
+        let world = world_with(objects, None, HashMap::new(), HashMap::from([(3, player)]));
         let args = [Value::Int(3), Value::Int(5)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_crew(&args));
 
@@ -956,16 +892,7 @@ func Missing() { return ComponentAll(0, WOOD); }
             .map(|id| ObjectId::new(*id))
             .collect::<Vec<_>>();
 
-        let world = HostWorldContext::with_landscape(
-            objects,
-            None,
-            HashMap::new(),
-            Vec::new(),
-            HashMap::from([(2, player)]),
-            HashMap::new(),
-            1,
-            false,
-        );
+        let world = world_with(objects, None, HashMap::new(), HashMap::from([(2, player)]));
         let args = [Value::Int(2)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_crew_count(&args));
 
@@ -1065,15 +992,11 @@ func Missing() { return ComponentAll(0, WOOD); }
         player.cursor = Some(cursor);
         player.crew = vec![cursor];
 
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             None,
             HashMap::new(),
-            Vec::new(),
             HashMap::from([(0, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || get_cursor_host(&[]));
 
@@ -1157,15 +1080,11 @@ func Missing() { return ComponentAll(0, WOOD); }
         player
             .viewports
             .push(PlayerViewport::new(Vector2::ZERO).with_focus(Some(view_target)));
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             None,
             HashMap::new(),
-            Vec::new(),
             HashMap::from([(15, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [Value::Int(15)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_view_cursor(&args));
@@ -1760,15 +1679,11 @@ public func Trigger()
                 ..Default::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(1, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [Value::Int(1), Value::C4Id("BRIK".into())];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_homebase_material(&args));
@@ -1802,15 +1717,11 @@ public func Trigger()
             ("ZPRD".into(), definition(4)),
             ("APRD".into(), definition(8)),
         ]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(1, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
 
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -1878,15 +1789,11 @@ public func Trigger()
                 ..Default::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(1, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [Value::Int(1), Value::C4Id("BRIK".into()), Value::Int(2)];
         let (result, outcome) =
@@ -1922,15 +1829,11 @@ public func Trigger()
                 ..Default::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(1, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [Value::Int(1), Value::C4Id("BRIK".into()), Value::Int(1)];
         let (result, outcome) =
@@ -1967,15 +1870,11 @@ public func Trigger()
             .into_iter()
             .map(|id| (id.into(), DefinitionMetadata::default()))
             .collect();
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             None,
             definitions,
-            Vec::new(),
             HashMap::from([(1, player)]),
-            HashMap::new(),
-            1,
-            false,
         );
 
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
@@ -2074,15 +1973,11 @@ public func Trigger()
     #[test]
     fn set_transfer_zone_registers_command_for_active_object() {
         let args = [Value::Int(2), Value::Int(3), Value::Int(5), Value::Int(7)];
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             vec![fixture_world_object(ObjectId::new(1), "ZoneTester")],
             None,
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, outcome) =
             with_object_host_context_with_world(world, || set_transfer_zone(&args));
@@ -2121,15 +2016,11 @@ public func Trigger()
 
     #[test]
     fn set_transfer_zone_with_zero_size_clears_existing() {
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             vec![fixture_world_object(ObjectId::new(1), "ZoneTester")],
             None,
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, outcome) = with_object_host_context_with_world(world, || {
             set_transfer_zone(&[Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(10)])
@@ -2430,15 +2321,11 @@ public func Trigger()
         // tunnel-background (IFT) pixels (C4Wrappers.h:189-192).
         let mut landscape = Landscape::flat(32, 100);
         landscape.set_tunnel_column(5, vec![(0, 20)]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let (result, _) = with_environment_context(EnvironmentSettings::new(60), 0, || {
             let (inner, _) = with_effect_context(None, &[], world, 1, || {

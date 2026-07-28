@@ -246,15 +246,11 @@ public func SeedFull()
                 ..DefinitionMetadata::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         )
         .with_materials(Some(Rc::new(materials)));
         let mut expected_rng = LcgRng::new(23);
@@ -306,15 +302,11 @@ public func SeedFull()
                 ..DefinitionMetadata::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         )
         .with_materials(Some(Rc::new(materials)));
         let mut expected_rng = LcgRng::new(2);
@@ -407,15 +399,11 @@ public func SeedFull()
                 ..DefinitionMetadata::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [
             Value::C4Id("ELEV".into()),
@@ -462,15 +450,11 @@ public func SeedFull()
                 ..Default::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [
             Value::C4Id("WORK".into()),
@@ -525,15 +509,11 @@ public func SeedFull()
                 ..DefinitionMetadata::default()
             },
         )]);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             definitions,
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [
             Value::C4Id("WORK".into()),
@@ -724,16 +704,7 @@ protected func Construction()
             None,
             None,
         );
-        let world = HostWorldContext::with_landscape(
-            vec![existing],
-            Some(landscape),
-            definitions,
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        );
+        let world = world_with(vec![existing], Some(landscape), definitions, HashMap::new());
         let args = [
             Value::C4Id("WORK".into()),
             Value::Int(32),

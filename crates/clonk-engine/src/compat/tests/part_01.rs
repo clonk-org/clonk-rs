@@ -99,6 +99,28 @@
         )
     }
 
+    /// A world context with the empty scaffolding these tests share: no
+    /// transfer zones, no crew selection, one free object id and no team
+    /// home-base rule. Sites state only the objects, landscape, definitions
+    /// and players they exercise.
+    fn world_with(
+        objects: impl IntoIterator<Item = HostWorldObject>,
+        landscape: Option<Landscape>,
+        definitions: HashMap<DefinitionId, DefinitionMetadata>,
+        players: HashMap<i32, PlayerState>,
+    ) -> HostWorldContext {
+        HostWorldContext::with_landscape(
+            objects,
+            landscape,
+            definitions,
+            Vec::new(),
+            players,
+            HashMap::new(),
+            1,
+            false,
+        )
+    }
+
     #[test]
     fn cpp_add_func_argument_extraction_canonicalizes_scalar_and_pointer_slots() {
         let raw_bool = Value::from_c4_bool_raw(2);

@@ -11,16 +11,7 @@
             .with_energy(0)
             .with_vertices(vertices.to_vec())
         .with_contact_density(crate::CONTACT_DENSITY_SOLID + 1);
-        let world = HostWorldContext::with_landscape(
-            vec![target],
-            Some(landscape),
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
-        );
+        let world = world_with(vec![target], Some(landscape), HashMap::new(), HashMap::new());
         let target = object_reference_value(target_id);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             Ok::<_, RuntimeError>(Value::Array(vec![
@@ -968,15 +959,11 @@
         landscape: Option<Landscape>,
         args: &[Value],
     ) -> (Result<Value, RuntimeError>, EffectContextOutcome) {
-        let world = HostWorldContext::with_landscape(
+        let world = world_with(
             Vec::<HostWorldObject>::new(),
             landscape,
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         with_effect_context(
             Some(
@@ -2159,15 +2146,11 @@ func Probe(object other)
     #[test]
     fn set_position_clamps_coordinates_when_requested() {
         let landscape = Landscape::flat(4, 6);
-        let world = HostWorldContext::with_landscape(
-            Vec::new(),
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
-            Vec::new(),
             HashMap::new(),
-            HashMap::new(),
-            1,
-            false,
         );
         let args = [
             Value::Int(10),
