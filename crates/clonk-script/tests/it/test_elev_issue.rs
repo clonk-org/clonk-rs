@@ -10,16 +10,7 @@ fn elev_pattern_minimal() {
             return (pCase->IsInPermanentMode());
         }
     "#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
@@ -32,30 +23,12 @@ public func IsInPermanentMode()
   return (pCase->IsInPermanentMode());
 }
     "#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn braceless_if_with_not() {
     // Braceless if with ! operator
     let source = r#"func Test() { var x; if (!x) return 1; return 0; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }

@@ -141,80 +141,35 @@ fn dynb_line_57_pattern() {
             }
         }
     "#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn not_with_assignment() {
     // Simple: !x = y is C++-valid syntax with a runtime-invalid bool lhs.
     let source = r#"func Test() { var x; if(!x = 42) return 1; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn not_with_addition_preserved() {
     // Precedence preservation: !a + b should still be (!a) + b, not !(a + b)
     let source = r#"func Test() { var a = 1; var b = 2; return !a + b; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn not_with_function_call() {
     // Baseline: !func() should continue to work
     let source = r#"func Test() { return !GetFlag(); }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn not_with_parenthesized_assignment() {
     // Control: !(x = y) with explicit parens should work
     let source = r#"func Test() { var x; if(!(x = 42)) return 1; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
@@ -238,46 +193,19 @@ fn increment_not_affected() {
 fn not_with_complex_assignment() {
     // Complex RHS: !x = a + b
     let source = r#"func Test() { var x, a = 1, b = 2; if(!x = a + b) return 1; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn bitwise_not_precedence_preserved() {
     // Ensure ~ (bitwise NOT) still has normal precedence with addition
     let source = r#"func Test() { var a = 5; return ~a + 1; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn negate_precedence_preserved() {
     // Ensure - (unary negate) still has normal precedence with addition
     let source = r#"func Test() { var a = 5; return -a + 1; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }

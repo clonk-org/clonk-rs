@@ -37,16 +37,7 @@ fn runtime_error(expression: &str) -> String {
 #[test]
 fn simple_exponentiation() {
     let source = r#"func Test() { return 2**3; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
@@ -64,47 +55,20 @@ fn exponentiation_with_parentheses() {
 #[test]
 fn exponentiation_with_variable() {
     let source = r#"func Test() { var iAlpha = 2; return iAlpha**5; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn exponentiation_with_negative_base() {
     let source = r#"func Test() { return (-2)**3; }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn frca_pattern() {
     // The actual pattern from FRCA script: Sqrt(Sqrt(iAlpha**5))
     let source = r#"func Test() { var iAlpha; return Sqrt(Sqrt(iAlpha**5)); }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]

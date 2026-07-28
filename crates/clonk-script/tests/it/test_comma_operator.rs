@@ -117,16 +117,7 @@ fn strict2_does_not_enter_the_legacy_multi_parameter_return_path() {
 fn mgsm_line_24_pattern() {
     // Exact pattern from MGSM line 24
     let source = r#"func Test() { if (!SetAction("Wait")) return (0, RemoveObject()); }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
@@ -147,48 +138,21 @@ fn nonstrict_spaced_return_parentheses_return_the_first_value() {
 fn comma_with_three_expressions() {
     // return (expr1, expr2, expr3)
     let source = r#"func Test() { return (1, 2, 3); }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn comma_with_function_calls() {
     // return (1, Message(...), Sound(...))
     let source = r#"func Test() { return (1, Message("test"), Sound("Click")); }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn comma_with_assignment() {
     // return (1, var = 0)
     let source = r#"func Test() { var x; return (1, x = 42); }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
@@ -780,32 +744,14 @@ fn nested_comma_expressions() {
 fn lock_pattern() {
     // Pattern from Lock.c4d scripts
     let source = r#"func Test() { return (1, Message("test"), Sound("Error")); }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
 fn kingdoms_pattern() {
     // Pattern from Kingdoms scripts
     let source = r#"func Test() { var clonk; if (!clonk) return (0, RemoveObject()); }"#;
-    let result = clonk_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    crate::support::assert_compiles(source);
 }
 
 #[test]
