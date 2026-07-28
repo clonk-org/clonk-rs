@@ -18241,6 +18241,42 @@ fn l049_renderer_config_loads_native_defaults_and_graphics_values() {
     assert!(load_display_flags(Some(&paths)).splitscreen_dividers);
 }
 
+// C4Network2ClientDlg appends " (!ack)" only when Game.Network.isHost() and
+// the row's C4Network2Client exists and is not NCS_Ready
+// (src/C4Network2Dialogs.cpp:62,71; src/C4Network2Client.h:113).
+#[test]
+fn l174_client_info_ack_marker_needs_a_host_and_an_unready_net_client() {
+    let state = |status| network::RuntimeNetworkClientState {
+        client_id: 7,
+        status,
+        control_ready: true,
+        wait_ms: 0,
+    };
+    for unready in [
+        clonk_network::RemoteBarrierState::Joining,
+        clonk_network::RemoteBarrierState::Chasing,
+        clonk_network::RemoteBarrierState::NotReady,
+        clonk_network::RemoteBarrierState::Removing,
+    ] {
+        assert!(GameApp::runtime_client_row_unacknowledged(
+            true,
+            Some(&state(unready))
+        ));
+        assert!(
+            !GameApp::runtime_client_row_unacknowledged(false, Some(&state(unready))),
+            "a client never renders the host-only marker"
+        );
+    }
+    assert!(!GameApp::runtime_client_row_unacknowledged(
+        true,
+        Some(&state(clonk_network::RemoteBarrierState::Ready))
+    ));
+    assert!(
+        !GameApp::runtime_client_row_unacknowledged(true, None),
+        "the local row has no C4Network2Client to interrogate"
+    );
+}
+
 #[test]
 fn runtime_client_list_maps_native_lifecycle_readiness_and_wait() {
     use clonk_frontend::runtime_client_list::RuntimeClientStatusIcon;
@@ -18656,8 +18692,13 @@ fn l144_standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
         wait_ms: None,
         connections: Vec::new(),
         can_moderate: false,
+        unacknowledged: false,
     };
-    app.runtime_client_list = Some(RuntimeClientListDialog::new_info("Client information", row));
+    app.runtime_client_list = Some(RuntimeClientListDialog::new_info(
+        "Client information",
+        row.client_id,
+        Some(row),
+    ));
     let (preferred, line_height) = app
         .runtime_client_list_input_geometry()
         .expect("standalone info geometry");

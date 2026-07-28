@@ -1370,6 +1370,19 @@ impl GameApp {
         (icon, (!local).then_some(state.wait_ms))
     }
 
+    /// `Game.Network.isHost() && pNetClient && !pNetClient->isReady()`
+    /// (src/C4Network2Dialogs.cpp:71). Only a network host sees the marker;
+    /// the local row has no `C4Network2Client` at all (`:62`), and every
+    /// status other than `NCS_Ready` counts as unacknowledged
+    /// (src/C4Network2Client.h:113).
+    pub(crate) fn runtime_client_row_unacknowledged(
+        network_host: bool,
+        state: Option<&network::RuntimeNetworkClientState>,
+    ) -> bool {
+        network_host
+            && state.is_some_and(|state| state.status != clonk_network::RemoteBarrierState::Ready)
+    }
+
     /// Compose the detailed `C4Network2::DrawStatus` text from live runtime
     /// diagnostics. Collection is skipped while its renderer flag is off so
     /// the normal frame path never blocks on worker inspection.
@@ -1781,6 +1794,10 @@ impl GameApp {
                     wait_ms,
                     connections,
                     can_moderate: can_moderate && client.client_id != 0,
+                    unacknowledged: Self::runtime_client_row_unacknowledged(
+                        can_moderate,
+                        client_state,
+                    ),
                 }
             })
             .collect::<Vec<_>>();

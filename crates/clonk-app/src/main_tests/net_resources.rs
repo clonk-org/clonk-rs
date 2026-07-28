@@ -1278,6 +1278,7 @@
             wait_ms: None,
             connections: Vec::new(),
             can_moderate: false,
+            unacknowledged: false,
         };
         let line_height = app
             .assets
@@ -1419,7 +1420,8 @@
             "resize cancels capture without discarding the retained offset"
         );
 
-        let mut info = RuntimeClientListDialog::new_info("Client information", row);
+        let mut info =
+            RuntimeClientListDialog::new_info("Client information", row.client_id, Some(row));
         let info_layout = info
             .info_layout(preferred, line_height)
             .expect("info layout");

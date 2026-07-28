@@ -5629,6 +5629,72 @@
         assert_eq!(*classic.scenario_game_options.values(), before);
     }
 
+    // C4Network2ClientDlg is constructed from an id and resolves the client in
+    // UpdateText, so an id that no longer resolves opens on
+    // IDS_NET_CLIENT_INFO_UNKNOWNID instead of doing nothing
+    // (src/C4Network2Dialogs.cpp:42-59).
+    #[test]
+    fn client_info_dialog_shows_unknown_id_and_host_unacknowledged_marker() {
+        let mut app = new_real_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Client")]);
+
+        assert!(
+            app.open_classic_lobby_client_info(42)
+                .expect("a stale client id still opens the native dialog"),
+            "C++ never refuses to construct C4Network2ClientDlg"
+        );
+        let info = app.runtime_client_list.as_ref().expect("info dialog");
+        assert_eq!(info.info_client_id(), Some(42));
+        assert_eq!(info.info_lines(), ["Unknown client ID #42.".to_string()]);
+
+        // A known id still resolves, and a joined client is never the network
+        // host, so it cannot show the acknowledgement marker.
+        assert!(app
+            .open_classic_lobby_client_info(0)
+            .expect("known client id opens"));
+        let info = app.runtime_client_list.as_ref().expect("info dialog");
+        assert_eq!(info.info_client_id(), Some(0));
+        assert!(
+            info.info_lines()
+                .iter()
+                .all(|line| !line.contains("(!ack)")),
+            "only Game.Network.isHost() adds the marker (src/C4Network2Dialogs.cpp:71)"
+        );
+
+        // The host's own row has no C4Network2Client, so it never carries the
+        // marker either (src/C4Network2Dialogs.cpp:62).
+        let mut host = new_real_menu_app(640, 480);
+        host.startup_view = StartupView::NetworkLobby;
+        let (host_network, _host_events) = NetworkManager::test_stub_for_client_id(0);
+        host.network = Some(host_network);
+        host.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        host.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+        assert!(host
+            .open_classic_lobby_client_info(0)
+            .expect("host opens its own client information"));
+        assert!(host
+            .runtime_client_list
+            .as_ref()
+            .expect("host info dialog")
+            .info_lines()
+            .iter()
+            .all(|line| !line.contains("(!ack)")));
+    }
+
     #[test]
     fn l102_lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
         let mut app = new_real_menu_app(640, 480);

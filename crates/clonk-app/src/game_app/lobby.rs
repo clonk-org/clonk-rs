@@ -2158,10 +2158,7 @@ impl GameApp {
         &mut self,
         client_id: i32,
     ) -> Result<bool, EngineError> {
-        if self.network.is_none()
-            || self.visible_lobby_client_is_local(client_id).is_none()
-            || !self.control_clients.contains(client_id)
-        {
+        if self.network.is_none() {
             return Ok(false);
         }
         Self::guard_gui_overlay_result(
@@ -2171,15 +2168,18 @@ impl GameApp {
                 .context("exact C4Network2ClientDlg resource set is absent")
                 .and_then(|resources| resources.validate()),
         )?;
+        // C4Network2ClientDlg is constructed from the id alone and resolves the
+        // client inside UpdateText, so a stale context entry opens the dialog on
+        // its unknown-id text instead of doing nothing
+        // (src/C4Network2Dialogs.cpp:42-59).
         let (_, rows, _) = self.runtime_client_list_snapshot();
-        let Some(row) = rows.into_iter().find(|row| row.client_id == client_id) else {
-            return Ok(false);
-        };
+        let row = rows.into_iter().find(|row| row.client_id == client_id);
         self.cancel_underlying_interaction();
         self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list = Some(
             clonk_frontend::runtime_client_list::RuntimeClientListDialog::new_info(
                 self.runtime_resource_string("IDS_NET_CLIENT_INFO"),
+                client_id,
                 row,
             ),
         );
