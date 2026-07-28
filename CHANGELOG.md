@@ -4,6 +4,12 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-28
+
+### Bug fixes
+
+- Package the game content notice from the content submodule
+
 ## [0.2.0] - 2026-07-28
 
 ### Bug fixes
