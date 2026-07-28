@@ -37,8 +37,10 @@ cargo xtask package
 ```
 
 By default, the command writes
-`target/dist/clonk-rust-<version>-<target-triple>.zip` (or the equivalent path
-beneath `CARGO_TARGET_DIR`). The archive contains the `clonk-game` launcher,
+`target/dist/clonk-rust-<version>-<target-triple>` (or the equivalent path
+beneath `CARGO_TARGET_DIR`) — a `.dmg` holding `Clonk Rust.app` on macOS, a
+`.zip` elsewhere. Released Windows builds are wrapped into a single installer
+`.exe` by the release workflow. The package contains the `clonk-game` launcher,
 the `clonk-app` runtime, the pinned content submodule — base packs plus the
 authorized Eke Reloaded and ClonkMars packs — credits, and the project and
 content notices. The legacy
