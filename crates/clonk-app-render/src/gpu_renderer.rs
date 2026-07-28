@@ -178,7 +178,7 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) modulation: vec4<f32>,
-    @location(2) liquid_scale: vec2<f32>,
+    @location(2) liquid_scale: vec4<f32>,
     @location(3) phase_gamma: vec4<f32>,
 };
 
@@ -195,9 +195,45 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.position = input.clip_position;
     output.uv = input.uv;
     output.modulation = input.modulation;
-    output.liquid_scale = input.liquid_scale.xy;
+    output.liquid_scale = input.liquid_scale;
     output.phase_gamma = input.phase_gamma;
     return output;
+}
+
+// Alpha-weighted bilinear reconstruction of the landscape cache.
+//
+// Sky texels are RGBA(0,0,0,0) against opaque material, so an ordinary
+// bilinear tap drags black into every silhouette and rings the terrain with a
+// grey halo. Weighting colour by coverage takes the colour only from texels
+// that have any, while alpha still ramps across the boundary — which is what
+// turns a magnified 1-game-pixel step into an antialiased edge.
+fn landscape_texel(coordinate: vec2<f32>, last: vec2<f32>) -> vec4<f32> {
+    let clamped = clamp(coordinate, vec2<f32>(0.0), last);
+    let sample = textureLoad(base_image, vec2<i32>(clamped), 0);
+    return vec4<f32>(sample.rgb * sample.a, sample.a);
+}
+
+fn sample_landscape_smooth(uv: vec2<f32>) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(base_image, 0));
+    let texel = uv * size - vec2<f32>(0.5);
+    let origin = floor(texel);
+    let weight = texel - origin;
+    let last = size - vec2<f32>(1.0);
+    let top = mix(
+        landscape_texel(origin, last),
+        landscape_texel(origin + vec2<f32>(1.0, 0.0), last),
+        weight.x,
+    );
+    let bottom = mix(
+        landscape_texel(origin + vec2<f32>(0.0, 1.0), last),
+        landscape_texel(origin + vec2<f32>(1.0, 1.0), last),
+        weight.x,
+    );
+    let accumulated = mix(top, bottom, weight.y);
+    if accumulated.a <= 0.0 {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(accumulated.rgb / accumulated.a, accumulated.a);
 }
 
 fn gamma_channel(channel: u32, value: f32) -> f32 {
@@ -216,9 +252,12 @@ fn apply_gamma(color: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let source = textureSample(base_image, base_sampler, input.uv);
+    var source = textureSample(base_image, base_sampler, input.uv);
+    if input.liquid_scale.z > 0.5 {
+        source = sample_landscape_smooth(input.uv);
+    }
     let mask = textureSample(liquid_mask, base_sampler, input.uv).r;
-    let liquid = textureSample(liquid_image, liquid_sampler, input.uv * input.liquid_scale).rgb - vec3<f32>(0.5);
+    let liquid = textureSample(liquid_image, liquid_sampler, input.uv * input.liquid_scale.xy).rgb - vec3<f32>(0.5);
     let delta = dot(liquid, input.phase_gamma.rgb) * mask;
     var rgb = clamp(source.rgb + vec3<f32>(delta), vec3<f32>(0.0), vec3<f32>(1.0));
     rgb = rgb * input.modulation.rgb;
@@ -738,6 +777,7 @@ pub struct RetainedGpuRenderer {
     /// the C++-exact sampler so the policy is one bind-time choice.
     linear_mip_sampler: wgpu::Sampler,
     mipmaps: bool,
+    smooth_landscape: bool,
     repeat_nearest_sampler: wgpu::Sampler,
     present_sampler: wgpu::Sampler,
     _fallback_mask_texture: wgpu::Texture,
@@ -1061,6 +1101,7 @@ impl RetainedGpuRenderer {
             linear_sampler,
             linear_mip_sampler,
             mipmaps: false,
+            smooth_landscape: false,
             repeat_nearest_sampler,
             present_sampler,
             _fallback_mask_texture: fallback_mask_texture,
@@ -1368,6 +1409,14 @@ impl RetainedGpuRenderer {
         self.quad_bind_groups.clear();
     }
 
+    /// Opt in to alpha-weighted magnification of the landscape. C++ blits the
+    /// landscape surface with GL_NEAREST, so a magnified terrain is hard
+    /// blocks; this reconstructs it without pulling the fully transparent sky
+    /// into the silhouette.
+    pub fn set_smooth_landscape(&mut self, smooth: bool) {
+        self.smooth_landscape = smooth;
+    }
+
     fn sync_textures(
         &mut self,
         device: &wgpu::Device,
@@ -1610,6 +1659,7 @@ impl RetainedGpuRenderer {
                                 liquid_scale,
                                 *phase,
                                 fragment_gamma_flag(scene.gamma_mode, *gamma),
+                                self.smooth_landscape,
                                 &projection,
                             )?,
                         );
@@ -2007,6 +2057,7 @@ fn packed_landscape_vertex(
     liquid_scale: [f32; 2],
     phase: [f32; 3],
     gamma: bool,
+    smooth: bool,
     projection: &DrawProjection,
 ) -> Result<PackedVertex, GpuRendererError> {
     if !vertex
@@ -2023,7 +2074,7 @@ fn packed_landscape_vertex(
         clip: clip_position(vertex.position, projection)?,
         uv: vertex.uv,
         data0: vertex.modulation,
-        data1: [liquid_scale[0], liquid_scale[1], 0.0, 0.0],
+        data1: [liquid_scale[0], liquid_scale[1], flag(smooth), 0.0],
         data2: [phase[0], phase[1], phase[2], flag(gamma)],
     })
 }
@@ -3697,6 +3748,37 @@ mod tests {
     }
 
     #[test]
+    fn landscape_vertices_carry_the_smoothing_flag_in_a_free_channel() {
+        // `liquid_scale` only ever uses xy, so the magnification policy rides
+        // along in z rather than costing another vertex attribute.
+        let presentation = GpuPresentation {
+            physical_extent: [4, 4],
+            scale: 1.0,
+            crop_top: 0,
+        };
+        let projection = draw_projection(None, [4, 4], &presentation)
+            .expect("valid presentation")
+            .expect("clip intersects the framebuffer");
+        let vertex = GpuVertex {
+            position: [0.0, 0.0, 1.0],
+            uv: [0.0, 0.0],
+            modulation: [1.0, 1.0, 1.0, 0.0],
+            owner_modulation: [0.0; 4],
+            outer_modulation: clonk_graphics::GpuOuterModulation::default(),
+            owner_outer_modulation: clonk_graphics::GpuOuterModulation::default(),
+            sample_tile: [0.0, 0.0, 1.0, 1.0],
+        };
+        let data1 = |smooth: bool| {
+            packed_landscape_vertex(vertex, [2.0, 4.0], [0.0; 3], false, smooth, &projection)
+                .expect("pack one landscape vertex")
+                .data1
+        };
+
+        assert_eq!(data1(false), [2.0, 4.0, 0.0, 0.0]);
+        assert_eq!(data1(true), [2.0, 4.0, 1.0, 0.0]);
+    }
+
+    #[test]
     fn only_unchanging_sources_get_a_mip_chain() {
         let pixels: Arc<[u8]> = vec![255_u8; 64 * 64 * 4].into();
         let art = GpuTextureResource::immutable_rgba(GpuTextureId::fresh(), 64, 64, pixels.clone());
@@ -4175,6 +4257,134 @@ mod tests {
         liquid: GpuTextureId,
         owner_base: GpuTextureId,
         owner_overlay: GpuTextureId,
+    }
+
+    #[test]
+    fn smooth_landscape_magnification_antialiases_without_a_sky_halo() {
+        // The landscape cache stores sky as RGBA(0,0,0,0) against opaque
+        // material, so plain bilinear would ring every silhouette with dark
+        // grey. Magnify a one-texel-wide edge 8x and check the boundary both
+        // ramps in coverage and keeps the material's colour.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime for wgpu adapter discovery");
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+        });
+        let Some(adapter) =
+            runtime.block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }))
+        else {
+            eprintln!("no wgpu adapter; skipping landscape magnification readback");
+            return;
+        };
+        let (device, queue) = runtime
+            .block_on(adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("lc_gpu_landscape_smooth_test_device"),
+                    features: wgpu::Features::empty(),
+                    limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+                },
+                None,
+            ))
+            .expect("request landscape magnification test device");
+
+        // Two texels: opaque red material on the left, sky on the right.
+        let base = GpuTextureId::fresh();
+        let mask = GpuTextureId::fresh();
+        let liquid = GpuTextureId::fresh();
+        let textures = vec![
+            GpuTextureResource::immutable_rgba(base, 2, 1, vec![200, 0, 0, 255, 0, 0, 0, 0].into()),
+            GpuTextureResource {
+                format: GpuTextureFormat::R8,
+                pixels: vec![0_u8; 2].into(),
+                ..GpuTextureResource::immutable_rgba(mask, 2, 1, vec![0_u8; 8].into())
+            },
+            GpuTextureResource::immutable_rgba(liquid, 1, 1, vec![128, 128, 128, 255].into()),
+        ];
+        let corner = |x: f32, y: f32, u: f32, v: f32| GpuVertex {
+            position: [x, y, 1.0],
+            uv: [u, v],
+            modulation: [1.0, 1.0, 1.0, 0.0],
+            owner_modulation: [0.0; 4],
+            outer_modulation: clonk_graphics::GpuOuterModulation::default(),
+            owner_outer_modulation: clonk_graphics::GpuOuterModulation::default(),
+            sample_tile: [0.0; 4],
+        };
+        let scene = GpuScene {
+            logical_extent: [16, 4],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures,
+            commands: vec![GpuCommand::Landscape {
+                base,
+                liquid_mask: Some(mask),
+                liquid: Some(liquid),
+                vertices: [
+                    corner(0.0, 0.0, 0.0, 0.0),
+                    corner(16.0, 0.0, 1.0, 0.0),
+                    corner(0.0, 4.0, 0.0, 1.0),
+                    corner(16.0, 4.0, 1.0, 1.0),
+                ],
+                clip: None,
+                phase: [0.0; 3],
+                gamma: false,
+            }],
+        };
+
+        let row = |renderer: &mut RetainedGpuRenderer| {
+            let frame = render_readback(
+                renderer,
+                &device,
+                &queue,
+                &scene,
+                &GpuPresentation::identity(16, 4),
+            );
+            (0..16)
+                .map(|x| readback_pixel(&frame, x, 1))
+                .collect::<Vec<_>>()
+        };
+
+        let mut classic =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let classic_row = row(&mut classic);
+        assert!(
+            classic_row
+                .iter()
+                .all(|pixel| pixel[3] == 0 || pixel[3] == 255),
+            "the C++ path is a hard nearest step: {classic_row:?}"
+        );
+
+        let mut smooth = RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        smooth.set_smooth_landscape(true);
+        let smooth_row = row(&mut smooth);
+        let partial: Vec<[u8; 4]> = smooth_row
+            .iter()
+            .copied()
+            .filter(|pixel| pixel[3] > 0 && pixel[3] < 255)
+            .collect();
+        assert!(
+            !partial.is_empty(),
+            "magnifying a one-texel edge must produce coverage in between: {smooth_row:?}"
+        );
+        for pixel in &partial {
+            // The readback is already composited over a transparent clear, so
+            // an edge that kept the material's colour reads back as exactly
+            // that colour scaled by its coverage. Straight-alpha filtering
+            // would have darkened the colour first and landed well below this.
+            let expected = (200.0 * f32::from(pixel[3]) / 255.0).round() as i32;
+            assert!(
+                (i32::from(pixel[0]) - expected).abs() <= 2 && pixel[1] == 0 && pixel[2] == 0,
+                "a partially covered edge keeps the material colour, not a sky-blended halo: \
+                 {pixel:?} (coverage implies red {expected})"
+            );
+        }
     }
 
     #[test]

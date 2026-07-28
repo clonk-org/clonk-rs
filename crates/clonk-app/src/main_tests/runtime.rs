@@ -878,11 +878,13 @@
         assert!(!configured_high_dpi_cursor(b""));
         assert!(!configured_sky_dither(b""));
         assert!(!configured_mipmaps(b""));
+        assert!(!configured_smooth_landscape(b""));
 
         let remastered = b"[Graphics]\nRemaster=1\n";
         assert!(configured_high_dpi_cursor(remastered));
         assert!(configured_sky_dither(remastered));
         assert!(configured_mipmaps(remastered));
+        assert!(configured_smooth_landscape(remastered));
 
         assert!(!configured_sky_dither(
             b"[Graphics]\nRemaster=1\nSkyDither=0\n"

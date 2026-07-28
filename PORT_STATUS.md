@@ -590,6 +590,23 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **The landscape may be magnified with alpha-weighted reconstruction**
+  (`sample_landscape_smooth` in `LANDSCAPE_SHADER`, `crates/clonk-app-render`;
+  opt-in `Graphics.SmoothLandscape`). Approved 2026-07-28. C++ blits the
+  landscape surface with GL_NEAREST, so above 1:1 the largest surface on
+  screen becomes hard colour blocks — increasingly so now that the first-run
+  application scale follows the display density. Plain bilinear cannot be used
+  here: the cache stores sky as `RGBA(0,0,0,0)` against opaque material
+  (`output.fill(0)`, `crates/clonk-frontend/src/graphics_system.rs`), so an
+  ordinary tap rings every silhouette with a dark halo. Weighting colour by
+  coverage takes colour only from texels that have any while alpha still ramps
+  across the boundary, which is what turns a magnified one-game-pixel step
+  into an antialiased edge. At 1:1 the reconstruction degenerates to the
+  nearest texel, so nothing changes until the frame is actually magnified.
+  Pinned on a real device by
+  `smooth_landscape_magnification_antialiases_without_a_sky_halo`, which also
+  asserts the default path stays a hard nearest step.
+
 - **Retained art may be minified through a mip chain**
   (`wants_mipmaps`/`generate_mip_chain` + `linear_mip_sampler`,
   `crates/clonk-app-render`; opt-in `Graphics.Mipmaps`). Approved 2026-07-28.

@@ -8135,6 +8135,12 @@ pub(crate) fn configured_mipmaps(config: &[u8]) -> bool {
     configured_remaster_feature(config, "Mipmaps")
 }
 
+/// `Graphics.SmoothLandscape`: opt in to alpha-weighted magnification of the
+/// landscape. C++ blits its landscape surface with GL_NEAREST.
+pub(crate) fn configured_smooth_landscape(config: &[u8]) -> bool {
+    configured_remaster_feature(config, "SmoothLandscape")
+}
+
 /// `Graphics.SkyDither`: opt in to sub-LSB dithering of the sky gradient.
 /// C++ emits the fade as a plain interpolated quad, so this defaults off and
 /// is recorded as a deliberate divergence in `PORT_STATUS.md`.

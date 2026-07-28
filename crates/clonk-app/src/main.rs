@@ -481,9 +481,9 @@ fn main() -> Result<()> {
         pixels.queue(),
         pixels.surface_texture_format(),
     );
-    retained_gpu_renderer.set_mipmaps(configured_mipmaps(&load_native_config_bytes(
-        app_paths.as_deref(),
-    )));
+    let renderer_config = load_native_config_bytes(app_paths.as_deref());
+    retained_gpu_renderer.set_mipmaps(configured_mipmaps(&renderer_config));
+    retained_gpu_renderer.set_smooth_landscape(configured_smooth_landscape(&renderer_config));
 
     // The app lays out and renders at the GUI resolution; the presenter
     // scales the finished frame to the window like the C++ engine scales
