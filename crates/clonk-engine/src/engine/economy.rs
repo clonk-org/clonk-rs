@@ -344,19 +344,19 @@ impl Engine {
         // at zero construction (C4Object::DoCon removal)
         if !no_burn_decay {
             if let Err(error) = self.do_con(idx, -100) {
-                tracing::warn!(%error, "fire DoCon callback failed; continuing");
+                tracing::debug!(%error, "fire DoCon callback failed; continuing");
             }
         }
         // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
         if frame.is_multiple_of(10) && !no_burn_damage {
             if let Err(error) = self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, caused_by) {
-                tracing::warn!(%error, "fire damage callback failed; continuing");
+                tracing::debug!(%error, "fire damage callback failed; continuing");
             }
         }
         // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
         if frame.is_multiple_of(5) {
             if let Err(error) = self.change_object_energy(idx, -1, C4FX_CALL_ENG_FIRE, caused_by) {
-                tracing::warn!(%error, "fire energy callback failed; continuing");
+                tracing::debug!(%error, "fire energy callback failed; continuing");
             }
         }
         // Background effects: Tick5 over valid landscape material
@@ -913,7 +913,7 @@ impl Engine {
                     )
                 };
                 if let Err(error) = self.bubble_out(bubble_x, bubble_y) {
-                    tracing::warn!(%error, "BubbleOut failed; continuing");
+                    tracing::debug!(%error, "BubbleOut failed; continuing");
                 }
                 self.train_physical(idx, "Breath", 2, C4_MAX_PHYSICAL);
             } else {

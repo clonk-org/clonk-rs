@@ -6769,7 +6769,7 @@ impl ScenarioScript {
                     None,
                 );
                 if let EngineError::Script { source, .. } = &error {
-                    tracing::warn!(
+                    tracing::debug!(
                         script = %script_name,
                         function,
                         %source,
@@ -10773,7 +10773,7 @@ fn recover_effect_callback_error(
                     source,
                     recovery: _,
                 } => {
-                    tracing::warn!(
+                    tracing::debug!(
                         %definition,
                         function,
                         error = %source,

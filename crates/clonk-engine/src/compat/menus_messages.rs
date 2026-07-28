@@ -901,7 +901,7 @@ fn menu_selection_changed(menu_object: ObjectId, menu: &crate::ObjectMenuState) 
         None
     };
     if let Some(Err(error)) = result {
-        tracing::warn!(
+        tracing::debug!(
             %error,
             "script error in OnMenuSelection; continuing like the C++ fail-safe exec"
         );
@@ -1050,7 +1050,7 @@ fn build_frame_decoration_snapshot(deco_id: &str) -> Option<crate::ObjectMenuFra
         match call_scoped_script_function(Arc::clone(&script), &function, &[]) {
             Some(Ok(value)) => value.as_c4_int().unwrap_or(0),
             Some(Err(error)) => {
-                tracing::warn!(%error, function, "frame-decoration callback failed; using zero");
+                tracing::debug!(%error, function, "frame-decoration callback failed; using zero");
                 0
             }
             None => 0,

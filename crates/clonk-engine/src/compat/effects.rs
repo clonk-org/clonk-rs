@@ -237,7 +237,7 @@ fn dispatch_effect_fx_callback_fail_safe(
         None => 0,
         Some(Ok(value)) => value_as_i32(&value),
         Some(Err(error)) => {
-            tracing::warn!(%error, "script error in {function}; continuing like C++ fail-safe effect dispatch");
+            tracing::debug!(%error, "script error in {function}; continuing like C++ fail-safe effect dispatch");
             0
         }
     }
@@ -1543,7 +1543,7 @@ pub(crate) fn object_effect_info_lines(target: ObjectId, effects: &[EffectState]
                 returned = value.type_name(),
                 "effect Info callback returned a non-string value"
             ),
-            Err(error) => tracing::warn!(
+            Err(error) => tracing::debug!(
                 %error,
                 effect = effect.name,
                 number = effect.number,
@@ -2261,7 +2261,7 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
                 "Damage",
                 &[Value::Int(damage_change), Value::Int(caused_by)],
             ) {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     "script error in Damage; continuing like the C++ fail-safe exec"
                 );
@@ -2658,7 +2658,7 @@ fn fire_effect_start_core(
                     "IncinerationEx",
                     &[Value::Int(caused_by)],
                 ) {
-                    tracing::warn!(
+                    tracing::debug!(
                         %error,
                         "script error in IncinerationEx; continuing like the C++ fail-safe exec"
                     );
@@ -2688,7 +2688,7 @@ fn fire_effect_start_core(
     let mode_answer = match call_world_object_own_function(target, "FireMode", &[]) {
         Some(Ok(value)) => value_as_i32(&value),
         Some(Err(error)) => {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 "script error in FireMode; continuing like the C++ fail-safe exec"
             );
@@ -2753,7 +2753,7 @@ fn fire_effect_start_core(
     if let Some(Err(error)) =
         call_world_object_own_function(target, "Incineration", &[Value::Int(caused_by)])
     {
-        tracing::warn!(
+        tracing::debug!(
             %error,
             "script error in Incineration; continuing like the C++ fail-safe exec"
         );

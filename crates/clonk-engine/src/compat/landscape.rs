@@ -460,7 +460,7 @@ pub(crate) fn launch_lightning(args: &[Value]) -> Result<Value, RuntimeError> {
         ];
         if let Some(Err(error)) = call_world_object_own_function(target, "Activate", &activate_args)
         {
-            tracing::warn!(
+            tracing::debug!(
                 id = target.as_u64(),
                 definition = "FXL1",
                 function = "Activate",
@@ -514,7 +514,7 @@ pub(crate) fn launch_volcano(args: &[Value]) -> Result<Value, RuntimeError> {
             Value::Int(lava),
         ];
         if let Some(Err(error)) = call_world_object_own_function(target, "Activate", &args) {
-            tracing::warn!(
+            tracing::debug!(
                 id = target.as_u64(),
                 definition = "FXV1",
                 function = "Activate",

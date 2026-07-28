@@ -4109,7 +4109,7 @@ pub(crate) fn tolerate_script_error<T>(
             // errors reaching here without a funnel carry none.
             recovery: _,
         }) => {
-            tracing::warn!(
+            tracing::debug!(
                 %definition,
                 function,
                 error = %source,
