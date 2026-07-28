@@ -417,14 +417,15 @@ impl StdScheduler {
         }
 
         let mut ranges: Vec<HandleRange> = Vec::new();
-        let mut fallbacks: Vec<(ProcHandle, i32)> = Vec::new();
 
         for entry in &self.procs {
             let proc = Arc::clone(&entry.proc);
             let handle_list = proc.get_handles();
-            if handle_list.is_empty() {
-                fallbacks.push((proc, entry.proc.get_timeout()));
-            } else {
+            // C++ collects only procs that expose an event and never executes a
+            // handle-less proc from this arm (`StdScheduler.cpp:86-119`). Such
+            // procs run solely from the zero-timeout sweep below, so executing
+            // them here too would run them twice per `execute`.
+            if !handle_list.is_empty() {
                 let start = handles.len();
                 handles.extend(handle_list.iter().map(|interest| interest.handle()));
                 let end = handles.len();
@@ -488,14 +489,6 @@ impl StdScheduler {
                     }
                     break;
                 }
-            }
-        }
-
-        for (proc, proc_timeout) in &fallbacks {
-            let should_run = timeout == 0 || *proc_timeout == 0 || timeout >= 0;
-            if should_run && !proc.execute(timeout) {
-                success = false;
-                self.handle_error(proc);
             }
         }
 
