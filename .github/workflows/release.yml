@@ -10,13 +10,14 @@ name: Release
 # here would never fire an `on: push: tags` workflow.
 
 on:
-  # Weekly, hands-off: if releasable commits landed since the last tag and
-  # main's CI is green, this bumps, tags, builds and publishes with no
-  # interaction. Cadence rather than per-push, because main takes ~40 commits
-  # a day and releasing on each one would mean several releases daily at
-  # ~210 billed minutes apiece.
+  # Daily at 10:00 UTC (05:00 CDT / 04:00 CST): if releasable commits landed
+  # since the last tag and main's CI is green, this bumps, tags, builds and
+  # publishes with no interaction. A cadence rather than per-push, because main
+  # takes ~40 commits a day and releasing on each would mean several releases
+  # daily at ~210 billed minutes apiece. Days with no feat/fix/perf commits
+  # skip cleanly (prepare-release.sh exit 3).
   schedule:
-    - cron: '0 9 * * 1'
+    - cron: '0 10 * * *'
   # Reacts to a `chore: release <version>` commit, which is how the
   # release-prepare pull request publishes when one is used.
   push:

@@ -108,7 +108,11 @@ jobs:
   full-parity:
     name: Full Rust parity gate
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Was 60, which a cold-cache run exceeded: the first run after the gate was
+    # re-enabled was killed at 60m31s during `Run workspace tests`. The
+    # scheduled release refuses to publish unless this gate is green, so a
+    # timeout here silently stops releases.
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
