@@ -3028,18 +3028,7 @@
                 ("LC_USER_DATA_DIR", Some(user.as_path())),
             ]);
             let paths = AppPaths::discover().expect("missing-sheet fixture paths");
-            let error = GameApp::new(
-                320,
-                200,
-                AudioOptions::default(),
-                Some(&paths),
-                RuntimeConfig {
-                    player_owner: 1,
-                    player_name: "Player".to_string(),
-                    network: None,
-                    record_enabled: false,
-                },
-            )
+            let error = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
             .err()
             .expect("real app construction must stop at the global bundle");
             assert_global_gui_boundary(
@@ -3183,18 +3172,7 @@
             "[General]\nFontName=Endeavour\nFontSize=14\n",
         )
         .expect("seed font config");
-        let mut app = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
         wait_for_menu(&mut app);
         app.open_options_menu();
@@ -3264,18 +3242,7 @@
         assert_eq!(fs::read(paths.config_file()).unwrap(), before_failure);
 
         drop(app);
-        let mut restarted = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut restarted = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("restart with persisted font selection");
         wait_for_menu(&mut restarted);
         assert_eq!(
@@ -3399,18 +3366,7 @@
             "[General]\nFontName=Endeavour\nFontSize=14\n",
         )
         .expect("seed font config");
-        let mut app = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
         wait_for_menu(&mut app);
         app.open_options_menu();

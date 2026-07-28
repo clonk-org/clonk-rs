@@ -7503,18 +7503,7 @@
             )
             .expect("seed Program config");
 
-        let mut app = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
         wait_for_menu(&mut app);
         app.open_options_menu();
@@ -11191,18 +11180,7 @@
         config.extend_from_slice(b"\"\n");
         fs::write(paths.config_file(), config).expect("write raw configured participants");
 
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("initialize app with configured participants");
         wait_for_menu(&mut app);
         app.freeze_configured_client_players_for_game()

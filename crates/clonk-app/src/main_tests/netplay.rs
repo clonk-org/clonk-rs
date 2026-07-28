@@ -6263,18 +6263,7 @@
         ]);
         let paths = AppPaths::discover().expect("installed paths");
         for (scale, physical_width, physical_height) in [(1.5, 480_u32, 300_u32), (0.5, 160, 100)] {
-            let mut app = GameApp::new(
-                320,
-                200,
-                AudioOptions::default(),
-                Some(&paths),
-                RuntimeConfig {
-                    player_owner: 1,
-                    player_name: "Player".to_string(),
-                    network: None,
-                    record_enabled: false,
-                },
-            )
+            let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
             .expect("app");
             app.configure_native_startup_fonts(scale, false);
             assert_eq!(app.mode, AppMode::Loading);
@@ -6309,18 +6298,7 @@
         let paths = AppPaths::discover().expect("installed paths");
 
         for client in [false, true] {
-            let mut app = GameApp::new(
-                640,
-                480,
-                AudioOptions::default(),
-                Some(&paths),
-                RuntimeConfig {
-                    player_owner: 1,
-                    player_name: "Player".to_string(),
-                    network: None,
-                    record_enabled: false,
-                },
-            )
+            let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
             .expect("app");
             app.configure_native_startup_fonts(0.5, false);
             app.loader_screen
@@ -6422,18 +6400,7 @@
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("installed paths");
-        let mut app = GameApp::new(
-            640,
-            480,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
         .expect("app");
         app.configure_native_startup_fonts(3.0, false);
         app.loader_screen
@@ -6513,18 +6480,7 @@
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("installed paths");
-        let mut app = GameApp::new(
-            640,
-            480,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
         .expect("app");
         app.configure_native_startup_fonts(1.5, false);
         app.loader_screen
@@ -6650,18 +6606,7 @@
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("installed paths");
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("app");
         app.configure_native_startup_fonts(3.0, false);
         // C++ rounds 598 / 3 up to 200 logical rows, renders a nominal
@@ -6693,18 +6638,7 @@
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("discover app paths");
-        let mut app = GameApp::new(
-            640,
-            480,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
         wait_for_menu(&mut app);
         app.configure_native_startup_fonts(3.0, false);
@@ -7156,18 +7090,7 @@
                 b"\"\nControlRate=7\nControlMode=1\nPortTCP=12345\nPortUDP=12346\nMaxLoadFileSize=123456\nNoRuntimeJoin=0\nEnableUPnP=0\n",
             );
         fs::write(paths.config_file(), config).expect("write native configured participants");
-        let app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("initialize app");
         assert_eq!(
             app.startup_player_files

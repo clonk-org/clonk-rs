@@ -2195,18 +2195,7 @@
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("initialise app with audio");
 
         let fixture = app
@@ -4011,18 +4000,7 @@
         let paths = AppPaths::discover().expect("discover app paths");
         persist_config_value(&paths, "General", "ShowLogTimestamps", "1")
             .expect("seed timestamp config");
-        let mut app = GameApp::new(
-            1280,
-            720,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths))
         .expect("initialise app");
         wait_for_menu(&mut app);
 

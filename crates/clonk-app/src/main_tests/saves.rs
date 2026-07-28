@@ -506,18 +506,7 @@
             OsString::from("/network"),
         ]);
         assert_eq!(classic.record_stream.as_deref(), Some(stream_path.as_path()));
-        let mut app = GameApp::new(
-            640,
-            480,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
         .expect("initialize record-stream app");
         app.apply_classic_command_line(&classic)
             .expect("apply record-stream command line");
@@ -593,18 +582,7 @@
         let stream_path = fixture.path().join("Broken.c4r");
         fs::write(&stream_path, b"not a zlib stream").expect("write unusable record stream");
         let classic = parse_classic_command_line(&[stream_path.clone().into_os_string()]);
-        let mut app = GameApp::new(
-            640,
-            480,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
         .expect("initialize bad record-stream app");
         app.apply_classic_command_line(&classic)
             .expect("apply bad record-stream command line");
@@ -5088,18 +5066,7 @@
         // Make a fresh ambient discovery disagree with the already-selected
         // paths. The constructor must pass its AppPaths into the worker.
         let _ambient_guard = EnvGuard::set(&[("LC_USER_DATA_DIR", Some(&ambient_user))]);
-        let app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
+        let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
         .expect("initialize app with selected user root");
 
         assert_eq!(paths.user_data_dir(), selected_user);
@@ -5121,18 +5088,7 @@
             let _guard = EnvGuard::set(&[]);
             reset_cached_app_paths();
 
-            let mut app = GameApp::new(
-                320,
-                200,
-                AudioOptions::default(),
-                None,
-                RuntimeConfig {
-                    player_owner: 1,
-                    player_name: "Player".to_string(),
-                    network: None,
-                    record_enabled: false,
-                },
-            )
+            let mut app = test_game_app(320, 200, AudioOptions::default(), None)
             .expect("initialise app");
             install_classic_test_assets(&mut app);
             app.start_sandbox_scenario(FrontendScenario::fallback())
@@ -5262,18 +5218,7 @@
             reset_cached_app_paths();
 
             let saved_frame = {
-                let mut app = GameApp::new(
-                    320,
-                    200,
-                    AudioOptions::default(),
-                    Some(&paths),
-                    RuntimeConfig {
-                        player_owner: 1,
-                        player_name: "Player".to_string(),
-                        network: None,
-                        record_enabled: false,
-                    },
-                )
+                let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
                 .expect("initialise app");
 
                 let scenario = app
@@ -5303,18 +5248,7 @@
             };
 
             {
-                let mut app = GameApp::new(
-                    320,
-                    200,
-                    AudioOptions::default(),
-                    Some(&paths),
-                    RuntimeConfig {
-                        player_owner: 1,
-                        player_name: "Player".to_string(),
-                        network: None,
-                        record_enabled: false,
-                    },
-                )
+                let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
                 .expect("initialise app after restart");
 
                 // Boot loading is asynchronous; let it settle to the menu before
