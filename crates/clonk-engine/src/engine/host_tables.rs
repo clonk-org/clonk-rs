@@ -480,13 +480,6 @@ impl Engine {
         unsafe { &*std::ptr::addr_of!((*engine).landscape) }.clone()
     }
 
-    /// Report the landscape extent without copying the shell. Sector sizing is
-    /// the only caller that used to force `lazy_host_world_landscape` for two
-    /// integers, once per script call that reaches `FindObjects`.
-    ///
-    /// # Safety
-    ///
-    /// Same contract as [`Self::lazy_host_world_landscape`].
     /// Borrow the landscape for read-only host queries. `GBackSolid` and the
     /// rest of C4Wrappers.h:66-92 read single pixels; copying the whole map to
     /// answer one was the single largest cost in `advance_tick` on real
@@ -505,6 +498,13 @@ impl Engine {
             .map(std::ptr::from_ref)
     }
 
+    /// Report the landscape extent without copying the shell. Sector sizing is
+    /// the only caller that used to force `lazy_host_world_landscape` for two
+    /// integers, once per script call that reaches `FindObjects`.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::lazy_host_world_landscape`].
     unsafe fn lazy_host_world_landscape_dimensions(source: *const ()) -> Option<(i32, i32)> {
         let engine = source.cast::<Self>();
         unsafe { &*std::ptr::addr_of!((*engine).landscape) }
