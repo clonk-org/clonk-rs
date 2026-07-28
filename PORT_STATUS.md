@@ -590,6 +590,79 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **The fullscreen loader background may be aspect-filled**
+  (`LoaderRenderConfig::with_aspect_fill`, `crates/clonk-frontend/src/loader_screen.rs`;
+  opt-in `Graphics.LoaderAspect`). Approved 2026-07-28. `C4LoaderScreen::Draw`
+  reaches `C4Facet::DrawFullScreen`, which stretches the source across the
+  whole target with no aspect preservation, so the shipped 3840x2880 (4:3)
+  loaders are squashed into 16:9 and bilinearly minified on a 4K panel. With
+  the key on the image is centre-cropped to the target's aspect instead —
+  which on a 16:9 4K panel makes it an unscaled 1:1 blit. Off, the blit stays
+  bit-identical to C++.
+
+- **The fog-of-war modulation grid may be subdivided**
+  (`fine_fog_cell_divisor`, `crates/clonk-frontend/src/fog_modulation.rs`;
+  opt-in `Graphics.FineFogOfWar`). Approved 2026-07-28. `Landscape.FoWRes`
+  defaults to 64 world pixels and the boundary is interpolated only at quad
+  corners, so the visibility edge shows 64px polygonal facets — very obvious at
+  4K. The value feeds only `ClrModMap::reset` and nothing in the simulation
+  reads it back, so subdividing it renderer-side (to 16px cells) is
+  presentation-only and cannot desync; the snapshot's own value is untouched.
+
+- **Higher-resolution GUI sheets are recognised by their dimensions**
+  (`GuiArtScale::detect`, `crates/clonk-frontend/src/hud.rs`; no key — the
+  opt-in is the presence of the art). Approved 2026-07-28. Graphics.c4g carries
+  no per-sheet scale metadata (DefCore `Scale=` covers object definitions
+  only), C4Facet derives cell sizes straight from the loaded surface while the
+  HUD hard-codes sub-rects into the same sheets, so a larger replacement sheet
+  used to magnify the layout or mis-slice the grid. A sheet that is an exact
+  integer multiple (2x-8x) of the oracle's dimensions is now treated as art at
+  that scale: hard-coded source rects are multiplied, dimension-derived cells
+  divided, so logical destination geometry stays bit-identical. Resolution also
+  prefers an `@4x`/`@3x`/`@2x` stem. With stock 1x content every path is the
+  oracle blit byte-for-byte.
+
+- **`Graphics.Monitor` selects the fullscreen monitor**
+  (`crates/clonk-app/src/main_parts/assets.rs`). Approved 2026-07-28.
+  `C4Config.h` declares the field and `C4Config.cpp` defaults it, but the
+  oracle's SDL/GL build never reads it back, so the row is inert in C++. The
+  port honours it: borderless fullscreen opens on the Nth enumerated monitor.
+  Out-of-range and non-positive values keep the previous behaviour, so the
+  default configuration is unchanged.
+
+- **HD definition art may blit one authored texel per device pixel**
+  (`GraphicsSystem::set_hd_exact_blits`; opt-in `Graphics.HDExactBlits`).
+  Approved 2026-07-28. `stdgl_blit_sampling` forces `Linear` whenever the
+  application scale is not 1 and `CStdDDraw` then insets the source by half a
+  texel (src/StdGL.cpp:527, src/StdDDraw2.cpp:676-688), and exactness is tested
+  in logical space. A `DefCore Scale=200` sheet drawn at `Graphics.Scale=200`
+  is therefore texel-perfect in PHYSICAL pixels yet is resampled with a
+  half-texel drift — which is what makes upscaled art look like a photograph of
+  pixel art. With the key on, exactness is tested against
+  `destination * presentation_scale` and both the correction and the forced
+  Linear are skipped. The default path still satisfies the C++ pinning test
+  unchanged.
+
+- **Save thumbnails are area-averaged rather than 2-tap sampled**
+  (`downsample_rgba_box`, `crates/clonk-graphics/src/surface.rs`; no key).
+  Approved 2026-07-28. C++ reduces the frame with `CStdDDraw::Blit`'s two-tap
+  sampler; at a 4K frame into a 200x150 box that reads 2 of ~20 source pixels
+  per axis, i.e. point sampling, so thin scenery aliases into noise. The port
+  averages every source pixel that falls in a destination cell, in
+  premultiplied space so transparent regions do not darken the result. The
+  thumbnail is metadata, not simulation state, and nothing pins its bytes.
+
+- **The scale-native glyph atlas serves any resolved font recipe**
+  (`ClassicNativeFontSource::sizes`; `Graphics.SnapTextToPixels` for the
+  fractional-scale half). Approved 2026-07-28. The device-resolution atlas is a
+  port enhancement with no C++ counterpart, and it previously only built for
+  the literal 22/16/14/13/12 role map, so any other `General.FontSize` or
+  scenario `Head.Font` silently dropped back to blurred logical raster — and at
+  Scale>100 the classic loader refused outright. It now carries the resolved
+  per-role sizes. Separately, `Graphics.SnapTextToPixels` rasterizes at
+  `round(logical * scale)` and blits on whole physical pixels so fractional
+  scales stop resampling every glyph.
+
 - **The landscape may be magnified with alpha-weighted reconstruction**
   (`sample_landscape_smooth` in `LANDSCAPE_SHADER`, `crates/clonk-app-render`;
   opt-in `Graphics.SmoothLandscape`). Approved 2026-07-28. C++ blits the
