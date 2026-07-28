@@ -21,3 +21,25 @@ pub const fn stdgl_blit_sampling(
         BlitSampling::Nearest
     }
 }
+
+/// `Graphics.HDExactBlits`: the application scale [`stdgl_blit_sampling`]
+/// should judge a blit by.
+///
+/// `pApp->GetScale() != 1.f` is C++'s proxy for "this blit magnifies and
+/// therefore needs filtering", which holds only because it assumes every facet
+/// is authored at DefCore `Scale=100`. High-resolution art breaks the proxy: a
+/// `Scale=200` sheet drawn at a 200% presentation scale covers exactly one
+/// authored texel per device pixel. A caller that has established that 1:1
+/// physical mapping passes `texel_exact`, which drops StdGL's
+/// application-scale arm (src/StdGL.cpp:527) and leaves C++'s own exactness
+/// rule to select the filter.
+///
+/// With `texel_exact` false this is the identity, so the default path stays
+/// bit-exact with C++.
+pub const fn hd_filter_scale(application_scale: f32, texel_exact: bool) -> f32 {
+    if texel_exact {
+        1.0
+    } else {
+        application_scale
+    }
+}

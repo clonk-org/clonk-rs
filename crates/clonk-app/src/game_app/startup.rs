@@ -27,6 +27,9 @@ impl GameApp {
     pub(crate) fn configure_native_startup_fonts(&mut self, scale: f32, point_filtering: bool) {
         match LoaderRenderConfig::new(scale, point_filtering) {
             Ok(config) => {
+                let config = config.with_aspect_fill(configured_loader_aspect(
+                    &load_native_config_bytes(self.app_paths.as_ref()),
+                ));
                 self.loader_render_config = Some(config);
                 self.loader_render_error = None;
             }

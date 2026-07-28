@@ -342,8 +342,14 @@ impl FloatSourceRect {
     }
 
     /// `CStdDDraw::Blit` insets ordinary source facets by half a texel on
-    /// each side when the application scale is not 100%. This happens before
-    /// exactness, tile intersection, and texture-coordinate calculation.
+    /// each side when the application scale is not 100%
+    /// (src/StdDDraw2.cpp:676-688). This happens before exactness, tile
+    /// intersection, and texture-coordinate calculation.
+    ///
+    /// C++'s own `noScalingCorrection` argument already suppresses the inset
+    /// per call site; `Graphics.HDExactBlits` additionally suppresses it for
+    /// blits that map one authored texel to one device pixel, where the inset
+    /// is a pure drift (see `GraphicsSystem::runtime_sprite_blit`).
     pub(crate) fn with_scaling_correction(mut self, enabled: bool) -> Self {
         if enabled {
             if self.width > 1.0 {

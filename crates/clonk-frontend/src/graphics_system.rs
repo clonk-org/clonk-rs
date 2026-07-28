@@ -320,6 +320,8 @@ pub struct GraphicsSystem {
     logical_resolution_width: u32,
     /// Opt-in sub-LSB dither for the interpolated sky gradient.
     sky_dither: bool,
+    /// Opt-in `Graphics.FineFogOfWar`: subdivide the modulation grid.
+    fine_fog_of_war: bool,
     /// Which sized cursor sheet the resolution selects. `Classic` is the C++
     /// rule; `HighDpi` is the opt-in remaster ladder.
     cursor_tiers: CursorTiers,
@@ -330,6 +332,10 @@ pub struct GraphicsSystem {
     /// sampling for non-exact runtime blits; non-100% application scale still
     /// forces linear filtering in StdGL.
     point_filtering: bool,
+    /// `Graphics.HDExactBlits`: opt-in divergence letting high-resolution
+    /// definition art land one authored texel per device pixel. See
+    /// [`GraphicsSystem::runtime_sprite_blit`].
+    hd_exact_blits: bool,
     /// Immutable CStdGL device/resource options installed by the application.
     advanced_renderer_config: AdvancedRendererConfig,
     surface_width: u32,
@@ -454,9 +460,11 @@ impl GraphicsSystem {
             viewport_zoom: 1.0,
             logical_resolution_width: surface_width,
             sky_dither: false,
+            fine_fog_of_war: false,
             cursor_tiers: CursorTiers::default(),
             presentation_scale: 1.0,
             point_filtering: false,
+            hd_exact_blits: false,
             advanced_renderer_config: AdvancedRendererConfig::DEFAULT,
             surface_width,
             surface_height,
@@ -546,8 +554,20 @@ impl GraphicsSystem {
         self.sky_dither = dither;
     }
 
+    pub fn set_fine_fog_of_war(&mut self, enabled: bool) {
+        self.fine_fog_of_war = enabled;
+    }
+
     pub fn set_cursor_tiers(&mut self, tiers: CursorTiers) {
         self.cursor_tiers = tiers;
+    }
+
+    pub fn set_hd_exact_blits(&mut self, enabled: bool) {
+        self.hd_exact_blits = enabled;
+    }
+
+    pub fn hd_exact_blits(&self) -> bool {
+        self.hd_exact_blits
     }
 
     /// The sized cursor sheet the current resolution selects.
@@ -597,27 +617,56 @@ impl GraphicsSystem {
         self.point_filtering = previous.point_filtering;
     }
 
-    /// Carries the cursor-sheet policy across a viewport rebuild. It is
-    /// configured once at startup, but `GraphicsSystem` is reconstructed on
-    /// every resolution change and scenario start.
+    /// Carries the cursor-sheet policy and the other startup-configured
+    /// presentation opt-ins across a viewport rebuild. They are configured
+    /// once at startup, but `GraphicsSystem` is reconstructed on every
+    /// resolution change and scenario start.
     pub fn inherit_cursor_tiers(&mut self, previous: &Self) {
         self.cursor_tiers = previous.cursor_tiers;
         self.sky_dither = previous.sky_dither;
+        self.hd_exact_blits = previous.hd_exact_blits;
+        self.fine_fog_of_war = previous.fine_fog_of_war;
     }
 
+    /// `CStdDDraw::Blit` decides exactness in *logical* units — `fwdt == twdt`
+    /// with `twdt` still unscaled (src/StdDDraw2.cpp:694) — and insets a
+    /// non-exact source by half a texel per side whenever the application
+    /// scale is not 100% (src/StdDDraw2.cpp:676-688); `CStdGL::PerformBlt`
+    /// then forces linear filtering on that same scale test
+    /// (src/StdGL.cpp:527). Those rules assume every facet is authored at
+    /// DefCore `Scale=100`, where a non-unit application scale really does
+    /// magnify. High-resolution art breaks the assumption: a `Scale=200`
+    /// sheet at a 200% presentation scale is 32 source texels over 32 device
+    /// pixels — already 1:1 — so C++ resamples it with a half-texel drift.
+    ///
+    /// `Graphics.HDExactBlits` re-measures exactness against the physical
+    /// destination and, only for blits that come out texel-perfect, skips the
+    /// correction and keeps the nearest filter. Every other blit — including
+    /// genuinely magnified `Scale=100` art and anything transformed — keeps
+    /// C++'s correction and filter unchanged, so the divergence is confined to
+    /// art that would otherwise be resampled for no reason.
     pub(crate) fn runtime_sprite_blit(
         &self,
         source: FloatSourceRect,
         destination_size: (f32, f32),
         transformed: bool,
     ) -> (FloatSourceRect, BlitSampling) {
-        let source = source.with_scaling_correction(self.presentation_scale != 1.0);
-        let exact = !transformed
-            && source.width == destination_size.0
-            && source.height == destination_size.1;
+        let texel_exact = self.hd_exact_blits
+            && !transformed
+            && source.width == destination_size.0 * self.presentation_scale
+            && source.height == destination_size.1 * self.presentation_scale;
+        let source = source.with_scaling_correction(self.presentation_scale != 1.0 && !texel_exact);
+        let exact = texel_exact
+            || (!transformed
+                && source.width == destination_size.0
+                && source.height == destination_size.1);
         (
             source,
-            stdgl_blit_sampling(self.presentation_scale, self.point_filtering, exact),
+            stdgl_blit_sampling(
+                clonk_graphics::sampling::hd_filter_scale(self.presentation_scale, texel_exact),
+                self.point_filtering,
+                exact,
+            ),
         )
     }
 
@@ -2588,13 +2637,14 @@ impl GraphicsSystem {
         self.surface_width = content_width;
         self.surface_height = content_height;
 
-        let fog_map = build_fog_modulation_map(
+        let fog_map = build_fog_modulation_map_with_cell_divisor(
             snapshot,
             input.owner,
             origin_x as i32,
             origin_y as i32,
             view_width,
             view_height,
+            fine_fog_cell_divisor(self.fine_fog_of_war),
         );
         let fade_transparent = fog_map.as_ref().is_some_and(|map| map.fade_transparent);
         let has_scroll_borders = offset_x != 0
@@ -9164,5 +9214,120 @@ mod sprite_fallback_tests {
 
         assert_eq!(resolved.0, "host-default");
         assert!(sprite_with_fallback(&sprites, "Missing", None, "Missing").is_none());
+    }
+}
+
+/// `Graphics.HDExactBlits` is an opt-in divergence from `CStdDDraw::Blit`
+/// (src/StdDDraw2.cpp:676-694) and `CStdGL::PerformBlt` (src/StdGL.cpp:527),
+/// which both measure a blit in *logical* units. High-resolution definition
+/// art (DefCore `Scale` above 100) drawn at a matching presentation scale is
+/// one authored texel per device pixel, yet C++ calls it a stretch: it forces
+/// linear filtering and insets the source by half a texel per side.
+#[cfg(test)]
+mod hd_exact_blit_tests {
+    use super::*;
+
+    fn test_graphics(presentation_scale: f32, hd_exact_blits: bool) -> GraphicsSystem {
+        let mut graphics = GraphicsSystem::new(
+            8,
+            8,
+            0,
+            "hd exact blits",
+            Arc::new(clonk_graphics::BitmapFont::new()),
+            Arc::new(HashMap::new()),
+            Arc::new(CursorAtlas::empty()),
+            Arc::new(HudGraphics::default()),
+        );
+        graphics.set_presentation_scale(presentation_scale);
+        graphics.set_hd_exact_blits(hd_exact_blits);
+        graphics
+    }
+
+    /// A DefCore `Scale=200` sheet: a 16x16 facet is 32 source texels.
+    fn hd_source() -> FloatSourceRect {
+        FloatSourceRect::scaled(SourceRect::new(0, 0, 16, 16), 2.0)
+    }
+
+    /// Ordinary `Scale=100` art: 16 source texels for the same 16-unit facet.
+    fn standard_source() -> FloatSourceRect {
+        FloatSourceRect::scaled(SourceRect::new(0, 0, 16, 16), 1.0)
+    }
+
+    #[test]
+    fn hd_exact_blits_off_keeps_the_cpp_correction_and_linear_filter() {
+        let graphics = test_graphics(2.0, false);
+        let (source, sampling) = graphics.runtime_sprite_blit(hd_source(), (16.0, 16.0), false);
+
+        assert_eq!(
+            source,
+            FloatSourceRect {
+                x: 0.5,
+                y: 0.5,
+                width: 31.0,
+                height: 31.0,
+            }
+        );
+        assert_eq!(sampling, BlitSampling::Linear);
+    }
+
+    #[test]
+    fn hd_exact_blits_on_map_one_authored_texel_to_one_device_pixel() {
+        let graphics = test_graphics(2.0, true);
+        let (source, sampling) = graphics.runtime_sprite_blit(hd_source(), (16.0, 16.0), false);
+
+        assert_eq!(source, hd_source());
+        assert_eq!(sampling, BlitSampling::Nearest);
+    }
+
+    #[test]
+    fn hd_exact_blits_leave_genuinely_magnified_art_on_the_cpp_path() {
+        let graphics = test_graphics(2.0, true);
+        let (source, sampling) =
+            graphics.runtime_sprite_blit(standard_source(), (16.0, 16.0), false);
+
+        assert_eq!(
+            source,
+            FloatSourceRect {
+                x: 0.5,
+                y: 0.5,
+                width: 15.0,
+                height: 15.0,
+            }
+        );
+        assert_eq!(sampling, BlitSampling::Linear);
+    }
+
+    #[test]
+    fn hd_exact_blits_never_rescue_a_transformed_blit() {
+        let graphics = test_graphics(2.0, true);
+        let (_, sampling) = graphics.runtime_sprite_blit(hd_source(), (16.0, 16.0), true);
+
+        assert_eq!(sampling, BlitSampling::Linear);
+    }
+
+    #[test]
+    fn hd_exact_blits_are_inert_at_presentation_scale_one() {
+        for hd_exact_blits in [false, true] {
+            let graphics = test_graphics(1.0, hd_exact_blits);
+            let (source, sampling) =
+                graphics.runtime_sprite_blit(standard_source(), (16.0, 16.0), false);
+
+            assert_eq!(source, standard_source());
+            assert_eq!(sampling, BlitSampling::Nearest);
+
+            // 32 texels over a 16-unit destination is a real stretch at scale
+            // one, so C++'s non-exact rule still applies with the flag on.
+            let (_, stretched) = graphics.runtime_sprite_blit(hd_source(), (16.0, 16.0), false);
+            assert_eq!(stretched, BlitSampling::Linear);
+        }
+    }
+
+    #[test]
+    fn hd_exact_blits_survive_a_viewport_rebuild() {
+        let graphics = test_graphics(2.0, true);
+        let mut rebuilt = test_graphics(2.0, false);
+        rebuilt.inherit_cursor_tiers(&graphics);
+
+        assert!(rebuilt.hd_exact_blits());
     }
 }
