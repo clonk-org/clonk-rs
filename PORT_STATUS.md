@@ -314,6 +314,41 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **Guided missiles turn only while a turn key is held, and key-ups are
+  synchronized in both control styles**
+  (`planet/System.c4g/EkeGuidedMissile.c`, `planet/System.c4g/EkeSftRelease.c`,
+  `LocalControlRegistry::route_keyboard_candidates`,
+  `GameApp::dispatch_control_event_for_local_player`; C++
+  `C4Game::LocalControlKeyUp`, LegacyClonk 7d43b47 src/C4Game.cpp:3592-3605).
+  Approved 2026-07-28. Shipped Eke content latches the RL5B remote-guidance
+  turn into the missile's `command` local and only `[Down]`/`[Up]` clears it
+  (`EkeReloaded.c4d/Weapons.c4d/RocketLauncher.c4d/Script.c:9-49`), so a tapped
+  turn key spins the missile until the player straightens it by hand. Two
+  changes make it hold-to-steer:
+  1. Two `#appendto` scripts in the port's own `planet/System.c4g` complete the
+     release pair the content never had — SF5B forwards
+     `ControlLeftReleased`/`ControlRightReleased` to the selected item, and
+     RL5B straightens the missile. A release only clears the direction it owns,
+     so rolling from `[Left]` onto `[Right]` keeps the newer turn.
+  2. The app synchronizes the key-up for classic players too, because C++ routes
+     a key-up only for AutoStopControl players and otherwise declines, leaving
+     classic control with no `Control*Released` at all. A classic set is the
+     *lowest priority* release handler: an AutoStop set still wins the key
+     exactly as in C++, and an eventless classic candidate still declines.
+  Classic movement is untouched — `C4Object::DirectCom`'s procedure switch has
+  no release arm (C4Object.cpp:3405-3556) — so a released direction key still
+  leaves the crew walking. What does change beyond the missile: every shipped
+  `Control*Released` handler now also fires in classic control (ridden
+  Knights/Western horses and coaches stop on release; the Fantasy Icestrike
+  ball stops steering; Hazard's lift handler is a `Method=None` no-op), and
+  `C4Player::PressedComs` now tracks the physical keys in classic control
+  instead of latching set bits forever.
+  Pinned by `eke_missile_stops_turning_when_the_turn_key_is_released`,
+  `eke_missile_keeps_the_newer_turn_when_the_previous_key_is_released`,
+  `eke_missile_down_and_up_still_straighten_the_guided_missile`,
+  `classic_release_is_emitted_only_when_no_autostop_set_claims_the_key` and
+  `selected_player_classic_control_synchronizes_horizontal_key_release`.
+
 - **The new-player dialog seeds its name from the localized rank ladder**
   (`GameApp::new_player_default_name`, `crates/clonk-app/src/game_app/startup.rs`;
   C++ `C4PlayerInfoCore::Default`, LegacyClonk 7d43b47 src/C4InfoCore.cpp:69).
