@@ -25,6 +25,7 @@ members = [
     "crates/clonk-platform",
     "crates/clonk-game",
     "crates/clonk-scaling",
+    "crates/clonk-update",
     "xtask",
 ]
 resolver = "2"

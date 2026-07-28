@@ -1142,6 +1142,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "clonk-update"
+version = "0.3.0"
+dependencies = [
+ "clonk-core",
+ "clonk-platform",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "zip",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
