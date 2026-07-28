@@ -1585,7 +1585,7 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
 
-    for binary_name in ["clonk-game", "clonk-app"] {
+    for binary_name in RUNTIME_BINARIES {
         let exe_name = executable_name(binary_name, &paths.target_triple);
         let built_binary = paths.release_dir.join(&exe_name);
         if !built_binary.exists() {
@@ -1653,7 +1653,7 @@ fn assemble_macos_app_bundle(paths: &WorkspacePaths, package_dir: &Path) -> Resu
     }
 
     let bin_dir = package_dir.join("bin");
-    for binary_name in ["clonk-game", "clonk-app"] {
+    for binary_name in RUNTIME_BINARIES {
         let staged = bin_dir.join(binary_name);
         let bundled = macos_dir.join(binary_name);
         fs::rename(&staged, &bundled).with_context(|| {
@@ -2317,7 +2317,7 @@ fn rustc_host_target(workspace_dir: &Path) -> Result<String> {
 }
 
 fn audit_release_dependencies(paths: &WorkspacePaths) -> Result<()> {
-    for binary_name in ["clonk-game", "clonk-app"] {
+    for binary_name in RUNTIME_BINARIES {
         let binary = paths
             .release_dir
             .join(executable_name(binary_name, &paths.target_triple));
