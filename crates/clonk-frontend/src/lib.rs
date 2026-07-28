@@ -5104,6 +5104,83 @@ mod tests {
         );
     }
 
+    /// A GPU scene-capture frame records commands instead of rasterizing, so
+    /// the per-viewport content surface `render_viewport` allocates every frame
+    /// is never read or written. Deferring the pixel plane must therefore cost
+    /// a steady-state frame zero materializations; each avoided 640x480 plane
+    /// is 1.23 MB of allocate-and-zero, roughly 0.5 ms of Raspberry Pi 4
+    /// memory bandwidth.
+    #[test]
+    fn gpu_capture_frames_materialize_no_viewport_pixel_planes() {
+        const WIDTH: u32 = 640;
+        const HEIGHT: u32 = 480;
+        const FRAMES: u64 = 60;
+
+        let mut snapshot = make_snapshot();
+        // A world larger than the viewport removes the letterbox borders, so
+        // the content surface is the full viewport the shipping game renders.
+        snapshot.landscape = Some(Landscape::flat(WIDTH * 2, HEIGHT as i32 * 2));
+        let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
+        let mut graphics = GraphicsSystem::new(
+            WIDTH,
+            HEIGHT,
+            120,
+            "Deferred pixel plane probe",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let gamma = clonk_graphics::GammaRamp::identity();
+        let capture_frame = |graphics: &mut GraphicsSystem| {
+            graphics.begin_gpu_scene_capture();
+            graphics.render_frame_without_atlas_deferred_monitor_gamma(&snapshot, &viewports);
+            graphics.finish_gpu_scene_capture(&gamma)
+        };
+        // Warm the retained caches so the measured window is steady state.
+        assert!(capture_frame(&mut graphics).is_some());
+
+        let before = clonk_graphics::pixel_plane_stats();
+        let start = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            capture_frame(&mut graphics);
+        }
+        let elapsed = start.elapsed();
+        let stats = clonk_graphics::pixel_plane_stats();
+
+        // The work the deferral removes, timed on this machine: allocating,
+        // zeroing and freeing one viewport-sized plane per frame is exactly
+        // what `Surface::new` used to do unconditionally.
+        let start = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            let surface = Surface::new(WIDTH, HEIGHT, clonk_graphics::PixelFormat::Rgba8888);
+            std::hint::black_box(surface.pixels()[0]);
+        }
+        let eager_plane = start.elapsed();
+
+        let deferred_bytes = stats.deferred_bytes - before.deferred_bytes;
+        let materialized = stats.materialized - before.materialized;
+        let materialized_bytes = stats.materialized_bytes - before.materialized_bytes;
+        println!(
+            "{FRAMES} capture frames at {WIDTH}x{HEIGHT}: {:.3} ms/frame; \
+             {} deferred plane bytes/frame, {materialized} materializations \
+             ({materialized_bytes} bytes); the removed allocate+zero+free costs \
+             {:.3} ms/frame here",
+            elapsed.as_secs_f64() * 1000.0 / FRAMES as f64,
+            deferred_bytes / FRAMES,
+            eager_plane.as_secs_f64() * 1000.0 / FRAMES as f64,
+        );
+        assert_eq!(
+            materialized, 0,
+            "a scene-capture frame rasterized into a deferred pixel plane"
+        );
+        assert!(
+            deferred_bytes / FRAMES >= u64::from(WIDTH * HEIGHT * 4),
+            "expected at least one full viewport plane deferred per frame, got {} bytes",
+            deferred_bytes / FRAMES
+        );
+    }
+
     #[test]
     fn no_atlas_completions_match_snapshot_render_state() {
         let snapshot = make_snapshot();
