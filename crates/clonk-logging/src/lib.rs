@@ -5,9 +5,12 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use tracing::Metadata;
+use tracing::{Event, Level, Metadata, Subscriber};
+use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt, OptionalWriter};
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::{SubscriberInitExt, TryInitError};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -29,14 +32,16 @@ pub struct ConsoleLogCapture {
 }
 
 impl ConsoleLogCapture {
-    /// Remove and return every byte written since the previous drain.
+    /// Remove and return every byte written since the previous drain. The
+    /// GuiSink formatter has already projected each line, so this is a plain
+    /// drain — nothing re-reads the text.
     pub fn take(&self) -> String {
         let mut bytes = self
             .bytes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let drained = std::mem::take(&mut *bytes);
-        format_console_log(&String::from_utf8_lossy(&drained))
+        String::from_utf8_lossy(&drained).into_owned()
     }
 }
 
@@ -127,13 +132,7 @@ fn install(
                 .with_target(false)
                 .with_level(true),
         )
-        .with(
-            fmt::layer()
-                .with_writer(gui)
-                .with_ansi(false)
-                .with_target(false)
-                .with_level(true),
-        )
+        .with(fmt::layer().with_writer(gui).event_format(GuiSinkFormat))
         .try_init()
 }
 
@@ -178,27 +177,39 @@ impl<'a> MakeWriter<'a> for ConsoleLogCapture {
     }
 }
 
-fn format_console_log(raw: &str) -> String {
-    let mut formatted = String::new();
-    for line in raw.lines() {
-        let (prefix, message) = [
-            (" ERROR ", "ERROR: "),
-            (" WARN ", "WARNING: "),
-            (" INFO ", ""),
-            (" DEBUG ", ""),
-            (" TRACE ", ""),
-        ]
-        .into_iter()
-        .find_map(|(marker, prefix)| {
-            line.find(marker)
-                .map(|position| (prefix, &line[position + marker.len()..]))
-        })
-        .unwrap_or(("", line));
-        formatted.push_str(prefix);
-        formatted.push_str(message);
-        formatted.push('\n');
+/// The level prefix `C4LogSystem`'s `LogLevelPrefixFormatterFlag` writes ahead
+/// of every GUI line (`src/C4Log.cpp:44-76`).
+fn level_prefix(level: Level) -> &'static str {
+    match level {
+        Level::ERROR => "ERROR: ",
+        Level::WARN => "WARNING: ",
+        Level::INFO | Level::DEBUG | Level::TRACE => "",
     }
-    formatted
+}
+
+/// `C4LogSystem::GuiSink` sets the pattern `"%*%v"` (`src/C4Log.cpp:185-200`):
+/// the level prefix followed by the message payload alone. There is no
+/// timestamp, no level token, and no span context in a line C++ shows in-game,
+/// so the prefix is projected from the record's own level here rather than
+/// recovered by scanning already-formatted text — message bodies are content
+/// strings and may themselves contain the word `ERROR`.
+struct GuiSinkFormat;
+
+impl<S, N> FormatEvent<S, N> for GuiSinkFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        writer.write_str(level_prefix(*event.metadata().level()))?;
+        ctx.field_format().format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
 }
 
 /// Initialise the global tracing subscriber used across the Clonk Rust binaries.
