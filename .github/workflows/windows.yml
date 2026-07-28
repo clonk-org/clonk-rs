@@ -129,7 +129,11 @@ jobs:
             exit 1
           fi
           export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
-          cargo build -p clonk-app -p clonk-game --locked
+          # `--release`, matching what `xtask package` builds. The release
+          # profile sets `lto = "thin"` and `codegen-units = 1`, and a static
+          # CRT can fail to link under LTO in ways a debug build never shows —
+          # so proving it on debug would prove the wrong binaries.
+          cargo build --release -p clonk-app -p clonk-game --locked
 
       # MinGW linked the C runtime statically and the shipped binaries needed
       # nothing installed. MSVC links it dynamically unless told otherwise, and
@@ -142,7 +146,7 @@ jobs:
           rustc -vV
           failed=0
           for binary in clonk-app clonk-game; do
-            path="target/x86_64-pc-windows-msvc/debug/$binary.exe"
+            path="target/x86_64-pc-windows-msvc/release/$binary.exe"
             ls -l "$path"
             if grep -qa 'VCRUNTIME140' "$path"; then
               echo "$path imports VCRUNTIME140; +crt-static did not take" >&2

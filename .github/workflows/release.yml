@@ -77,8 +77,13 @@ jobs:
           fetch-depth: 0
 
       # Nothing here reviews the code, so refuse to release a tree whose own
-      # CI is failing. `Clonk Rust CI` runs on every push to main, so its
-      # latest conclusion is an accurate verdict on what is about to ship.
+      # CI is failing. Both workflows run on every push to main, so their
+      # latest conclusions are an accurate verdict on what is about to ship.
+      #
+      # `Windows` is checked as well as `Clonk Rust CI` because the Windows
+      # binaries are built on their own runner and nothing else covers them:
+      # a shipped Windows build was once unable to start at all, and only that
+      # workflow would have caught it.
       - name: Require main's CI to be green
         env:
           GH_TOKEN: ${{ github.token }}
@@ -88,11 +93,17 @@ jobs:
           # here, before the force branch below could override anything — which
           # is precisely when an override is wanted. An unknown conclusion is
           # treated as not-green, so it still blocks unless forced.
-          conclusion=$(gh run list --workflow "Clonk Rust CI" --branch main \
-            --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"' \
-            2>/dev/null || echo "unknown")
-          [[ -n "$conclusion" ]] || conclusion="unknown"
-          echo "latest Clonk Rust CI on main: $conclusion"
+          conclusion=success
+          for workflow in "Clonk Rust CI" "Windows"; do
+            latest=$(gh run list --workflow "$workflow" --branch main \
+              --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"' \
+              2>/dev/null || echo "unknown")
+            [[ -n "$latest" ]] || latest="unknown"
+            echo "latest $workflow on main: $latest"
+            if [[ "$latest" != "success" ]]; then
+              conclusion="$latest"
+            fi
+          done
           if [[ "$conclusion" == "success" ]]; then
             exit 0
           fi
