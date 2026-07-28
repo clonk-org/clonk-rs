@@ -1,4 +1,8 @@
 use super::*;
+// `HostObjectContext::new` is the tests' positional constructor; the
+// engine builds scopes through `with_category`.
+#[cfg(test)]
+use crate::ActionLibrary;
 
 struct FairCrewHostContextState {
     script_object: Option<ObjectId>,

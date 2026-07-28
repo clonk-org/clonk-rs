@@ -10377,46 +10377,14 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             (
                 id.clone(),
                 DefinitionMetadata {
-                    name: String::new(),
-                    portrait_names: Vec::new(),
                     category: *category,
-                    border_bound: 0,
-                    contact_function_calls: false,
-                    blit_mode: 0,
                     ocf_base: OCF_NORMAL,
-                    crew_member: false,
-                    crew_member_value: 0,
-                    silent_commands: false,
-                    vehicle_control: 0,
-                    action_library: ActionLibrary::default().into(),
-                    control_transfer_callback: None,
-                    action_graphics: HashMap::new(),
-                    value: 0,
-                    allow_picture_stack: 0,
-                    mass: 0,
-                    no_component_mass: false,
-                    constructable: false,
-                    shape: None,
-                    placement: 0,
-                    growth: 0,
-                    construction_offset: 0,
-                    basement: 0,
-                    physical: clonk_resources::PhysicalInfo::default(),
-                    components: Vec::new(),
-                    collection_limit: 0,
-                    grab_put_get: 0,
-                    line_connect: 0,
-                    clonk_name_newlines: None,
-                    stretch_growth: false,
-                    rotateable: 0,
                     line: snapshot
                         .definition_lines
                         .get(id)
                         .map(|metadata| metadata.line)
                         .unwrap_or(0),
-                    vertices: Vec::new(),
-                    contact_density: None,
-                    fire: compat::DefinitionFireMetadata::default(),
+                    ..Default::default()
                 },
             )
         })
