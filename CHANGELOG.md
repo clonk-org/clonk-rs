@@ -6,14 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.1] - 2026-07-28
 
+Includes everything prepared for 0.2.0, which was never published.
+
 ### Bug fixes
 
 - Package the game content notice from the content submodule
-
-## [0.2.0] - 2026-07-28
-
-### Bug fixes
-
 - Let the release override survive a failed CI lookup
 - Stop packaging the licence files removed from the tree
 - Keep breaking changes pre-1.0 in the release version bump
