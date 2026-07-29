@@ -2073,6 +2073,9 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
 
     app.message_dialogs[0].state.handle_hotkey('D');
     app.persist_top_message_dialog_checkbox_changes();
+    // Memory-only until a save surface, as `ShowMessageModal`'s by-pointer flag
+    // is (C4ChatDlg.cpp:624); flushed here because the subject is the value.
+    app.flush_deferred_config();
     assert_eq!(
         Config::load(paths.config_file())
             .unwrap()

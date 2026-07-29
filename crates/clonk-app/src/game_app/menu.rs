@@ -4015,17 +4015,22 @@ impl GameApp {
         else {
             return;
         };
-        let Some(paths) = self.app_paths.as_ref() else {
-            return;
-        };
         for checked in changes {
-            let persisted = if native_irc_preference {
-                persist_irc_warning_preference(paths, checked)
+            // `ShowMessageModal` takes the `Config.Startup.HideMsg*` flag by
+            // pointer and writes it in memory; no call site saves, and neither
+            // `C4Gui.cpp`, `C4GuiDialogs.cpp` nor `C4ChatDlg.cpp` contains a
+            // `Config.Save()` (e.g. C4ChatDlg.cpp:624). The file is written at
+            // the next save surface.
+            if native_irc_preference {
+                let Some(paths) = self.app_paths.as_ref() else {
+                    continue;
+                };
+                if let Err(error) = persist_irc_warning_preference(paths, checked) {
+                    tracing::warn!(%error, preference = description, "failed to persist warning preference");
+                }
             } else {
-                persist_config_value(paths, "Startup", key, i32::from(checked).to_string())
-            };
-            if let Err(error) = persisted {
-                tracing::warn!(%error, preference = description, "failed to persist warning preference");
+                self.deferred_config
+                    .set("Startup", key, i32::from(checked).to_string());
             }
         }
     }

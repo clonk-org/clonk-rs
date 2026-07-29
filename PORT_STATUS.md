@@ -445,10 +445,15 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   The four `[Sound]` toggles defer too: `C4SoundSystem::ToggleOnOff` is
   `enabled = !enabled` with no save (`C4SoundSystem.cpp:138-142`), and neither
   `C4SoundSystem.cpp` nor `C4MainMenu.cpp` contains a `Config.Save()`.
-  Four tests asserted the file was written immediately; two now assert the
-  pending value and two flush explicitly before reloading, since their subject
-  is the written *content* rather than the timing. All had pinned the
-  divergence.
+  The `[Startup]` hide-message flags defer too: `ShowMessageModal` takes
+  `Config.Startup.HideMsg*` **by pointer** and writes it in memory
+  (`C4ChatDlg.cpp:624`), and none of `C4Gui.cpp`, `C4GuiDialogs.cpp` or
+  `C4ChatDlg.cpp` contains a `Config.Save()`. Six tests asserted the file was
+  written immediately; two now assert the pending value and four flush
+  explicitly before reloading, since their subject is the written *content*
+  rather than the timing. All had pinned the divergence. The IRC preference is
+  deliberately left writing eagerly — it goes through
+  `persist_irc_warning_preference`, a different native path.
   **There are two flush points, not one.** `C4StartupOptionsDlg::SaveConfig`
   ends with an outright `Config.Save()` — "make sure config is saved, in case
   the game crashes later on" (`C4StartupOptionsDlg.cpp:1188-1189`) — so leaving

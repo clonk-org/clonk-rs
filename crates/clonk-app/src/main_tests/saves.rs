@@ -5424,6 +5424,11 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     app.message_dialogs[0].state.handle_hotkey('D');
     assert_eq!(app.message_dialogs[0].state.checkbox_checked(), Some(true));
     app.persist_message_dialog_checkbox_changes(0);
+    // `ShowMessageModal` writes the `HideMsg*` flag through its by-pointer
+    // argument and no call site saves (C4ChatDlg.cpp:624; no `Config.Save()` in
+    // C4Gui.cpp/C4GuiDialogs.cpp), so the file is written at the next save
+    // surface. This test's subject is the stored value, so it flushes here.
+    app.flush_deferred_config();
     let config = Config::load(paths.config_file()).expect("reload config");
     assert_eq!(config.get_in(Some("Startup"), "HideMsgPlrTakeOver"), Some("1"));
 
