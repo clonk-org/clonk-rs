@@ -49,6 +49,7 @@ mod legacy_types;
 mod map;
 mod sections;
 mod values;
+pub mod verbose_loading;
 
 pub(crate) use c4value::*;
 pub use core::*;

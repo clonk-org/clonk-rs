@@ -3787,6 +3787,19 @@ pub(crate) fn load_thread_pool_thread_count(paths: Option<&AppPaths>) -> usize {
     .unwrap_or(clonk_app_netplay::network::DEFAULT_NETWORK_RUNTIME_WORKER_THREADS)
 }
 
+/// `Graphics.VerboseObjectLoading`, default 0 (C4Config.cpp:453). Gates the
+/// definition and particle loading diagnostics in `clonk-engine`.
+pub(crate) fn load_verbose_object_loading(paths: Option<&AppPaths>) -> i32 {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        "Graphics",
+        "VerboseObjectLoading",
+    )
+    .as_deref()
+    .and_then(|value| crate::parse_startup_config_integer(value.as_bytes()))
+    .unwrap_or(0)
+}
+
 /// `C4ConfigGraphics::RenderInactive` bits (C4Config.h:128-129).
 pub(crate) const RENDER_INACTIVE_FULLSCREEN: u32 = 1 << 0;
 pub(crate) const RENDER_INACTIVE_CONSOLE: u32 = 1 << 1;

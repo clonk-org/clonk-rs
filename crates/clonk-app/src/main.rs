@@ -377,6 +377,11 @@ fn main() -> Result<()> {
     if let Some(paths) = app_paths.as_ref() {
         clonk_platform::crash_win32::set_user_path(&paths.user_data_dir().to_string_lossy());
     }
+    // The definition loader reads this the way C++ reads the global `Config`
+    // (C4Config.cpp:453; C4Def.cpp:555,1051).
+    clonk_engine::scenario::verbose_loading::set_verbose_object_loading(
+        load_verbose_object_loading(app_paths.as_deref()),
+    );
     // `[Logging]` must reach the subscriber before it is installed below.
     clonk_logging::set_logging_config_directive(load_logging_config_directive(
         app_paths.as_deref(),

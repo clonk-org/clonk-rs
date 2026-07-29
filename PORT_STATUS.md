@@ -425,6 +425,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **`Graphics.VerboseObjectLoading` diagnostics.** The level
+  had an editor row but no runtime consumer. `clonk-engine`'s
+  `scenario::verbose_loading` now carries it as a process global — the same
+  shape as C++'s `Config` global, which the definition loader reads far from
+  where the app parses configuration — published by `main` from the config with
+  C++'s default of 0 (`C4Config.cpp:453`). Level 3 logs each definition's group
+  full name (`C4Def.cpp:555-556`), level 1 logs `IDS_PRC_DEFOVERLOAD` for
+  definition and particle overloads (`C4Def.cpp:1051`; `C4Particles.cpp:182`),
+  and level 2 adds the `Old def at`/`Overload by` lines (:1055-1058); the levels
+  are floors, so level 3 emits all three. Pinned by
+  `verbose_object_loading_levels_gate_definition_diagnostics`. The overload
+  bookkeeping is skipped entirely below level 1 so the default path adds no
+  allocation to scenario load. **Not covered:** the overload template is the
+  shipped US `IDS_PRC_DEFOVERLOAD` text — the engine has no resource-string
+  table of its own, and unlike `NeededMaterialStrings`/`ConstructionCheckStrings`
+  the app does not yet overwrite this one, so a German session logs the US
+  wording. The seam to do so exists.
+
 - Closed 2026-07-29: **Windows `/allocconsole` bootstrap.** `C4WinMain.cpp:72-93`
   allocates a console before normal initialization — unconditionally for debug
   GUI builds, only for `/allocconsole` in release GUI builds — aborts startup

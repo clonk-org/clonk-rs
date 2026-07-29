@@ -3283,9 +3283,58 @@ impl Scenario {
         // Keep only the last definition event for each ID without flattening
         // the surviving System host order.
         let mut last_definition = HashMap::new();
+        // `Graphics.VerboseObjectLoading >= 3` logs every loaded definition's
+        // group full name (C4Def.cpp:555-556), and levels 1/2 need the winning
+        // definition's name and group to describe each overload (:1051-1058).
+        let verbose_level = verbose_loading::verbose_object_loading();
+        let mut overload_winners: HashMap<String, (String, String)> = HashMap::new();
+        let mut seen_particles: HashSet<String> = HashSet::new();
         for (index, item) in load_items.iter().enumerate() {
-            if let CollectedDefinition::Definition(definition) = item {
-                last_definition.insert(definition.id.to_ascii_uppercase(), index);
+            match item {
+                CollectedDefinition::Definition(definition) => {
+                    let key = definition.id.to_ascii_uppercase();
+                    let group = definition
+                        .script_name
+                        .as_deref()
+                        .map(verbose_loading::group_full_name)
+                        .unwrap_or(definition.id.as_str());
+                    if let Some(line) =
+                        verbose_loading::definition_loaded_line(verbose_level, group)
+                    {
+                        tracing::info!("{line}");
+                    }
+                    // Only levels >= 1 report overloads, so the default level
+                    // pays nothing on a path that dominates scenario load.
+                    if verbose_level >= 1 {
+                        overload_winners.insert(
+                            key.clone(),
+                            (
+                                definition
+                                    .name
+                                    .clone()
+                                    .unwrap_or_else(|| definition.id.clone()),
+                                group.to_owned(),
+                            ),
+                        );
+                    }
+                    last_definition.insert(key, index);
+                }
+                // C4ParticleDef::Load reports an overload against the particle
+                // already registered under this name (C4Particles.cpp:180-185).
+                CollectedDefinition::Particle(definition)
+                    if verbose_level >= 1
+                        && !seen_particles.insert(definition.core.name.clone()) =>
+                {
+                    if let Some(line) = verbose_loading::particle_overload_line(
+                        verbose_level,
+                        verbose_loading::DEFAULT_DEFINITION_OVERLOAD_TEMPLATE,
+                        &definition.core.name,
+                    ) {
+                        tracing::info!("{line}");
+                    }
+                }
+                CollectedDefinition::Particle(_) => {}
+                CollectedDefinition::SystemScripts(_) => {}
             }
         }
         let mut collected = Vec::new();
@@ -3300,6 +3349,27 @@ impl Scenario {
                     collected.push(definition);
                 }
                 CollectedDefinition::Definition(definition) => {
+                    // This definition lost to a later one with the same ID:
+                    // C++ logs the overload from the winner's side (:1051-1058).
+                    if let Some((winning_name, winning_group)) =
+                        overload_winners.get(&definition.id.to_ascii_uppercase())
+                    {
+                        let old_group = definition
+                            .script_name
+                            .as_deref()
+                            .map(verbose_loading::group_full_name)
+                            .unwrap_or(definition.id.as_str());
+                        verbose_loading::definition_overload_lines(
+                            verbose_level,
+                            verbose_loading::DEFAULT_DEFINITION_OVERLOAD_TEMPLATE,
+                            winning_name,
+                            &definition.id,
+                            old_group,
+                            winning_group,
+                        )
+                        .iter()
+                        .for_each(|line| tracing::info!("{line}"));
+                    }
                     definition_load_steps.push(DefinitionLoadStep::Declarations {
                         name: definition.id,
                         source: definition.script,
