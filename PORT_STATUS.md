@@ -745,9 +745,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `"toolbox"` role, transient-for the console, centre-on-parent) is carried in
   `ToolboxChrome` so the platform layer applies C++'s hints rather than
   inventing its own. Pinned by
-  `developer_toolbox_hides_on_close_and_remembers_its_position`. **Still open:**
-  the rendered page contents — tool buttons, material/texture lists, grade,
-  preview and focus.
+  `developer_toolbox_hides_on_close_and_remembers_its_position`.
+  The Tools page's own contract is in `clonk-app::developer_tools_page`: the
+  fourteen controls in the order `C4ToolsDlg`'s box tree builds them
+  (`C4ToolsDlg.cpp:289-377`), and `EnableControls`' rules (`:912-940`), which
+  are three rules rather than one. Nearly everything needs
+  `Mode >= C4LSC_Static`, but **Fill needs `>= C4LSC_Exact`** — it is the only
+  tool absent from a static landscape — and the **texture list additionally
+  requires the material not to be Sky**. The three landscape-mode buttons are
+  never disabled, which is what stops a dynamic landscape being a dead end: in
+  that mode they are the *only* live controls. Win32 selects a disabled bitmap
+  from the same predicates, so the enablement answer picks the artwork too.
+  Pinned by `tools_page_enables_fill_only_in_exact_and_textures_only_off_sky`.
+  **Still open:** rendering the page — the button artwork, the grade scale, the
+  material and texture pickers and the preview — and window focus.
 
 - **Developer draw-tool state machine and mode control landed; dialog open.**
   `clonk-engine::developer_tools` carries `C4ToolsDlg`'s retained state and
