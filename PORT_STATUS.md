@@ -425,6 +425,23 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Live-reload path matching landed; the reload itself is open.**
+  `clonk-engine::developer_reload` ports `C4DefList::GetByPath`
+  (`C4Def.cpp:1137-1152`), which decides whether a changed file names a loaded
+  definition. The rule is narrower than it looks: a path matches only the
+  definition **root** or **exactly one component below it** — a grandchild such
+  as `Rock.c4d/Graphics/Overlay.png` does *not* match and falls through to the
+  generic script-host reload (`C4ScriptHost.cpp:135-149`). Comparison is
+  case-insensitive (`SEqual2NoCase`), and a prefix that stops mid-component
+  (`Rock.c4d` against `Rock.c4dx`) is rejected because the following byte is
+  neither NUL nor a separator. Pinned by
+  `definition_path_matches_only_the_root_or_one_immediate_child` and
+  `definition_lookup_returns_the_first_match_in_list_order`. **Note the ticket
+  cites `C4Def.cpp:1158-1175` for this, which is `CheckRequireDef` — the wrong
+  function.** **Still open:** everything the match feeds — reloading the
+  definition in place, refreshing live objects' faces, the failure-removal
+  policy and the network refusal (`C4Game.cpp:2294-2355`).
+
 - **Deferred runtime config save: mechanism landed, most callers still write
   through.** C++ mutates its process-wide `Config` for ordinary runtime toggles
   and writes once in `C4Application::Clear` (`C4Application.cpp:351-367`); the
