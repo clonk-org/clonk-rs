@@ -7126,6 +7126,117 @@ mod tests {
     }
 
     #[test]
+    fn hd_crew_art_reaches_the_gpu_one_authored_texel_per_device_pixel() {
+        // The end of the high-resolution chain. A rendered crew pack authors
+        // Walk as `Facet=0,0,16,22` at DefCore `Scale=300`, so the source is
+        // 48x66 texels for a facet that stays 16x22 GAME units — object
+        // geometry never follows the art (C4Object.cpp:438-467).
+        //
+        // The retained scene records vertices in LOGICAL units and the
+        // renderer projects them by the presentation scale
+        // (gpu_renderer.rs:2588-2615), so the quad only lands 1:1 if it
+        // reaches the GPU with an uncorrected source and a nearest sampler.
+        let facet = SourceRect::new(0, 0, 16, 22);
+        let sprite = DefinitionSprite {
+            graphics_scale: 3.0,
+            image: ImageData::new(96, 132, vec![255_u8; 96 * 132 * 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(0, 0, 16, 22)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+
+        let capture = |presentation_scale: f32, hd_exact_blits: bool| {
+            let mut graphics = test_graphics(64, 64, 0, "hd crew gpu");
+            graphics.set_presentation_scale(presentation_scale);
+            graphics.set_hd_exact_blits(hd_exact_blits);
+            graphics.begin_gpu_scene_capture();
+            graphics.blit_face(
+                &sprite,
+                facet,
+                (0.0, 0.0, 16.0, 22.0),
+                (8.0, 11.0),
+                false,
+                None,
+                1.0,
+                0.0,
+                None,
+                SpriteBlitState::normal(),
+                None,
+            );
+            let gamma = clonk_graphics::GammaRamp::identity();
+            let scene = graphics
+                .surface_mut()
+                .take_gpu_scene_capture()
+                .expect("sprite capture stays active across the blit")
+                .into_scene([64, 64], Color::transparent(), &gamma);
+            let extent = scene.textures[0].extent;
+            let quad = scene
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    clonk_graphics::GpuCommand::Quad {
+                        vertices, sampler, ..
+                    } => Some((*vertices, *sampler)),
+                    _ => None,
+                })
+                .expect("the face blit retains a textured quad");
+            (extent, quad)
+        };
+
+        let (extent, (vertices, sampler)) = capture(3.0, true);
+        assert_eq!(sampler, clonk_graphics::GpuSampler::Nearest);
+
+        // Source: the UV span covers exactly the 48x66 authored texels.
+        let span = |axis: usize| {
+            let values = vertices.iter().map(|vertex| vertex.uv[axis]);
+            let max = values.clone().fold(f32::MIN, f32::max);
+            let min = values.fold(f32::MAX, f32::min);
+            (max - min) * extent[axis] as f32
+        };
+        assert_eq!((span(0), span(1)), (48.0, 66.0), "authored source texels");
+
+        // Destination: the retained vertices are logical game units.
+        let logical = |axis: usize| {
+            let values = vertices.iter().map(|vertex| vertex.position[axis]);
+            let max = values.clone().fold(f32::MIN, f32::max);
+            let min = values.fold(f32::MAX, f32::min);
+            max - min
+        };
+        assert_eq!((logical(0), logical(1)), (16.0, 22.0), "logical game units");
+
+        // Projection: the renderer's own transform turns those logical units
+        // into device pixels, and 48x66 texels land on 48x66 of them.
+        let projection = clonk_graphics::ClipperProjection::new(
+            3.0,
+            (64, 64),
+            64 * 3,
+            clonk_graphics::Rect::new(0, 0, 64, 64),
+        );
+        let (left, top) = projection.logical_to_physical(0.0, 0.0);
+        let (right, bottom) = projection.logical_to_physical(16.0, 22.0);
+        assert_eq!(
+            (right - left, bottom - top),
+            (48.0, 66.0),
+            "one authored texel per device pixel at Graphics.Scale=300"
+        );
+
+        // Without the opt-in the same blit takes C++'s half-texel correction
+        // and a linear filter, which is what softens the art today.
+        let (_, (corrected, sampling)) = capture(3.0, false);
+        assert_eq!(sampling, clonk_graphics::GpuSampler::Linear);
+        assert_ne!(
+            corrected[0].uv, vertices[0].uv,
+            "the correction must move the sampled origin"
+        );
+    }
+
+    #[test]
     fn action_overlay_clamps_a_scaled_facet_to_the_source_sheet() {
         // blit_face clamps the source rect to the sheet after applying the
         // definition Scale and shrinks the destination by the same ratio
