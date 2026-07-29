@@ -587,9 +587,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `definition_path_matches_only_the_root_or_one_immediate_child` and
   `definition_lookup_returns_the_first_match_in_list_order`. **Note the ticket
   cites `C4Def.cpp:1158-1175` for this, which is `CheckRequireDef` — the wrong
-  function.** **Still open:** everything the match feeds — reloading the
-  definition in place, refreshing live objects' faces, the failure-removal
-  policy and the network refusal (`C4Game.cpp:2294-2355`).
+  function.**
+  `C4Game::ReloadDef`'s surrounding policy is ported too. The network refusal is
+  its *first* line, so a network game never reloads whatever changed on disk;
+  the synchronise that follows is `Synchronize(false)`, which closes menus
+  holding dead surfaces but deliberately does **not** write player files back.
+  The two outcomes are symmetric sweeps over every object of that id in master
+  order, and both are blunter than they look: on success **all** of them get
+  `UpdateFace(true)` — C++ does not work out which are affected, because an
+  object can use another definition's graphics — and on failure **all** of them
+  are removed, the script profiler is aborted, and the definition itself is
+  dropped from the list. `Messages.UpdateDef(id)` runs after either arm. Pinned
+  by `console_definition_reload_refuses_network_and_sweeps_every_matching_object`.
+  **Still open:** the reload itself — retaining source provenance through
+  production loading and rebuilding DefCore, ActMap, scripts, graphics,
+  portraits, ranks and localised components in place.
 
 - **Deferred runtime config save: mechanism landed, most callers still write
   through.** C++ mutates its process-wide `Config` for ordinary runtime toggles

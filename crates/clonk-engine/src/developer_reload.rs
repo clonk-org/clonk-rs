@@ -93,6 +93,72 @@ fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str>
         .then(|| &value[prefix.len()..])
 }
 
+/// What `C4Game::ReloadDef` does before it touches anything (`C4Game.cpp`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DefinitionReloadPlan {
+    /// `if (Network.isEnabled()) return false;` — the very first line. A
+    /// network game never reloads a definition, whatever changed on disk.
+    RefusedInNetwork,
+    /// `Defs.ID2Def(id)` found nothing, so there is nothing to reload. Note
+    /// this check happens *after* `Synchronize(false)`, which has already run.
+    UnknownDefinition,
+    /// Reload it. `synchronize` mirrors `Synchronize(false)`: the game is
+    /// synchronised so menus holding dead surfaces are closed, but player files
+    /// are deliberately **not** written back.
+    Reload { synchronize: bool },
+}
+
+/// `C4Game::ReloadDef`'s two outcomes, both of which touch every object of the
+/// reloaded type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DefinitionReloadOutcome {
+    /// `Defs.Reload` succeeded: every object of that id gets
+    /// `UpdateFace(true)`. C++ refreshes them all rather than trying to work
+    /// out which are affected — objects can use another definition's graphics,
+    /// so "better update everything".
+    Reloaded { refresh_faces: Vec<crate::ObjectId> },
+    /// `Defs.Reload` failed: every object of that id is removed
+    /// (`AssignRemoval`), any running script profile is aborted, and the
+    /// definition itself is dropped from the list.
+    Failed {
+        remove_objects: Vec<crate::ObjectId>,
+        abort_profiler: bool,
+        remove_definition: bool,
+    },
+}
+
+/// The gate `C4Game::ReloadDef` applies before reloading.
+pub fn definition_reload_plan(network_game: bool, definition_known: bool) -> DefinitionReloadPlan {
+    if network_game {
+        return DefinitionReloadPlan::RefusedInNetwork;
+    }
+    if !definition_known {
+        return DefinitionReloadPlan::UnknownDefinition;
+    }
+    DefinitionReloadPlan::Reload { synchronize: true }
+}
+
+/// What to do with live objects once `Defs.Reload` has answered.
+///
+/// `objects_of_definition` is every object whose `id` matches, in
+/// `Game.Objects` order — C++ walks the master list First -> Next in both arms.
+/// Whichever arm runs, `Messages.UpdateDef(id)` follows it.
+pub fn definition_reload_outcome(
+    reloaded: bool,
+    objects_of_definition: &[crate::ObjectId],
+) -> DefinitionReloadOutcome {
+    if reloaded {
+        return DefinitionReloadOutcome::Reloaded {
+            refresh_faces: objects_of_definition.to_vec(),
+        };
+    }
+    DefinitionReloadOutcome::Failed {
+        remove_objects: objects_of_definition.to_vec(),
+        abort_profiler: true,
+        remove_definition: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +250,73 @@ mod tests {
             find_definition_by_path("Objects.c4d\\Metal.c4d\\Script.c", paths, SEP),
             None,
             "an unmatched path falls through to the generic script-host reload"
+        );
+    }
+
+    // C4Game::ReloadDef — the network refusal, the no-player-writeback sync,
+    // and the two symmetric object sweeps.
+    #[test]
+    fn console_definition_reload_refuses_network_and_sweeps_every_matching_object() {
+        use crate::ObjectId;
+
+        // The network check is the very first line: nothing else is attempted.
+        assert_eq!(
+            definition_reload_plan(true, true),
+            DefinitionReloadPlan::RefusedInNetwork
+        );
+        assert_eq!(
+            definition_reload_plan(true, false),
+            DefinitionReloadPlan::RefusedInNetwork
+        );
+        // An unknown id stops after the synchronise, which has already run.
+        assert_eq!(
+            definition_reload_plan(false, false),
+            DefinitionReloadPlan::UnknownDefinition
+        );
+        // Otherwise: Synchronize(false) — sync, but do not write player files.
+        assert_eq!(
+            definition_reload_plan(false, true),
+            DefinitionReloadPlan::Reload { synchronize: true }
+        );
+
+        let objects = [ObjectId(4), ObjectId(9), ObjectId(2)];
+
+        // Success refreshes the face of *every* object of that type, in master
+        // list order. C++ does not try to work out which are affected — an
+        // object can use another definition's graphics.
+        assert_eq!(
+            definition_reload_outcome(true, &objects),
+            DefinitionReloadOutcome::Reloaded {
+                refresh_faces: objects.to_vec()
+            }
+        );
+
+        // Failure is the harsh arm: every object of that type is removed, the
+        // profiler is aborted, and the definition itself is dropped.
+        assert_eq!(
+            definition_reload_outcome(false, &objects),
+            DefinitionReloadOutcome::Failed {
+                remove_objects: objects.to_vec(),
+                abort_profiler: true,
+                remove_definition: true,
+            }
+        );
+
+        // With no live objects both arms are empty sweeps, but the failure arm
+        // still removes the definition.
+        assert_eq!(
+            definition_reload_outcome(true, &[]),
+            DefinitionReloadOutcome::Reloaded {
+                refresh_faces: Vec::new()
+            }
+        );
+        assert_eq!(
+            definition_reload_outcome(false, &[]),
+            DefinitionReloadOutcome::Failed {
+                remove_objects: Vec::new(),
+                abort_profiler: true,
+                remove_definition: true,
+            }
         );
     }
 }
