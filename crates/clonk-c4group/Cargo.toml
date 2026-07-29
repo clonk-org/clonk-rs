@@ -1,0 +1,20 @@
+[package]
+name = "clonk-c4group"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "c4group"
+path = "src/main.rs"
+
+[dependencies]
+clonk-resources = { path = "../clonk-resources" }
+
+[dev-dependencies]
+tempfile = "3.8"

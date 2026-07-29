@@ -425,6 +425,27 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **`c4group` CLI exists but implements only the read commands.** The C++
+  product builds and installs a standalone `c4group` (`CMakeLists.txt:431-437`);
+  the port had no binary at all. `crates/clonk-c4group` now provides one. Its
+  argument parser is **complete** — the whole native matrix from
+  `c4group_ng.cpp:146-400` (`-a`/`-as`, `-m`, `-e`/`-et`, `-d`, `-s`, `-r`,
+  `-l`/`-v`, `-o`, `-p`, `-u`, `-x`, `-k`, `-g`, `-y`, `-z`, `-w`), the leading
+  options (:545-576, including `-x:<command>` reading from `argv+3` and `fQuiet`
+  defaulting to true), multi-group dispatch, and the "argument beginning with
+  `-` ends the previous command's arguments" rule that makes `-a f1 f2 -e g`
+  parse. Execution covers the commands the group library already supports:
+  the default listing (:120-124), `-l`/`-v` with wildcard filtering (:270-284),
+  `-k` (:346-348), and `-e`/`-et`. **Every other command prints
+  `is not implemented yet` and exits non-zero** rather than silently succeeding.
+  Pinned by six parser tests plus the end-to-end
+  `c4group_cli_round_trips_native_command_matrix` against a packed fixture.
+  **Deliberately NOT added to packaging/install rules** (the ticket's last
+  criterion): shipping a `c4group` that silently lacks pack/unpack/add/delete
+  would be worse than shipping none. Remaining work is the mutating commands
+  over `MutableGroup`, the sort list, update generation/application, Windows
+  shell registration (`-i`/`-u`), prompt/execute-at-end, and then packaging.
+
 - Closed 2026-07-29: **Live `UserPath` re-expansion.** `AppPaths` resolved
   `General.UserPath` once at discovery and cached everything derived from it,
   while `C4Config::AtUserPath` re-reads and re-expands on **every** call

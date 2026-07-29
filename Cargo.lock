@@ -823,6 +823,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clonk-c4group"
+version = "0.4.0"
+dependencies = [
+ "clonk-resources",
+ "tempfile",
+]
+
+[[package]]
 name = "clonk-core"
 version = "0.4.0"
 dependencies = [

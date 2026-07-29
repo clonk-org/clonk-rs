@@ -2,6 +2,7 @@
 members = [
     "crates/clonk-core",
     "crates/clonk-logging",
+    "crates/clonk-c4group",
     "crates/clonk-resources",
     "crates/clonk-script",
     "crates/clonk-engine",
