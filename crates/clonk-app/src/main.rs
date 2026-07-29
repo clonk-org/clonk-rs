@@ -1922,10 +1922,7 @@ impl GameApp {
         self.update_check_requested = classic.update_requested;
 
         if let Some(screen) = classic.startup_screen.as_deref() {
-            tracing::warn!(
-                screen,
-                "classic /startup screen selection is not implemented in clonk-app"
-            );
+            self.apply_classic_startup_screen(screen);
         }
         Ok(())
     }

@@ -5262,3 +5262,54 @@ fn load_frontend_scenarios_sets_human_readable_location() {
 
     reset_cached_app_paths();
 }
+
+/// `C4Startup::SetStartScreen` (C4Startup.cpp:389-408) maps seven
+/// case-insensitive names onto the dialog opened first; `C4Game` routes
+/// `/startup:` straight into it (C4Game.cpp:3205). An unrecognized name changes
+/// nothing.
+#[test]
+fn classic_startup_argument_selects_initial_cpp_view() {
+    let view = |screen: &str| {
+        let mut app = new_real_classic_menu_app(640, 480);
+        app.apply_classic_startup_screen(screen);
+        (app.startup_view, app.scenario_selector_mode)
+    };
+
+    assert_eq!(view("main").0, StartupView::MainMenu);
+    assert_eq!(view("scen").0, StartupView::ScenarioBrowser);
+    assert_eq!(view("net").0, StartupView::NetworkGame);
+    assert_eq!(view("options").0, StartupView::Options);
+    assert_eq!(view("plrsel").0, StartupView::PlayerSelection);
+    assert_eq!(view("about").0, StartupView::About);
+
+    // `netscen` is the scenario selector in network-host mode: same view as
+    // `scen`, different selector mode, and neither is the `net` browser.
+    let (netscen_view, netscen_mode) = view("netscen");
+    assert_eq!(netscen_view, StartupView::ScenarioBrowser);
+    assert_eq!(netscen_mode, ScenarioSelectorMode::NetworkHost);
+    assert_ne!(netscen_mode, view("scen").1);
+
+    // Every name is case-insensitive, exactly like SEqualNoCase.
+    for (lower, upper) in [
+        ("main", "MAIN"),
+        ("scen", "Scen"),
+        ("netscen", "NetScen"),
+        ("net", "NET"),
+        ("options", "Options"),
+        ("plrsel", "PlrSel"),
+        ("about", "ABOUT"),
+    ] {
+        assert_eq!(view(lower), view(upper), "{lower} must be case-insensitive");
+    }
+
+    // An unknown name leaves the remembered/default view untouched and opens
+    // no overlay of its own.
+    let mut app = new_real_classic_menu_app(640, 480);
+    app.open_about_dialog();
+    let remembered = app.startup_view;
+    app.apply_classic_startup_screen("nonsense");
+    assert_eq!(app.startup_view, remembered);
+    assert!(app.message_dialogs.is_empty());
+    app.apply_classic_startup_screen("");
+    assert_eq!(app.startup_view, remembered);
+}

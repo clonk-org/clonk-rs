@@ -3489,6 +3489,35 @@ impl GameApp {
         self.process_about_dialog_actions_with_sound(actions, true)
     }
 
+    /// `C4Startup::SetStartScreen` (C4Startup.cpp:389-408) maps the seven
+    /// case-insensitive `/startup:` names onto the dialog it opens first.
+    /// `netscen` is the scenario selector in network-host mode, distinct from
+    /// both `scen` and the `net` game browser. An unknown name leaves the
+    /// remembered/default view alone — C++ returns false and changes nothing.
+    pub(crate) fn apply_classic_startup_screen(&mut self, screen: &str) {
+        let screen = screen.trim();
+        if screen.eq_ignore_ascii_case("main") {
+            self.show_main_menu();
+        } else if screen.eq_ignore_ascii_case("scen") {
+            self.open_scenario_browser();
+        } else if screen.eq_ignore_ascii_case("netscen") {
+            self.open_network_host_scenario_browser();
+        } else if screen.eq_ignore_ascii_case("net") {
+            self.open_network_game_dialog();
+        } else if screen.eq_ignore_ascii_case("options") {
+            self.open_options_menu();
+        } else if screen.eq_ignore_ascii_case("plrsel") {
+            self.open_player_selection_dialog();
+        } else if screen.eq_ignore_ascii_case("about") {
+            self.open_about_dialog();
+        } else {
+            tracing::warn!(
+                screen,
+                "unknown classic /startup screen; keeping the default view"
+            );
+        }
+    }
+
     pub(crate) fn open_network_game_dialog(&mut self) {
         self.external_irc_dialog_visible = false;
         self.external_irc_dialog = None;
