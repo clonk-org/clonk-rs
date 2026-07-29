@@ -6967,3 +6967,26 @@
         }
     
 }
+
+    /// `C4FullScreen::Init` titles its carrier window with `STD_PRODUCT`,
+    /// which is `C4ENGINECAPTION` = "LegacyClonk" (C4FullScreen.cpp:474-480;
+    /// C4Version.h:19,24). The developer console keeps its own caption, and
+    /// neither may be confused with `PRODUCT_NAME`, which names the port's
+    /// user-data directories.
+    #[test]
+    fn startup_window_builder_uses_legacyclonk_product_title() {
+        assert_eq!(native_window_title(false), "LegacyClonk");
+        assert_eq!(native_window_title(true), "LegacyClonk Console");
+        assert_eq!(clonk_platform::ENGINE_CAPTION, "LegacyClonk");
+
+        // The user-data product name is a deliberate divergence and must not
+        // have been dragged along with the caption.
+        assert_eq!(clonk_platform::PRODUCT_NAME, "Clonk Rust");
+        assert_ne!(native_window_title(false), clonk_platform::PRODUCT_NAME);
+
+        // The console caption is distinct from the game one and derived from
+        // the same engine name.
+        assert_ne!(native_window_title(true), native_window_title(false));
+        assert!(native_window_title(true).starts_with(native_window_title(false)));
+    
+}

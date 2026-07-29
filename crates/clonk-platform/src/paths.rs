@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub const PRODUCT_NAME: &str = "Clonk Rust";
+/// `C4ENGINECAPTION` / `STD_PRODUCT` (C4Version.h:19,24): the caption
+/// `C4FullScreen` gives its carrier window (C4FullScreen.cpp:474-480). This is
+/// deliberately *not* `PRODUCT_NAME`, which names the port's user-data
+/// directories and must keep identifying the Rust build.
+pub const ENGINE_CAPTION: &str = "LegacyClonk";
+/// `C4EDITORCAPTION` is "Clonk Editor"; the port's developer console is a
+/// different surface, so it keeps its own caption built from the engine one.
+pub const CONSOLE_CAPTION: &str = "LegacyClonk Console";
 pub const PRODUCT_SLUG: &str = "clonk-rust";
 pub const PRODUCT_COMPACT_NAME: &str = "ClonkRust";
 // Compatibility-only names for profiles created before the product rename.

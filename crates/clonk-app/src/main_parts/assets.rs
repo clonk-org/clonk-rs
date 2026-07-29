@@ -8738,12 +8738,23 @@ pub(crate) fn discover_validated_startup_paths(
     Ok(app_paths)
 }
 
+/// `C4FullScreen::Init` titles the carrier window with `STD_PRODUCT`
+/// (C4FullScreen.cpp:474-480); the developer console is a separate surface with
+/// its own caption. Factored so the selection is testable without a window.
+pub(crate) fn native_window_title(console: bool) -> &'static str {
+    if console {
+        clonk_platform::CONSOLE_CAPTION
+    } else {
+        clonk_platform::ENGINE_CAPTION
+    }
+}
+
 pub(crate) fn startup_window_builder(
     display_options: &DisplayOptions,
     initial_size: PhysicalSize<u32>,
 ) -> WindowBuilder {
     let mut window_builder = WindowBuilder::new()
-        .with_title("Clonk Rust")
+        .with_title(native_window_title(false))
         .with_inner_size(initial_size);
     if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
         if let Some((x, y)) = display_options.position {

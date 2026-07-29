@@ -492,7 +492,7 @@ fn main() -> Result<()> {
     .build(&event_loop)
     .context("failed to create application window")?;
     if classic.console {
-        window.set_title("Clonk Rust Console");
+        window.set_title(native_window_title(true));
     }
     let mut display_sleep_inhibitor = DisplaySleepInhibitor::acquire();
     if display_options.maximized && matches!(display_options.mode, DisplayMode::Window) {
