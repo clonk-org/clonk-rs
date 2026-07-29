@@ -35,6 +35,29 @@
 //!
 //! Only the first `TargetCount` entries of either array are meaningful.
 
+/// `C4Group_GetFileCRC` (`C4Group.cpp`).
+///
+/// Despite the name it is a plain CRC-32 over the **whole packed file's
+/// bytes**, seeded at zero — not over entry contents, and not over the group
+/// structure. `MakeUpdate` stores it as `GrpChks1`/`GrpChks2`, and `Check`
+/// compares a candidate target against it.
+///
+/// This matters for the port's scope: `GrpChks2` is the CRC of the *target
+/// group*, so a port that produces the same target reproduces it by
+/// construction. It is not a checksum of the update package, and never
+/// constrained how the package itself is built.
+pub(crate) fn group_file_crc(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    crc ^ u32::MAX
+}
+
 /// `C4UP_MaxUpGrpCnt` (`C4Update.h:25`).
 pub(crate) const MAX_UPDATE_GROUP_COUNT: usize = 50;
 
@@ -212,6 +235,19 @@ mod tests {
             "written only when set, like every other defaulted key"
         );
         assert_eq!(UpdateCore::from_ini(&raw), multi);
+
+        // C4Group_GetFileCRC is a plain CRC-32 of the whole file. Checked
+        // against the two groups the fixture package was generated from: the
+        // oracle wrote GrpChks1=1686362931 for g1.c4f and GrpChks2=1194512086
+        // for g2.c4f, and those are exactly their file CRCs.
+        assert_eq!(group_file_crc(b""), 0);
+        assert_eq!(
+            group_file_crc(b"123456789"),
+            0xCBF4_3926,
+            "CRC-32 check value"
+        );
+        // Seeded at zero and reflected, so an incremental split matches.
+        assert_eq!(group_file_crc(b"hello world"), 0x0D4A_1185);
 
         // An absent or empty core reads as the all-defaults package rather than
         // failing, matching StdCompiler's defaulted values.
