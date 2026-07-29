@@ -327,6 +327,11 @@ fn main() -> Result<()> {
     // yet, so the banner starts stderr-only and gains the log descriptor below.
     #[cfg(unix)]
     clonk_platform::crash::install(-1);
+    // `C4WinMain.cpp:68-70` installs the unhandled-exception filter before
+    // application initialization; it reads the user path and log descriptor
+    // lazily, so both are published below once they exist.
+    #[cfg(windows)]
+    clonk_platform::crash_win32::install();
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
@@ -344,6 +349,12 @@ fn main() -> Result<()> {
         .as_deref()
         .or(cli.config_file.as_deref());
     let app_paths = discover_validated_startup_paths(explicit_config)?;
+    // The crash filter writes its dump under `Config.General.UserPath`
+    // (C4CrashHandlerWin32.cpp:374-375).
+    #[cfg(windows)]
+    if let Some(paths) = app_paths.as_ref() {
+        clonk_platform::crash_win32::set_user_path(&paths.user_data_dir().to_string_lossy());
+    }
     // `[Logging]` must reach the subscriber before it is installed below.
     clonk_logging::set_logging_config_directive(load_logging_config_directive(
         app_paths.as_deref(),
@@ -368,6 +379,10 @@ fn main() -> Result<()> {
                 // once the session log exists (C4WinMain.cpp:199-209).
                 #[cfg(unix)]
                 clonk_platform::crash::set_log_descriptor(clonk_logging::crash_log_descriptor());
+                #[cfg(windows)]
+                clonk_platform::crash_win32::set_log_descriptor(
+                    clonk_logging::crash_log_descriptor(),
+                );
                 tracing::info!(
                     path = %log_path.display(),
                     "engine session log initialized"

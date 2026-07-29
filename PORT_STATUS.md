@@ -425,6 +425,28 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Windows unhandled-exception diagnostics.**
+  `clonk-platform::crash_win32` installs the one-shot
+  `SetUnhandledExceptionFilter` before application initialization
+  (`C4WinMain.cpp:68-70`; `C4CrashHandlerWin32.cpp:644`). A first crash composes
+  the `SafeTextDump` report — banner, exception code and sentence,
+  continuability, access-violation/page-error detail, the x86_64 register block
+  and the EFLAGS letters (`C4CrashHandlerWin32.cpp:86-202`) — writes it to the
+  session log descriptor, writes a `LegacyClonk-crash-<UTC>.dmp` minidump under
+  `Config.General.UserPath` via `CreateFileA(CREATE_NEW)` + `MiniDumpWriteDump`
+  (:390,410,417,455-464), shows the `MessageBoxA` naming both artifacts
+  (:427-447), and returns `EXCEPTION_CONTINUE_SEARCH` so the OS keeps its own
+  processing (:467-468). The user path and log descriptor are published as they
+  become known, mirroring C++ reading them from inside the filter. Report
+  composition is host-independent and pinned by unit tests on every platform;
+  the artifact path is pinned on Windows by
+  `windows_unhandled_exception_writes_log_minidump_and_dialog`, which drives the
+  same code the filter does — the OS-invoked filter itself cannot run in-process
+  without killing the harness. **Not covered:** the symbolised stack walk and
+  loaded-module list (`C4CrashHandlerWin32.cpp:280-350`), which need DbgHelp
+  `StackWalk64`/`SymFromAddr` and a `Module32First` snapshot; the report carries
+  registers but no frames.
+
 - Closed 2026-07-29: **Unix fatal-signal diagnostics.** `clonk-platform::crash`
   installs the classic handler set — SIGBUS, SIGILL, SIGSEGV, SIGABRT, SIGINT,
   SIGQUIT, SIGFPE, SIGTERM, in `C4WinMain.cpp:257-264` order — before
