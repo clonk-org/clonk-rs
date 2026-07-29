@@ -24,6 +24,7 @@ mod advanced_config;
 mod classic_record_stream;
 mod console_window_position;
 mod control_options;
+mod deferred_config;
 mod desktop_notification;
 mod developer_console_save;
 mod developer_windows;
@@ -1287,6 +1288,32 @@ fn run() -> Result<()> {
         // `C4Console::StorePosition` on window destruction (C4Console.cpp:154-159)
         // writes the console's own slot and nothing else, so this is deliberately
         // separate from the game window's `persist_if_dirty` above.
+        // `C4Application::Clear` writes the accumulated config once on a clean
+        // quit; an aborted run discards it (C4Application.cpp:351-367).
+        if matches!(
+            *control_flow,
+            ControlFlow::Exit | ControlFlow::ExitWithCode(_)
+        ) && !app.configuration_reset_requested
+        {
+            if let Some(paths) = app_paths.as_ref() {
+                for (section, entries) in app.deferred_config.take_by_section() {
+                    let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                key.as_str(),
+                                clonk_app_netplay::NativeConfigValue::RawAscii(value.as_str()),
+                            )
+                        })
+                        .collect();
+                    if let Err(error) =
+                        persist_native_config_values(paths.as_ref(), &section, &updates)
+                    {
+                        tracing::warn!(%error, section, "could not save deferred config values");
+                    }
+                }
+            }
+        }
         let console_shutdown = matches!(
             *control_flow,
             ControlFlow::Exit | ControlFlow::ExitWithCode(_)
@@ -1671,6 +1698,7 @@ impl GameApp {
             taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress::new(
                 clonk_platform::taskbar_progress::NoTaskbarProgress,
             ),
+            deferred_config: crate::deferred_config::DeferredConfig::default(),
             sky: None,
             material_texture_images: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),

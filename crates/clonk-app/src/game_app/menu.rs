@@ -2924,30 +2924,20 @@ impl GameApp {
                     } else {
                         self.startup_masterserver_next_query_at = None;
                     }
-                    if let Some(paths) = self.app_paths.as_ref() {
-                        if let Err(error) = persist_config_value(
-                            paths,
-                            "Network",
-                            "MasterServerSignUp",
-                            i32::from(enabled).to_string(),
-                        ) {
-                            self.status_text = format!("Unable to save network setting: {error}");
-                        }
-                    }
+                    // `OnBtnInternet` flips the flag in memory only; the file
+                    // is written once at shutdown (C4StartupNetDlg.cpp:840-845).
+                    self.deferred_config.set(
+                        "Network",
+                        "MasterServerSignUp",
+                        i32::from(enabled).to_string(),
+                    );
                 }
                 NetDlgAction::RecordingChanged(record) => {
                     self.startup_view_flags.record = record;
                     self.recording_enabled = record && self.recordings_dir.is_some();
-                    if let Some(paths) = self.app_paths.as_ref() {
-                        if let Err(error) = persist_config_value(
-                            paths,
-                            "General",
-                            "Record",
-                            i32::from(record).to_string(),
-                        ) {
-                            self.status_text = format!("Unable to save recording setting: {error}");
-                        }
-                    }
+                    // `OnBtnRecord` likewise mutates memory only (:847-850).
+                    self.deferred_config
+                        .set("General", "Record", i32::from(record).to_string());
                 }
             }
         }

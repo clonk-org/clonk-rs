@@ -425,6 +425,26 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Deferred runtime config save: mechanism landed, most callers still write
+  through.** C++ mutates its process-wide `Config` for ordinary runtime toggles
+  and writes once in `C4Application::Clear` (`C4Application.cpp:351-367`); the
+  port wrote every toggle straight to disk, so a transient change survived a
+  crash C++ would have discarded and each toggle rewrote the whole file.
+  `clonk-app::deferred_config` now holds pending `(section, key) -> value`
+  writes, replacing rather than queueing a repeated key, and `main` flushes them
+  grouped by section on the clean-exit path only — an aborted run discards them,
+  which is the behaviour the ticket asks for. Pinned by
+  `runtime_config_mutations_remain_process_local_until_shutdown_save`.
+  **Migrated so far: only the two toggles the oracle classifies unambiguously** —
+  `Network.MasterServerSignUp` and `General.Record`, which
+  `C4StartupNetDlg::OnBtnInternet`/`OnBtnRecord` change in memory alone
+  (`C4StartupNetDlg.cpp:840-850`). **Still open:** every other
+  `persist_config_value` caller needs its own C++ site read before being moved —
+  MissionAccess, Participants, sound toggles, ServerAddress and the Startup
+  checkboxes are *not* settled by the oracle lines this ticket cites, and the
+  many `main_tests` callers are fixture set-up that must keep writing
+  immediately.
+
 - **Keyed developer window host landed; live records not yet wired.**
   The runner owns exactly one Window/Pixels/FramePresenter, so console
   viewports, the Tools/Property toolbox and the object-list window had nowhere

@@ -105,6 +105,10 @@ pub(crate) struct GameApp {
     pub(crate) focus_snapshot: Option<clonk_engine::ObjectSnapshot>,
     pub(crate) frame_text: String,
     pub(crate) status_text: String,
+    /// Ordinary runtime config toggles, held until a clean shutdown the way
+    /// C++ mutates its process-wide `Config` and saves once in
+    /// `C4Application::Clear` (C4Application.cpp:351-367).
+    pub(crate) deferred_config: crate::deferred_config::DeferredConfig,
     pub(crate) startup_restart_diagnostics: StartupRestartDiagnostics,
     pub(crate) energy_fraction: f32,
     pub(crate) scenario_label: String,
