@@ -3,6 +3,7 @@ mod console;
 pub mod crash;
 pub mod crash_win32;
 mod paths;
+pub mod privileges;
 
 pub use console::attach_parent_console;
 #[cfg(target_os = "macos")]

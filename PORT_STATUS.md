@@ -425,6 +425,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Unix effective-root startup refusal.** `C4WinMain.cpp:251-255`
+  refuses `geteuid() == 0` before the debug facilities and application
+  initialization. `clonk-platform::privileges` now supplies that guard and
+  `main` consults it immediately after the macOS translocation chdir and before
+  the crash handlers, printing `Do not run <argv[0]> as root!` to stdout — with
+  C++'s `"this program"` fallback when `argv[0]` is absent — and exiting
+  `C4XRV_Failure` (1). Non-root and non-Unix startup are untouched. Pinned by
+  `unix_effective_root_is_rejected_before_bootstrap`, which drives the guard
+  with an explicit effective UID: an unprivileged test run cannot spawn a
+  privileged child, so the decision function is exercised directly and `main`
+  feeds it the real `geteuid()`.
+
 - Closed 2026-07-29: **Windows unhandled-exception diagnostics.**
   `clonk-platform::crash_win32` installs the one-shot
   `SetUnhandledExceptionFilter` before application initialization

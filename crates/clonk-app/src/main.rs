@@ -322,6 +322,15 @@ fn main() -> Result<()> {
     // MacAppTranslocation.cpp:27-63). It must precede path discovery.
     #[cfg(target_os = "macos")]
     clonk_platform::establish_macos_bundle_working_directory();
+    // Root is refused before the debug facilities and any initialization
+    // (C4WinMain.cpp:251-255), so this precedes the handlers installed below.
+    #[cfg(unix)]
+    if let Some(refusal) = clonk_platform::privileges::root_startup_refusal_for_current_process(
+        std::env::args().next().as_deref(),
+    ) {
+        println!("{refusal}");
+        std::process::exit(clonk_platform::privileges::STARTUP_FAILURE_EXIT_CODE);
+    }
     // `C4WinMain` installs the fatal-signal handlers before application
     // initialization (C4WinMain.cpp:256-265). The session log does not exist
     // yet, so the banner starts stderr-only and gains the log descriptor below.
