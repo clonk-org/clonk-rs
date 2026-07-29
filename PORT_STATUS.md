@@ -425,6 +425,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Property-panel composition landed; the surfaces open.**
+  `clonk-engine::developer_property_text` ports `C4PropertyDlg::Update`'s body
+  (`C4PropertyDlg.cpp:169-256`): the 0/1/many switch, the fixed section order
+  (type, owner, contents, action, locals, effects), and the `fFirstLocal`-style
+  headers that appear **once** before their first entry and not at all when the
+  section is empty. Section *values* are supplied by the caller, so this is
+  independent of the value formatting tracked as M10-P4-L085 — which means the
+  composition can be pinned now even though indexed locals do not yet exist in
+  the engine. Pinned by
+  `object_list_and_property_dialog_share_edit_cursor_selection_order`.
+  **Still open:** the panel and object-list surfaces (which need the developer
+  window host, M10-P4-L081), the script input's `EMMO_Script` fan-out, and the
+  refresh cadence.
+
 - **File-monitor arming and the external reload trigger landed; the watcher is
   open.** `clonk-engine::developer_file_monitor` ports the two gates.
   A monitor starts only when `Developer.AutoFileReload` is set, the app is
