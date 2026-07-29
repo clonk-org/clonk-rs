@@ -1035,6 +1035,88 @@ fn script_object_menu_overlay_uses_owned_square_and_aspect_fit() {
     assert_eq!(&ranked_picture.pixels()[4 * 4..4 * 5], &[0xff, 0, 0, 0xff]);
 }
 
+/// A Context `ObjectRank` row builds its facet from the menu's live
+/// `GetItemHeight()` - `fctSymbol.Create(H * 2, H)` with the object left and
+/// the rank right - while every other style keeps the add-time
+/// `GetSymbolSize()` (C4Script.cpp:1717-1728; C4Menu.cpp:650-652).
+#[test]
+fn context_object_rank_snapshot_uses_runtime_item_height() {
+    let mut definition = Definition::from_script("OBJC", "Object", "").expect("definition compiles");
+    definition.set_picture(Some(clonk_engine::DefinitionPicture {
+        x: 0,
+        y: 0,
+        width: 2,
+        height: 2,
+    }));
+    definition.set_sprite_image(Some(clonk_engine::DefinitionSpriteImage {
+        width: 2,
+        height: 2,
+        pixels: Arc::from([0xff, 0, 0, 0xff].repeat(4).as_slice()),
+        color_mask: None,
+    }));
+    let mut engine = Engine::new();
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+
+    let item = clonk_engine::ObjectMenuItem {
+        caption: String::new(),
+        info_caption: String::new(),
+        command: String::new(),
+        command2: String::new(),
+        count: 0,
+        item_id: String::new(),
+        symbol: clonk_engine::ObjectMenuSymbol::default(),
+        image: clonk_engine::ObjectMenuImage::ObjectRank {
+            object: ObjectId::new(9),
+        },
+        presentation_definition_id: Some("OBJC".into()),
+        picture_snapshot: Some(clonk_engine::ObjectMenuPictureSnapshot {
+            definition_id: "OBJC".into(),
+            // The add-time GetSymbolSize() a non-Context menu keeps.
+            symbol_size: 4,
+            base_graphics: None,
+            graphics_overlays: Vec::new(),
+            blit_mode: 0,
+            color: 0,
+            color_modulation: 0,
+            picture_rect: clonk_engine::DefinitionRect::default(),
+            rank: None,
+        }),
+        picture_object: None,
+        components: Vec::new(),
+        selectable: false,
+        value: None,
+        text_display_progress: -1,
+    };
+    let snapshot = make_snapshot(Vec::new(), Vec::new());
+    let extent = |style: i32, context_item_height: Option<i32>| {
+        let picture = clonk_app_core::pictures::object_menu_item_picture_with_context_height(
+            &engine,
+            &snapshot,
+            &item,
+            0,
+            &HudGraphics::default(),
+            style,
+            ScriptTextSpecResources::default(),
+            15,
+            context_item_height,
+        )
+        .expect("ObjectRank picture");
+        (picture.width(), picture.height())
+    };
+
+    // Context: the resolved row height wins over the add-time symbol size,
+    // and the facet stays twice as wide as it is tall.
+    assert_eq!(extent(1, Some(16)), (32, 16));
+    assert_eq!(extent(1, Some(9)), (18, 9));
+    // Without a resolved height the add-time size is the fallback.
+    assert_eq!(extent(1, None), (8, 4));
+    // Every other style keeps the square add-time symbol size regardless.
+    assert_eq!(extent(0, Some(16)), (4, 4));
+    assert_eq!(extent(3, Some(16)), (4, 4));
+}
+
 #[test]
 fn script_rank_menu_image_composes_extended_captain_symbol() {
     let mut rank_pixels = Vec::new();

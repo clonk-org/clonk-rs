@@ -335,7 +335,26 @@ pub fn menu_object_rank_picture(
     object_picture: ImageData,
     menu_style: i32,
 ) -> Option<ImageData> {
-    let side = u32::try_from(object.symbol_size.max(1)).ok()?;
+    menu_object_rank_picture_with_item_height(engine, hud, object, object_picture, menu_style, None)
+}
+
+/// A Context row sizes its ObjectRank facet from the menu's live
+/// `GetItemHeight()`, not from `GetSymbolSize()`: `fctSymbol.Create(H * 2, H)`
+/// with the object left and the rank right (C4Script.cpp:1717-1728). Every
+/// other style keeps the add-time symbol size.
+pub fn menu_object_rank_picture_with_item_height(
+    engine: &Engine,
+    hud: &HudGraphics,
+    object: &clonk_engine::ObjectMenuPictureSnapshot,
+    object_picture: ImageData,
+    menu_style: i32,
+    item_height: Option<i32>,
+) -> Option<ImageData> {
+    let resolved = match (menu_style, item_height) {
+        (1, Some(height)) => height,
+        _ => object.symbol_size,
+    };
+    let side = u32::try_from(resolved.max(1)).ok()?;
     let width = if menu_style == 1 {
         side.saturating_mul(2)
     } else {
@@ -804,6 +823,33 @@ pub fn object_menu_item_picture_with_renderer_modes(
     text_spec_resources: ScriptTextSpecResources<'_>,
     allowed_blit_modes: u32,
 ) -> Option<ImageData> {
+    object_menu_item_picture_with_context_height(
+        engine,
+        snapshot,
+        item,
+        definition_color,
+        hud,
+        menu_style,
+        text_spec_resources,
+        allowed_blit_modes,
+        None,
+    )
+}
+
+/// `context_item_height` is the Context menu's resolved `ItemHeight`, which
+/// only the layout knows; it sizes ObjectRank rows (C4Script.cpp:1717-1721).
+#[allow(clippy::too_many_arguments)]
+pub fn object_menu_item_picture_with_context_height(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    item: &clonk_engine::ObjectMenuItem,
+    definition_color: u32,
+    hud: &HudGraphics,
+    menu_style: i32,
+    text_spec_resources: ScriptTextSpecResources<'_>,
+    allowed_blit_modes: u32,
+    context_item_height: Option<i32>,
+) -> Option<ImageData> {
     match &item.image {
         clonk_engine::ObjectMenuImage::None => None,
         clonk_engine::ObjectMenuImage::Object { object } => item
@@ -843,7 +889,14 @@ pub fn object_menu_item_picture_with_renderer_modes(
                     allowed_blit_modes,
                 )
                 .and_then(|object_picture| {
-                    menu_object_rank_picture(engine, hud, picture, object_picture, menu_style)
+                    menu_object_rank_picture_with_item_height(
+                        engine,
+                        hud,
+                        picture,
+                        object_picture,
+                        menu_style,
+                        context_item_height,
+                    )
                 })
             })
             .or_else(|| {

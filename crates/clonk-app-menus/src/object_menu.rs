@@ -41,6 +41,13 @@ const MODE_HINT: &str = "Press ←/→ to switch menus";
 const CLASSIC_ITEM_SIZE: i32 = 35;
 const CLASSIC_FRAME_WIDTH: i32 = 2;
 const CLASSIC_COMMAND_HEIGHT: i32 = 16;
+
+/// `C4Menu::InitLocation`'s Context row height: `max(C4MN_SymbolSize,
+/// FontRegular.GetLineHeight())` (C4Menu.cpp:650-652). ObjectRank rows size
+/// their facet from it (C4Script.cpp:1721).
+pub fn classic_context_item_height(font_line_height: i32) -> i32 {
+    font_line_height.max(CLASSIC_COMMAND_HEIGHT).max(1)
+}
 const CLASSIC_SCROLLBAR_WIDTH: i32 = 16;
 const CLASSIC_TITLE_HEIGHT: i32 = 23;
 const CLASSIC_INFO_DEFAULT_WIDTH: i32 = 270;
@@ -1708,7 +1715,7 @@ fn engine_script_menu_layout_impl(
     let columns = menu.columns.max(1);
     let (item_width, item_height) = match menu.style {
         1 => {
-            let item_height = font.line_height().max(CLASSIC_COMMAND_HEIGHT);
+            let item_height = classic_context_item_height(font.line_height());
             let title = engine_script_presentation_text(&menu.caption);
             let title_width = text_spec_width(font, &title, font_images)
                 .saturating_add(item_height)

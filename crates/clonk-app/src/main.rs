@@ -124,8 +124,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use clonk_app_core::pictures::{
     apply_definition_owner_color, definition_menu_picture, inventory_object_picture_layers,
-    object_menu_item_picture_with_renderer_modes, resolve_portrait_text_spec,
-    resolve_script_font_image, ScriptTextSpecResources,
+    resolve_portrait_text_spec, resolve_script_font_image, ScriptTextSpecResources,
 };
 use clonk_app_core::{
     AppMode, ClassicGameLobbyBoundary, ClassicGameLobbyChild, ClassicGuiBootstrapIssue,
