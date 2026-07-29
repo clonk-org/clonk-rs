@@ -18277,6 +18277,114 @@ fn l174_client_info_ack_marker_needs_a_host_and_an_unready_net_client() {
     );
 }
 
+// `/netgetscen` copies the transferred scenario resource next to the
+// executable, and only for a non-host network client outside the lobby - the
+// lobby uses its Resources tab instead. Every other state, and every failure
+// along the way, is C++'s `return false`, which surfaces as the ordinary
+// unknown-command error (src/C4MessageInput.cpp:527-545).
+#[test]
+fn running_chat_netgetscen_saves_client_scenario_resource_like_cpp() {
+    let transfer = tempdir().expect("resource transfer folder");
+    let source = transfer.path().join("Transferred.c4s");
+    fs::write(&source, b"packed scenario bytes").expect("write transferred scenario");
+
+    // The sandbox app boots against the repository install root; only the
+    // netgetscen destination is redirected afterwards.
+    let mut app = new_classic_running_sandbox_app();
+    // AppPaths::discover validates planet/System.c4g, so the redirected root
+    // gets a minimal one; only the install root matters to netgetscen.
+    let install_root = tempdir().expect("install root");
+    let user_data = tempdir().expect("user data");
+    fs::create_dir_all(install_root.path().join("planet/System.c4g"))
+        .expect("minimal system group");
+    let _guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(install_root.path())),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+    ]);
+    app.app_paths = Some(AppPaths::discover().expect("discover isolated app paths"));
+    let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+
+    let host_config = clonk_network::HostConfig::default();
+    let mut snapshot = host_config
+        .initial_join_snapshot
+        .expect("default host publishes JoinData");
+    snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Scenario as u8,
+        id: 9,
+        loadable: true,
+        filename: LegacyCString::from_bytes(b"Scenarios/Remote.c4s".to_vec()).unwrap(),
+        ..Default::default()
+    };
+    app.pending_network_join_data = Some(clonk_network::JoinDataEnvelope {
+        client_id: 7,
+        start_control_tick: 0,
+        status: host_config.initial_status,
+        dynamic: snapshot.dynamic,
+        parameters: snapshot.parameters,
+    });
+
+    // The resource has not arrived yet: C++ returns false and the command is
+    // reported as unknown.
+    assert!(app.save_joined_scenario_resource().is_none());
+
+    app.admission_resources.resources.insert(
+        9,
+        AdmissionResourceState::Complete {
+            path: source.clone(),
+            removed: false,
+            local: false,
+        },
+    );
+
+    // `Game.Network.isHost()` is client-id based, so the host - which already
+    // owns the file - never gets the command.
+    let (host_network, _host_events) = NetworkManager::test_stub_for_client_id(0);
+    app.network = Some(host_network);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+    app.process_running_chat_text("/netgetscen");
+    assert!(
+        !install_root.path().join("Remote.c4s").exists(),
+        "the network host has the resource already"
+    );
+
+    let (client_network, _client_events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(client_network);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.process_running_chat_text("/netgetscen");
+
+    // Saved under the scenario's own base name, next to the executable, not
+    // under the resource's transfer name.
+    let destination = install_root.path().join("Remote.c4s");
+    assert_eq!(
+        fs::read(&destination).expect("saved scenario"),
+        b"packed scenario bytes"
+    );
+
+    // CreateItem erases an existing target first, so a repeat overwrites and
+    // succeeds (src/C4Group.cpp:147; src/StdFile.cpp:660-670).
+    fs::write(&source, b"newer scenario bytes").expect("rewrite transferred scenario");
+    assert_eq!(
+        app.save_joined_scenario_resource().as_deref(),
+        Some(destination.as_path())
+    );
+    assert_eq!(
+        fs::read(&destination).expect("overwritten scenario"),
+        b"newer scenario bytes"
+    );
+}
+
 #[test]
 fn runtime_client_list_maps_native_lifecycle_readiness_and_wait() {
     use clonk_frontend::runtime_client_list::RuntimeClientStatusIcon;

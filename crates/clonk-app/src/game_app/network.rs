@@ -3483,6 +3483,35 @@ impl GameApp {
         Ok(())
     }
 
+    /// `/netgetscen`'s body (src/C4MessageInput.cpp:530-543): resolve the
+    /// scenario's `C4Network2Res`, copy its transferred file to
+    /// `Config.AtExePath(GetFilename(Game.ScenarioFilename))` and return that
+    /// destination. Every missing link and the copy failure itself return
+    /// `None`, which is C++'s `return false`.
+    pub(crate) fn save_joined_scenario_resource(&self) -> Option<PathBuf> {
+        let join = self.pending_network_join_data.as_ref()?;
+        let source = self
+            .admission_resources
+            .complete_path(join.parameters.scenario.id)?
+            .to_path_buf();
+        // GetFilename(Game.ScenarioFilename) is the scenario's own base name,
+        // not the resource file's temporary transfer name.
+        let filename = path_from_group_name_bytes(join.parameters.scenario.filename.as_bytes());
+        let filename = filename.file_name()?;
+        let destination = self.app_paths.as_ref()?.install_root().join(filename);
+        // `C4Group_CopyItem` copies a packed group as a file and an unpacked
+        // one recursively, and `CreateItem` erases any existing target first
+        // (src/C4Group.cpp:133-147; src/StdFile.cpp:660-670), so a repeated
+        // command overwrites rather than failing.
+        erase_item(&destination);
+        copy_file_or_directory(&source, &destination)
+            .map_err(|error| {
+                tracing::warn!(%error, source = %source.display(), destination = %destination.display(), "netgetscen copy failed");
+            })
+            .ok()?;
+        Some(destination)
+    }
+
     pub(crate) fn append_running_command_resource(&mut self, key: &str, fallback: &str) {
         let message = self.runtime_resource_text(key, fallback);
         self.append_control_message_log(message, CONTROL_LOG_COLOR, None);

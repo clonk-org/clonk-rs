@@ -357,6 +357,28 @@ impl GameApp {
                 }
                 self.toggle_network_chart();
             }
+            // `netgetscen` copies the transferred scenario resource next to the
+            // executable, and only for a non-host network client outside the
+            // lobby - the lobby has its Resources tab for this
+            // (src/C4MessageInput.cpp:527-545). Every other state, and every
+            // failure along the way, returns false so the caller emits the
+            // ordinary unknown-command error.
+            b"netgetscen" => {
+                if self.network.is_none() || network_host || self.control_message_has_lobby() {
+                    return Ok(false);
+                }
+                let Some(destination) = self.save_joined_scenario_resource() else {
+                    return Ok(false);
+                };
+                let message = format_resource_string(
+                    self.runtime_resource_text(
+                        "IDS_MSG_CMD_NETGETSCEN_SAVED",
+                        "Got it! Saved to %s",
+                    ),
+                    &[&destination.to_string_lossy()],
+                );
+                self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
+            }
             _ => {
                 if !game_running {
                     return Ok(false);

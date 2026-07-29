@@ -3709,7 +3709,20 @@ pub(crate) fn remove_file_or_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-fn copy_file_or_directory(source: &Path, destination: &Path) -> io::Result<()> {
+/// `EraseItem` (src/StdFile.cpp:642-658): remove an existing target of either
+/// kind, ignoring a target that was not there.
+pub(crate) fn erase_item(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    let _ = if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+}
+
+pub(crate) fn copy_file_or_directory(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
