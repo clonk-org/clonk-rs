@@ -678,7 +678,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   **every particle in the system**, not just that definition's, then deletes the
   definition. Pinned by
   `external_reload_routes_by_definition_and_clears_particles_on_failure`.
-  **Still open:** the reload itself — retaining source provenance through
+  `C4DefList::Reload`'s sequence is ported as well, and its order is
+  load-bearing in three places. `SortByID` rebuilds the quick-access table
+  **before** the relink, so the relink sees the definition at its final
+  position; `ReLink` runs **before** graphics are restored and "will also do
+  include callbacks", so a script inspecting graphics from an include callback
+  sees the *backed-up* set, not the reloaded one; and graphics are restored last
+  via `AssignUpdate`, which remaps live pointers rather than reassigning. On any
+  early return — the group failing to open, or `Load` failing — the graphics
+  backup's destructor resets every graphic to default, and `Clear` deliberately
+  keeps the filename, which is what lets the reload re-open the group it came
+  from. Pinned by `definition_reload_relinks_before_restoring_graphics`.
+  **Still open:** the reload's body — retaining source provenance through
   production loading and rebuilding DefCore, ActMap, scripts, graphics,
   portraits, ranks and localised components in place — and the file watcher that
   feeds it.

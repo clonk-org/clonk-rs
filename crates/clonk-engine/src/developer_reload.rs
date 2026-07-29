@@ -93,6 +93,71 @@ fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str>
         .then(|| &value[prefix.len()..])
 }
 
+/// One step of `C4DefList::Reload` (`C4Def.cpp`), in call order.
+///
+/// The sequence is load-bearing in three places a rewrite tends to reorder:
+///
+/// - `SortByID` rebuilds the quick-access table **before** the relink, so the
+///   relink sees the definition at its final position.
+/// - `ReLink` runs **before** graphics are restored, and it "will also do
+///   include callbacks" — so a script that inspects graphics during an include
+///   callback sees the *backed-up* set, not the reloaded one.
+/// - Graphics are restored last, by `C4DefGraphicsPtrBackup::AssignUpdate`,
+///   which remaps live pointers rather than reassigning wholesale.
+///
+/// Failure is guarded by the backup's destructor: if the group cannot be opened
+/// or `Load` fails, every graphic is reset to default on the way out. And
+/// `Clear` deliberately **keeps the filename** ("Assume filename is being
+/// kept"), which is what lets the reload re-open the same group it came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DefinitionReloadStep {
+    /// `C4DefGraphicsPtrBackup GfxBackup(&pDef->Graphics)`.
+    BackUpGraphics,
+    /// `pDef->Clear()` — the filename survives.
+    ClearKeepingFilename,
+    /// `hGroup.Open(pDef->Filename)`.
+    OpenGroup,
+    /// `pDef->Load(hGroup, dwLoadWhat, szLanguage, pSoundSystem)`.
+    Load,
+    /// `SortByID()`.
+    SortById,
+    /// `Game.ScriptEngine.ReLink(this)`, include callbacks and all.
+    RelinkScripts,
+    /// `GfxBackup.AssignUpdate(&pDef->Graphics)`.
+    RestoreGraphics,
+}
+
+/// `C4DefList::Reload`'s full sequence.
+pub const DEFINITION_RELOAD_STEPS: [DefinitionReloadStep; 7] = [
+    DefinitionReloadStep::BackUpGraphics,
+    DefinitionReloadStep::ClearKeepingFilename,
+    DefinitionReloadStep::OpenGroup,
+    DefinitionReloadStep::Load,
+    DefinitionReloadStep::SortById,
+    DefinitionReloadStep::RelinkScripts,
+    DefinitionReloadStep::RestoreGraphics,
+];
+
+/// The steps that actually run, given where the reload stopped.
+///
+/// `opened` is `hGroup.Open`, `loaded` is `pDef->Load`. Either failing returns
+/// early — the remaining steps do not run, and the graphics backup's destructor
+/// resets every graphic to default.
+pub fn definition_reload_steps(opened: bool, loaded: bool) -> Vec<DefinitionReloadStep> {
+    let taken = match (opened, loaded) {
+        (false, _) => 3,
+        (true, false) => 4,
+        (true, true) => DEFINITION_RELOAD_STEPS.len(),
+    };
+    DEFINITION_RELOAD_STEPS[..taken].to_vec()
+}
+
+/// Whether a stopped reload must reset graphics to default — the backup
+/// destructor's job on every early return.
+pub fn definition_reload_resets_graphics(opened: bool, loaded: bool) -> bool {
+    !(opened && loaded)
+}
+
 /// Where a changed file's reload goes (`C4Game::ReloadFile`, `C4Game.cpp:2306`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChangedFileRoute {
@@ -396,6 +461,45 @@ mod tests {
                 remove_definition: true,
             }
         );
+    }
+
+    // C4DefList::Reload — the order, and the failure guard.
+    #[test]
+    fn definition_reload_relinks_before_restoring_graphics() {
+        use DefinitionReloadStep::*;
+        let full = definition_reload_steps(true, true);
+        assert_eq!(full, DEFINITION_RELOAD_STEPS.to_vec());
+
+        let at = |step: DefinitionReloadStep| full.iter().position(|held| *held == step).unwrap();
+        // The table is rebuilt before the relink, so the relink sees the
+        // definition at its final position...
+        assert!(at(SortById) < at(RelinkScripts));
+        // ...and the relink — which also runs include callbacks — happens
+        // BEFORE graphics are restored, so those callbacks see the backed-up
+        // graphics, not the reloaded ones.
+        assert!(at(RelinkScripts) < at(RestoreGraphics));
+        // Clear keeps the filename, which is what the re-open depends on.
+        assert!(at(ClearKeepingFilename) < at(OpenGroup));
+        assert!(at(BackUpGraphics) < at(ClearKeepingFilename));
+
+        // A group that will not open stops after Clear; nothing is sorted,
+        // relinked or restored, and graphics fall back to default.
+        assert_eq!(
+            definition_reload_steps(false, false),
+            vec![BackUpGraphics, ClearKeepingFilename, OpenGroup]
+        );
+        assert!(definition_reload_resets_graphics(false, false));
+
+        // A failed Load stops one step later, with the same guarantee — the
+        // definition is left cleared, which is why the caller removes it.
+        assert_eq!(
+            definition_reload_steps(true, false),
+            vec![BackUpGraphics, ClearKeepingFilename, OpenGroup, Load]
+        );
+        assert!(definition_reload_resets_graphics(true, false));
+
+        // Only a complete reload keeps the reloaded graphics.
+        assert!(!definition_reload_resets_graphics(true, true));
     }
 
     // C4Game::ReloadFile and C4Game::ReloadParticle — the watcher's dispatch
