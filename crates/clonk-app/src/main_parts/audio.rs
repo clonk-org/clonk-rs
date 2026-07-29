@@ -5764,8 +5764,12 @@ pub(crate) fn extract_default_startup_portraits_once(paths: &AppPaths) {
         return;
     }
 
-    if let Err(error) = fs::create_dir_all(paths.user_data_dir()) {
-        tracing::warn!(%error, path = %paths.user_data_dir().display(), "failed to create portrait directory");
+    // `C4FileSelDlg` extracts these through `Config.AtUserPath`
+    // (C4FileSelDlg.cpp:614-622), which re-expands `General.UserPath` on every
+    // call rather than using a root cached at startup.
+    let user_root = paths.at_user_path("");
+    if let Err(error) = fs::create_dir_all(&user_root) {
+        tracing::warn!(%error, path = %user_root.display(), "failed to create portrait directory");
     } else {
         match main_graphics_group(paths) {
             Ok(graphics) => {
@@ -5774,7 +5778,7 @@ pub(crate) fn extract_default_startup_portraits_once(paths: &AppPaths) {
                         .read_file(source)
                         .map_err(|error| error.to_string())
                         .and_then(|bytes| {
-                            fs::write(paths.user_data_dir().join(destination), bytes)
+                            fs::write(paths.at_user_path(destination), bytes)
                                 .map_err(|error| error.to_string())
                         });
                     if let Err(error) = result {

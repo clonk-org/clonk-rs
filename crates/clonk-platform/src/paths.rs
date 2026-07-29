@@ -126,6 +126,25 @@ impl AppPaths {
         &self.system_group
     }
 
+    /// `C4Config::AtUserPath` (`C4Config.cpp:1351-1357`): resolve `filename`
+    /// against `General.UserPath`, **re-reading and re-expanding it on every
+    /// call**. C++ never caches this, so a `UserPath` or environment change
+    /// made while the game runs moves later lookups.
+    ///
+    /// [`Self::user_data_dir`] is the cached counterpart, resolved once at
+    /// discovery — use it for anything that must stay put for the session
+    /// (the session log, the cache), and this for the paths C++ resolves
+    /// through `AtUserPath`.
+    pub fn at_user_path(&self, filename: &str) -> PathBuf {
+        let root = discover_configured_user_data_dir(&self.config_file, &self.install_root)
+            .unwrap_or_else(|| self.user_data_dir.clone());
+        if filename.is_empty() {
+            root
+        } else {
+            root.join(filename)
+        }
+    }
+
     pub fn user_data_dir(&self) -> &Path {
         &self.user_data_dir
     }
@@ -987,6 +1006,59 @@ mod tests {
 
         assert_eq!(paths.config_file(), explicit_file);
         assert!(explicit_file.parent().unwrap().is_dir());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    // C4Config.cpp:1351-1357 — `AtUserPath` re-reads `General.UserPath` and
+    // re-expands the environment on every call, so a change made while the game
+    // runs moves later lookups. `user_data_dir()` stays where discovery put it.
+    #[test]
+    fn at_user_path_reexpands_live_user_path_and_environment() {
+        let install_dir = TempDir::new().unwrap();
+        touch_system_group(&install_dir);
+        let home_dir = TempDir::new().unwrap();
+        let config_dir = TempDir::new().unwrap();
+        let config_file = config_dir.path().join("clonk.config");
+        fs::write(&config_file, "[General]\nUserPath=\"$HOME/First\"\n").unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", None),
+            ("LC_CONFIG_FILE", Some(config_file.as_path())),
+            ("LC_CACHE_DIR", None),
+            ("LC_LOGS_DIR", None),
+            ("HOME", Some(home_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover_with_config_file(None).unwrap();
+        let first = home_dir.path().join("First");
+        assert_eq!(paths.user_data_dir(), first);
+        // An empty filename yields the root itself, like `AtUserPath("")`
+        // (C4Config.cpp:1337).
+        assert_eq!(paths.at_user_path(""), first);
+        assert_eq!(paths.at_user_path("Clonk.png"), first.join("Clonk.png"));
+
+        // The config changes while the game runs.
+        fs::write(&config_file, "[General]\nUserPath=\"$HOME/Second\"\n").unwrap();
+        let second = home_dir.path().join("Second");
+        assert_eq!(
+            paths.at_user_path("Clonk.png"),
+            second.join("Clonk.png"),
+            "AtUserPath must re-read UserPath rather than cache it"
+        );
+        // The cached root is deliberately unmoved: the session log and cache
+        // stay where discovery put them.
+        assert_eq!(paths.user_data_dir(), first);
+
+        // The environment is re-expanded too, not just the config text. The
+        // guard above already holds the env lock and captured HOME, so it is
+        // set directly here and restored on drop — a second EnvGuard would
+        // deadlock on the same static mutex.
+        let moved_home = TempDir::new().unwrap();
+        std::env::set_var("HOME", moved_home.path());
+        assert_eq!(
+            paths.at_user_path("Clonk.png"),
+            moved_home.path().join("Second").join("Clonk.png")
+        );
     }
 
     #[cfg(not(target_os = "windows"))]

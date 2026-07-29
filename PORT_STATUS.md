@@ -425,6 +425,22 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Live `UserPath` re-expansion.** `AppPaths` resolved
+  `General.UserPath` once at discovery and cached everything derived from it,
+  while `C4Config::AtUserPath` re-reads and re-expands on **every** call
+  (`C4Config.cpp:1351-1357`), so a `UserPath` or environment change made while
+  the game runs moves later lookups in C++ but not here.
+  `AppPaths::at_user_path` now mirrors that. **Blast radius is two C++ files,
+  not the whole path system** — an earlier note on this ticket implied
+  otherwise. `AtUserPath` is called only from the startup directory creation
+  (:1337-1338, once, so re-expansion is unobservable) and from
+  `C4FileSelDlg`'s default-portrait extraction (`C4FileSelDlg.cpp:614-622`).
+  The port's counterpart, `extract_default_startup_portraits_once`, was the one
+  real consumer and now goes through `at_user_path`. `user_data_dir()` stays
+  cached deliberately: the session log and cache must not move mid-session.
+  Pinned by `at_user_path_reexpands_live_user_path_and_environment`, which
+  changes both the config text and `$HOME` after discovery.
+
 - Closed 2026-07-29: **Developer ordered edit selection.** The engine retained
   only a single hovered `edit_cursor_target`, so nothing owned the ordered
   selection the edit cursor, property panel and object tree share.
