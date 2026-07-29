@@ -93,6 +93,32 @@ fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str>
         .then(|| &value[prefix.len()..])
 }
 
+/// `C4D_Load_*` — which parts of a definition a load or reload covers
+/// (`C4Def.h:119-130`).
+pub mod load_what {
+    pub const NONE: u32 = 0;
+    pub const PICTURE: u32 = 1;
+    pub const BITMAP: u32 = 2;
+    pub const SCRIPT: u32 = 4;
+    pub const DESC: u32 = 8;
+    pub const ACT_MAP: u32 = 16;
+    pub const IMAGE: u32 = 32;
+    pub const SOUNDS: u32 = 64;
+    pub const CLONK_NAMES: u32 = 128;
+    pub const RANK_NAMES: u32 = 256;
+    pub const RANK_FACES: u32 = 512;
+
+    /// `C4D_Load_RX` — the default `C4Game::ReloadDef` uses
+    /// (`C4Game.h:225`).
+    ///
+    /// Note what it leaves out: **`PICTURE` and `IMAGE` are not included**, so a
+    /// console reload deliberately does not rebuild the definition's picture or
+    /// image facets. Reloading them as well would look like a harmless
+    /// completeness fix and would diverge.
+    pub const RX: u32 =
+        BITMAP | SCRIPT | CLONK_NAMES | DESC | ACT_MAP | SOUNDS | RANK_NAMES | RANK_FACES;
+}
+
 /// One step of `C4DefList::Reload` (`C4Def.cpp`), in call order.
 ///
 /// The sequence is load-bearing in three places a rewrite tends to reorder:
@@ -500,6 +526,29 @@ mod tests {
 
         // Only a complete reload keeps the reloaded graphics.
         assert!(!definition_reload_resets_graphics(true, true));
+
+        // C4Def.h:119-130 / C4Game.h:225 — the console reload's flag set.
+        use load_what::*;
+        assert_eq!(RX, 2 | 4 | 128 | 8 | 16 | 64 | 256 | 512);
+        assert_eq!(RX, 990);
+        // The omissions are the point: a console reload rebuilds neither the
+        // picture nor the image facet.
+        assert_eq!(RX & PICTURE, 0, "C4D_Load_RX excludes Picture");
+        assert_eq!(RX & IMAGE, 0, "C4D_Load_RX excludes Image");
+        // Everything else is in.
+        for included in [
+            BITMAP,
+            SCRIPT,
+            DESC,
+            ACT_MAP,
+            SOUNDS,
+            CLONK_NAMES,
+            RANK_NAMES,
+            RANK_FACES,
+        ] {
+            assert_eq!(RX & included, included);
+        }
+        assert_eq!(NONE, 0);
     }
 
     // C4Game::ReloadFile and C4Game::ReloadParticle — the watcher's dispatch
