@@ -643,7 +643,6 @@ pub struct NetDlgChatStrings {
     pub real_name: String,
     pub channel: String,
     pub connect: String,
-    pub no_message: String,
     pub not_connected_error: String,
     /// Use `{command}` for the command name.
     pub insufficient_parameters: String,
@@ -698,10 +697,9 @@ impl Default for NetDlgChatStrings {
             real_name: "Real name:".into(),
             channel: "Channel:".into(),
             connect: "Connect".into(),
-            no_message: "No message entered".into(),
             not_connected_error: "Not connected to a server".into(),
             insufficient_parameters: "Insufficient parameters for /{command}".into(),
-            invalid_nick: "Invalid nickname".into(),
+            invalid_nick: "/{command}: invalid nick name".into(),
             unknown_command: "Unknown command: {command}".into(),
             not_on_channel: "Not on a channel".into(),
             connecting: "Connecting to %s at %s".into(),
@@ -1340,6 +1338,9 @@ pub struct NetDlgController {
     /// NetDlg's embedded chat group.
     chat_bounds_override: Option<IntRect>,
     chat_server: String,
+    /// Sheet a still-unreported send was submitted from, so the transport's
+    /// asynchronous error lands where `ProcessInput` would have put it.
+    chat_send_error_origin: Option<(NetDlgChatSheetKind, String)>,
     chat_login_edits: [NetDlgEditState; 4],
     chat_login_field: NetDlgChatLoginField,
     chat_connect_focused: bool,
@@ -1467,6 +1468,7 @@ impl NetDlgController {
             chat_strings: NetDlgChatStrings::default(),
             chat_bounds_override: None,
             chat_server: login.server.clone(),
+            chat_send_error_origin: None,
             chat_login_edits,
             chat_login_field: NetDlgChatLoginField::Nick,
             chat_connect_focused: false,
@@ -1956,8 +1958,17 @@ impl NetDlgController {
                 kind: NetDlgChatLineKind::Error,
                 text: format!("Error: {error}"),
             };
-            if sheets[0].lines.last() != Some(&line) {
-                Self::append_chat_line(&mut sheets[0], line, selected == 0);
+            let target = self
+                .chat_send_error_origin
+                .take()
+                .and_then(|(kind, ident)| {
+                    sheets.iter().position(|sheet| {
+                        sheet.kind == kind && sheet.ident.eq_ignore_ascii_case(&ident)
+                    })
+                })
+                .unwrap_or(0);
+            if sheets[target].lines.last() != Some(&line) {
+                Self::append_chat_line(&mut sheets[target], line, target == selected);
             }
         }
 
@@ -3927,8 +3938,10 @@ impl NetDlgController {
         self.chat_edit.set_text("");
         self.chat_history_index = None;
         if input.is_empty() {
-            let error = self.chat_strings.no_message.clone();
-            return (self.chat_error(error), false);
+            // `OnChatInput` answers empty submission with `DoError(nullptr)`,
+            // which sounds without adding a line and never reaches
+            // `ProcessInput` or the back buffer (C4ChatDlg.cpp:254-259,329-336).
+            return (vec![NetDlgAction::GuiSound(NetDlgSound::Error)], false);
         }
         self.store_chat_history(&input);
         let mut actions = vec![NetDlgAction::ChatHistoryStored(input.clone())];
@@ -3942,11 +3955,10 @@ impl NetDlgController {
         let parsed: Result<(NetDlgChatCommand, bool), String> =
             if input.starts_with('/') && !input[1..].to_ascii_lowercase().starts_with("me ") {
                 let command_line = &input[1..];
-                let (name, parameter) = command_line
-                    .split_once(' ')
-                    .map_or((command_line, ""), |(name, parameter)| {
-                        (name, parameter.trim_start())
-                    });
+                // `SplitAtChar` cuts at the first delimiter only and takes the
+                // remainder verbatim, so parameter spacing survives
+                // (StdBuf.h:579-588).
+                let (name, parameter) = command_line.split_once(' ').unwrap_or((command_line, ""));
                 match name.to_ascii_lowercase().as_str() {
                     "quit" => Ok((
                         NetDlgChatCommand::Quit {
@@ -4060,7 +4072,10 @@ impl NetDlgController {
                         },
                         false,
                     )),
-                    "nick" => Err(self.chat_strings.invalid_nick.clone()),
+                    "nick" => Err(Self::chat_string_command(
+                        &self.chat_strings.invalid_nick,
+                        name,
+                    )),
                     _ => Err(Self::chat_string_command(
                         &self.chat_strings.unknown_command,
                         name,
@@ -4095,6 +4110,14 @@ impl NetDlgController {
             };
         match parsed {
             Ok((command, abort_paste)) => {
+                // `ProcessInput` reports a failed send on the sheet it was
+                // handed (C4ChatDlg.cpp:1014-1017). The port sends
+                // asynchronously, so the origin is retained until the
+                // transport's error reaches the next snapshot.
+                self.chat_send_error_origin = self
+                    .chat_sheets
+                    .get(self.chat_active_sheet)
+                    .map(|sheet| (sheet.kind, sheet.ident.clone()));
                 actions.push(NetDlgAction::ChatCommand(command));
                 (actions, abort_paste)
             }
@@ -8999,6 +9022,96 @@ mod tests {
                     channel: "#clonken".into(),
                 }),
             ]
+        );
+    }
+
+    /// `OnChatInput` answers empty submission with `DoError(nullptr)`, which is
+    /// sound-only (C4ChatDlg.cpp:250-273,329-336). `SplitAtChar` keeps every
+    /// character after the first delimiter (StdBuf.h:579-588), the invalid-nick
+    /// error carries its command token, and a failed send is reported on the
+    /// originating sheet rather than Server (C4ChatDlg.cpp:899-1018).
+    #[test]
+    fn irc_process_input_errors_spacing_and_send_failure_match_cpp() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            Vec::new(),
+            0,
+        ));
+        controller.force_chat_mode_and_focus();
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel sheet");
+        controller.select_chat_sheet(channel);
+
+        // Empty submission sounds without a transcript line or a history entry.
+        controller.handle_key_down(KeyCode::Up);
+        let before = controller.chat_sheets()[channel].lines.clone();
+        let actions = controller.submit_chat_input();
+        assert_eq!(actions, vec![NetDlgAction::GuiSound(NetDlgSound::Error)]);
+        assert_eq!(controller.chat_sheets()[channel].lines, before);
+        assert!(controller.chat_history().is_empty());
+        assert_eq!(controller.chat_input(), "");
+
+        // Everything after the first delimiter survives verbatim.
+        controller.handle_text_input("/ns  identify   secret ", text_font());
+        let actions = controller.submit_chat_input();
+        assert!(
+            actions.contains(&NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
+                target: "NickServ".into(),
+                text: " identify   secret ".into(),
+            })),
+            "{actions:?}"
+        );
+        controller.handle_text_input("/raw PRIVMSG #clonken  :two  spaces", text_font());
+        let actions = controller.submit_chat_input();
+        assert!(
+            actions.contains(&NetDlgAction::ChatCommand(NetDlgChatCommand::Raw(
+                "PRIVMSG #clonken  :two  spaces".into()
+            ))),
+            "{actions:?}"
+        );
+
+        // The invalid-nick error carries the command token like IDS_ERR_INVALIDNICKNAME2.
+        controller.handle_text_input("/nick bad nick", text_font());
+        controller.submit_chat_input();
+        assert_eq!(
+            controller.chat_sheets()[channel]
+                .lines
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("/nick: invalid nick name")
+        );
+
+        // A queued send that fails reports on the sheet it was typed into.
+        controller.handle_text_input("hello", text_font());
+        controller.submit_chat_input();
+        let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
+        snapshot.last_error = Some("Send failed".into());
+        controller.sync_chat_snapshot(snapshot);
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel sheet");
+        assert!(
+            controller.chat_sheets()[channel]
+                .lines
+                .iter()
+                .any(|line| line.text.contains("Send failed")),
+            "{:?}",
+            controller.chat_sheets()[channel].lines
+        );
+        assert!(
+            !controller.chat_sheets()[0]
+                .lines
+                .iter()
+                .any(|line| line.text.contains("Send failed")),
+            "{:?}",
+            controller.chat_sheets()[0].lines
         );
     }
 

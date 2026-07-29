@@ -1190,7 +1190,6 @@ impl GameApp {
             real_name: self.runtime_resource_text("IDS_CTL_REALNAME", "Real name:"),
             channel: self.runtime_resource_text("IDS_CTL_CHANNEL", "Channel:"),
             connect: self.runtime_resource_text("IDS_BTN_CONNECT", "Connect"),
-            no_message: "No message entered".to_string(),
             not_connected_error: self
                 .runtime_resource_text("IDS_ERR_NOTCONNECTEDTOSERVER", "Not connected to server."),
             insufficient_parameters: command_template(
