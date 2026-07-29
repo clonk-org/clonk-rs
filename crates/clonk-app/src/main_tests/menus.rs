@@ -3007,6 +3007,77 @@
         }
     }
 
+    /// `Dialog::KeyHotkey` is registered for both `KEYS_Alt` and
+    /// `KEYS_Alt | KEYS_Shift` on every dialog, so the network browser's
+    /// advertised mnemonics activate exactly like the main menu's
+    /// (src/C4GuiDialogs.cpp:363-364,574-582; src/C4GuiButton.cpp:73-79).
+    #[test]
+    fn netdlg_alt_mnemonics_activate_visible_buttons() {
+        let mut app = new_real_classic_menu_app(640, 480);
+        app.open_network_game_dialog();
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        let signup = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .masterserver_signup();
+
+        // Alt+I toggles Internet; Alt+Shift+R toggles Record.
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::I, ElementState::Pressed)
+            .expect("dispatch the Internet mnemonic");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .masterserver_signup(),
+            !signup
+        );
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
+            .expect("hold Alt+Shift");
+        app.handle_key(VirtualKeyCode::I, ElementState::Pressed)
+            .expect("the shifted Alt form dispatches the same mnemonic");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .masterserver_signup(),
+            signup
+        );
+
+        // Alt+C reaches the Chat tab; there Refresh and Join are not drawn, so
+        // their mnemonics are inert while New game still activates.
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("dispatch the Chat mnemonic");
+        assert!(app
+            .startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .is_chat_mode());
+        app.handle_key(VirtualKeyCode::D, ElementState::Pressed)
+            .expect("a hidden Reload button does not activate");
+        app.handle_key(VirtualKeyCode::J, ElementState::Pressed)
+            .expect("a hidden Join button does not activate");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        app.handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("dispatch the Games mnemonic");
+        assert!(!app
+            .startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .is_chat_mode());
+
+        // A covering modal owns the keyboard, so the dialog beneath is inert.
+        app.handle_game_over()
+            .expect("forge a covering evaluation dialog");
+        app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+            .expect("the exclusive owner swallows the mnemonic");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+    }
+
     #[test]
     fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
         let mut app = new_real_classic_menu_app(640, 480);

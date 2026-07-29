@@ -482,6 +482,7 @@ impl GameApp {
                     | StartupView::PlayerSelection
                     | StartupView::Options
                     | StartupView::About
+                    | StartupView::NetworkGame
             )
         {
             return Ok(false);
@@ -552,6 +553,17 @@ impl GameApp {
                 };
                 // See the Button::OnHotkey sound rule above.
                 self.process_about_dialog_actions_with_sound(actions, false)?;
+                true
+            }
+            StartupView::NetworkGame => {
+                let Some(actions) = self
+                    .startup_network_dialog
+                    .as_mut()
+                    .and_then(|dialog| dialog.handle_hotkey(character))
+                else {
+                    return Ok(suppress_plain_gui_key);
+                };
+                self.process_network_dialog_actions(actions)?;
                 true
             }
             _ => unreachable!("startup mnemonic view checked above"),

@@ -2234,6 +2234,16 @@ impl NetDlgController {
         self.max_list_scroll(&self.layout())
     }
 
+    /// Whether the Chat tab is shown, which decides button visibility exactly
+    /// like `C4StartupNetDlg::UpdateCollapsed`.
+    pub fn is_chat_mode(&self) -> bool {
+        self.mode == NetDlgMode::Chat
+    }
+
+    pub fn masterserver_signup(&self) -> bool {
+        self.config.masterserver_signup
+    }
+
     pub fn list_is_collapsed(&self) -> bool {
         self.list_is_collapsed_with_font(&self.layout(), self.text_font.as_ref())
     }
@@ -4159,6 +4169,46 @@ impl NetDlgController {
                 _ => None,
             }
         })
+    }
+
+    /// Captions the dialog advertises, in `C4StartupNetDlg`'s construction
+    /// order (C4StartupNetDlg.cpp:651-728). `Back` carries no marker.
+    const HOTKEY_CAPTIONS: [(NetDlgControl, &'static str); 8] = [
+        (NetDlgControl::GamesButton, "&Games"),
+        (NetDlgControl::ChatButton, "&Chat"),
+        (NetDlgControl::Internet, "&Internet"),
+        (NetDlgControl::Record, "&Record"),
+        (NetDlgControl::Back, "Back"),
+        (NetDlgControl::Refresh, "Reloa&d"),
+        (NetDlgControl::JoinGame, "&Join game"),
+        (NetDlgControl::CreateGame, "&New game"),
+    ];
+
+    /// `Dialog::OnHotkey` walks the visible elements and lets the first
+    /// matching enabled `Button` press itself (C4GuiButton.cpp:73-79). Chat
+    /// mode removes Internet, Record, Reload and Join from the dialog, so
+    /// their markers cannot fire.
+    pub fn handle_hotkey(&mut self, character: char) -> Option<Vec<NetDlgAction>> {
+        let character = character.to_ascii_uppercase();
+        if !character.is_ascii_alphanumeric() {
+            return None;
+        }
+        Self::HOTKEY_CAPTIONS
+            .into_iter()
+            .filter(|(control, _)| self.control_is_shown(*control))
+            .find(|(_, caption)| expand_hotkey_markup(caption).1 == Some(character))
+            .map(|(control, _)| self.activate(control))
+    }
+
+    fn control_is_shown(&self, control: NetDlgControl) -> bool {
+        self.mode == NetDlgMode::GameList
+            || !matches!(
+                control,
+                NetDlgControl::Internet
+                    | NetDlgControl::Record
+                    | NetDlgControl::Refresh
+                    | NetDlgControl::JoinGame
+            )
     }
 
     fn hit_button(&self, point: GuiPoint) -> Option<NetDlgControl> {
