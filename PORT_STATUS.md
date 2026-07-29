@@ -450,13 +450,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   then case-insensitively by name, `C4Group.cpp:2290-2340`), `-x` (explode,
   which unpacks and then explodes each child group), `-z`, `-w`, the
   `-p`/`-x:` end-of-run prompt and detached execute (`c4group_ng.cpp:680-704`),
-  and `-i` shell registration on Windows, which reuses the registry table from
-  `clonk-platform::file_classes`.
-  **Still unimplemented, each reporting itself and exiting non-zero rather than
-  silently succeeding:** `-g`/`-y` (update generation and application) and `-u`
-  shell *un*registration. The update commands depend on the `C4UpdatePackage`
-  format in `C4Update.cpp`, which is a separate unported subsystem — not a CLI
-  concern — so they cannot be closed from this crate.
+  and `-i`/`-u` shell registration and unregistration on Windows, which reuse
+  the registry table from `clonk-platform::file_classes`. Unregistration deletes
+  deepest key first, because `RegDeleteKey` refuses a key that still has
+  subkeys, and treats an absent key as success so it is idempotent over a
+  partly-registered machine.
+  **Still unimplemented, reporting themselves and exiting non-zero rather than
+  silently succeeding:** `-g` and `-y`, update generation and application. They
+  depend on the `C4UpdatePackage` format (`C4Update.cpp`, 909 lines), which
+  **nothing in this port implements**. It needs no binary diffing — updates are
+  whole-file replacement — but `C4GroupEx` reaches into `C4Group`'s private
+  header and entry cores (`C4Update.cpp:149-200`), and `clonk-resources`
+  exposes no equivalent. That is a separate subsystem port, not a CLI concern.
 
 - Closed 2026-07-29: **Live `UserPath` re-expansion.** `AppPaths` resolved
   `General.UserPath` once at discovery and cached everything derived from it,

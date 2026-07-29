@@ -203,21 +203,36 @@ pub fn file_class_registry_values(engine_path: &str) -> Vec<RegistryStringValue>
     values
 }
 
+/// The `HKEY_CLASSES_ROOT` keys the registration creates, deepest first so a
+/// parent is only removed once its children are gone. `RegDeleteKey` does not
+/// delete a key that still has subkeys.
+pub fn file_class_registry_keys_for_removal(engine_path: &str) -> Vec<String> {
+    let mut keys: Vec<String> = file_class_registry_values(engine_path)
+        .into_iter()
+        .map(|value| value.key)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    // Deepest first: more separators means deeper.
+    keys.sort_by(|left, right| right.matches('\\').count().cmp(&left.matches('\\').count()));
+    keys
+}
+
 /// The stale `App Paths` key `SetC4FileClasses` deletes under
 /// `HKEY_LOCAL_MACHINE` (`C4FileClasses.cpp:68`).
 pub const STALE_APP_PATHS_KEY: &str =
     "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Clonk.exe";
 
 #[cfg(windows)]
-pub use windows_impl::register_file_classes;
+pub use windows_impl::{register_file_classes, unregister_file_classes};
 
 #[cfg(windows)]
 mod windows_impl {
     use super::{file_class_registry_values, RegistryStringValue};
-    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExA, RegSetValueExA, HKEY, HKEY_CLASSES_ROOT, KEY_WRITE,
-        REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCloseKey, RegCreateKeyExA, RegDeleteKeyA, RegSetValueExA, HKEY, HKEY_CLASSES_ROOT,
+        KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
     };
 
     /// `SetC4FileClasses` (`C4FileClasses.cpp:46-72`), called best-effort during
@@ -227,6 +242,28 @@ mod windows_impl {
         file_class_registry_values(engine_path)
             .iter()
             .all(write_classes_root_value)
+    }
+
+    /// Removes the registration, deepest key first. A key that is already
+    /// absent is not a failure — the operation is idempotent, which is what a
+    /// `c4group -u` run over a partly-registered machine needs.
+    pub fn unregister_file_classes(engine_path: &str) -> bool {
+        super::file_class_registry_keys_for_removal(engine_path)
+            .iter()
+            .map(|key| delete_classes_root_key(key))
+            .collect::<Vec<bool>>()
+            .into_iter()
+            .all(|removed| removed)
+    }
+
+    fn delete_classes_root_key(key: &str) -> bool {
+        let Ok(key_name) = std::ffi::CString::new(key) else {
+            return false;
+        };
+        // SAFETY: `key_name` outlives the call.
+        let removed = unsafe { RegDeleteKeyA(HKEY_CLASSES_ROOT, key_name.as_ptr().cast()) };
+        // ERROR_FILE_NOT_FOUND means it was never there, which is success here.
+        removed == ERROR_SUCCESS || removed == ERROR_FILE_NOT_FOUND
     }
 
     /// `SetRegClassesRoot`: create the key under `HKEY_CLASSES_ROOT` and write
@@ -367,5 +404,30 @@ mod tests {
 
         // 11 classes * 4 values + 4 protocol + 3 verb + 1 AppUserModelId.
         assert_eq!(values.len(), 11 * 4 + 4 + 3 + 1);
+    }
+
+    // Removal must visit children before their parents: `RegDeleteKey` refuses
+    // a key that still has subkeys.
+    #[test]
+    fn removal_order_visits_child_keys_before_their_parents() {
+        let keys = file_class_registry_keys_for_removal("C:\\clonk.exe");
+        let position = |key: &str| {
+            keys.iter()
+                .position(|candidate| candidate == key)
+                .unwrap_or_else(|| panic!("{key} is not scheduled for removal"))
+        };
+        assert!(
+            position("Clonk4.Update\\Shell\\Update\\Command")
+                < position("Clonk4.Update\\Shell\\Update")
+        );
+        assert!(position("Clonk4.Update\\Shell\\Update") < position("Clonk4.Update\\Shell"));
+        assert!(position("Clonk4.Update\\Shell") < position("Clonk4.Update"));
+        assert!(position("clonk\\shell\\open\\command") < position("clonk"));
+        assert!(position("Clonk4.Scenario\\DefaultIcon") < position("Clonk4.Scenario"));
+        // Every registered key is scheduled exactly once.
+        let mut deduped = keys.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), keys.len());
     }
 }

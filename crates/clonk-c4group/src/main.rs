@@ -76,15 +76,15 @@ fn main() -> ExitCode {
 fn apply_shell_registration(line: &CommandLine) -> bool {
     #[cfg(windows)]
     {
-        if line.options.unregister_shell {
-            eprintln!("c4group: shell unregistration is not implemented yet");
-            return false;
-        }
         let Ok(module) = std::env::current_exe() else {
             eprintln!("c4group: could not resolve the executable path");
             return false;
         };
-        return clonk_platform::file_classes::register_file_classes(&module.to_string_lossy());
+        let module = module.to_string_lossy();
+        if line.options.unregister_shell {
+            return clonk_platform::file_classes::unregister_file_classes(&module);
+        }
+        return clonk_platform::file_classes::register_file_classes(&module);
     }
     #[cfg(not(windows))]
     {
