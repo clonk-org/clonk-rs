@@ -425,6 +425,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Per-viewport pointer projection landed; identity-addressed rendering open.**
+  `clonk-frontend::viewport_projection` ports `C4Viewport`'s local-to-world
+  conversion (`C4Viewport.cpp:112,181,192`):
+  `ViewX + static_cast<int32_t>(local / scale)`. Two details a from-scratch
+  implementation gets wrong: the division is floating point and the cast
+  truncates **toward zero**, not floors — so a pointer above or left of the
+  window projects differently — and the view origin is added *after*
+  truncation. A non-finite or non-positive scale yields the view origin rather
+  than a wild coordinate. Pinned by
+  `detached_viewport_pointer_projection_uses_window_identity_and_scale`.
+  **Still open:** rendering one physical identity into a supplied target,
+  keying camera state by identity rather than the last global layout, and the
+  console-overlay hook that must run after world/foreground and before the
+  per-viewport HUD (`C4Viewport.cpp:1023-1110`).
+
 - **Live-reload path matching landed; the reload itself is open.**
   `clonk-engine::developer_reload` ports `C4DefList::GetByPath`
   (`C4Def.cpp:1137-1152`), which decides whether a changed file names a loaded
