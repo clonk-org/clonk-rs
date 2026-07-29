@@ -841,6 +841,27 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   (M10-P4-L044's criterion 7), the property and object-list windows
   (M10-P4-L045) and console viewports (M10-P4-L047).
 
+- **The reference C++ build has no console dialog windows at all.** Worth
+  stating plainly, because it reframes the whole console-surface group.
+  `C4ToolsDlg::Open` (and its Property/object-list siblings) creates a window
+  only under `_WIN32` or `WITH_DEVELOPER_MODE`. `WITH_DEVELOPER_MODE` defaults
+  to **OFF** (`CMakeLists.txt:205-206`), and the pinned oracle's own arm64 macOS
+  build is compiled `WITH_DEVELOPER_MODE:BOOL=OFF`, `USE_SDL_MAINLOOP:BOOL=ON`.
+  On that build `Open` falls straight through to `Active = true` plus an ordered
+  refresh — `InitGradeCtrl`, `UpdateLandscapeModeCtrls`, `UpdateToolCtrls`,
+  `UpdateIFTControls`, `InitMaterialCtrls`, `EnableControls` — and `Clear` drops
+  `Active` and nothing else, which is why re-opening restores the previous
+  selection rather than the defaults. `C4ToolsDlg::Default`'s starting state is
+  Brush, grade 5, IFT on, material `Earth`, texture `Rough`. All of that is now
+  in `clonk-engine::developer_tools` (`open`, `clear`, `active`, `material`,
+  `texture`), pinned by
+  `console_draw_mode_routes_pointer_gestures_through_tools_state`.
+  So M10-P4-L044's "native separate-window/notebook behavior" describes the
+  Win32 and GTK builds, neither of which is the reference build — and against the
+  reference build the ported state *is* the dialog. The same reading applies to
+  M10-P4-L045's property and object-list surfaces. Whether those cards close on
+  that basis is a scoping decision for the queue owner, not a worker's.
+
 - **The toolbox notebook landed; its rendered controls are open.**
   `C4DevmodeDlg` (`C4DevmodeDlg.cpp:28-121`) is one shared utility window
   holding the Tools and Property pages in a **tabless** notebook

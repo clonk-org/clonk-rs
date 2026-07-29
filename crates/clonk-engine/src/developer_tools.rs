@@ -56,6 +56,9 @@ pub enum DrawControl {
 /// The retained tool state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeveloperTools {
+    /// `C4ToolsDlg::Active`. On the reference macOS build this is the *whole*
+    /// observable state of "the dialog is open" — see [`Self::open`].
+    active: bool,
     tool: Tool,
     /// The tool to restore when a temporary Picker override ends.
     restore_tool: Option<Tool>,
@@ -65,17 +68,63 @@ pub struct DeveloperTools {
     hold: bool,
     /// Where the current gesture began.
     anchor: Option<(i32, i32)>,
+    /// `C4ToolsDlg::Material`, defaulting to `"Earth"`.
+    material: String,
+    /// `C4ToolsDlg::Texture`, defaulting to `"Rough"`.
+    texture: String,
+}
+
+/// `C4ToolsDlg::Default`'s starting material and texture (`C4ToolsDlg.cpp`).
+pub const DEFAULT_MATERIAL: &str = "Earth";
+pub const DEFAULT_TEXTURE: &str = "Rough";
+
+/// The refresh `C4ToolsDlg::Open` runs after the dialog exists, in call order.
+///
+/// On a build with neither `_WIN32` nor `WITH_DEVELOPER_MODE` — which is the
+/// **default macOS build**, and the one this port is checked against
+/// (`WITH_DEVELOPER_MODE` defaults to `OFF`, and the oracle's own arm64 build
+/// has `WITH_DEVELOPER_MODE:BOOL=OFF`, `USE_SDL_MAINLOOP:BOOL=ON`) — `Open`
+/// creates **no window at all**: it falls straight through to this sequence and
+/// sets `Active`. So on the reference build this list *is* the dialog.
+pub const TOOLS_OPEN_REFRESH: [ToolsRefresh; 6] = [
+    ToolsRefresh::Grade,
+    ToolsRefresh::LandscapeMode,
+    ToolsRefresh::Tool,
+    ToolsRefresh::Ift,
+    ToolsRefresh::Materials,
+    ToolsRefresh::Enablement,
+];
+
+/// One step of `C4ToolsDlg::Open`'s trailing refresh.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolsRefresh {
+    /// `InitGradeCtrl`.
+    Grade,
+    /// `UpdateLandscapeModeCtrls`.
+    LandscapeMode,
+    /// `UpdateToolCtrls`.
+    Tool,
+    /// `UpdateIFTControls`.
+    Ift,
+    /// `InitMaterialCtrls`.
+    Materials,
+    /// `EnableControls`, which itself ends in `UpdatePreview`.
+    Enablement,
 }
 
 impl Default for DeveloperTools {
     fn default() -> Self {
+        // `C4ToolsDlg::Default` (`C4ToolsDlg.cpp`).
         Self {
+            active: false,
             tool: Tool::Brush,
             restore_tool: None,
             grade: GRADE_DEFAULT,
             ift: true,
             hold: false,
             anchor: None,
+            material: DEFAULT_MATERIAL.to_owned(),
+            texture: DEFAULT_TEXTURE.to_owned(),
         }
     }
 }
@@ -95,6 +144,41 @@ impl DeveloperTools {
 
     pub fn holding(&self) -> bool {
         self.hold
+    }
+
+    pub fn active(&self) -> bool {
+        self.active
+    }
+
+    pub fn material(&self) -> &str {
+        &self.material
+    }
+
+    pub fn texture(&self) -> &str {
+        &self.texture
+    }
+
+    pub fn set_material(&mut self, material: impl Into<String>) {
+        self.material = material.into();
+    }
+
+    pub fn set_texture(&mut self, texture: impl Into<String>) {
+        self.texture = texture.into();
+    }
+
+    /// `C4ToolsDlg::Open`. Marks the dialog active and returns the ordered
+    /// refresh it runs; re-opening an already-open dialog repeats the refresh,
+    /// as C++ does on every call that reaches the tail.
+    pub fn open(&mut self) -> [ToolsRefresh; 6] {
+        self.active = true;
+        TOOLS_OPEN_REFRESH
+    }
+
+    /// `C4ToolsDlg::Clear`. Away from Win32 this only clears `Active` — the
+    /// retained tool, grade, IFT, material and texture all survive, which is
+    /// why re-opening restores the previous selection rather than the defaults.
+    pub fn clear(&mut self) {
+        self.active = false;
     }
 
     /// `C4ToolsDlg::SetTool`. A temporary selection remembers what to restore.
@@ -275,6 +359,43 @@ mod tests {
     #[test]
     fn console_draw_mode_routes_pointer_gestures_through_tools_state() {
         let mut tools = DeveloperTools::default();
+        // C4ToolsDlg::Default — the exact starting state.
+        assert!(!tools.active());
+        assert_eq!(tools.material(), "Earth");
+        assert_eq!(tools.texture(), "Rough");
+        assert!(tools.ift());
+
+        // C4ToolsDlg::Open — on a build with neither _WIN32 nor
+        // WITH_DEVELOPER_MODE (the default macOS build, and the one the oracle
+        // itself is compiled as) no window is created at all: Open sets Active
+        // and runs this refresh, in this order.
+        assert_eq!(
+            tools.open(),
+            [
+                ToolsRefresh::Grade,
+                ToolsRefresh::LandscapeMode,
+                ToolsRefresh::Tool,
+                ToolsRefresh::Ift,
+                ToolsRefresh::Materials,
+                ToolsRefresh::Enablement,
+            ]
+        );
+        assert!(tools.active());
+
+        // C4ToolsDlg::Clear drops Active and *nothing else*, which is why
+        // re-opening restores the previous selection rather than the defaults.
+        tools.set_grade(31);
+        tools.set_material("Granite");
+        tools.clear();
+        assert!(!tools.active());
+        assert_eq!(tools.grade(), 31);
+        assert_eq!(tools.material(), "Granite");
+        tools.open();
+        assert_eq!(tools.grade(), 31);
+        assert_eq!(tools.material(), "Granite");
+        tools.set_grade(GRADE_DEFAULT);
+        tools.set_material(DEFAULT_MATERIAL);
+
         assert_eq!(tools.tool(), Tool::Brush);
         assert_eq!(tools.grade(), GRADE_DEFAULT);
 
