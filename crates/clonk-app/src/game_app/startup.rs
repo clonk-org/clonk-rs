@@ -3675,6 +3675,17 @@ impl GameApp {
             .iter()
             .map(|player| (player.file_name.clone(), player.render_model.activated))
             .collect::<Vec<_>>();
+        // `C4StartupPlrSelDlg` rebuilds `Config.General.Participants` in memory
+        // and never saves — that file contains no `Config.Save()` at all, and
+        // `UpdateActivatedPlayers` (:824-833) just re-runs `SAddModule`. A memory
+        // rebuild cannot fail, so unlike the previous eager write there is no
+        // error to report here.
+        let forced_first_participant =
+            matches!(&origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer);
+        if forced_first_participant {
+            self.deferred_config
+                .set("General", "Participants", saved.file_name.clone());
+        }
         let Some(paths) = self.app_paths.as_ref() else {
             self.startup_tooltip.pointer_left();
             self.startup_player_properties_dialog = None;
@@ -3682,10 +3693,6 @@ impl GameApp {
             self.mark_menu_dirty();
             return;
         };
-        let forced_participant_persistence =
-            matches!(&origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer).then(|| {
-                persist_config_value(paths, "General", "Participants", saved.file_name.clone())
-            });
         let mut players = match discover_player_files(paths) {
             Ok(players) => players,
             Err(error) => {
@@ -3693,17 +3700,8 @@ impl GameApp {
                 self.startup_tooltip.pointer_left();
                 self.startup_player_properties_dialog = None;
                 self.refresh_participants_label();
-                if let Some(persistence_error) =
-                    forced_participant_persistence.and_then(Result::err)
-                {
-                    tracing::error!(%persistence_error, "failed to select the first saved player");
-                    self.status_text = format!(
-                        "Player saved, but participant selection failed: {persistence_error}"
-                    );
-                } else {
-                    self.status_text =
-                        format!("Player saved, but the list could not be refreshed: {error}");
-                }
+                self.status_text =
+                    format!("Player saved, but the list could not be refreshed: {error}");
                 self.mark_menu_dirty();
                 return;
             }
@@ -3733,9 +3731,10 @@ impl GameApp {
             };
             player.set_activated(activated);
         }
-        let persistence = match forced_participant_persistence {
-            Some(result) => result.map(|()| Vec::new()),
-            None => persist_activations(&paths.config_file(), &mut players),
+        let persistence = if forced_first_participant {
+            Ok(Vec::new())
+        } else {
+            persist_activations(&paths.config_file(), &mut players)
         };
         let (persistence_error, activation_refusals) = match persistence {
             Ok(refusals) => (None, refusals),

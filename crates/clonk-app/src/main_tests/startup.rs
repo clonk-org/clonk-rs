@@ -1818,7 +1818,14 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
         }),
         "standalone creation deactivates a player that appears while its modal is open"
     );
+    // The label reads the in-memory value, so a config file written behind the
+    // modal cannot change it — `C4StartupMainDlg::UpdateParticipants` reads
+    // `Config.General.Participants` directly (C4StartupMainDlg.cpp:174-200).
     assert_eq!(app.main_menu_state.participants_label, "Players: First");
+    // `C4StartupPlrSelDlg` never saves (no `Config.Save()` in that file), so the
+    // new participant reaches the file at the next save surface — and still
+    // overwrites the raced value when it does.
+    app.flush_deferred_config();
     assert_eq!(
         Config::load(paths.config_file())
             .expect("reload config")

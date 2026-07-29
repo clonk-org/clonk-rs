@@ -5305,7 +5305,14 @@ impl GameApp {
     }
 
     fn refresh_participants_label(&mut self) {
-        let label = load_participants_label(self.app_paths.as_ref());
+        // An unflushed `General.Participants` wins over the file, so a
+        // concurrent writer cannot change what the label shows — C++ reads its
+        // in-memory Config (C4StartupMainDlg.cpp:174-200).
+        let pending = self
+            .deferred_config
+            .get("General", "Participants")
+            .map(str::to_owned);
+        let label = participants_label_with_pending(self.app_paths.as_ref(), pending.as_deref());
         self.main_menu_state.update_participants_label(label);
     }
 

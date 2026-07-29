@@ -4821,6 +4821,20 @@ pub(crate) fn persist_startup_options_config(
 }
 
 pub(crate) fn load_participants_label(paths: Option<&AppPaths>) -> String {
+    participants_label_with_pending(paths, None)
+}
+
+/// As [`load_participants_label`], but `pending` — an unflushed
+/// `General.Participants` — wins over the file.
+///
+/// `C4StartupMainDlg::UpdateParticipants` reads the in-memory
+/// `Config.General.Participants` (`C4StartupMainDlg.cpp:174-200`), so a
+/// concurrent writer to the config file cannot change what it displays. Any
+/// reader of a deferred key has to consult memory first for that to hold.
+pub(crate) fn participants_label_with_pending(
+    paths: Option<&AppPaths>,
+    pending: Option<&str>,
+) -> String {
     // C++ C4StartupMainDlg::UpdateParticipants (C4StartupMainDlg.cpp:174-200):
     // IDS_DESC_PLRS ("Players: ") + comma-separated player file basenames
     // without extension, or IDS_DLG_NOPLAYERSSELECTED ("none selected").
@@ -4833,9 +4847,14 @@ pub(crate) fn load_participants_label(paths: Option<&AppPaths>) -> String {
     let config_path = paths.config_file();
     match Config::load(&config_path) {
         Ok(config) => {
-            let entries = config
-                .get_in(Some("General"), "Participants")
-                .map(|raw| raw.split(';').collect::<Vec<_>>())
+            let entries = pending
+                .map(|raw| raw.to_owned())
+                .or_else(|| {
+                    config
+                        .get_in(Some("General"), "Participants")
+                        .map(str::to_owned)
+                })
+                .map(|raw| raw.split(';').map(str::to_owned).collect::<Vec<_>>())
                 .unwrap_or_default();
             let mut names = Vec::new();
             for entry in entries {
