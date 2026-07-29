@@ -1911,13 +1911,17 @@ impl NetDlgController {
                     })
                     .map(Some)
                     .unwrap_or(None)
-            } else if Self::is_irc_service(source_nick)
-                || source_nick.is_empty()
-                || matches!(message.kind, NetDlgChatMessageKind::Status)
-            {
+            } else if Self::is_irc_service(source_nick) {
                 Some(0)
             } else if matches!(message.kind, NetDlgChatMessageKind::Notice) {
+                // Native `Update` tests `MSG_Notice` before the empty-source
+                // fallback, so a source-less notice stays on the active sheet
+                // (C4ChatDlg.cpp:742-747).
                 Some(selected.min(sheets.len().saturating_sub(1)))
+            } else if matches!(message.kind, NetDlgChatMessageKind::Status)
+                || source_nick.is_empty()
+            {
+                Some(0)
             } else {
                 let outgoing = source_nick.eq_ignore_ascii_case(&snapshot.nick);
                 let query = if outgoing {
@@ -1928,18 +1932,25 @@ impl NetDlgController {
                 if Self::is_irc_service(query) {
                     Some(0)
                 } else {
+                    // `SplitAtChar('!')` leaves the ident behind the nick, and
+                    // `OpenQuery` matches on it, so a nick change reuses and
+                    // retitles the sheet. An own message passes no ident at all
+                    // (C4ChatDlg.cpp:753-770,834-854).
                     let ident = if outgoing {
-                        query
+                        ""
                     } else {
-                        message.source.as_str()
+                        message
+                            .source
+                            .split_once('!')
+                            .map_or(message.source.as_str(), |(_, ident)| ident)
                     };
                     let query_index = Self::ensure_query_sheet(&mut sheets, query, ident);
-                    if !outgoing && !message.source.is_empty() {
-                        sheets[query_index].topic.clone_from(&message.source);
-                    }
                     if outgoing {
+                        sheets[query_index].topic = query.to_string();
                         selected = query_index;
                         sheets[query_index].unread = false;
+                    } else if !message.source.is_empty() {
+                        sheets[query_index].topic.clone_from(&message.source);
                     }
                     Some(query_index)
                 }
@@ -3578,7 +3589,10 @@ impl NetDlgController {
         let mut wrapped = Vec::new();
         for line in &sheet.lines {
             let mut first_physical = true;
-            for paragraph in line.text.split('|') {
+            // Chat TextWindows are constructed with `fMarkup = false`, so
+            // `AppendLines` only counts CR and LF as line breaks and `|` stays
+            // literal (C4Gui.h:1309; C4LogBuf.cpp:180-183).
+            for paragraph in line.text.split(['\r', '\n']) {
                 let broken = font.map_or_else(
                     || paragraph.to_string(),
                     |font| break_message(font, paragraph, width.max(1)),
@@ -9022,6 +9036,119 @@ mod tests {
                     channel: "#clonken".into(),
                 }),
             ]
+        );
+    }
+
+    /// Chat `TextWindow`s are built with `fMarkup = false` (C4Gui.h:1309), so
+    /// `C4LogBuffer::AppendLines` breaks on CR/LF only and leaves `|` literal
+    /// (C4LogBuf.cpp:180-183). `Update` tests `MSG_Notice` before the
+    /// empty-source Server fallback, and `OpenQuery` keys queries by the post-`!`
+    /// ident so a nick change reuses and retitles the sheet
+    /// (C4ChatDlg.cpp:729-773,834-854).
+    #[test]
+    fn irc_transcript_literal_pipes_and_query_routing_match_cpp() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.set_text_font(text_font());
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            vec![NetDlgChatMessage {
+                kind: NetDlgChatMessageKind::Message,
+                source: "Keeper!ident@example".into(),
+                target: "#clonken".into(),
+                text: "a|b".into(),
+                is_channel: true,
+            }],
+            0,
+        ));
+        controller.force_chat_mode_and_focus();
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel sheet");
+        let lines = NetDlgController::wrapped_chat_lines(
+            &controller.chat_sheets()[channel],
+            Some(text_font()),
+            4000,
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["<Keeper> a|b"]
+        );
+
+        // A source-less notice reaches the active sheet, not Server.
+        controller.select_chat_sheet(channel);
+        let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
+        snapshot.messages = vec![NetDlgChatMessage {
+            kind: NetDlgChatMessageKind::Notice,
+            source: String::new(),
+            target: "Clonker".into(),
+            text: "server notice".into(),
+            is_channel: false,
+        }];
+        snapshot.unread_index = 0;
+        controller.sync_chat_snapshot(snapshot);
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel sheet");
+        assert!(
+            controller.chat_sheets()[channel]
+                .lines
+                .iter()
+                .any(|line| line.text.contains("server notice")),
+            "{:?}",
+            controller.chat_sheets()[channel].lines
+        );
+        assert!(
+            !controller.chat_sheets()[0]
+                .lines
+                .iter()
+                .any(|line| line.text.contains("server notice")),
+            "{:?}",
+            controller.chat_sheets()[0].lines
+        );
+
+        // One query survives the sender's nick change because its ident did not.
+        let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
+        snapshot.messages = vec![
+            NetDlgChatMessage {
+                kind: NetDlgChatMessageKind::Message,
+                source: "Keeper!ident@example".into(),
+                target: "Clonker".into(),
+                text: "first".into(),
+                is_channel: false,
+            },
+            NetDlgChatMessage {
+                kind: NetDlgChatMessageKind::Message,
+                source: "Wache!ident@example".into(),
+                target: "Clonker".into(),
+                text: "second".into(),
+                is_channel: false,
+            },
+        ];
+        snapshot.unread_index = 0;
+        controller.sync_chat_snapshot(snapshot);
+        let queries = controller
+            .chat_sheets()
+            .iter()
+            .filter(|sheet| sheet.kind == NetDlgChatSheetKind::Query)
+            .collect::<Vec<_>>();
+        assert_eq!(queries.len(), 1, "{queries:?}");
+        assert_eq!(queries[0].title, "Wache");
+        assert_eq!(queries[0].ident, "ident@example");
+        assert_eq!(
+            queries[0]
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["<Keeper> first", "<Wache> second"]
         );
     }
 
