@@ -32,6 +32,35 @@ pub fn should_arm_file_monitor(
     auto_file_reload && !fullscreen && !monitor_running
 }
 
+/// Whether loading a definition registers its directory with the file monitor
+/// (`C4Def::Load`, `C4Def.cpp:547-560`):
+///
+/// ```cpp
+/// const bool addFileMonitoring{!hGroup.IsPacked() && !SEqual(hGroup.GetFullName().getData(), Filename)};
+/// ...
+/// SCopy(hGroup.GetFullName().getData(), Filename);   // <- Filename overwritten
+/// ...
+/// if (addFileMonitoring) Game.AddDirectoryForMonitoring(Filename);
+/// ```
+///
+/// Two conditions, and one ordering trap:
+///
+/// - **Only unpacked groups are watched.** A packed `.c4d` has no directory to
+///   observe, so a packed installation registers nothing however the developer
+///   key is set.
+/// - **Only a *new* location is watched.** Reloading a definition from the path
+///   it already has re-registers nothing.
+/// - **The flag is computed before `Filename` is overwritten.** Evaluating it
+///   after the `SCopy` would compare the group's name against itself, always be
+///   false, and silently watch nothing at all.
+pub fn definition_registers_for_monitoring(
+    group_is_packed: bool,
+    group_full_name: &str,
+    previous_filename: &str,
+) -> bool {
+    !group_is_packed && group_full_name != previous_filename
+}
+
 /// Why an external reload payload was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReloadPayloadError {
@@ -82,6 +111,39 @@ mod tests {
             !should_arm_file_monitor(true, false, true),
             "a running monitor is not replaced"
         );
+
+        // C4Def.cpp:547 — which definitions get registered once it is armed.
+        assert!(definition_registers_for_monitoring(
+            false,
+            "Objects.c4d/Rock.c4d",
+            ""
+        ));
+        // A packed group has no directory to watch.
+        assert!(!definition_registers_for_monitoring(
+            true,
+            "Objects.c4d/Rock.c4d",
+            ""
+        ));
+        // Reloading from the path it already has re-registers nothing.
+        assert!(!definition_registers_for_monitoring(
+            false,
+            "Objects.c4d/Rock.c4d",
+            "Objects.c4d/Rock.c4d"
+        ));
+        // Moving to a new location does register.
+        assert!(definition_registers_for_monitoring(
+            false,
+            "Objects.c4d/Rock.c4d",
+            "Old.c4d/Rock.c4d"
+        ));
+        // The flag is computed BEFORE `Filename` is overwritten. Passing the
+        // post-assignment value — the group's own name — would make this always
+        // false and silently watch nothing.
+        assert!(!definition_registers_for_monitoring(
+            false,
+            "Objects.c4d/Rock.c4d",
+            "Objects.c4d/Rock.c4d"
+        ));
     }
 
     // C4Console.cpp:243-249 — the payload's last byte must be NUL.

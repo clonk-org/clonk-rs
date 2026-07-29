@@ -484,6 +484,13 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   **Still open:** the watcher itself, its app-thread delivery, and
   `ReloadParticle` — the last of which needs the definition reload from
   M10-P4-L086.
+  Which definitions get registered once it is armed is ported too
+  (`C4Def.cpp:547-560`): only **unpacked** groups — a packed `.c4d` has no
+  directory to observe — and only a **new** location, so reloading from the path
+  a definition already has re-registers nothing. The ordering is the trap: C++
+  computes the flag *before* `SCopy` overwrites `Filename`, and evaluating it
+  afterwards would compare the group's name against itself, always be false, and
+  silently watch nothing at all.
 
 - **Viewport lock, scroll ranges and input routing landed; windows open.**
   `clonk-engine::developer_viewport` ports `C4Viewport::TogglePlayerLock`
