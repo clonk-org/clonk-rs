@@ -6490,7 +6490,7 @@
                 )
             },
             |player_info_id| (player_info_id == 41).then(|| player_icon.clone()),
-        |_player_info_id| None, |_player_info_id| None,
+        |_player_info_id| None, |_player_info_id| None, |_icon_spec, _color| None,
         );
 
         assert_eq!(
@@ -6541,7 +6541,7 @@
             "decoy title".into(),
             &next_mission,
             |_, _| (None, String::new()),
-            |_| None, |_player_info_id| None, |_player_info_id| None,
+            |_| None, |_player_info_id| None, |_player_info_id| None, |_icon_spec, _color| None,
         );
         let player = hidden
             .evaluation()
@@ -6613,7 +6613,7 @@
             "Scenario".into(),
             &clonk_engine::NextMissionState::default(),
             |_, _| (None, String::new()),
-            |_| None, |_player_info_id| None, |_player_info_id| None,
+            |_| None, |_player_info_id| None, |_player_info_id| None, |_icon_spec, _color| None,
         );
 
         assert_eq!(
@@ -6661,7 +6661,7 @@
             "Scenario".into(),
             &clonk_engine::NextMissionState::default(),
             |_, _| (None, String::new()),
-            |_| None, |_player_info_id| None, |_player_info_id| None,
+            |_| None, |_player_info_id| None, |_player_info_id| None, |_icon_spec, _color| None,
         );
         assert_eq!(generated.evaluation().separate_team_ids(), None);
         assert_eq!(

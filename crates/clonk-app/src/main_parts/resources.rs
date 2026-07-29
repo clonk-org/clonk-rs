@@ -5946,6 +5946,9 @@ pub(crate) fn build_game_over_dialog(
     // the `Game.RestorePlayerInfos` entry it took over, and `None` when the
     // row is not a savegame join at all.
     mut player_joined_color: impl FnMut(i32) -> Option<u32>,
+    // `Game.DrawTextSpecImage(icon, IconSpec, team colour)` for a declared
+    // team `IconSpec` (src/C4PlayerInfoListBox.cpp:1028-1031).
+    mut team_icon: impl FnMut(&str, u32) -> Option<ImageData>,
 ) -> GameOverState {
     // C4GameOverDlg freezes C4RoundResults into presentation state; player
     // results are joined through C4PlayerInfo::ID, not the runtime player
@@ -6028,12 +6031,32 @@ pub(crate) fn build_game_over_dialog(
     }
     let separate_team_ids =
         (teams.len() == 2 && !auto_generate_teams).then(|| [teams[0].id, teams[1].id]);
+    // `C4Team::HasWon()` is what recolours a TeamListItem's caption
+    // (src/C4PlayerInfoListBox.cpp:1100-1115). A team has won when any of its
+    // players did, which is the same rule the per-player `won` projection
+    // above already applies in the other direction.
+    let evaluation_teams = teams
+        .iter()
+        .map(|team| clonk_app_menus::game_over::EvaluationTeam {
+            id: team.id,
+            name: c4_presentation_text(&team.name),
+            color_dw: team.color,
+            icon: team
+                .icon_spec
+                .as_deref()
+                .and_then(|spec| team_icon(spec, team.color)),
+            won: snapshot
+                .players
+                .iter()
+                .any(|player| player.team == Some(team.id) && player.won),
+        });
     let evaluation = EvaluationViewModel::new(goals, players)
         .with_dialog_context(
             c4_presentation_text(&snapshot.round_results.custom_evaluation_strings),
             separate_team_ids,
         )
-        .with_team_order(teams.iter().map(|team| team.id));
+        .with_team_order(teams.iter().map(|team| team.id))
+        .with_teams(evaluation_teams);
 
     // Keep the asset-less fallback usable, but derive it from the same frozen
     // evaluation instead of treating every still-Active player as a winner or

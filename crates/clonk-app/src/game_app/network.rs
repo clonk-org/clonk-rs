@@ -7120,6 +7120,10 @@ impl GameApp {
                 };
                 Some(joined.color)
             },
+            |icon_spec, color| {
+                let resources = self.script_text_spec_resources();
+                resolve_script_font_image(&self.engine, icon_spec, color, resources)
+            },
         );
         let network_result = self.snapshot.round_results.network_result;
         let network_result_text =

@@ -10,6 +10,9 @@ const CLASSIC_DIALOG_TITLE: &str = "Evaluation";
 const CLASSIC_MIN_CAPTION_HEIGHT: i32 = 23;
 const CLASSIC_BUTTON_HEIGHT: i32 = 32;
 const CLASSIC_INDENT_X: i32 = 10;
+/// `C4SymbolSize`, the evaluation `TeamListItem` icon extent
+/// (src/C4PlayerInfoListBox.cpp:1020-1025).
+const CLASSIC_TEAM_HEADER_ICON: i32 = 35;
 /// `C4GUI_ScrollBarWdt` (src/C4Gui.h) — the column `ScrollWindow` reserves and
 /// the width of every `GUIScroll.png` facet cell.
 const CLASSIC_SCROLLBAR_EXTENT: i32 = 16;
@@ -268,6 +271,23 @@ pub fn evaluation_score_label(
     Some((EvaluationScoreIcon::Settlement, text))
 }
 
+/// One `C4PlayerInfoListBox::TeamListItem` header
+/// (src/C4PlayerInfoListBox.cpp:996-1035,1100-1115). During evaluation the
+/// icon is the team's `IconSpec` drawn in the team colour when one is
+/// declared, otherwise the generic `Ico_Team`, and the label takes the
+/// winning or losing text colour from `C4Team::HasWon()`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluationTeam {
+    pub id: i32,
+    pub name: String,
+    pub color_dw: u32,
+    /// The team's `IconSpec` image already resolved and colourized, mirroring
+    /// `DrawTextSpecImage(pIcon->GetMFacet(), IconSpec, GetColor())` at
+    /// construction time. `None` falls back to the generic `Ico_Team` facet.
+    pub icon: Option<ImageData>,
+    pub won: bool,
+}
+
 /// Frozen presentation model for C4GameOverDlg.
 ///
 /// Player order remains the order supplied by C4PlayerInfos; C++ does not sort
@@ -280,6 +300,7 @@ pub struct EvaluationViewModel {
     custom_evaluation_strings: String,
     separate_team_ids: Option<[i32; 2]>,
     team_order: Vec<i32>,
+    teams: Vec<EvaluationTeam>,
 }
 
 impl EvaluationViewModel {
@@ -290,6 +311,7 @@ impl EvaluationViewModel {
             custom_evaluation_strings: String::new(),
             separate_team_ids: None,
             team_order: Vec::new(),
+            teams: Vec::new(),
         }
     }
 
@@ -306,6 +328,15 @@ impl EvaluationViewModel {
     pub fn with_team_order(mut self, team_order: impl IntoIterator<Item = i32>) -> Self {
         self.team_order = team_order.into_iter().collect();
         self
+    }
+
+    pub fn with_teams(mut self, teams: impl IntoIterator<Item = EvaluationTeam>) -> Self {
+        self.teams = teams.into_iter().collect();
+        self
+    }
+
+    pub fn team(&self, id: i32) -> Option<&EvaluationTeam> {
+        self.teams.iter().find(|team| team.id == id)
     }
 
     pub fn goals(&self) -> &[EvaluationGoal] {
@@ -442,6 +473,16 @@ pub struct ClassicEvaluationTextLayout {
     pub scrollbar: Option<IntRect>,
 }
 
+/// One `TeamListItem` row at the top of a team-filtered evaluation list box
+/// (src/C4PlayerInfoListBox.cpp:1536-1541).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassicEvaluationTeamHeaderLayout {
+    pub player_list_index: usize,
+    pub team_id: i32,
+    pub icon: IntRect,
+    pub name_anchor: (i32, i32),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassicEvaluationLayout {
     pub goal_display: Option<IntRect>,
@@ -449,6 +490,7 @@ pub struct ClassicEvaluationLayout {
     pub network_result: Option<IntRect>,
     pub custom_evaluation: Option<ClassicEvaluationTextLayout>,
     pub player_lists: Vec<IntRect>,
+    pub team_headers: Vec<ClassicEvaluationTeamHeaderLayout>,
     pub players: Vec<ClassicEvaluationPlayerLayout>,
 }
 
@@ -1492,6 +1534,7 @@ impl GameOverState {
 
         let split = self.evaluation.separate_team_ids;
         let mut players = Vec::new();
+        let mut team_headers = Vec::new();
         for (player_list_index, player_list) in player_lists.iter().copied().enumerate() {
             let player_indices = if let Some(team_ids) = split {
                 self.evaluation
@@ -1518,6 +1561,28 @@ impl GameOverState {
                 (player_list.w - CLASSIC_PLAYER_ROW_LEFT_INSET - CLASSIC_PLAYER_ROW_RIGHT_INSET)
                     .max(0);
             let mut row_y = player_list.y + CLASSIC_PLAYER_ROW_TOP_INSET;
+            // A team-filtered evaluation list emits one TeamListItem before its
+            // players (src/C4PlayerInfoListBox.cpp:1536-1541). Its icon is a
+            // C4SymbolSize square and the label is centred against it
+            // (`:1014-1027`).
+            if let Some(team_ids) = split {
+                let icon = IntRect {
+                    x: player_list.x + CLASSIC_PLAYER_ROW_LEFT_INSET,
+                    y: row_y,
+                    w: CLASSIC_TEAM_HEADER_ICON,
+                    h: CLASSIC_TEAM_HEADER_ICON,
+                };
+                team_headers.push(ClassicEvaluationTeamHeaderLayout {
+                    player_list_index,
+                    team_id: team_ids[player_list_index],
+                    icon,
+                    name_anchor: (
+                        icon.x + icon.w + CLASSIC_PLAYER_LABEL_SPACING,
+                        icon.y + (icon.h - text_font.line_height) / 2,
+                    ),
+                });
+                row_y += CLASSIC_TEAM_HEADER_ICON + CLASSIC_PLAYER_LABEL_SPACING;
+            }
             for player_index in player_indices {
                 let player = self
                     .evaluation
@@ -1573,6 +1638,7 @@ impl GameOverState {
             network_result,
             custom_evaluation,
             player_lists,
+            team_headers,
             players,
         }
     }
@@ -2007,6 +2073,42 @@ impl GameOverState {
                     gamma,
                 );
             }
+        }
+
+        // TeamListItem headers precede their team's rows and take the winning
+        // or losing text colour from C4Team::HasWon()
+        // (src/C4PlayerInfoListBox.cpp:996-1035,1100-1115).
+        for header in &layout.team_headers {
+            let Some(team) = self.evaluation.team(header.team_id) else {
+                continue;
+            };
+            let team_color = Color::opaque(
+                ((team.color_dw >> 16) & 0xff) as u8,
+                ((team.color_dw >> 8) & 0xff) as u8,
+                (team.color_dw & 0xff) as u8,
+            );
+            // `DrawTextSpecImage` colours a declared IconSpec by the team
+            // colour; without one the generic Ico_Team facet is drawn as-is.
+            let fallback = resources
+                .player
+                .map(|image| clonk_frontend::hud::colorize_by_owner(image, team_color));
+            if let Some(icon) = team.icon.as_ref().or(fallback.as_ref()) {
+                draw_classic_image(surface, icon, header.icon, gamma);
+            }
+            draw_clonk_text(
+                surface,
+                &resources.fonts.text,
+                header.name_anchor.0,
+                header.name_anchor.1,
+                &team.name,
+                if team.won {
+                    Color::opaque(0xff, 0xdf, 0x00)
+                } else {
+                    Color::opaque(0xff, 0xff, 0xff)
+                },
+                TextAlign::Left,
+                gamma,
+            );
         }
 
         let split_player_lists = layout.player_lists.len() == 2;
@@ -2618,6 +2720,78 @@ mod tests {
     // player's lobby colour over the lower-left of the row icon, drawn twice:
     // a two-pixel-right shadow under blit modulation 1, then the coloured pass
     // flush at the left edge (src/C4PlayerInfoListBox.cpp:302-321).
+    // A team-filtered evaluation list box emits exactly one TeamListItem
+    // before its players, and only when the dialog is in the two-team layout
+    // (src/C4PlayerInfoListBox.cpp:1536-1541; src/C4GameOverDlg.cpp:214-230).
+    #[test]
+    fn l183_two_team_evaluation_lists_lead_with_one_native_team_header() {
+        let player = |info_id: i32, team_id: i32, won: bool| EvaluationPlayer {
+            player_info_id: info_id,
+            team_id: Some(team_id),
+            name: format!("Player {info_id}"),
+            won,
+            color_dw: 0,
+            total_playing_time: 0,
+            score_old: 0,
+            score_new: None,
+            custom_evaluation_strings: String::new(),
+            big_icon: None,
+            league_score_old: None,
+            league_score_gain: None,
+            league_score_new: None,
+            joined_color_dw: None,
+        };
+        let team = |id: i32, won: bool| EvaluationTeam {
+            id,
+            name: format!("Team {id}"),
+            color_dw: 0x0011_2233,
+            icon: None,
+            won,
+        };
+        let evaluation =
+            EvaluationViewModel::new(Vec::new(), vec![player(1, 7, true), player(2, 8, false)])
+                .with_dialog_context(String::new(), Some([7, 8]))
+                .with_team_order([7, 8])
+                .with_teams([team(7, true), team(8, false)]);
+
+        assert_eq!(evaluation.team(7).map(|team| team.won), Some(true));
+        assert_eq!(evaluation.team(8).map(|team| team.won), Some(false));
+        assert!(evaluation.team(9).is_none());
+
+        let fonts = endeavour_fonts();
+        let mut state = GameOverState::new("Round over".into(), Vec::new(), false);
+        state.set_evaluation(evaluation);
+        let layout = state.classic_evaluation_layout(640, 480, &fonts);
+
+        assert_eq!(layout.player_lists.len(), 2);
+        assert_eq!(
+            layout
+                .team_headers
+                .iter()
+                .map(|header| (header.player_list_index, header.team_id))
+                .collect::<Vec<_>>(),
+            [(0, 7), (1, 8)],
+            "one header per filtered list, in team order"
+        );
+        for header in &layout.team_headers {
+            let list = layout.player_lists[header.player_list_index];
+            assert_eq!(header.icon.w, header.icon.h, "C4SymbolSize square");
+            assert!(header.icon.x >= list.x && header.icon.y >= list.y);
+            assert!(
+                header.name_anchor.0 > header.icon.x + header.icon.w,
+                "the caption sits right of its icon"
+            );
+            // Every row of that list starts below its header.
+            for row in layout
+                .players
+                .iter()
+                .filter(|row| row.player_list_index == header.player_list_index)
+            {
+                assert!(row.row.y >= header.icon.y + header.icon.h);
+            }
+        }
+    }
+
     #[test]
     fn l183_joined_savegame_crew_overlay_uses_the_native_half_size_geometry() {
         // The C++ arithmetic, isolated: iSizeMax = max(Wdt, Hgt),
