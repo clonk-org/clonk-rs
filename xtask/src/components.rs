@@ -16,8 +16,8 @@
 //!    built here, or `content/` would stop being covered by it.
 //! 2. The `planet` archive is **prefix-free**, so its bytes are identical on
 //!    every platform. Its name is its own digest, so a platform-dependent
-//!    prefix would produce a different hash per shipped triple for identical data and defeat
-//!    deduplication entirely.
+//!    prefix would produce a different hash per shipped triple for identical
+//!    data and defeat deduplication entirely.
 //!
 //! `content` is a component a client fetches but this repository does **not**
 //! build — see [`BuiltComponent`]. It is published by the repository the game
@@ -262,7 +262,7 @@ pub struct EmittedComponent {
 ///
 /// Shared components are named after their own digest so an unchanged `planet`
 /// keeps the same name across releases and needs no re-upload. `engine` changes
-/// every release and is versioned instead, which also keeps the per-triple
+/// every release and is versioned instead, which also keeps the three per-build
 /// archives distinguishable.
 pub fn component_archive_name(
     component: BuiltComponent,
@@ -540,8 +540,8 @@ mod tests {
     #[test]
     fn shared_components_are_byte_identical_across_target_triples() {
         // The property the entire component store rests on: if `planet` hashed
-        // differently per platform there would be four copies of identical
-        // data and no deduplication at all.
+        // differently per platform there would be six copies of identical data
+        // — one per shipped triple — and no deduplication at all.
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
         let arm = emit(

@@ -1122,9 +1122,10 @@ fn missing_manifest_argument(name: &str) -> anyhow::Error {
 /// Which component an emitted archive is, and which triple it was built for.
 ///
 /// `None` means every triple: `planet` is prefix-free, so its bytes are
-/// identical on every shipped triple. `engine` is the reason the manifest is keyed by
-/// triple at all, and its filename is the only place that triple survives —
-/// the archives arrive in the publishing job as a flat directory.
+/// identical on all six of [`UPDATE_TARGET_TRIPLES`]. `engine` is the
+/// reason the manifest is keyed by triple at all, and its filename is the only
+/// place that triple survives — the archives arrive in the publishing job as a
+/// flat directory.
 fn archive_identity(
     name: &str,
     version: &str,
