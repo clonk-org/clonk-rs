@@ -206,6 +206,65 @@ impl DeveloperSelection {
     }
 }
 
+/// One `C4ControlScript` the console's script input produces.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectionScriptControl {
+    /// `ScriptCtrl.SetTargetObj(pObjects[i])` — the target changes per object.
+    pub target: ObjectId,
+    /// The scope stays `SCOPE_Global` for every object; only the target moves
+    /// (`C4Control.cpp:935-943`).
+    pub global_scope: bool,
+}
+
+/// `EMMO_Script`'s fan-out (`C4EditCursor.cpp:475`, `C4Control.cpp:932-944`).
+///
+/// One `C4ControlScript` is built once with `SCOPE_Global` and the console's
+/// strictness, then **executed once per selected object** in selection order
+/// with only its target re-pointed. An empty selection executes nothing at all
+/// — C++ returns early on `!pObjects`, so the script is not run globally as a
+/// fallback.
+pub fn selection_script_controls(selection: &[ObjectId]) -> Vec<SelectionScriptControl> {
+    selection
+        .iter()
+        .map(|target| SelectionScriptControl {
+            target: *target,
+            global_scope: true,
+        })
+        .collect()
+}
+
+/// The deferred property/object-list refresh (`C4EditCursor.cpp:80-86,196-199`).
+///
+/// `OnSelectionChanged` only raises `fSelectionChanged`; `Execute` consumes it
+/// once per frame and *then* updates the property dialog and object list. Many
+/// selection changes inside one frame therefore collapse into a single refresh.
+///
+/// There is no periodic refresh to pair this with. `PropertyDlg::Update` has
+/// exactly five callers in the pinned source and every one is selection-driven;
+/// `Tick35` never appears near the console. A tick-driven refresh would be an
+/// invention.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PropertyRefresh {
+    pending: bool,
+}
+
+impl PropertyRefresh {
+    /// `C4EditCursor::OnSelectionChanged` — mark, do not refresh.
+    pub fn mark_changed(&mut self) {
+        self.pending = true;
+    }
+
+    pub fn pending(&self) -> bool {
+        self.pending
+    }
+
+    /// `C4EditCursor::Execute`'s selection-update block: consumes the flag and
+    /// reports whether this frame should refresh.
+    pub fn take(&mut self) -> bool {
+        std::mem::take(&mut self.pending)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +390,44 @@ mod tests {
             .prune(|object| object != self::object(42))
             .expect("an unknown object is pruned");
         assert_eq!(dropped.objects, vec![object(1), object(3)]);
+    }
+
+    // C4Control.cpp:932-944 and C4EditCursor.cpp:80-86,196-199 — the script
+    // fan-out and the coalesced refresh.
+    #[test]
+    fn script_input_fans_out_over_the_selection_and_refresh_is_coalesced() {
+        // One control per selected object, in selection order, all still
+        // SCOPE_Global — only the target moves.
+        let selection = [object(7), object(2), object(9)];
+        let controls = selection_script_controls(&selection);
+        assert_eq!(
+            controls.iter().map(|c| c.target).collect::<Vec<_>>(),
+            selection.to_vec()
+        );
+        assert!(controls.iter().all(|control| control.global_scope));
+
+        // An empty selection executes nothing — C++ returns on `!pObjects`
+        // rather than falling back to one global run.
+        assert!(selection_script_controls(&[]).is_empty());
+
+        // OnSelectionChanged only marks; Execute consumes it once.
+        let mut refresh = PropertyRefresh::default();
+        assert!(!refresh.pending());
+        assert!(!refresh.take(), "an idle frame refreshes nothing");
+        refresh.mark_changed();
+        assert!(refresh.pending());
+        assert!(refresh.take());
+        assert!(
+            !refresh.take(),
+            "the flag is consumed, so one change is one refresh"
+        );
+
+        // Several changes inside one frame collapse into a single refresh —
+        // this is what stops a multi-object edit updating the panel per object.
+        refresh.mark_changed();
+        refresh.mark_changed();
+        refresh.mark_changed();
+        assert!(refresh.take());
+        assert!(!refresh.take());
     }
 }

@@ -929,9 +929,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   nobody, and each snapshot carries its `SelectionWriter` so a subscriber can
   suppress its own echo (`C4ObjectListDlg.cpp:599-646`). Pinned by
   `developer_selection_preserves_toggle_frame_and_tree_order` and
-  `developer_selection_prunes_removed_objects_and_notifies_once`. Hit testing,
-  gestures and dialog content stay out by design; the parity row flips when the
-  dependent edit/object UI lands.
+  `developer_selection_prunes_removed_objects_and_notifies_once`.
+  The console's script input and its refresh cadence now sit here too.
+  `EMMO_Script` builds **one** `C4ControlScript` at `SCOPE_Global` and executes
+  it **once per selected object**, re-pointing only the target
+  (`C4Control.cpp:932-944`); an empty selection runs nothing, because C++
+  returns on `!pObjects` rather than falling back to a single global run.
+  The refresh is deferred and coalesced: `OnSelectionChanged` merely raises
+  `fSelectionChanged`, and `Execute` consumes it once per frame before updating
+  the property dialog and object list (`C4EditCursor.cpp:80-86,196-199`), so a
+  multi-object edit refreshes the panel once, not once per object.
+  **There is no periodic refresh to pair with it.** `PropertyDlg::Update` has
+  exactly five callers in the pinned source and every one is selection-driven;
+  `Tick35` never appears near the console (only `C4Viewport` and `C4Object`
+  use it). M10-P4-L045's criterion 5 asks for a "Windows-only Tick35 periodic
+  refresh" that does not exist — adding one would be an invention. Pinned by
+  `script_input_fans_out_over_the_selection_and_refresh_is_coalesced`.
+  Hit testing, gestures and dialog content stay out by design; the parity row
+  flips when the dependent edit/object UI lands.
 
 - Closed 2026-07-29: **Developer landscape-tool read model.**
   `clonk-engine::developer_landscape` exposes the material/texture catalog and
