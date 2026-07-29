@@ -821,29 +821,30 @@ pub(crate) const SCENARIO_LOADING_LOG_CAPACITY: usize = 1_000;
 pub(crate) struct ScenarioLoadingReporter {
     sender: mpsc::Sender<ScenarioLoadingEvent>,
     last_progress: i32,
-    log: VecDeque<String>,
 }
 
 impl ScenarioLoadingReporter {
+    /// Opens the loader's log buffer, the way `C4MessageBoard::Init` hands the
+    /// loader a startup buffer before the round loads
+    /// (`src/C4MessageBoard.cpp:223-251`).
     pub(crate) fn new(sender: mpsc::Sender<ScenarioLoadingEvent>) -> Self {
+        clonk_logging::activate_loader_log();
         Self {
             sender,
             last_progress: 0,
-            log: VecDeque::new(),
         }
     }
 
+    /// Records a phase milestone. The line goes into the same buffer the GUI
+    /// log sink appends to, so a worker thread's log event between two
+    /// milestones keeps its position instead of either source replacing the
+    /// other (`src/C4Log.cpp:208-243`).
     pub(crate) fn report(&mut self, progress: i32, line: &'static str) {
         self.last_progress = self.last_progress.max(progress.clamp(0, 99));
-        if !line.is_empty() {
-            if self.log.len() == SCENARIO_LOADING_LOG_CAPACITY {
-                self.log.pop_front();
-            }
-            self.log.push_back(line.to_string());
-        }
+        clonk_logging::push_loader_log_line(line);
         let _ = self.sender.send(ScenarioLoadingEvent::LoaderFrame {
             progress: self.last_progress,
-            log: Some(self.log.iter().cloned().collect()),
+            log: Some(clonk_logging::loader_log_snapshot()),
         });
     }
 

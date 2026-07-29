@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs::{self, File},
     io::{self, IsTerminal, Write},
     path::Path,
@@ -113,6 +114,15 @@ where
 /// nothing else, so engine-internal Rust tracing — which has no C++ `Log()`
 /// counterpart — never reaches `C4MessageBoard::AddLog`
 /// (`src/C4Log.cpp:226-240`).
+/// The loading screen's attachment: it takes the same events the message
+/// board does, so the loader shows what C++ shows, and retains them only while
+/// the loading screen is up.
+fn loader_log_sink() -> impl for<'a> MakeWriter<'a> + Send + Sync + 'static {
+    LoaderLogCapture.with_filter(|meta: &Metadata<'_>| {
+        loader_log_is_active() && debug_log_reaches_gui(meta.target())
+    })
+}
+
 fn message_board_sink(
     game_log: Option<GameLogCapture>,
 ) -> impl for<'a> MakeWriter<'a> + Send + Sync + 'static {
@@ -143,7 +153,9 @@ fn install(
     capture: Option<ConsoleLogCapture>,
     game_log: Option<GameLogCapture>,
 ) -> Result<(), TryInitError> {
-    let gui = Optional(capture).and(message_board_sink(game_log));
+    let gui = Optional(capture)
+        .and(message_board_sink(game_log))
+        .and(loader_log_sink());
     let (filter, rejected_directives) = env_filter(default_level);
     let installed = tracing_subscriber::registry()
         .with(filter)
@@ -217,6 +229,107 @@ impl<'a> MakeWriter<'a> for ConsoleLogCapture {
     fn make_writer(&'a self) -> Self::Writer {
         ConsoleLogWriter {
             bytes: Arc::clone(&self.bytes),
+            pending: Vec::new(),
+        }
+    }
+}
+
+/// Bounded ordered buffer behind the graphical loading screen's log box.
+///
+/// `C4MessageBoard::Init` hands the loader a startup log buffer that
+/// `C4LoaderScreen::Draw` renders above the progress bar
+/// (`src/C4MessageBoard.cpp:223-251`; `src/C4LoaderScreen.cpp:126-177`), and
+/// `C4LogSystem`'s GUI sink feeds it every log event from any thread
+/// (`src/C4Log.cpp:208-243`). Both the tracing sink and the loader's own phase
+/// milestones append here, so one mutex orders worker-thread log events against
+/// main-thread progress updates instead of one source replacing the other.
+static LOADER_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+/// Whether the loading screen is up. The sink is always attached — activation
+/// decides whether it retains anything, so no subscriber is rebuilt per round.
+static LOADER_LOG_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lines retained for the loader's log box before the oldest is dropped.
+pub const LOADER_LOG_CAPACITY: usize = 1_000;
+
+/// Starts capturing into the loader log, discarding anything a previous round
+/// left behind.
+pub fn activate_loader_log() {
+    loader_log().clear();
+    LOADER_LOG_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Stops capturing and releases the buffer when the loading screen closes.
+pub fn deactivate_loader_log() {
+    LOADER_LOG_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    loader_log().clear();
+}
+
+/// Whether the loading screen is currently capturing.
+pub fn loader_log_is_active() -> bool {
+    LOADER_LOG_ACTIVE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn loader_log() -> std::sync::MutexGuard<'static, VecDeque<String>> {
+    LOADER_LOG
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Appends one already-formatted line, dropping the oldest past capacity.
+/// Ignored while the loader is not up.
+pub fn push_loader_log_line(line: &str) {
+    if !loader_log_is_active() || line.is_empty() {
+        return;
+    }
+    let mut log = loader_log();
+    if log.len() == LOADER_LOG_CAPACITY {
+        log.pop_front();
+    }
+    log.push_back(line.to_owned());
+}
+
+/// The retained lines, oldest first — the order `C4LoaderScreen` draws.
+pub fn loader_log_snapshot() -> Vec<String> {
+    loader_log().iter().cloned().collect()
+}
+
+/// Sink that feeds tracing events into the loader log in `GuiSinkFormat` form.
+#[derive(Clone, Debug, Default)]
+struct LoaderLogCapture;
+
+/// Buffers one event so a worker thread's line stays contiguous, then splits it
+/// into the loader's line-oriented buffer on flush.
+pub struct LoaderLogWriter {
+    pending: Vec<u8>,
+}
+
+impl Write for LoaderLogWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let pending = std::mem::take(&mut self.pending);
+        String::from_utf8_lossy(&pending)
+            .lines()
+            .for_each(push_loader_log_line);
+        Ok(())
+    }
+}
+
+impl Drop for LoaderLogWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+impl<'a> MakeWriter<'a> for LoaderLogCapture {
+    type Writer = LoaderLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LoaderLogWriter {
             pending: Vec::new(),
         }
     }

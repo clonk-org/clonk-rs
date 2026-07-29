@@ -6411,6 +6411,10 @@ impl GameApp {
                         .as_mut()
                         .expect("loading state exists while draining its receiver");
                     state.finished = true;
+                    // The loading screen is done; release its log buffer the
+                    // way C4MessageBoard drops the startup buffer once the
+                    // round is up (src/C4MessageBoard.cpp:223-251).
+                    clonk_logging::deactivate_loader_log();
                     completion =
                         Some((state.scenario.clone(), result, state.prepared_go.is_some()));
                     break;

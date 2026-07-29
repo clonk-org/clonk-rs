@@ -425,6 +425,23 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Loading-screen GUI log capture.** The loader's log box
+  showed only its own hard-coded phase labels: `ScenarioLoadingReporter` kept a
+  private `VecDeque` that `report` replaced wholesale, so engine diagnostics
+  emitted while a scenario loaded reached Clonk.log and stderr but never the
+  only screen the player can see. `clonk-logging` now owns a bounded ordered
+  loader buffer that both the GUI log sink and the reporter's milestones append
+  to under one mutex, so a worker-thread event landing between two milestones
+  keeps its position instead of either source replacing the other
+  (`src/C4Log.cpp:208-243`). The sink is permanently attached and gated by an
+  active flag rather than rebuilt per round; it reuses `GuiSinkFormat`, so lines
+  carry the C++ GUI severity prefix rather than raw tracing metadata. The buffer
+  opens with the reporter (`src/C4MessageBoard.cpp:223-251`) and is released
+  when the loader consumes `Finished`. Pinned by
+  `loader_captures_runtime_log_lines_in_gui_order`, which interleaves a
+  worker-thread event between two phase updates and covers the capacity and
+  before/after-loader boundaries.
+
 - Closed 2026-07-29: **`DebugLog` routing.** `DebugLog` emitted an ordinary
   `tracing::debug!` on the same target as `Log`, so the one process-start
   `EnvFilter` discarded it everywhere at default verbosity — script diagnostics
