@@ -1641,7 +1641,9 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
         app.handle_key(VirtualKeyCode::F9, ElementState::Released)
             .expect("release F9");
         assert_eq!(
-            app.pending_screenshots.pop_back().map(|request| request.kind),
+            app.pending_screenshots
+                .pop_back()
+                .map(|request| request.kind),
             Some(ScreenshotKind::PresentedFrame),
             "{view:?} must queue a presented-frame capture"
         );
@@ -5430,7 +5432,10 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     // surface. This test's subject is the stored value, so it flushes here.
     app.flush_deferred_config();
     let config = Config::load(paths.config_file()).expect("reload config");
-    assert_eq!(config.get_in(Some("Startup"), "HideMsgPlrTakeOver"), Some("1"));
+    assert_eq!(
+        config.get_in(Some("Startup"), "HideMsgPlrTakeOver"),
+        Some("1")
+    );
 
     // With the preference set, later sessions log but show nothing.
     let mut hidden = new_menu_app(320, 200);

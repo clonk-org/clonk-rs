@@ -6967,10 +6967,10 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
     // A KeyConfig action bound to F11 reaches ordinary classic dispatch.
     app.runtime_key_config_cache = OnceLock::new();
     app.runtime_key_config_cache
-        .set(Ok(
-            parse_runtime_key_config(b"[Keys]\nToggleShowHelp=F11\n")
-                .expect("parse an F11 scoreboard binding"),
-        ))
+        .set(Ok(parse_runtime_key_config(
+            b"[Keys]\nToggleShowHelp=F11\n",
+        )
+        .expect("parse an F11 scoreboard binding")))
         .expect("install the F11 binding");
     assert!(!app.runtime_help_visible);
     app.handle_key(VirtualKeyCode::F11, ElementState::Pressed)
@@ -7044,19 +7044,16 @@ fn keyconfig_accepts_extended_sdl_scancode_names() {
         RuntimePhysicalKey::Keyboard(VirtualKeyCode::Calculator)
     );
     // A name SDL does not know keeps the disabled outcome.
-    assert_eq!(
-        physical("MsgBoardScrollDown"),
-        RuntimePhysicalKey::Disabled
-    );
+    assert_eq!(physical("MsgBoardScrollDown"), RuntimePhysicalKey::Disabled);
 
     // A bound extended key dispatches like any other physical key.
     let mut app = new_classic_running_sandbox_app();
     app.runtime_key_config_cache = OnceLock::new();
     app.runtime_key_config_cache
-        .set(Ok(
-            parse_runtime_key_config(b"[Keys]\nToggleShowHelp=Mute\n")
-                .expect("parse the Mute help binding"),
-        ))
+        .set(Ok(parse_runtime_key_config(
+            b"[Keys]\nToggleShowHelp=Mute\n",
+        )
+        .expect("parse the Mute help binding")))
         .expect("install the Mute binding");
     assert!(!app.runtime_help_visible);
     app.handle_key(VirtualKeyCode::Mute, ElementState::Pressed)

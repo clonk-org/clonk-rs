@@ -19702,7 +19702,10 @@ fn configured_max_resource_search_recursion_reaches_client_candidates() {
     // non-numeric value.
     assert_eq!(load(None), (1, 1));
     assert_eq!(load(Some("[Network]\nName=Tester\n")), (1, 1));
-    assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=deep\n")), (1, 1));
+    assert_eq!(
+        load(Some("[Network]\nMaxResSearchRecursion=deep\n")),
+        (1, 1)
+    );
     // A configured depth is loaded and carried into the client settings.
     assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=0\n")), (0, 0));
     assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=3\n")), (3, 3));
@@ -19774,7 +19777,10 @@ fn configured_network_work_path_controls_resource_staging_directory() {
     assert_eq!(staging(Some("[Network]\nWorkPath=..\n")), "Network");
     assert_eq!(staging(Some("[Network]\nWorkPath=../escape\n")), "Network");
     assert_eq!(staging(Some("[Network]\nWorkPath=net/../..\n")), "Network");
-    assert_eq!(staging(Some("[Network]\nWorkPath=/tmp/escape\n")), "Network");
+    assert_eq!(
+        staging(Some("[Network]\nWorkPath=/tmp/escape\n")),
+        "Network"
+    );
     assert_eq!(staging(Some("[Network]\nWorkPath=./here\n")), "Network");
 }
 

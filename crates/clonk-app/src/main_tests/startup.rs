@@ -468,11 +468,17 @@ fn startup_options_visible_labels_follow_runtime_resources() {
         ("IDS_NET_PORT_DISCOVERY", "Suchport"),
         ("IDS_CTL_ACTIVE", "Aktiv"),
         ("IDS_CTL_USEOTHERSERVER", "Anderen Internetserver verwenden"),
-        ("IDS_CTL_AUTOMATICUPDATES", "Automatische Updates aktivieren"),
+        (
+            "IDS_CTL_AUTOMATICUPDATES",
+            "Automatische Updates aktivieren",
+        ),
         ("IDS_CTL_UPNP", "UPnP verwenden"),
         ("IDS_NET_COMPUTERNAME", "Computername:"),
         ("IDS_NET_USERNAME", "Chatname:"),
-        ("IDS_CTL_FAIRCREWSTRENGTH", "Staerke der \"Fairen Mannschaft\""),
+        (
+            "IDS_CTL_FAIRCREWSTRENGTH",
+            "Staerke der \"Fairen Mannschaft\"",
+        ),
         ("IDS_CTL_NOLANGINFO", "Sprachpaket nicht verfuegbar."),
     ] {
         app.startup_tooltip_resources
@@ -490,10 +496,7 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     assert_eq!(labels.title, "Einstellungen");
     assert_eq!(
         labels.sheets,
-        [
-            "Programm", "Grafik", "Ton", "Tastatur", "Gamepad", "Netzwerk"
-        ]
-        .map(str::to_string)
+        ["Programm", "Grafik", "Ton", "Tastatur", "Gamepad", "Netzwerk"].map(str::to_string)
     );
     assert_eq!(labels.back, "Zurueck");
     assert_eq!(labels.language, "Sprache");
@@ -501,7 +504,10 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     assert_eq!(labels.port_reference, "Referenzport");
     assert_eq!(labels.active, "Aktiv");
     assert_eq!(labels.chat_name, "Chatname:");
-    assert_eq!(labels.fair_crew_strength, "Staerke der \"Fairen Mannschaft\"");
+    assert_eq!(
+        labels.fair_crew_strength,
+        "Staerke der \"Fairen Mannschaft\""
+    );
 
     // A key absent from the table falls back to the shipped US text, which is
     // what C4ResStrTable itself yields.
@@ -519,7 +525,10 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     // The nested key-capture and resolution-confirm dialogs are resources too,
     // including their positional `%s`/`%d`/`%u` arguments.
     for (key, value) in [
-        ("IDS_MSG_PRESSKEY", "Taste fuer \"%s\" auf Tastaturblock %d druecken."),
+        (
+            "IDS_MSG_PRESSKEY",
+            "Taste fuer \"%s\" auf Tastaturblock %d druecken.",
+        ),
         ("IDS_MSG_DEFINEKEY", "Taste zuweisen"),
         ("IDS_MNU_SWITCHRESOLUTION", "Aufloesung wechseln"),
         (
@@ -540,7 +549,11 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     );
     app.tick_options_scale_test_prompt();
     assert_eq!(
-        app.message_dialogs.last().expect("confirmation").state.message(),
+        app.message_dialogs
+            .last()
+            .expect("confirmation")
+            .state
+            .message(),
         "Neue Aufloesung. Gefaellt sie?|Wird in 11 Sekunden zurueckgesetzt..."
     );
 
@@ -4640,11 +4653,10 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
     };
 
     press_frontend_f3(&mut app, ModifiersState::empty(), "startup F3");
-    let after_startup_music =
-        {
-            app.flush_deferred_config();
-            Config::load(paths.config_file()).expect("reload startup frontend-music toggle")
-        };
+    let after_startup_music = {
+        app.flush_deferred_config();
+        Config::load(paths.config_file()).expect("reload startup frontend-music toggle")
+    };
     assert_eq!(
         after_startup_music.get_in(Some("Sound"), "MenuMusic"),
         Some("false")
@@ -4656,11 +4668,10 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
     );
 
     press_frontend_f3(&mut app, ModifiersState::CTRL, "startup Ctrl+F3");
-    let after_startup_sound =
-        {
-            app.flush_deferred_config();
-            Config::load(paths.config_file()).expect("reload startup frontend-sound toggle")
-        };
+    let after_startup_sound = {
+        app.flush_deferred_config();
+        Config::load(paths.config_file()).expect("reload startup frontend-sound toggle")
+    };
     assert_eq!(
         after_startup_sound.get_in(Some("Sound"), "MenuSound"),
         Some("false")
@@ -4684,11 +4695,10 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
     app.mode = AppMode::Loading;
     press_frontend_f3(&mut app, ModifiersState::empty(), "loading F3");
     press_frontend_f3(&mut app, ModifiersState::CTRL, "loading Ctrl+F3");
-    let after_loading =
-        {
-            app.flush_deferred_config();
-            Config::load(paths.config_file()).expect("reload loading frontend audio toggles")
-        };
+    let after_loading = {
+        app.flush_deferred_config();
+        Config::load(paths.config_file()).expect("reload loading frontend audio toggles")
+    };
     assert_eq!(
         after_loading.get_in(Some("Sound"), "MenuMusic"),
         Some("true")

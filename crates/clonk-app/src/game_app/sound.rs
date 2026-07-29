@@ -125,8 +125,7 @@ impl GameApp {
         // the file is written when the Options dialog closes or on a clean
         // shutdown, so a toggle flipped back and forth costs no disk writes and
         // an aborted run discards it.
-        self.deferred_config
-            .set("Sound", key, enabled.to_string());
+        self.deferred_config.set("Sound", key, enabled.to_string());
     }
 
     pub(crate) fn set_frontend_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {
