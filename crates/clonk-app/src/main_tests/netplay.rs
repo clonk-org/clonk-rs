@@ -6263,8 +6263,7 @@ fn l008_fractional_loader_scales_reach_native_text() {
     ]);
     let paths = AppPaths::discover().expect("installed paths");
     for (scale, physical_width, physical_height) in [(1.5, 480_u32, 300_u32), (0.5, 160, 100)] {
-        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-        .expect("app");
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("app");
         app.configure_native_startup_fonts(scale, false);
         assert_eq!(app.mode, AppMode::Loading);
         assert!(app.can_defer_native_loader_text(scale));
@@ -6298,8 +6297,7 @@ fn l008_scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
     let paths = AppPaths::discover().expect("installed paths");
 
     for client in [false, true] {
-        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-        .expect("app");
+        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("app");
         app.configure_native_startup_fonts(0.5, false);
         app.loader_screen
             .as_mut()
@@ -6400,8 +6398,7 @@ fn l149_scale_three_host_start_wait_renders_after_native_loader_text() {
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
     let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-    .expect("app");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("app");
     app.configure_native_startup_fonts(3.0, false);
     app.loader_screen
         .as_mut()
@@ -6480,8 +6477,7 @@ fn l149_fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
     let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-    .expect("app");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("app");
     app.configure_native_startup_fonts(1.5, false);
     app.loader_screen
         .as_mut()
@@ -6606,8 +6602,7 @@ fn scale_three_clipped_loader_uses_native_text_after_chrome_upscale() {
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
     let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-    .expect("app");
+    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("app");
     app.configure_native_startup_fonts(3.0, false);
     // C++ rounds 598 / 3 up to 200 logical rows, renders a nominal
     // 600-row GL viewport, and lets the framebuffer clip its top two rows.
@@ -6638,8 +6633,8 @@ fn scale_three_clipped_main_menu_commits_native_captions_after_bilinear_base() {
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
     let paths = AppPaths::discover().expect("discover app paths");
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-    .expect("initialise app");
+    let mut app =
+        test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("initialise app");
     wait_for_menu(&mut app);
     app.configure_native_startup_fonts(3.0, false);
     assert!(app.can_defer_native_main_menu_text(3.0));
@@ -7090,8 +7085,8 @@ fn network_host_preparation_keeps_cpp_configured_participant_order() {
                 b"\"\nControlRate=7\nControlMode=1\nPortTCP=12345\nPortUDP=12346\nMaxLoadFileSize=123456\nNoRuntimeJoin=0\nEnableUPnP=0\n",
             );
     fs::write(paths.config_file(), config).expect("write native configured participants");
-    let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-    .expect("initialize app");
+    let app =
+        test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("initialize app");
     assert_eq!(
         app.startup_player_files
             .iter()
@@ -11852,11 +11847,14 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
     observer_menu.physical_viewports_authoritative = true;
     observer_menu.ingame_menu.replace(
         observer_menu.local_owner,
-        IngameMenuState::main_menu(&MainMenuConditions {
-            has_player: false,
-            player_count: 0,
-            ..MainMenuConditions::default()
-        }, &IngameMenuLabels::default()),
+        IngameMenuState::main_menu(
+            &MainMenuConditions {
+                has_player: false,
+                player_count: 0,
+                ..MainMenuConditions::default()
+            },
+            &IngameMenuLabels::default(),
+        ),
     );
     assert!(observer_menu.primary_physical_viewport_is_no_owner());
     assert!(
@@ -12776,7 +12774,8 @@ fn main_menu_player_join_uses_active_network_max_players() {
     }];
 
     let conditions = app.main_menu_conditions();
-    let menu = IngameMenuState::main_menu(&conditions, &IngameMenuLabels::default()).expect("main menu has entries");
+    let menu = IngameMenuState::main_menu(&conditions, &IngameMenuLabels::default())
+        .expect("main menu has entries");
 
     assert_eq!(conditions.max_players, 1);
     assert!(!menu
