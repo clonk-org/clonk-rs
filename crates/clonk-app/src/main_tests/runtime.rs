@@ -922,6 +922,68 @@
         );
     }
 
+    /// `Config.Graphics.MaxRefreshDelay` is 30 (C4Config.cpp:485) and
+    /// `C4Application` uses it as the divisor ceiling when choosing the
+    /// graphics timer interval (C4Application.cpp:510-531). Every path that
+    /// materializes the value - the startup resolver and the advanced-config
+    /// editor row - has to agree on that default, and a valid positive value
+    /// must still reach the divisor.
+    #[test]
+    fn max_refresh_delay_missing_or_invalid_matches_cpp_thirty_ms() {
+        // Absent section, absent key and unparsable values all resolve to 30.
+        for config in [
+            &b""[..],
+            b"[Graphics]\n",
+            b"[Graphics]\nMaxRefreshDelay=\n",
+            b"[Graphics]\nMaxRefreshDelay=fast\n",
+            b"[Graphics]\nMaxRefreshDelay=0\n",
+            b"[Graphics]\nMaxRefreshDelay=-1\n",
+        ] {
+            assert_eq!(
+                configured_max_refresh_delay_ms(config),
+                30,
+                "{:?} must resolve to the native default",
+                String::from_utf8_lossy(config)
+            );
+        }
+        // A trailing suffix is not invalid: StdCompiler reads the numeric
+        // prefix and ignores the rest, so `16ms` is the positive value 16.
+        assert_eq!(
+            configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=16ms\n"),
+            16
+        );
+
+        // A valid positive value is kept verbatim.
+        assert_eq!(
+            configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=50\n"),
+            50
+        );
+        assert_eq!(
+            configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=16\n"),
+            16
+        );
+
+        // The advanced-config editor materializes the same default rather than
+        // inventing a faster one.
+        let row = crate::advanced_config::sections(&Config::new())
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.name == "MaxRefreshDelay")
+            .expect("MaxRefreshDelay row");
+        assert_eq!(row.value.serialized(), "30");
+
+        // The retained value still feeds the divisor: 30 leaves the 28 ms game
+        // timer as one graphics opportunity, a smaller ceiling splits it.
+        assert_eq!(
+            frame_schedule_for_mode(AppMode::Running, 28, 1, 30).refresh_interval,
+            Duration::from_millis(28)
+        );
+        assert_eq!(
+            frame_schedule_for_mode(AppMode::Running, 28, 1, 16).refresh_interval,
+            Duration::from_millis(14)
+        );
+    }
+
     #[test]
     fn max_refresh_delay_uses_cpp_divisor_without_speeding_simulation() {
         let default = frame_schedule_for_mode(AppMode::Running, 28, 1, 16);
