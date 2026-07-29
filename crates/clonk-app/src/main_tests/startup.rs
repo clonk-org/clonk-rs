@@ -4634,7 +4634,10 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
 
     press_frontend_f3(&mut app, ModifiersState::empty(), "startup F3");
     let after_startup_music =
-        Config::load(paths.config_file()).expect("reload startup frontend-music toggle");
+        {
+            app.flush_deferred_config();
+            Config::load(paths.config_file()).expect("reload startup frontend-music toggle")
+        };
     assert_eq!(
         after_startup_music.get_in(Some("Sound"), "MenuMusic"),
         Some("false")
@@ -4647,7 +4650,10 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
 
     press_frontend_f3(&mut app, ModifiersState::CTRL, "startup Ctrl+F3");
     let after_startup_sound =
-        Config::load(paths.config_file()).expect("reload startup frontend-sound toggle");
+        {
+            app.flush_deferred_config();
+            Config::load(paths.config_file()).expect("reload startup frontend-sound toggle")
+        };
     assert_eq!(
         after_startup_sound.get_in(Some("Sound"), "MenuSound"),
         Some("false")
@@ -4672,7 +4678,10 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
     press_frontend_f3(&mut app, ModifiersState::empty(), "loading F3");
     press_frontend_f3(&mut app, ModifiersState::CTRL, "loading Ctrl+F3");
     let after_loading =
-        Config::load(paths.config_file()).expect("reload loading frontend audio toggles");
+        {
+            app.flush_deferred_config();
+            Config::load(paths.config_file()).expect("reload loading frontend audio toggles")
+        };
     assert_eq!(
         after_loading.get_in(Some("Sound"), "MenuMusic"),
         Some("true")

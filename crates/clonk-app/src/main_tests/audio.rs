@@ -5007,6 +5007,12 @@
             .expect("open in-game Options");
         app.apply_ingame_menu_action(MenuAction::ToggleSound)
             .expect("toggle in-game Sound");
+        // `C4SoundSystem::ToggleOnOff` flips the flag in memory alone
+        // (C4SoundSystem.cpp:138-142); the file is written when the Options
+        // dialog closes or at clean shutdown. This test's subject is the write
+        // *content*, so it flushes explicitly — the deferral itself is pinned by
+        // `runtime_config_mutations_remain_process_local_until_shutdown_save`.
+        app.flush_deferred_config();
         let after_sound = Config::load(paths.config_file()).expect("reload Sound toggle");
         assert_eq!(
             after_sound.get_in(Some("Sound"), "Sound"),
@@ -5020,6 +5026,7 @@
 
         app.apply_ingame_menu_action(MenuAction::ToggleMusic)
             .expect("toggle in-game Music");
+        app.flush_deferred_config();
         let after_music = Config::load(paths.config_file()).expect("reload Music toggle");
         assert_eq!(
             after_music.get_in(Some("Sound"), "Sound"),

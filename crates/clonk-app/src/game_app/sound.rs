@@ -118,18 +118,15 @@ impl GameApp {
         Ok(())
     }
 
-    fn persist_audio_option(&self, key: &'static str, enabled: bool) {
-        let Some(paths) = self.app_paths.as_ref() else {
-            return;
-        };
+    fn persist_audio_option(&mut self, key: &'static str, enabled: bool) {
         // C4ConfigSound::CompileFunc serializes RXSound/RXMusic/FEMusic/
         // FESamples as the external [Sound] Sound/Music/MenuMusic/MenuSound
-        // keys. Rust saves eagerly; a write failure must not roll back the
-        // live toggle, just as C++ ignores a later Config.Save failure during
-        // normal application shutdown.
-        if let Err(error) = persist_config_value(paths, "Sound", key, enabled.to_string()) {
-            tracing::warn!(%error, key, "failed to persist audio option");
-        }
+        // keys. `C4SoundSystem::ToggleOnOff` changes only the in-memory flag;
+        // the file is written when the Options dialog closes or on a clean
+        // shutdown, so a toggle flipped back and forth costs no disk writes and
+        // an aborted run discards it.
+        self.deferred_config
+            .set("Sound", key, enabled.to_string());
     }
 
     pub(crate) fn set_frontend_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {

@@ -442,8 +442,13 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `FnGainMissionAccess` (`C4Script.cpp:2466-2471`) and the cheat-code
   add/remove (`C4StartupScenSelDlg.cpp:1838-1856`), change the string in memory
   and return; `C4StartupScenSelDlg.cpp` contains no `Config.Save()` at all.
-  Two tests asserted the file was written immediately and were updated to assert
-  the pending value instead — they had pinned the divergence.
+  The four `[Sound]` toggles defer too: `C4SoundSystem::ToggleOnOff` is
+  `enabled = !enabled` with no save (`C4SoundSystem.cpp:138-142`), and neither
+  `C4SoundSystem.cpp` nor `C4MainMenu.cpp` contains a `Config.Save()`.
+  Four tests asserted the file was written immediately; two now assert the
+  pending value and two flush explicitly before reloading, since their subject
+  is the written *content* rather than the timing. All had pinned the
+  divergence.
   **There are two flush points, not one.** `C4StartupOptionsDlg::SaveConfig`
   ends with an outright `Config.Save()` — "make sure config is saved, in case
   the game crashes later on" (`C4StartupOptionsDlg.cpp:1188-1189`) — so leaving
