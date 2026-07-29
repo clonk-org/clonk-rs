@@ -55,6 +55,46 @@ pub fn control_key_label(control: usize, resources: &dyn Fn(&str) -> Option<Stri
         .unwrap_or_default()
 }
 
+/// The four control facets and where they live in their source images
+/// (`C4GraphicsResource.cpp:200-203,229`). `fctKeyboard`, `fctCommand` and
+/// `fctKey` are sub-rects of one `Control.png`; `fctGamepad` is its own
+/// `Gamepad.png` loaded with an 80px phase width.
+pub mod control_facets {
+    use crate::classic_gui::IntRect;
+
+    /// `fctKeyboard.Set(&sfcControl, 0, 0, 80, 36)` — one phase per control set.
+    pub const KEYBOARD: IntRect = IntRect {
+        x: 0,
+        y: 0,
+        w: 80,
+        h: 36,
+    };
+    /// `fctCommand.Set(&sfcControl, 0, 36, 32, 32)` — one phase per command.
+    pub const COMMAND: IntRect = IntRect {
+        x: 0,
+        y: 36,
+        w: 32,
+        h: 32,
+    };
+    /// `fctKey.Set(&sfcControl, 0, 100, 64, 64)` — phase 0 idle, 1 pressed.
+    pub const KEY: IntRect = IntRect {
+        x: 0,
+        y: 100,
+        w: 64,
+        h: 64,
+    };
+    /// `LoadFile(fctGamepad, "Gamepad", Files, 80)` — phase width, own image.
+    pub const GAMEPAD_PHASE_WIDTH: i32 = 80;
+
+    /// The source rect of `phase` within a facet whose cells run left to right.
+    pub fn phase_rect(cell: IntRect, phase: usize) -> IntRect {
+        IntRect {
+            x: cell.x + cell.w * phase as i32,
+            ..cell
+        }
+    }
+}
+
 /// Which facet cell a device selector shows. `C4StartupOptionsDlg` draws
 /// `fctKeyboard`/`fctGamepad` phases rather than a text button
 /// (`C4StartupOptionsDlg.cpp:215-345`).
@@ -418,6 +458,25 @@ mod tests {
         assert_eq!(control_key_label(5, &table), "Dig");
         assert_eq!(CONTROL_KEY_LABEL_KEYS.len(), CONTROL_KEY_LABELS.len());
         assert_eq!(CONTROL_KEY_LABEL_KEYS[11], "IDS_CTL_SPECIAL2");
+
+        // The facet source rects come from one Control.png, except the gamepad
+        // selector which is its own image (C4GraphicsResource.cpp:200-203,229).
+        use control_facets::{phase_rect, COMMAND, GAMEPAD_PHASE_WIDTH, KEY, KEYBOARD};
+        assert_eq!(
+            (KEYBOARD.x, KEYBOARD.y, KEYBOARD.w, KEYBOARD.h),
+            (0, 0, 80, 36)
+        );
+        assert_eq!(
+            (COMMAND.x, COMMAND.y, COMMAND.w, COMMAND.h),
+            (0, 36, 32, 32)
+        );
+        assert_eq!((KEY.x, KEY.y, KEY.w, KEY.h), (0, 100, 64, 64));
+        assert_eq!(GAMEPAD_PHASE_WIDTH, 80);
+        // Phases run left to right from the cell's own origin.
+        assert_eq!(phase_rect(KEY, 0), KEY);
+        assert_eq!(phase_rect(KEY, 1).x, KEY.x + KEY.w);
+        assert_eq!(phase_rect(COMMAND, 3).x, COMMAND.x + 3 * COMMAND.w);
+        assert_eq!(phase_rect(COMMAND, 3).y, COMMAND.y);
     }
 
     fn labels(prefix: &str) -> [[String; CONTROL_KEY_COUNT]; CONTROL_SET_COUNT] {

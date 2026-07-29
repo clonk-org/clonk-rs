@@ -6409,6 +6409,10 @@ impl FrontendAssets {
             book_scroll: self.dialog_image("StartupBookScroll.png")?,
             context_arrow: self.dialog_image("StartupContext.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,
+            // The control facets degrade to text buttons when absent, so these
+            // are optional rather than failing the whole dialog.
+            control: self.dialog_image("Control.png"),
+            gamepad: self.dialog_image("Gamepad.png"),
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             button: self.dialog_image("GUIButton.png")?,
         })

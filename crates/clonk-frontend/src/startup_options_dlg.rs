@@ -33,8 +33,8 @@
 use crate::clonk_fonts::ClonkFontSet;
 use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::startup_options_controls::{
-    control_sheet_hit_test, ControlCaptureTarget, ControlDevice, ControlSheetHit,
-    ControlSheetLayout, ControlSheetState, CONTROL_KEY_COUNT, CONTROL_KEY_LABELS,
+    control_facets, control_sheet_hit_test, key_button_facets, ControlCaptureTarget, ControlDevice,
+    ControlSheetHit, ControlSheetLayout, ControlSheetState, CONTROL_KEY_COUNT, CONTROL_KEY_LABELS,
 };
 use crate::startup_options_graphics::{
     graphics_hit_test, graphics_sheet_layout, GraphicsCheckboxId, GraphicsHitTarget,
@@ -1028,6 +1028,12 @@ pub struct OptionsDlgAssets {
     pub button_highlight: ImageData,
     /// `GUIButton.png` 128x32 — 3-slice bar of the standard Back button.
     pub button: ImageData,
+    /// `Control.png` — source of `fctKeyboard`, `fctCommand` and `fctKey`
+    /// (`C4GraphicsResource.cpp:200-203`). Absent falls back to text buttons.
+    pub control: Option<ImageData>,
+    /// `Gamepad.png` — `fctGamepad`, its own image with an 80px phase width
+    /// (`C4GraphicsResource.cpp:229`).
+    pub gamepad: Option<ImageData>,
 }
 
 /// Mutable display state of the Program sheet. Defaults mirror a fresh US
@@ -5021,6 +5027,46 @@ impl OptionsDlgScreen {
                 .controls()
                 .visible_label(device, control)
                 .unwrap_or("Undefined");
+            // `KeySelButton::DrawElement` blits fctKey then an inset fctCommand
+            // (C4StartupOptionsDlg.cpp:215-240). Without the facet the sheet
+            // keeps its text button, which is what a headless run gets.
+            if let Some(control_facet) = assets.control.as_ref() {
+                let facets = key_button_facets(rect, control, false);
+                let key_cell = control_facets::phase_rect(control_facets::KEY, facets.key_phase);
+                crate::classic_gui::draw_facet_stretch(
+                    surface,
+                    control_facet,
+                    (
+                        key_cell.x as f32,
+                        key_cell.y as f32,
+                        key_cell.w as f32,
+                        key_cell.h as f32,
+                    ),
+                    (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+                    gamma,
+                );
+                let command_cell =
+                    control_facets::phase_rect(control_facets::COMMAND, facets.command_phase);
+                let target = facets.command_rect;
+                crate::classic_gui::draw_facet_stretch(
+                    surface,
+                    control_facet,
+                    (
+                        command_cell.x as f32,
+                        command_cell.y as f32,
+                        command_cell.w as f32,
+                        command_cell.h as f32,
+                    ),
+                    (
+                        target.x as f32,
+                        target.y as f32,
+                        target.w as f32,
+                        target.h as f32,
+                    ),
+                    gamma,
+                );
+                continue;
+            }
             Self::draw_small_button(
                 surface,
                 assets,
@@ -5543,6 +5589,8 @@ mod tests {
             checkbox: load_graphics_png("GUICheckBox.png"),
             button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             button: load_graphics_png("GUIButton.png"),
+            control: None,
+            gamepad: None,
         }
     }
 

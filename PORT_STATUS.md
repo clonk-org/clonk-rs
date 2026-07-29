@@ -436,10 +436,15 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `IDS_CTL_*` table in C++'s order (`:166-169`) via `OptionsLabels::control_keys`
   instead of baked English, falling back to the shipped US text per key. Pinned
   by `startup_options_control_sheets_render_classic_facets_and_resource_text`.
-  **Still open:** the draw path still calls `draw_small_button` rather than
-  blitting `fctKey`/`fctCommand`/`fctKeyboard`/`fctGamepad`, because those
-  facets are not yet among `OptionsDlgAssets`. That is asset plumbing plus a
-  draw swap; the geometry and phases to feed it are done and tested.
+  The key buttons now blit the real facets: `OptionsDlgAssets` carries optional
+  `control` (`Control.png`, source of `fctKeyboard` 0,0,80,36; `fctCommand`
+  0,36,32,32; `fctKey` 0,100,64,64) and `gamepad` (`Gamepad.png`, its own image
+  with an 80px phase width) per `C4GraphicsResource.cpp:200-203,229`, and
+  `draw_control_sheet` blits `fctKey` then the inset `fctCommand`. Both assets
+  are optional, so a headless run or missing data keeps the text buttons rather
+  than failing the dialog. **Still open:** the device set selectors still draw
+  text buttons rather than `fctKeyboard`/`fctGamepad` phases, and the
+  `MENU_PARITY.md` rows.
 
 - Closed 2026-07-29: **Overflow menu scrollbars.**
   `C4GUI::ScrollBar` had two independent implementations — the drawing half in
