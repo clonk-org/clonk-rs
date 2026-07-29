@@ -205,6 +205,120 @@ class InstallHdDefinitionPackTests(unittest.TestCase):
         write_png(self.pack / "Overlay.png", 96, 96)
         self.assertEqual(self.install(), 1)
 
+    def test_shipped_crlf_line_endings_survive_the_splice(self):
+        # The shipped definition files are CRLF. Rewriting them as LF changes
+        # every line, which buries the real two-line facet change in a
+        # whole-file diff.
+        crlf = SHIPPED_ACT_MAP.replace("\n", "\r\n")
+        (self.shipped / "ActMap.txt").write_bytes(crlf.encode("latin-1"))
+        (self.shipped / "DefCore.txt").write_bytes(
+            SHIPPED_DEF_CORE.replace("\n", "\r\n").encode("latin-1")
+        )
+        self.assertEqual(self.install(), 0)
+        for name in ("ActMap.txt", "DefCore.txt"):
+            raw = (self.out / name).read_bytes()
+            self.assertNotIn(b"\n\n", raw, f"{name} gained a bare LF")
+            self.assertEqual(
+                raw.count(b"\r\n"),
+                raw.count(b"\n"),
+                f"{name} must stay entirely CRLF",
+            )
+        self.assertIn(b"Facet=0,0,16,22,0,-2\r\n", (self.out / "ActMap.txt").read_bytes())
+
+
+class ReflowAuxiliarySheetTests(unittest.TestCase):
+    """An extra sheet indexes the SAME ActMap, so it must follow the new layout."""
+
+    def setUp(self):
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        base = InstallHdDefinitionPackTests("run")
+        base.setUp()
+        self.addCleanup(base._tmp.cleanup)
+        self.shipped, self.pack, self.out = base.shipped, base.pack, base.out
+        # The Knights' GraphicsShield.png is an ExtraGraphics overlay drawn
+        # through the clonk's own definition, so it inherits its Scale.
+        write_png(self.shipped / "GraphicsShield.png", 16, 16)
+        write_png(self.shipped / "OverlayShield.png", 16, 16)
+
+    def test_a_stale_auxiliary_sheet_is_reflowed_to_match_the_base(self):
+        self.assertEqual(
+            install_hd_definition_pack.install(self.shipped, self.pack, self.out), 0
+        )
+        base = install_hd_definition_pack.png_size(self.out / "Graphics.png")
+        self.assertEqual(base, (960, 924))
+        for name in ("GraphicsShield.png", "OverlayShield.png"):
+            self.assertEqual(
+                install_hd_definition_pack.png_size(self.out / name),
+                base,
+                f"{name} would index the rewritten ActMap at the old coordinates",
+            )
+
+    def test_a_portrait_overlay_is_not_mistaken_for_an_action_sheet(self):
+        # Overlay1.png pairs with Portrait1.png, NOT with Graphics.png. Resizing
+        # it to the action sheet makes the loader reject the definition with
+        # "size ... does not match graphics".
+        write_png(self.shipped / "Portrait1.png", 150, 150)
+        write_png(self.shipped / "Overlay1.png", 150, 150)
+        self.assertEqual(
+            install_hd_definition_pack.install(self.shipped, self.pack, self.out), 0
+        )
+        self.assertEqual(
+            install_hd_definition_pack.png_size(self.out / "Overlay1.png"),
+            (150, 150),
+            "the portrait overlay must keep its portrait dimensions",
+        )
+
+    def test_a_sheet_already_matching_the_base_is_left_alone(self):
+        write_png(self.shipped / "GraphicsShield.png", 960, 924)
+        write_png(self.shipped / "OverlayShield.png", 960, 924)
+        before = (self.shipped / "GraphicsShield.png").read_bytes()
+        self.assertEqual(
+            install_hd_definition_pack.install(self.shipped, self.pack, self.out), 0
+        )
+        self.assertEqual((self.out / "GraphicsShield.png").read_bytes(), before)
+
+
+class InstallGraphicsVariantTests(InstallHdDefinitionPackTests):
+    """A variant sheet shares the base definition's ActMap and DefCore."""
+
+    def setUp(self):
+        super().setUp()
+        write_png(self.shipped / "GraphicsArmored.png", 16, 16)
+        write_png(self.shipped / "OverlayArmored.png", 16, 16)
+
+    def install_variant(self, variant="Armored"):
+        return install_hd_definition_pack.install(
+            self.shipped, self.pack, self.out, variant
+        )
+
+    def test_variant_replaces_only_its_own_sheet_pair(self):
+        # Install the base first so the variant has a matching base sheet.
+        self.assertEqual(self.install(), 0)
+        shutil_src = self.out
+        base_actmap = (shipped_out := shutil_src / "ActMap.txt").read_bytes()
+        base_defcore = (shutil_src / "DefCore.txt").read_bytes()
+        self.shipped = shutil_src  # variant installs on top of the HD base
+        self.out = self.out.parent / "Variant.c4d"
+        self.assertEqual(self.install_variant(), 0)
+        self.assertEqual((self.out / "ActMap.txt").read_bytes(), base_actmap)
+        self.assertEqual((self.out / "DefCore.txt").read_bytes(), base_defcore)
+        self.assertEqual(
+            install_hd_definition_pack.png_size(self.out / "GraphicsArmored.png"),
+            (960, 924),
+        )
+        self.assertEqual(
+            install_hd_definition_pack.png_size(self.out / "OverlayArmored.png"),
+            (960, 924),
+        )
+
+    def test_variant_sheet_that_does_not_match_the_base_fails(self):
+        # Variants index the base ActMap, so a differently sized sheet would
+        # put every facet somewhere else on this costume.
+        self.assertEqual(self.install_variant(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
