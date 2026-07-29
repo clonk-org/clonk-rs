@@ -9306,6 +9306,39 @@ mod hd_exact_blit_tests {
     }
 
     #[test]
+    fn hd_exact_blits_match_a_real_crew_facet_only_at_its_authored_scale() {
+        // The shipped Clonk's Walk facet is `Facet=0,0,16,22` — the crew rows
+        // are NOT square, and a rendered HD crew pack authors them at DefCore
+        // `Scale=300`, so the source is 48x66 texels for a 16x22 destination.
+        // Exactness is measured per axis against the physical destination, so
+        // both axes have to land together (C4Object.cpp:470-475 selects the
+        // source crop; StdGL.cpp:527 owns the correction this opts out of).
+        let walk = FloatSourceRect::scaled(SourceRect::new(0, 0, 16, 22), 3.0);
+        assert_eq!((walk.width, walk.height), (48.0, 66.0));
+
+        let matched = test_graphics(3.0, true);
+        let (source, sampling) = matched.runtime_sprite_blit(walk, (16.0, 22.0), false);
+        assert_eq!(
+            source, walk,
+            "a Scale=300 facet at a 300% presentation is 1:1"
+        );
+        assert_eq!(sampling, BlitSampling::Nearest);
+
+        // A presentation scale that does not match the authored scale is a
+        // genuine resample in both directions, so C++'s correction stays.
+        for presentation_scale in [2.0, 4.0] {
+            let (corrected, sampling) = test_graphics(presentation_scale, true)
+                .runtime_sprite_blit(walk, (16.0, 22.0), false);
+            assert_eq!(
+                (corrected.x, corrected.y),
+                (0.5, 0.5),
+                "scale {presentation_scale} still takes the half-texel correction"
+            );
+            assert_eq!(sampling, BlitSampling::Linear);
+        }
+    }
+
+    #[test]
     fn hd_exact_blits_are_inert_at_presentation_scale_one() {
         for hd_exact_blits in [false, true] {
             let graphics = test_graphics(1.0, hd_exact_blits);
