@@ -3518,6 +3518,31 @@ impl GameApp {
         }
     }
 
+    /// `C4StartupMainDlg::SwitchToEditor` (C4StartupMainDlg.cpp:313-325). On
+    /// Windows it refuses when the configured editor is absent — returning
+    /// false so the key is not consumed — and otherwise flags the launch and
+    /// exits startup; `~C4Application` spawns it after teardown
+    /// (C4Application.cpp:58-74). The `#ifdef _WIN32` body is skipped
+    /// elsewhere, so every other platform consumes the key and does nothing.
+    pub(crate) fn switch_to_editor(&mut self) -> bool {
+        if !cfg!(windows) {
+            return true;
+        }
+        let Some(editor) = self.classic_editor_executable() else {
+            return false;
+        };
+        self.pending_editor_launch = Some(editor);
+        self.request_exit();
+        true
+    }
+
+    /// `Config.AtExePath(C4CFN_Editor)` — "Editor.exe" beside the engine
+    /// (C4Components.h:23; C4StartupMainDlg.cpp:317).
+    pub(crate) fn classic_editor_executable(&self) -> Option<PathBuf> {
+        let editor = self.app_paths.as_ref()?.install_root().join("Editor.exe");
+        editor.is_file().then_some(editor)
+    }
+
     pub(crate) fn open_network_game_dialog(&mut self) {
         self.external_irc_dialog_visible = false;
         self.external_irc_dialog = None;

@@ -120,6 +120,9 @@ pub(crate) struct GameApp {
     /// independently of the startup network dialog, so changing startup
     /// screens must not tear down a live connection.
     pub(crate) startup_irc_client: Option<clonk_network::IrcClientHandle>,
+    /// `Application.launchEditor`: set by `SwitchToEditor`, consumed by
+    /// `~C4Application` after subsystem cleanup (C4Application.cpp:58-74).
+    pub(crate) pending_editor_launch: Option<PathBuf>,
     pub(crate) startup_irc_server: String,
     /// Whether the singleton-style C4ChatDlg analogue is currently shown.
     /// The controller and transport remain process-global when this UI closes.

@@ -5313,3 +5313,70 @@ fn classic_startup_argument_selects_initial_cpp_view() {
     app.apply_classic_startup_screen("");
     assert_eq!(app.startup_view, remembered);
 }
+
+/// `C4StartupMainDlg` binds bare F6 to `SwitchToEditor`
+/// (C4StartupMainDlg.cpp:95-100,313-325): on Windows it refuses when the
+/// configured `Editor.exe` is absent — returning false so the key is not
+/// consumed — and otherwise flags the launch and exits startup, with
+/// `~C4Application` spawning it after teardown (C4Application.cpp:58-74).
+/// Every other platform skips the `#ifdef _WIN32` body and consumes the key
+/// without effect.
+#[test]
+fn startup_f6_launches_editor_when_available() {
+    let install = tempdir().expect("editor install root");
+    let user_data = tempdir().expect("editor user data");
+    install_global_gui_and_loader_test_root(install.path());
+    let _guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(install.path())),
+        ("LC_CONTENT_DIR", None),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+    ]);
+    let paths = AppPaths::discover().expect("discover app paths");
+    paths.ensure_user_dirs().expect("create user directories");
+
+    // Without Editor.exe the shortcut is inert on every platform: startup
+    // stays open and nothing is queued.
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    app.show_main_menu();
+    assert_eq!(app.classic_editor_executable(), None);
+    app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
+        .expect("bare F6 without an editor is handled");
+    assert_eq!(app.startup_view, StartupView::MainMenu);
+    assert!(app.pending_editor_launch.is_none());
+    assert!(!app.exit_requested);
+
+    // With Editor.exe beside the engine, Windows queues the deferred launch
+    // and exits; other platforms still consume the key with no effect.
+    let editor = install.path().join("Editor.exe");
+    fs::write(&editor, b"stub").expect("write the editor stub");
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    app.show_main_menu();
+    assert_eq!(app.classic_editor_executable(), Some(editor.clone()));
+    app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
+        .expect("bare F6 with an editor is handled");
+    if cfg!(windows) {
+        assert_eq!(app.pending_editor_launch, Some(editor));
+        assert!(app.exit_requested, "SwitchToEditor exits startup");
+    } else {
+        assert!(app.pending_editor_launch.is_none());
+        assert!(!app.exit_requested);
+    }
+    assert_eq!(app.startup_view, StartupView::MainMenu);
+
+    // A modified F6 is not the classic binding and must not reach it.
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    app.show_main_menu();
+    app.keyboard_modifiers = ModifiersState::CTRL;
+    app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
+        .expect("Ctrl+F6 is not the editor shortcut");
+    assert!(app.pending_editor_launch.is_none());
+    assert!(!app.exit_requested);
+
+    // The binding belongs to the main dialog only.
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    app.open_about_dialog();
+    app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
+        .expect("F6 outside the main dialog is not the editor shortcut");
+    assert!(app.pending_editor_launch.is_none());
+    assert_eq!(app.startup_view, StartupView::About);
+}

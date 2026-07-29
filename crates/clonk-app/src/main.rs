@@ -1128,6 +1128,17 @@ fn main() -> Result<()> {
                 if app.console_mode {
                     app.finish_console_shutdown();
                 }
+                // `~C4Application` spawns the editor only after subsystem
+                // cleanup (C4Application.cpp:58-74).
+                if let Some(editor) = app.pending_editor_launch.take() {
+                    if let Err(error) = std::process::Command::new(&editor).spawn() {
+                        tracing::warn!(
+                            %error,
+                            path = %editor.display(),
+                            "failed to launch the classic editor"
+                        );
+                    }
+                }
                 if let Some(inhibitor) = display_sleep_inhibitor.take() {
                     inhibitor.release();
                 }
@@ -1581,6 +1592,7 @@ impl GameApp {
             startup_tooltip: ClassicTooltipTracker::new(),
             startup_network_dialog: None,
             startup_irc_client: None,
+            pending_editor_launch: None,
             startup_irc_server: String::new(),
             external_irc_dialog_visible: false,
             external_irc_dialog: None,

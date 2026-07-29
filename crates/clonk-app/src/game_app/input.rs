@@ -4237,6 +4237,20 @@ impl GameApp {
                     self.request_exit();
                     return Ok(());
                 }
+                // `C4StartupMainDlg` registers bare F6 at control-override
+                // priority within its own dialog scope
+                // (C4StartupMainDlg.cpp:95-100). `SwitchToEditor` returning
+                // false leaves the key unconsumed.
+                if self.startup_view == StartupView::MainMenu
+                    && state == ElementState::Pressed
+                    && key == VirtualKeyCode::F6
+                    && (self.keyboard_modifiers
+                        & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
+                        .is_empty()
+                    && self.switch_to_editor()
+                {
+                    return Ok(());
+                }
                 if let Some(gui_key) = map_key_code(key) {
                     if self.handle_startup_dialog_key(gui_key, state)? {
                         return Ok(());
