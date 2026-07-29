@@ -102,21 +102,21 @@ impl AudioOptions {
         }
 
         if let Some(raw) = config.get_in(Some("Sound"), "MusicVolume") {
-            if let Ok(value) = raw.trim().parse::<i32>() {
+            if let Some(value) = parse_native_config_integer(raw) {
                 let clamped = value.clamp(0, 100);
                 self.music_volume = clamped as f32 / 100.0;
             }
         }
 
         if let Some(raw) = config.get_in(Some("Sound"), "SoundVolume") {
-            if let Ok(value) = raw.trim().parse::<i32>() {
+            if let Some(value) = parse_native_config_integer(raw) {
                 let clamped = value.clamp(0, 100);
                 self.sound_volume = clamped as f32 / 100.0;
             }
         }
 
         if let Some(raw) = config.get_in(Some("Sound"), "MaxChannels") {
-            if let Ok(value) = raw.trim().parse::<i32>() {
+            if let Some(value) = parse_native_config_integer(raw) {
                 let clamped = value.clamp(1, MAX_CHANNELS_LIMIT as i32);
                 self.max_channels = clamped as usize;
             }
@@ -195,6 +195,14 @@ fn bool_config_value(value: bool) -> &'static str {
 /// value in place: a leading `1`/`0` not followed by another digit, or a
 /// case-sensitive `true`/`false` prefix. No trimming and no case folding, so
 /// `TRUE`, ` 1` and `10` are all not-found and leave the adapted default.
+/// `StdCompilerINIRead::ReadNum` (StdCompiler.h:705-724): skip whitespace,
+/// select base 16 only for a leading `0x`/`0X`, then consume the longest valid
+/// numeric prefix and ignore whatever follows. No digits means not-found, so
+/// the caller keeps the field's adapted default.
+fn parse_native_config_integer(raw: &str) -> Option<i32> {
+    crate::parse_startup_config_integer(raw.as_bytes())
+}
+
 fn parse_bool(raw: &str) -> Option<bool> {
     let value = raw.as_bytes();
     if value.first() == Some(&b'1') && !value.get(1).is_some_and(u8::is_ascii_digit) {
@@ -841,21 +849,21 @@ impl DisplayOptions {
 
     fn apply_config(&mut self, config: &Config) {
         if let Some(raw) = config.get_in(Some("Graphics"), "ResolutionX") {
-            if let Ok(parsed) = raw.trim().parse::<i32>() {
+            if let Some(parsed) = parse_native_config_integer(raw) {
                 if parsed > 0 {
                     self.base_width = parsed as u32;
                 }
             }
         }
         if let Some(raw) = config.get_in(Some("Graphics"), "ResolutionY") {
-            if let Ok(parsed) = raw.trim().parse::<i32>() {
+            if let Some(parsed) = parse_native_config_integer(raw) {
                 if parsed > 0 {
                     self.base_height = parsed as u32;
                 }
             }
         }
         if let Some(raw) = config.get_in(Some("Graphics"), "Scale") {
-            if let Ok(percent) = raw.trim().parse::<i32>() {
+            if let Some(percent) = parse_native_config_integer(raw) {
                 self.scale_percent = percent;
                 self.scale = (percent as f32) / 100.0;
             }
@@ -881,10 +889,10 @@ impl DisplayOptions {
         }
         let pos_x = config
             .get_in(Some("Graphics"), "PositionX")
-            .and_then(|raw| raw.trim().parse::<i32>().ok());
+            .and_then(parse_native_config_integer);
         let pos_y = config
             .get_in(Some("Graphics"), "PositionY")
-            .and_then(|raw| raw.trim().parse::<i32>().ok());
+            .and_then(parse_native_config_integer);
         if let (Some(x), Some(y)) = (pos_x, pos_y) {
             self.position = Some((x, y));
         }

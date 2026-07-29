@@ -6900,3 +6900,70 @@
         }
     
 }
+
+    /// `StdCompilerINIRead::ReadNum` (StdCompiler.h:705-724) skips leading
+    /// whitespace, selects base 16 only for a leading `0x`/`0X`, consumes the
+    /// longest valid numeric prefix and ignores the rest. No digits is
+    /// not-found, so the field's adapted default survives.
+    #[test]
+    fn runtime_config_scalars_follow_stdcompiler_prefix_hex_and_narrowing() {
+        let parse = |raw: &str| parse_startup_config_integer(raw.as_bytes());
+
+        // Plain decimal, sign and surrounding whitespace.
+        assert_eq!(parse("42"), Some(42));
+        assert_eq!(parse("-7"), Some(-7));
+        assert_eq!(parse("+7"), Some(7));
+        assert_eq!(parse("   19"), Some(19));
+        assert_eq!(parse("\t\r\n5"), Some(5));
+
+        // Hex only with an explicit 0x/0X prefix; a bare leading zero is
+        // decimal, and `0x` with no digits is still the value zero because
+        // strtol consumed the leading `0`.
+        assert_eq!(parse("0x1f"), Some(31));
+        assert_eq!(parse("0X1F"), Some(31));
+        assert_eq!(parse("010"), Some(10));
+        assert_eq!(parse("0x"), Some(0));
+
+        // The longest valid prefix wins and trailing bytes are tolerated.
+        assert_eq!(parse("30ms"), Some(30));
+        assert_eq!(parse("12 ; comment"), Some(12));
+        assert_eq!(parse("0x1fg"), Some(31));
+        // A decimal parse stops at the first non-digit, so `1e3` is 1.
+        assert_eq!(parse("1e3"), Some(1));
+
+        // No digits at all is not-found.
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("wobble"), None);
+        assert_eq!(parse("-"), None);
+        assert_eq!(parse("   "), None);
+
+        // The live settings readers share that grammar and keep their adapted
+        // defaults when it yields nothing.
+        let audio = |body: &str| {
+            let root = tempdir().expect("scalar config root");
+            let user_data = tempdir().expect("scalar user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            fs::write(paths.config_file(), format!("[Sound]\n{body}\n"))
+                .expect("write fixture config");
+            AudioOptions::load(Some(&paths))
+        };
+        let defaults = AudioOptions::default();
+        // A hex volume is honoured, exactly as C++ would read it.
+        assert_eq!(audio("MusicVolume=0x40").music_volume, 64.0 / 100.0);
+        // A tolerated suffix keeps the numeric prefix.
+        assert_eq!(audio("SoundVolume=75%").sound_volume, 75.0 / 100.0);
+        // Digit-less input leaves the adapted default alone rather than
+        // clamping to the range floor.
+        for invalid in ["", "loud", "-", "   "] {
+            let kept = audio(&format!("MusicVolume={invalid}\nMaxChannels={invalid}"));
+            assert_eq!(kept.music_volume, defaults.music_volume, "{invalid:?}");
+            assert_eq!(kept.max_channels, defaults.max_channels, "{invalid:?}");
+        }
+    
+}
