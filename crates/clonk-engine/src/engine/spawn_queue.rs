@@ -408,6 +408,7 @@ impl Engine {
             id,
             definition_id.clone(),
             ObjectState {
+                view_energy: 0,
                 custom_name,
                 script_fixed_position: None,
                 script_fixed_velocity: None,

@@ -8543,7 +8543,11 @@ impl GraphicsSystem {
                     );
                 }
                 let mut bar_slot = 0;
-                if crew.hide_hud_bars & clonk_engine::HIDE_HUD_BAR_ENERGY == 0 {
+                // The whole bar group is transient: `DrawCursorInfo` skips it
+                // unless the timer is live or the always-HUD option is set
+                // (C4Viewport.cpp:921).
+                let draw_bars = crew.view_energy != 0 || self.show_player_hud_always;
+                if draw_bars && crew.hide_hud_bars & clonk_engine::HIDE_HUD_BAR_ENERGY == 0 {
                     hud::draw_level_bar_with_gamma(
                         &mut self.surface,
                         &self.hud_graphics,
@@ -8557,7 +8561,8 @@ impl GraphicsSystem {
                     );
                     bar_slot += 1;
                 }
-                if crew.magic_energy != 0
+                if draw_bars
+                    && crew.magic_energy != 0
                     && crew.hide_hud_bars & clonk_engine::HIDE_HUD_BAR_MAGIC_ENERGY == 0
                 {
                     hud::draw_level_bar_with_gamma(
@@ -8573,7 +8578,8 @@ impl GraphicsSystem {
                     );
                     bar_slot += 1;
                 }
-                if crew.breath != 0
+                if draw_bars
+                    && crew.breath != 0
                     && crew.breath < crew.breath_capacity
                     && crew.hide_hud_bars & clonk_engine::HIDE_HUD_BAR_BREATH == 0
                 {

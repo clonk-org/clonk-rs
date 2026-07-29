@@ -2055,6 +2055,7 @@ fn collect_player_overlays_filtered(
                 label,
                 energy,
                 energy_capacity,
+                view_energy,
                 magic_energy,
                 magic_capacity,
                 breath,
@@ -2076,6 +2077,10 @@ fn collect_player_overlays_filtered(
                     .map(|physical| physical.magic)
                     .unwrap_or(object.magic_capacity);
                 let breath_capacity = physical.map(|physical| physical.breath).unwrap_or(0);
+                let view_energy = engine
+                    .find_object_index(object.id)
+                    .map(|index| engine.object_view_energy(index))
+                    .unwrap_or(0);
                 let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
                 let hide_hud_elements =
                     engine.definition_hide_hud_elements(object.definition_id.as_str());
@@ -2084,6 +2089,7 @@ fn collect_player_overlays_filtered(
                     label,
                     object.energy,
                     energy_capacity,
+                    view_energy,
                     object.magic_energy,
                     magic_capacity,
                     object.breath,
@@ -2094,13 +2100,14 @@ fn collect_player_overlays_filtered(
                 )
             } else {
                 let label = format!("Object #{}", object_id.as_u64());
-                (label, 0, 0, 0, 0, 0, 0, false, 0, 0)
+                (label, 0, 0, 0, 0, 0, 0, 0, false, 0, 0)
             };
             crew.push(CrewOverlay {
                 object_id: *object_id,
                 label,
                 energy,
                 energy_capacity,
+                view_energy,
                 magic_energy,
                 magic_capacity,
                 breath,

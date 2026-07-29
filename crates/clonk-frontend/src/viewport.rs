@@ -899,6 +899,10 @@ pub struct CrewOverlay {
     /// Raw `C4Object::Energy` and resolved `GetPhysical()->Energy`.
     pub energy: i32,
     pub energy_capacity: i32,
+    /// `C4Object::ViewEnergy`, the transient bar timer. `DrawCursorInfo` draws
+    /// the three status bars only while it is live or
+    /// `Config.Graphics.ShowPlayerHUDAlways` is set (C4Viewport.cpp:921).
+    pub view_energy: i32,
     /// Raw `C4Object::MagicEnergy` and resolved `GetPhysical()->Magic`.
     /// A non-zero level inserts the optional middle HUD bar
     /// (src/C4Viewport.cpp:934-938; src/C4Object.cpp:2722-2726).

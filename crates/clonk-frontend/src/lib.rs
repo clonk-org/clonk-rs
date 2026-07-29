@@ -14177,6 +14177,7 @@ mod tests {
             control_key_labels: Vec::new(),
             crew_count: 1,
             crew: vec![CrewOverlay {
+                view_energy: 100,
                 object_id,
                 label: "Joe".to_string(),
                 energy: 100,
@@ -14839,6 +14840,107 @@ mod tests {
             Some(standard_gamma_color(Color::opaque(0, 0, 220))),
             "breath shifts one compact slot right when magic is present"
         );
+    }
+
+    /// `DrawCursorInfo` gates the whole energy/magic/breath group on
+    /// `cursor->ViewEnergy || Config.Graphics.ShowPlayerHUDAlways`
+    /// (C4Viewport.cpp:921), so a stale cursor shows no bars at all.
+    #[test]
+    fn cursor_bars_require_view_energy_when_always_hud_is_disabled() {
+        let render = |view_energy: i32, always: bool| {
+            let (snapshot, mut graphics) = cursor_label_fixture(None);
+            let crew = &mut graphics.hud_players[0].crew[0];
+            crew.energy = 100;
+            crew.energy_capacity = 100;
+            crew.magic_energy = 1_000;
+            crew.magic_capacity = 2_000;
+            crew.breath = 50;
+            crew.breath_capacity = 100;
+            crew.hide_hud_elements = 0;
+            crew.hide_hud_bars = 0;
+            crew.view_energy = view_energy;
+            crew.inventory = vec![InventoryOverlay {
+                object_id: ObjectId::new(20),
+                definition_id: "ITEM".into(),
+                picture: Some(ImageData::new(
+                    hud::SYMBOL_SIZE as u32,
+                    hud::SYMBOL_SIZE as u32,
+                    std::iter::repeat_n(
+                        [220u8, 0, 220, 255],
+                        (hud::SYMBOL_SIZE * hud::SYMBOL_SIZE) as usize,
+                    )
+                    .flatten()
+                    .collect(),
+                )),
+                count: 1,
+                additive: false,
+                picture_overlays: Vec::new(),
+            }];
+            // A synthetic 6x3 EnergyBars atlas, so each bar has its own color.
+            let columns = [
+                [220, 0, 0, 255],
+                [70, 0, 0, 255],
+                [0, 220, 0, 255],
+                [0, 70, 0, 255],
+                [0, 0, 220, 255],
+                [0, 0, 70, 255],
+            ];
+            let pixels = (0..3).flat_map(|_| columns.into_iter().flatten()).collect();
+            graphics.hud_graphics = Arc::new(HudGraphics {
+                energy_bars: Some(ImageData::new(6, 3, pixels)),
+                ..HudGraphics::default()
+            });
+            graphics.set_renderer_config(always, true, true);
+            graphics.render_frame(
+                &snapshot,
+                &[ViewportInput::from_focus(&snapshot.objects[0])],
+            );
+            let bar_y = (180 - hud::SYMBOL_SIZE - hud::SYMBOL_BORDER - 1) as u32;
+            let inventory_y = (180 - hud::SYMBOL_BORDER - hud::SYMBOL_SIZE) as u32;
+            (
+                graphics
+                    .surface()
+                    .get_pixel(hud::SYMBOL_BORDER as u32, inventory_y),
+                [
+                    graphics
+                        .surface()
+                        .get_pixel(hud::SYMBOL_BORDER as u32, bar_y),
+                    graphics
+                        .surface()
+                        .get_pixel((hud::SYMBOL_BORDER + 2) as u32, bar_y),
+                    graphics
+                        .surface()
+                        .get_pixel((hud::SYMBOL_BORDER + 4) as u32, bar_y),
+                ],
+            )
+        };
+        let magenta = Some(standard_gamma_color(Color::opaque(220, 0, 220)));
+        let red = Some(standard_gamma_color(Color::opaque(220, 0, 0)));
+        let green = Some(standard_gamma_color(Color::opaque(0, 220, 0)));
+        let blue = Some(standard_gamma_color(Color::opaque(0, 0, 220)));
+        let drawn = [red, green, blue];
+
+        // A live timer draws them, and so does the always-HUD option.
+        assert_eq!(
+            render(100, false).1,
+            drawn,
+            "a live ViewEnergy draws the bars"
+        );
+        assert_eq!(render(1, false).1, drawn, "the last tick still draws them");
+        assert_eq!(
+            render(0, true).1,
+            drawn,
+            "ShowPlayerHUDAlways draws them regardless"
+        );
+
+        // An expired timer without the option draws none of the three, while
+        // the inventory beside them is untouched: only the bar group is
+        // transient (C4Viewport.cpp:921).
+        let (inventory, hidden) = render(0, false);
+        assert_eq!(inventory, magenta);
+        assert_ne!(hidden[0], red);
+        assert_ne!(hidden[1], green);
+        assert_ne!(hidden[2], blue);
     }
 
     #[test]

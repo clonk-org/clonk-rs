@@ -4823,6 +4823,80 @@ public func Boot() {
     // FnDoEnergy's pObj (C4Script.cpp:492-499): `if (!pObj) pObj = cthr->Obj`
     // is only the local-call default — a named FOREIGN target takes the
     // change (C4Object::DoEnergy percent scale, C4Object.cpp:1345-1365).
+    /// `ViewEnergy` is the `// NoSave //` cursor-bar timer: `DoEnergy`,
+    /// `DoBreath`, the asphyxiation arm and `FnDoMagicEnergy` all refresh it to
+    /// `C4ViewDelay`, and `C4Object::Execute` decrements it once per tick down
+    /// to zero (C4Object.h:145; C4Constants.h:35; C4Object.cpp:914,1127,1398,
+    /// 1419; C4Script.cpp:552).
+    #[test]
+    fn view_energy_triggers_for_energy_breath_and_magic_and_expires_after_100_ticks() {
+        let script = r#"#strict
+func Hurt() { return DoEnergy(-10); }
+func Gasp() { return DoBreath(-10); }
+func Cast() { return DoMagicEnergy(-1); }
+"#;
+        let mut engine = Engine::with_seed(17);
+        let mut definition =
+            Definition::from_script("ACTR", "Actor", script).expect("script compiles");
+        definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            breath: 50_000,
+            magic: 50_000,
+            ..PhysicalInfo::default()
+        });
+        engine
+            .register_definition(definition)
+            .expect("actor registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[idx].state.energy = 50_000;
+        engine.objects[idx].state.breath = 50_000;
+        engine.objects[idx].state.magic_energy = 50_000;
+        engine.objects[idx].state.alive = true;
+
+        // Initialized to zero (C4Object.cpp:105).
+        assert_eq!(engine.objects[idx].state.view_energy, 0);
+
+        for function in ["Hurt", "Gasp", "Cast"] {
+            let idx = engine.find_object_index(actor).expect("actor exists");
+            engine.objects[idx].state.view_energy = 0;
+            engine
+                .call_object_function(idx, function, Vec::new())
+                .unwrap_or_else(|error| panic!("{function} runs: {error}"));
+            let idx = engine.find_object_index(actor).expect("actor exists");
+            assert_eq!(
+                engine.objects[idx].state.view_energy, 100,
+                "{function} must refresh ViewEnergy to C4ViewDelay"
+            );
+        }
+
+        // One decrement per object execution, floored at zero.
+        engine.tick().expect("tick advances the object");
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        assert_eq!(engine.objects[idx].state.view_energy, 99);
+        for _ in 0..99 {
+            engine.tick().expect("tick advances the object");
+        }
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        assert_eq!(engine.objects[idx].state.view_energy, 0);
+        engine.tick().expect("tick advances the object");
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.view_energy, 0,
+            "the decrement must not underflow"
+        );
+
+        // NoSave: a capture/restore round trip drops it, like C++.
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[idx].state.view_energy = 42;
+        let state = engine.capture_state();
+        engine.restore_state(&state).expect("state restores");
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        assert_eq!(engine.objects[idx].state.view_energy, 0);
+    }
+
     #[test]
     fn do_energy_reaches_a_foreign_target_like_cpp() {
         let script = r#"#strict

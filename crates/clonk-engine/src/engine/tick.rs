@@ -1059,6 +1059,13 @@ impl Engine {
                 let _ = menu.set_text_progress(1, true);
             }
 
+            // View delays: the last thing C4Object::Execute does
+            // (C4Object.cpp:1126-1127).
+            let view_energy = &mut self.objects[idx].state.view_energy;
+            if *view_energy > 0 {
+                *view_energy -= 1;
+            }
+
             let object_id = self.objects[idx].id;
             // Step is the command-DSL fixture callback; real content has no
             // Step function (call_step would return an empty batch) — skip

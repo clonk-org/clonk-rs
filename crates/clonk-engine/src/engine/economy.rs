@@ -1412,6 +1412,13 @@ impl Engine {
     /// fair-crew projection cached by definition. Objects without info use
     /// the definition's `[Physical]` section.
     #[doc(hidden)]
+    /// `C4Object::ViewEnergy`, the transient cursor-bar timer. It is live
+    /// object state rather than snapshot state: C++ marks it `// NoSave //`
+    /// and never synchronizes it (C4Object.h:145).
+    pub fn object_view_energy(&self, idx: usize) -> i32 {
+        self.objects[idx].state.view_energy
+    }
+
     pub fn object_physical(&mut self, idx: usize) -> PhysicalInfo {
         if let Some(temporary) = self.objects[idx].state.temporary_physical {
             return temporary;

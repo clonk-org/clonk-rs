@@ -1002,6 +1002,7 @@ impl Engine {
                 snapshot.id,
                 snapshot.definition_id.clone(),
                 ObjectState {
+                    view_energy: 0,
                     custom_name: snapshot.custom_name.clone(),
                     script_fixed_position: None,
                     script_fixed_velocity: None,

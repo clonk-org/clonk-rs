@@ -10303,6 +10303,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
     let component_order =
         normalized_component_order(&snapshot.components, snapshot.component_order.clone(), &[]);
     ObjectState {
+        view_energy: 0,
         custom_name: snapshot.custom_name.clone(),
         script_fixed_position: None,
         script_fixed_velocity: None,
