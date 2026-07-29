@@ -729,6 +729,26 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   (M10-P4-L044's criterion 7), the property and object-list windows
   (M10-P4-L045) and console viewports (M10-P4-L047).
 
+- **The toolbox notebook landed; its rendered controls are open.**
+  `C4DevmodeDlg` (`C4DevmodeDlg.cpp:28-121`) is one shared utility window
+  holding the Tools and Property pages in a **tabless** notebook
+  (`gtk_notebook_set_show_tabs(FALSE)`), so a page is never picked by clicking —
+  the console switches it. `clonk-app::developer_toolbox` ports the four
+  behaviours a port loses first: the close button **hides** (its `delete-event`
+  handler calls `SwitchPage(nullptr)` and returns `TRUE`, suppressing GTK's
+  destroy), the window position is **remembered across hides** in `static` x/y
+  and restored on the next show rather than re-centring, the title follows the
+  current page's *invisible* tab label, and the window is destroyed only when
+  its **last page** is removed — not when it is closed. Capturing the position
+  is guarded on visibility, which is what stops a hidden window's stale
+  coordinates overwriting a good one. Window chrome (utility type hint,
+  `"toolbox"` role, transient-for the console, centre-on-parent) is carried in
+  `ToolboxChrome` so the platform layer applies C++'s hints rather than
+  inventing its own. Pinned by
+  `developer_toolbox_hides_on_close_and_remembers_its_position`. **Still open:**
+  the rendered page contents — tool buttons, material/texture lists, grade,
+  preview and focus.
+
 - **Developer draw-tool state machine and mode control landed; dialog open.**
   `clonk-engine::developer_tools` carries `C4ToolsDlg`'s retained state and
   `C4EditCursor`'s gesture cadence. `ToggleTool` is `(Tool + 1) % 4`

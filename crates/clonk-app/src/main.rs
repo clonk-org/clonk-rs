@@ -27,6 +27,7 @@ mod control_options;
 mod deferred_config;
 mod desktop_notification;
 mod developer_console_save;
+mod developer_toolbox;
 mod developer_windows;
 mod display_sleep_inhibitor;
 use clonk_app_render::draw_commands;
