@@ -447,7 +447,17 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   menu's bar is only two 16px rows tall, so the two arrows consume it entirely
   and the pin has no travel — `rect.h - 3 * extent` is negative — which is what
   C++ does for a bar that short; the shared model's own test covers a bar with
-  travel. Two hazards recorded on the ticket: the
+  travel. **The in-game menu is wired too, and it was a parity fix, not just
+  plumbing:** `C4Menu::InitSize` widens an overflowing menu by
+  `C4GUI_ScrollBarWdt` (`C4Menu.cpp:776`), and the port's in-game menu did not —
+  it was 16px too narrow whenever it overflowed, with no test covering that
+  case. It now widens, exposes the bar rect, and routes pointer input through
+  the shared model via `scrollbar_hit`/`scrollbar_scroll_from_pointer`, pinned by
+  `ingame_menu_overflow_widens_for_the_scroll_bar`. Note `C4Menu.cpp:765-771`
+  gives Dialog-style menus vertical auto-enlargement and explicitly **no** bar;
+  the ticket's first criterion lists Dialog among the barred styles, which is
+  wrong against the oracle. This chassis has only Normal and Context, so the
+  distinction does not bite yet. Two hazards recorded on the ticket: the
   in-game menu render is cached and version-gated, so a newly interactive
   element must bump `menu_render_version` or the frame goes stale; and
   `object_menu.rs` already reserves a scrollbar column, so check the reserved

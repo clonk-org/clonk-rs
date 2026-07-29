@@ -1556,6 +1556,45 @@ impl IngameMenuState {
             && rect_contains_point(self.layout(area, font, gfx).client_rect(), point)
     }
 
+    /// Which part of the overflow scroll bar `point` hits, if any. Routes
+    /// through the shared `C4GUI::ScrollBar` model so every menu agrees
+    /// (`C4GuiContainers.cpp:477-623`). `None` while the menu fits, which is
+    /// when C++ leaves the bar disabled (`C4Menu.cpp:772-778`).
+    pub fn scrollbar_hit(
+        &self,
+        area: Rect,
+        font: &HudFont<'_>,
+        gfx: &IngameMenuGraphics,
+        point: GuiPoint,
+    ) -> Option<crate::scrollbar::ScrollbarHit> {
+        let layout = self.layout(area, font, gfx);
+        let bar = layout.scrollbar?;
+        crate::scrollbar::hit(
+            crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
+            (point.x.floor() as i32, point.y.floor() as i32),
+            layout.scroll_y,
+            layout.max_scroll,
+        )
+    }
+
+    /// The scroll a pin drag to `pointer_y` selects, or `None` while the menu
+    /// shows no bar.
+    pub fn scrollbar_scroll_from_pointer(
+        &self,
+        area: Rect,
+        font: &HudFont<'_>,
+        gfx: &IngameMenuGraphics,
+        pointer_y: i32,
+    ) -> Option<i32> {
+        let layout = self.layout(area, font, gfx);
+        let bar = layout.scrollbar?;
+        Some(crate::scrollbar::scroll_from_pointer(
+            crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
+            pointer_y,
+            layout.max_scroll,
+        ))
+    }
+
     /// Advances `TimeOnSelection` once per frame while the menu is shown
     /// (C4Menu::Draw, C4Menu.cpp:805).
     pub fn tick(&mut self) {
@@ -1778,7 +1817,13 @@ impl IngameMenuState {
         // extra bar when menu controls are drawn (C4Menu.h:262-264).
         let title_height = font.line_height().max(MIN_WOOD_BAR_HGT);
         let extra_height = if gfx.show_commands { MN_SYMBOL_SIZE } else { 0 };
-        let width = client_width + 2 * MN_FRAME_WIDTH;
+        // `C4Menu::InitSize`: an overflowing menu is widened by the scroll bar
+        // (C4Menu.cpp:772-777). Dialog-style menus auto-enlarge instead and
+        // never need one (:765-771), but this chassis has no Dialog style.
+        let bar_needed = row_count.saturating_mul(item_height) > lines.saturating_mul(item_height);
+        let width = client_width
+            + 2 * MN_FRAME_WIDTH
+            + i32::from(bar_needed) * crate::scrollbar::SCROLLBAR_EXTENT;
         let height = lines * item_height + title_height + extra_height + MN_FRAME_WIDTH;
 
         // Alignment 0 centers in the viewport; Left|Bottom sets
@@ -1839,6 +1884,14 @@ impl IngameMenuState {
             lines,
             scroll_y,
             max_scroll,
+            scrollbar: bar_needed.then(|| {
+                Rect::new(
+                    x + width - MN_FRAME_WIDTH - crate::scrollbar::SCROLLBAR_EXTENT,
+                    y + title_height,
+                    crate::scrollbar::SCROLLBAR_EXTENT as u32,
+                    (lines * item_height) as u32,
+                )
+            }),
         }
     }
 }
@@ -1872,6 +1925,9 @@ struct MenuLayout {
     lines: i32,
     scroll_y: i32,
     max_scroll: i32,
+    /// The overflow scroll bar's column, present only when `C4Menu::InitSize`
+    /// would widen the menu for one (C4Menu.cpp:772-777).
+    scrollbar: Option<Rect>,
 }
 
 impl MenuLayout {
@@ -4067,6 +4123,50 @@ mod tests {
             tooltip_position(facet, 200, facet.y + 40 + 5, 80, 40),
             (160, 20),
             "equality uses the above-pointer branch"
+        );
+    }
+
+    // C4Menu.cpp:772-777 — an overflowing menu is widened by the scroll bar and
+    // shows it beside the client; one that fits is neither widened nor barred.
+    #[test]
+    fn ingame_menu_overflow_widens_for_the_scroll_bar() {
+        use clonk_graphics::BitmapFont;
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let gfx = IngameMenuGraphics::default();
+        let area = Rect::new(0, 0, 640, 480);
+
+        let menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default(), &labels()).expect("menu");
+        let fitted = menu.layout(area, &font, &gfx);
+        assert_eq!(fitted.max_scroll, 0, "the main menu fits its viewport");
+        assert!(fitted.scrollbar.is_none());
+
+        // A viewport too short for every row forces the bar.
+        let short = Rect::new(0, 0, 640, 120);
+        let overflowing = menu.layout(short, &font, &gfx);
+        assert!(
+            overflowing.max_scroll > 0,
+            "the fixture must actually overflow"
+        );
+        let bar = overflowing
+            .scrollbar
+            .expect("an overflowing menu shows the bar");
+        assert_eq!(bar.width as i32, crate::scrollbar::SCROLLBAR_EXTENT);
+        // The menu is widened by exactly the bar, so the bar never covers the
+        // client area (C4Menu.cpp:776).
+        assert_eq!(
+            overflowing.bounds.width as i32,
+            fitted.bounds.width as i32 + crate::scrollbar::SCROLLBAR_EXTENT
+        );
+        // ...and it sits inside the frame at the menu's right edge.
+        assert_eq!(
+            bar.x + bar.width as i32,
+            overflowing.bounds.x + overflowing.bounds.width as i32 - MN_FRAME_WIDTH
+        );
+        assert_eq!(
+            bar.height as i32,
+            overflowing.lines * overflowing.item_height
         );
     }
 
