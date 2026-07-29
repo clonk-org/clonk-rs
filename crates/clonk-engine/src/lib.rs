@@ -7401,6 +7401,10 @@ struct HostRequestQueues {
 }
 
 pub struct Engine {
+    /// Active-language `IDS_BTN_NEXTSCENARIO`/`IDS_DESC_NEXTSCENARIO`, which
+    /// `FnSetNextMission` substitutes for omitted arguments. Presentation text
+    /// is host state, so it stays out of the serialized `EngineState`.
+    pub(crate) next_mission_defaults: (String, String),
     #[doc(hidden)]
     pub(crate) definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
@@ -9882,6 +9886,10 @@ impl Engine {
         let script_global_consts = clonk_script::new_global_variables();
         script_constants::register_script_constants_in_global_table(&script_global_consts);
         let mut engine = Self {
+            next_mission_defaults: (
+                compat::DEFAULT_NEXT_MISSION_TEXT.to_string(),
+                compat::DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
+            ),
             definitions: HashMap::new(),
             definition_load_order: Vec::new(),
             runtime_definition_order: Rc::new(Vec::new()),

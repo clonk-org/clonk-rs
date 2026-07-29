@@ -910,15 +910,18 @@
         assert_eq!(
             outcome.next_mission_commands,
             vec![
+                // An explicit empty string is retained; `getData()` is
+                // non-null for it, so C++ does not substitute the resource.
                 NextMissionCommand::Set {
                     path: "First".to_string(),
-                    text: String::new(),
-                    description: String::new(),
+                    text: Some(String::new()),
+                    description: Some(String::new()),
                 },
+                // Omitted arguments stay omitted until the host resolves them.
                 NextMissionCommand::Set {
                     path: "Second".to_string(),
-                    text: DEFAULT_NEXT_MISSION_TEXT.to_string(),
-                    description: DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
+                    text: None,
+                    description: None,
                 },
                 NextMissionCommand::Clear,
             ]

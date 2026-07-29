@@ -2313,6 +2313,12 @@ impl GameApp {
         );
         self.engine
             .set_object_no_dig_resource_string(self.object_no_dig.clone());
+        // `FnSetNextMission` substitutes these for omitted arguments
+        // (C4Script.cpp:6250,6258).
+        self.engine.set_next_mission_defaults(
+            self.runtime_resource_text("IDS_BTN_NEXTSCENARIO", "&Next scenario"),
+            self.runtime_resource_text("IDS_DESC_NEXTSCENARIO", "Continue with the next scenario."),
+        );
         {
             let [undefined, no_construction, no_room, no_level, no_other] =
                 self.construction_check_feedback.clone();

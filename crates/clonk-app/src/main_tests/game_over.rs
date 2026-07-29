@@ -6356,6 +6356,69 @@ fn ending_vote_restarts_timeout_for_the_next_subject() {
     );
 }
 
+/// `FnSetNextMission` resolves an omitted button text or description through
+/// `LoadResStr(IDS_BTN_NEXTSCENARIO)` / `IDS_DESC_NEXTSCENARIO`
+/// (C4Script.cpp:6244-6259). An explicit empty string is kept, because
+/// `C4String::Data.getData()` is non-null for it, and an explicit custom string
+/// is kept verbatim.
+#[test]
+fn set_next_mission_omitted_labels_use_active_runtime_resources() {
+    let mut app = new_classic_running_sandbox_app();
+    app.startup_tooltip_resources.insert(
+        "IDS_BTN_NEXTSCENARIO".to_string(),
+        "&Naechstes Szenario".to_string(),
+    );
+    app.startup_tooltip_resources.insert(
+        "IDS_DESC_NEXTSCENARIO".to_string(),
+        "Mit dem naechsten Szenario fortfahren.".to_string(),
+    );
+    // The same host-state pass that seeds every other resource string.
+    app.apply_material_library();
+
+    let run = |app: &mut GameApp, script: &str| {
+        app.engine
+            .execute_script_control(
+                &clonk_engine::ScriptControlData {
+                    target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: clonk_engine::ScriptStrictness::Strict3,
+                    script: LegacyCString::from_bytes(script.as_bytes().to_vec())
+                        .expect("script has no NUL"),
+                    by_client: 0,
+                },
+                ScriptControlPolicy::live(false),
+            )
+            .expect("SetNextMission executes");
+    };
+
+    // Omitted arguments take the active language table.
+    run(&mut app, r#"SetNextMission("Tutorial.c4f\\Tutorial02.c4s");"#);
+    assert_eq!(app.engine.next_mission().text, "&Naechstes Szenario");
+    assert_eq!(
+        app.engine.next_mission().description,
+        "Mit dem naechsten Szenario fortfahren."
+    );
+
+    // An explicit empty string stays empty.
+    run(
+        &mut app,
+        r#"SetNextMission("Tutorial.c4f\\Tutorial02.c4s", "", "");"#,
+    );
+    assert_eq!(app.engine.next_mission().text, "");
+    assert_eq!(app.engine.next_mission().description, "");
+
+    // Explicit custom text is verbatim, and one omitted argument still
+    // resolves independently of the other.
+    run(
+        &mut app,
+        r#"SetNextMission("Tutorial.c4f\\Tutorial02.c4s", "Weiter");"#,
+    );
+    assert_eq!(app.engine.next_mission().text, "Weiter");
+    assert_eq!(
+        app.engine.next_mission().description,
+        "Mit dem naechsten Szenario fortfahren."
+    );
+}
+
 #[test]
 fn next_mission_action_launches_the_catalog_target() {
     // C4GameOverDlg's Next button passes Game.NextMission through

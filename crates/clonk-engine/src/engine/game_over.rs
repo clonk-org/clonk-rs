@@ -343,6 +343,17 @@ impl Engine {
         })
     }
 
+    /// Installs the active language table's `IDS_BTN_NEXTSCENARIO` and
+    /// `IDS_DESC_NEXTSCENARIO`, which `FnSetNextMission` substitutes for
+    /// omitted arguments (C4Script.cpp:6250,6258).
+    pub fn set_next_mission_defaults(
+        &mut self,
+        text: impl Into<String>,
+        description: impl Into<String>,
+    ) {
+        self.next_mission_defaults = (text.into(), description.into());
+    }
+
     pub fn next_mission(&self) -> &NextMissionState {
         &self.next_mission
     }
@@ -365,10 +376,15 @@ impl Engine {
                     text,
                     description,
                 } => {
+                    // `FnSetNextMission` resolves an omitted button text or
+                    // description through `LoadResStr` at the command boundary
+                    // (C4Script.cpp:6244-6259); the host owns the active table,
+                    // so it supplies those two strings.
                     self.next_mission = NextMissionState {
                         path,
-                        text,
-                        description,
+                        text: text.unwrap_or_else(|| self.next_mission_defaults.0.clone()),
+                        description: description
+                            .unwrap_or_else(|| self.next_mission_defaults.1.clone()),
                     };
                 }
                 NextMissionCommand::Clear => {
