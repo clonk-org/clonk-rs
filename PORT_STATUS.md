@@ -573,9 +573,14 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `EditCursor()` already reaches the hovered object —
   `Engine::set_edit_cursor_target` feeds the host world context. Pinned by
   `console_edit_cursor_selects_cycles_drags_and_emits_cpp_ordered_controls`.
-  **Still open:** the Property/Tools page handoff and the overlay marks, which
-  need the window host (M10-P4-L081) and the detached overlay hook
-  (M10-P4-L082).
+  The mode-change publication is ported too (`C4EditCursor::SetMode`). Three
+  details: `Console.UpdateModeCtrls` runs **before** the unchanged-mode early
+  return, so it fires even when nothing changed; entering Draw clears the
+  **Property** page while entering Edit or Play clears the **Tools** page; and
+  the toolbox reopens *only* when one of the two was already active — a mode
+  switch never opens it from nothing. Play shows the mouse cursor, Edit and Draw
+  hide it, and the focused window is saved and restored around the switch so it
+  is never stolen from the console.
 
 - **The viewport draw order and the console overlay's place in it landed.**
   The console's edit cursor draws *inside* the ordinary viewport pass, not on a

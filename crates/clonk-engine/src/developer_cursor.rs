@@ -100,6 +100,64 @@ pub fn context_menu(
     }
 }
 
+/// What changing the cursor mode publishes (`C4EditCursor::SetMode`,
+/// `C4EditCursor.cpp`).
+///
+/// Everything here is intent: the console applies it to whatever dialogs exist,
+/// and nothing requires them to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModeChange {
+    /// `Console.UpdateModeCtrls(iMode)`. Runs **before** the unchanged-mode
+    /// early return, so it fires even when the mode did not actually change.
+    pub update_mode_controls: CursorMode,
+    /// Whether anything below applies. False when the mode was already `iMode`.
+    pub changed: bool,
+    /// The toolbox page this mode drops: Edit and Play clear **Tools**, Draw
+    /// clears **Property**.
+    pub clear_page: Option<PropertyToolsPage>,
+    /// `OpenPropTools()`, issued only when one of the two was already active.
+    /// A mode switch never opens the toolbox from nothing.
+    pub reopen_prop_tools: bool,
+    /// `ShowCursor` in Play, `HideCursor` in Edit and Draw.
+    pub show_mouse_cursor: bool,
+    /// C++ saves the focused window before the switch and restores it after, so
+    /// changing mode never steals focus from the console.
+    pub restore_focus: bool,
+}
+
+/// Which page of the shared toolbox a mode change clears.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PropertyToolsPage {
+    Tools,
+    Property,
+}
+
+/// `C4EditCursor::SetMode`. `tools_active`/`property_active` are
+/// `Console.ToolsDlg.Active` / `Console.PropertyDlg.Active` as they were
+/// *before* the switch.
+pub fn set_mode(
+    current: CursorMode,
+    requested: CursorMode,
+    tools_active: bool,
+    property_active: bool,
+) -> ModeChange {
+    let reopen = tools_active || property_active;
+    let changed = current != requested;
+    ModeChange {
+        // Unconditional, and before the early return.
+        update_mode_controls: requested,
+        changed,
+        clear_page: changed.then_some(match requested {
+            // Leaving Draw behind: the drawing tools go.
+            CursorMode::Edit | CursorMode::Play => PropertyToolsPage::Tools,
+            CursorMode::Draw => PropertyToolsPage::Property,
+        }),
+        reopen_prop_tools: changed && reopen,
+        show_mouse_cursor: matches!(requested, CursorMode::Play),
+        restore_focus: true,
+    }
+}
+
 /// `C4EditCursor::Move`'s Edit-mode branch (`C4EditCursor.cpp:129-152`).
 ///
 /// A held, non-frame drag moves the selection by the pointer delta and
@@ -285,6 +343,45 @@ mod tests {
             context_menu(CursorMode::Play, true, true, 1).properties_caption,
             PropertiesCaption::Tools
         );
+
+        // C4EditCursor::SetMode — the mode-change publication.
+        // UpdateModeCtrls runs even when the mode does not change.
+        let unchanged = set_mode(CursorMode::Edit, CursorMode::Edit, true, false);
+        assert!(!unchanged.changed);
+        assert_eq!(unchanged.update_mode_controls, CursorMode::Edit);
+        assert_eq!(unchanged.clear_page, None);
+        assert!(
+            !unchanged.reopen_prop_tools,
+            "an unchanged mode publishes only the control update"
+        );
+
+        // Entering Draw clears the Property page; entering Edit or Play clears
+        // the Tools page.
+        assert_eq!(
+            set_mode(CursorMode::Edit, CursorMode::Draw, true, false).clear_page,
+            Some(PropertyToolsPage::Property)
+        );
+        assert_eq!(
+            set_mode(CursorMode::Draw, CursorMode::Edit, true, false).clear_page,
+            Some(PropertyToolsPage::Tools)
+        );
+        assert_eq!(
+            set_mode(CursorMode::Draw, CursorMode::Play, false, true).clear_page,
+            Some(PropertyToolsPage::Tools)
+        );
+
+        // The toolbox reopens only when one of the two was already active — a
+        // mode switch never opens it from nothing.
+        assert!(set_mode(CursorMode::Edit, CursorMode::Draw, true, false).reopen_prop_tools);
+        assert!(set_mode(CursorMode::Edit, CursorMode::Draw, false, true).reopen_prop_tools);
+        assert!(!set_mode(CursorMode::Edit, CursorMode::Draw, false, false).reopen_prop_tools);
+
+        // The mouse cursor is shown in Play and hidden in the editing modes.
+        assert!(set_mode(CursorMode::Edit, CursorMode::Play, false, false).show_mouse_cursor);
+        assert!(!set_mode(CursorMode::Play, CursorMode::Edit, false, false).show_mouse_cursor);
+        assert!(!set_mode(CursorMode::Play, CursorMode::Draw, false, false).show_mouse_cursor);
+        // Focus is always saved and restored, so switching never steals it.
+        assert!(set_mode(CursorMode::Play, CursorMode::Draw, false, false).restore_focus);
 
         // C4EditCursor.cpp:143-151 — the stack under the cursor, walked by
         // Shift. `stack` stands in for Game.FindObject's resume behaviour.
