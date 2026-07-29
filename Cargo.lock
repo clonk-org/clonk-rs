@@ -728,6 +728,7 @@ dependencies = [
  "parking_lot",
  "pixels",
  "png",
+ "raw-window-handle 0.5.2",
  "rfd",
  "serde",
  "serde_json",

@@ -37,6 +37,7 @@ mod gamepad;
 use clonk_app_menus::ingame_menu;
 use clonk_app_netplay::host_game_resource_sources;
 use clonk_app_render::gpu_renderer;
+use raw_window_handle::HasRawWindowHandle;
 mod input;
 mod local_control;
 use clonk_app_netplay::network;
@@ -668,6 +669,33 @@ fn run() -> Result<()> {
         arm_configured_engine_debug_mode(&mut app.engine, app_paths.as_deref(), true);
     }
     app.window_active = window.has_focus();
+    // C++ only has an `ITaskbarList3` once `CStdWindow` owns a handle, so the
+    // real sink replaces the no-op one here rather than in `GameApp::new`
+    // (M10-P4-L079). Everything but Windows keeps the no-op, matching the SDL
+    // and X11 `CStdWindow` implementations, which are no-ops there too.
+    //
+    // The handle is extracted unconditionally so this compiles and is checked
+    // on every host: `RawWindowHandle::Win32` exists on all platforms, and only
+    // the sink construction is target-gated. `clonk-app` cannot be
+    // cross-checked for Windows (stacker's C build needs an MSVC toolchain), so
+    // keeping the untestable part to two lines is deliberate.
+    let taskbar_window = match window.raw_window_handle() {
+        raw_window_handle::RawWindowHandle::Win32(handle) => Some(handle.hwnd as isize),
+        _ => None,
+    };
+    #[cfg(windows)]
+    if let Some(handle) = taskbar_window {
+        // SAFETY: winit initialised COM on this thread and owns the window for
+        // the rest of the process.
+        if let Some(sink) =
+            unsafe { clonk_platform::taskbar_progress::Win32TaskbarProgress::new(handle) }
+        {
+            app.taskbar_progress.replace_sink(Box::new(sink));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = taskbar_window;
+
     // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
     let render_inactive_mask = load_render_inactive_mask(app.app_paths.as_ref());
     app.set_display_mode(display_options.mode);
@@ -1721,7 +1749,7 @@ impl GameApp {
             engine,
             graphics,
             taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress::new(
-                clonk_platform::taskbar_progress::NoTaskbarProgress,
+                Box::new(clonk_platform::taskbar_progress::NoTaskbarProgress),
             ),
             deferred_config: crate::deferred_config::DeferredConfig::default(),
             sky: None,

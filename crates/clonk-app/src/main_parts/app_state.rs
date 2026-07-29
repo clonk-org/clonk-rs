@@ -305,7 +305,7 @@ pub(crate) struct GameApp {
     /// (`C4Game.cpp:4094-4106`; `StdWindow.cpp:183-196`). The backend is
     /// injected because C++'s SDL and X11 windows implement it as no-ops.
     pub(crate) taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress<
-        clonk_platform::taskbar_progress::NoTaskbarProgress,
+        Box<dyn clonk_platform::taskbar_progress::TaskbarProgressSink>,
     >,
     pub(crate) loader_error: Option<String>,
     pub(crate) loader_render_config: Option<LoaderRenderConfig>,

@@ -39,6 +39,14 @@ impl TaskbarProgressSink for NoTaskbarProgress {
     fn apply(&mut self, _update: TaskbarProgressUpdate) {}
 }
 
+/// So the app can hold one field and choose its backend once the platform
+/// window exists.
+impl TaskbarProgressSink for Box<dyn TaskbarProgressSink> {
+    fn apply(&mut self, update: TaskbarProgressUpdate) {
+        (**self).apply(update);
+    }
+}
+
 /// The real Windows backend: `ITaskbarList3`, exactly as `CStdWindow` uses it.
 ///
 /// C++ creates the object once and keeps it for the window's lifetime
@@ -133,6 +141,13 @@ impl<S: TaskbarProgressSink> LoaderTaskbarProgress<S> {
 
     /// `C4Application`'s entry into startup, which clears the indicator by
     /// reporting a complete load (`C4Application.cpp:422-426`).
+    /// Swaps the backend, keeping the monotone gate's current position. The
+    /// app uses this once its platform window exists, since C++ likewise only
+    /// has an `ITaskbarList3` after `CStdWindow` has a handle.
+    pub fn replace_sink(&mut self, sink: S) -> S {
+        std::mem::replace(&mut self.sink, sink)
+    }
+
     pub fn enter_startup(&mut self) {
         self.last_progress = 0;
         self.sink.apply(TaskbarProgressUpdate::Clear);

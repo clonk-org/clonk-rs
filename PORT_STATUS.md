@@ -1136,9 +1136,17 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   been unverifiable without a Windows machine and an off-by-one calls the wrong
   method with the wrong signature; generated bindings remove the risk entirely.
   Verified with `cargo check -p clonk-platform --target x86_64-pc-windows-msvc
-  --all-targets`. **Still open:** constructing it in place of
-  `NoTaskbarProgress` in the app's `GameApp` initializer, which needs the
-  platform window handle, and observing it on a real taskbar.
+  --all-targets`.
+  The app now installs it. `GameApp::taskbar_progress` holds a boxed sink so the
+  backend can be chosen once the platform window exists — which is also when
+  C++ first has an `ITaskbarList3`, since `CStdWindow` needs a handle — and
+  `run()` swaps it in right after the window is created. The handle is extracted
+  **unconditionally**, because `RawWindowHandle::Win32` exists on every
+  platform; only the two-line sink construction is target-gated. That is
+  deliberate: `clonk-app` cannot be cross-checked for Windows (stacker's C build
+  needs an MSVC toolchain), so the untestable surface is kept to those two
+  lines and everything around them is compiled and linted on every host.
+  **Still open:** observing it on a real taskbar.
 
 - Closed 2026-07-29: **Loading-screen GUI log capture.** The loader's log box
   showed only its own hard-coded phase labels: `ScenarioLoadingReporter` kept a
