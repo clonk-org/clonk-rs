@@ -634,6 +634,30 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   many `main_tests` callers are fixture set-up that must keep writing
   immediately.
 
+- **Actionable ready-check toasts: the concurrency core landed, backends open.**
+  The lobby ready check already runs as an in-window Yes/No dialog with a
+  countdown; making the desktop notification beside it *actionable* means an
+  answer can arrive from a backend callback thread while the same question is
+  still answerable in-window. That race, not the API shape, is the hard part —
+  getting it wrong double-submits to a live protocol request.
+  `clonk-app::ready_check_notification::ReadyCheckContinuation` claims the
+  answer with a single atomic swap, so exactly one of the dialog thread and any
+  number of activation callbacks may resolve it; every later one is dropped.
+  Whatever wins also hides the toast, so a stale notification can never answer a
+  question that no longer exists, and a `Default` activation (clicking the body)
+  closes *without* submitting an answer — it means "come back to the game", not
+  "yes". Backend show and hide failures are logged and ignored, because a
+  missing notification daemon must not take the lobby down. Pinned by
+  `ready_check_notification_actions_answer_and_dialog_close_hides_toast` against
+  a fake sink, and by
+  `concurrent_ready_check_resolution_submits_exactly_one_answer`, which races
+  four threads 64 times and asserts a single winner and a single hide.
+  **Still open:** the Linux and Windows backends, which advertise the localized
+  actions and deliver activations. They are deliberately not written here — a
+  signal-listener or WinRT callback that cannot be run on the authoring host is
+  exactly where the concurrency bugs this core exists to prevent would be
+  introduced blind.
+
 - **`Network.UseCurl` now selects the HTTP backend, as a policy rather than a
   second stack.** `C4Network2HTTPClient` picks one of two implementations at
   construction (`C4Network2Reference.cpp:410-413`), and they differ on the wire,
