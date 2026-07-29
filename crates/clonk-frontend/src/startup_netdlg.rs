@@ -668,7 +668,7 @@ fn substitute_resource_arguments(template: &str, arguments: &[&str]) -> String {
         let mut characters = rest.chars();
         characters.next();
         match characters.next() {
-            Some('s' | 'd' | 'i') => match arguments.next() {
+            Some('s' | 'd' | 'i' | 'u') => match arguments.next() {
                 Some(argument) => output.push_str(argument),
                 None => output.push_str(&rest[..2]),
             },

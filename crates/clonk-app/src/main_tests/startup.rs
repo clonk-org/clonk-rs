@@ -372,6 +372,148 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     );
 }
 
+/// `C4StartupOptionsDlg`'s constructor resolves every caption, label, button
+/// and checkbox text through `LoadResStr` (C4StartupOptionsDlg.cpp:609-1033),
+/// so the whole subtree follows the active language - including the widths it
+/// measures from that text (`:687-697`).
+#[test]
+fn startup_options_visible_labels_follow_runtime_resources() {
+    let mut app = new_real_classic_menu_app(640, 480);
+    for (key, value) in [
+        ("IDS_DLG_OPTIONS", "&Einstellungen"),
+        ("IDS_DLG_PROGRAM", "Programm"),
+        ("IDS_DLG_GRAPHICS", "Grafik"),
+        ("IDS_DLG_SOUND", "Ton"),
+        ("IDS_DLG_KEYBOARD", "Tastatur"),
+        ("IDS_DLG_GAMEPAD", "Gamepad"),
+        ("IDS_DLG_NETWORK", "Netzwerk"),
+        ("IDS_BTN_BACK", "Zurueck"),
+        ("IDS_CTL_LANGUAGE", "Sprache"),
+        ("IDS_CTL_FONT", "Schriftart"),
+        ("IDS_MNU_WHITECHAT", "Weisser Chat"),
+        ("IDS_CTL_WHITECHAT_INGAME", "Im Spiel"),
+        ("IDS_CTL_WHITECHAT_LOBBY", "Lobby"),
+        ("IDS_CTL_TIMESTAMPS", "Zeitstempel"),
+        ("IDS_CTL_PRELOADING", "Spieldaten vorladen"),
+        ("IDS_BTN_RESETCONFIG", "Konfiguration zuruecksetzen"),
+        ("IDS_DLG_ADVANCED_SETTINGS", "Erweiterte Einstellungen"),
+        ("IDS_CTL_MUSIC", "Musik"),
+        ("IDS_CTL_SOUNDFX", "Klaenge"),
+        ("IDS_CTL_DISPLAYMODE", "Anzeigemodus"),
+        ("IDS_CTL_GRAPHICSSCALE", "Skalierung"),
+        ("IDS_CTL_SMOKELOW", "Niedrig"),
+        ("IDS_CTL_SMOKEHI", "Hoch"),
+        ("IDS_BTN_TESTGRAPHICSSCALE", "Anwenden"),
+        ("IDS_BTN_RESETKEYBOARD", "Alle zuruecksetzen"),
+        ("IDS_NET_PORT_REFERENCE", "Referenzport"),
+        ("IDS_NET_PORT_DISCOVERY", "Suchport"),
+        ("IDS_CTL_ACTIVE", "Aktiv"),
+        ("IDS_CTL_USEOTHERSERVER", "Anderen Internetserver verwenden"),
+        ("IDS_CTL_AUTOMATICUPDATES", "Automatische Updates aktivieren"),
+        ("IDS_CTL_UPNP", "UPnP verwenden"),
+        ("IDS_NET_COMPUTERNAME", "Computername:"),
+        ("IDS_NET_USERNAME", "Chatname:"),
+        ("IDS_CTL_FAIRCREWSTRENGTH", "Staerke der \"Fairen Mannschaft\""),
+        ("IDS_CTL_NOLANGINFO", "Sprachpaket nicht verfuegbar."),
+    ] {
+        app.startup_tooltip_resources
+            .insert(key.to_string(), value.to_string());
+    }
+    app.open_options_menu();
+    let labels = app
+        .startup_options_dialog
+        .as_ref()
+        .expect("options dialog")
+        .labels()
+        .clone();
+
+    // The caption drops its mnemonic marker like every FullscreenDialog title.
+    assert_eq!(labels.title, "Einstellungen");
+    assert_eq!(
+        labels.sheets,
+        [
+            "Programm", "Grafik", "Ton", "Tastatur", "Gamepad", "Netzwerk"
+        ]
+        .map(str::to_string)
+    );
+    assert_eq!(labels.back, "Zurueck");
+    assert_eq!(labels.language, "Sprache");
+    assert_eq!(labels.reset_config, "Konfiguration zuruecksetzen");
+    assert_eq!(labels.port_reference, "Referenzport");
+    assert_eq!(labels.active, "Aktiv");
+    assert_eq!(labels.chat_name, "Chatname:");
+    assert_eq!(labels.fair_crew_strength, "Staerke der \"Fairen Mannschaft\"");
+
+    // A key absent from the table falls back to the shipped US text, which is
+    // what C4ResStrTable itself yields.
+    app.startup_tooltip_resources.remove("IDS_CTL_LANGUAGE");
+    app.open_options_menu();
+    assert_eq!(
+        app.startup_options_dialog
+            .as_ref()
+            .expect("options dialog")
+            .labels()
+            .language,
+        "Language"
+    );
+
+    // The nested key-capture and resolution-confirm dialogs are resources too,
+    // including their positional `%s`/`%d`/`%u` arguments.
+    for (key, value) in [
+        ("IDS_MSG_PRESSKEY", "Taste fuer \"%s\" auf Tastaturblock %d druecken."),
+        ("IDS_MSG_DEFINEKEY", "Taste zuweisen"),
+        ("IDS_MNU_SWITCHRESOLUTION", "Aufloesung wechseln"),
+        (
+            "IDS_MNU_SWITCHRESOLUTION_TEXT",
+            "Neue Aufloesung. Gefaellt sie?|Wird in %u Sekunden zurueckgesetzt...",
+        ),
+    ] {
+        app.startup_tooltip_resources
+            .insert(key.to_string(), value.to_string());
+    }
+    app.begin_options_scale_test(100, 150)
+        .expect("open the resolution confirmation");
+    let confirm = app.message_dialogs.last().expect("confirmation dialog");
+    assert_eq!(confirm.state.caption(), "Aufloesung wechseln");
+    assert_eq!(
+        confirm.state.message(),
+        "Neue Aufloesung. Gefaellt sie?|Wird in 12 Sekunden zurueckgesetzt..."
+    );
+    app.tick_options_scale_test_prompt();
+    assert_eq!(
+        app.message_dialogs.last().expect("confirmation").state.message(),
+        "Neue Aufloesung. Gefaellt sie?|Wird in 11 Sekunden zurueckgesetzt..."
+    );
+
+    // Layout measures the resolved text, so a longer label widens its column.
+    let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+    let book = app
+        .assets
+        .options_book_fonts
+        .as_deref()
+        .expect("options fonts");
+    let wide = clonk_frontend::startup_options_dlg::OptionsLabels {
+        language: "Sprachauswahl fuer das gesamte Programm".to_string(),
+        ..Default::default()
+    };
+    let narrow = clonk_frontend::startup_options_dlg::options_dlg_layout_with_labels(
+        640,
+        480,
+        fonts,
+        book,
+        &clonk_frontend::startup_options_dlg::OptionsLabels::default(),
+    );
+    let widened = clonk_frontend::startup_options_dlg::options_dlg_layout_with_labels(
+        640, 480, fonts, book, &wide,
+    );
+    assert!(
+        widened.language_combo.x > narrow.language_combo.x,
+        "a longer resolved label must push its combo right: {} vs {}",
+        widened.language_combo.x,
+        narrow.language_combo.x
+    );
+}
+
 #[test]
 fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
     let mut app = new_real_classic_menu_app(640, 480);

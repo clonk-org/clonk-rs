@@ -542,7 +542,7 @@ impl IngameMenuLabels {
 /// C4ResStrTable substitutes positional `%s` arguments in order. Arguments are
 /// inserted verbatim, so a literal placeholder inside a player or team name
 /// cannot consume the next slot.
-fn substitute_resource_arguments(template: &str, arguments: &[&str]) -> String {
+pub fn substitute_resource_arguments(template: &str, arguments: &[&str]) -> String {
     let mut output = String::with_capacity(template.len());
     let mut remainder = template;
     let mut arguments = arguments.iter();
@@ -552,7 +552,7 @@ fn substitute_resource_arguments(template: &str, arguments: &[&str]) -> String {
         let mut characters = rest.chars();
         characters.next();
         match characters.next() {
-            Some('s' | 'd' | 'i') => match arguments.next() {
+            Some('s' | 'd' | 'i' | 'u') => match arguments.next() {
                 Some(argument) => output.push_str(argument),
                 None => output.push_str(&rest[..2]),
             },
