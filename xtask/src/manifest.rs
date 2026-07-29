@@ -234,27 +234,53 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    /// One engine archive, keyed by the triple it was built for.
+    fn engine(triple: &str, digest_byte: &str, size: u64) -> (String, EmittedComponent) {
+        (
+            triple.to_string(),
+            EmittedComponent {
+                id: ComponentId::Engine,
+                path: PathBuf::from(format!("clonk-rust-0.4.0-engine-{triple}.zip")),
+                sha256: digest_byte.repeat(32),
+                size,
+            },
+        )
+    }
+
+    /// A prefix-free archive that every triple is offered, exactly as
+    /// `scan_emitted_components` reports one.
+    fn shared(
+        id: ComponentId,
+        archive: &str,
+        digest_byte: &str,
+        size: u64,
+    ) -> (String, EmittedComponent) {
+        (
+            crate::SHARED_ARCHIVE_TRIPLE.to_string(),
+            EmittedComponent {
+                id,
+                path: PathBuf::from(archive),
+                sha256: digest_byte.repeat(32),
+                size,
+            },
+        )
+    }
+
+    /// The archives one release run uploads, expanded through the *real* alias
+    /// table rather than a hand-written approximation of it.
+    ///
+    /// Three engine builds for six shipped triples: macOS fuses one universal
+    /// archive that its two architecture triples resolve through, and Windows
+    /// serves its retired gnu triple from the msvc build. A fixture that still
+    /// listed a per-architecture macOS engine would bind the two crates to a
+    /// document no release can produce.
     fn emitted() -> Vec<(String, EmittedComponent)> {
-        vec![
-            (
-                "x86_64-unknown-linux-gnu".to_string(),
-                EmittedComponent {
-                    id: ComponentId::Engine,
-                    path: PathBuf::from("clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"),
-                    sha256: "aa".repeat(32),
-                    size: 24_000_000,
-                },
-            ),
-            (
-                "aarch64-apple-darwin".to_string(),
-                EmittedComponent {
-                    id: ComponentId::Engine,
-                    path: PathBuf::from("clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip"),
-                    sha256: "cc".repeat(32),
-                    size: 18_000_000,
-                },
-            ),
-        ]
+        crate::serve_aliased_triples(&[
+            engine("x86_64-unknown-linux-gnu", "aa", 24_000_000),
+            engine("x86_64-pc-windows-msvc", "dd", 26_000_000),
+            engine(crate::MACOS_UNIVERSAL_TRIPLE, "cc", 34_000_000),
+            shared(ComponentId::Planet, "planet-ee.zip", "ee", 49_000_000),
+        ])
     }
 
     /// `content`, which the content repository publishes and this one only
@@ -279,7 +305,7 @@ mod tests {
             "2026-07-28T10:00:00Z",
             &emitted(),
             &referenced(),
-            &["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"],
+            &crate::UPDATE_TARGET_TRIPLES,
         )
     }
 
@@ -338,7 +364,7 @@ mod tests {
             .iter()
             .map(|entry| entry.name.clone())
             .collect();
-        assert_eq!(names, ["content", "engine"]);
+        assert_eq!(names, ["content", "planet", "engine"]);
     }
 
     #[test]
@@ -365,9 +391,9 @@ mod tests {
     }
 
     #[test]
-    fn each_triple_resolves_to_its_own_engine_archive() {
-        // A single `archive` field could not express four per-triple engine
-        // builds: a Windows client would fetch whichever was recorded last.
+    fn each_build_resolves_to_its_own_engine_archive() {
+        // A single `archive` field could not express three per-build engine
+        // archives: a Windows client would fetch whichever was recorded last.
         let manifest = manifest();
         let engine = manifest
             .components
@@ -375,17 +401,33 @@ mod tests {
             .find(|entry| entry.name == "engine")
             .expect("engine entry");
 
-        assert_eq!(
-            engine.targets["x86_64-unknown-linux-gnu"].archive,
-            "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"
-        );
-        assert_eq!(
-            engine.targets["aarch64-apple-darwin"].archive,
-            "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip"
+        for (triple, archive) in [
+            (
+                "x86_64-unknown-linux-gnu",
+                "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+            ),
+            (
+                "x86_64-pc-windows-msvc",
+                "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+            ),
+            (
+                "universal-apple-darwin",
+                "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+            ),
+        ] {
+            assert_eq!(engine.targets[triple].archive, archive);
+        }
+        let digests: BTreeMap<&str, &String> = engine
+            .targets
+            .iter()
+            .map(|(triple, target)| (triple.as_str(), &target.sha256))
+            .collect();
+        assert_ne!(
+            digests["x86_64-unknown-linux-gnu"], digests["universal-apple-darwin"],
+            "different builds must not share a digest"
         );
         assert_ne!(
-            engine.targets["x86_64-unknown-linux-gnu"].sha256,
-            engine.targets["aarch64-apple-darwin"].sha256,
+            digests["x86_64-unknown-linux-gnu"], digests["x86_64-pc-windows-msvc"],
             "different builds must not share a digest"
         );
     }
@@ -425,6 +467,34 @@ mod tests {
     }
 
     #[test]
+    fn an_aliased_triple_resolves_to_the_archive_that_serves_it() {
+        // The macOS aliases are permanent, not a migration: a universal install
+        // still reports the architecture triple cargo compiled it for, so these
+        // two keys never drain away. Dropping either strands every Mac on that
+        // architecture on "no update available", for ever and silently.
+        let manifest = manifest();
+        let engine = manifest
+            .components
+            .iter()
+            .find(|entry| entry.name == "engine")
+            .expect("engine entry");
+
+        for triple in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            // The whole target, not just the name: a client verifies the digest
+            // it was handed, so an alias agreeing on the filename alone would
+            // fail at the integrity check instead of at the manifest.
+            assert_eq!(
+                engine.targets[triple], engine.targets["universal-apple-darwin"],
+                "{triple} must resolve to the universal build"
+            );
+        }
+        assert_eq!(
+            engine.targets["x86_64-pc-windows-gnu"], engine.targets["x86_64-pc-windows-msvc"],
+            "the retired gnu triple must resolve to the msvc build"
+        );
+    }
+
+    #[test]
     fn macos_installs_shared_components_inside_the_bundle() {
         let manifest = manifest();
         let content = manifest
@@ -432,17 +502,25 @@ mod tests {
             .iter()
             .find(|entry| entry.name == "content")
             .expect("content entry");
-        assert_eq!(
-            content.targets["aarch64-apple-darwin"].install,
-            "Contents/Resources/content"
-        );
+        // Every macOS key, including the universal triple a fresh install
+        // reports: the bundle layout follows the platform, not the build.
+        for triple in [
+            "universal-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+        ] {
+            assert_eq!(
+                content.targets[triple].install, "Contents/Resources/content",
+                "{triple} keeps game data inside the bundle"
+            );
+        }
         assert_eq!(
             content.targets["x86_64-unknown-linux-gnu"].install,
             "content"
         );
         // Same bytes on both platforms; only the destination differs.
         assert_eq!(
-            content.targets["aarch64-apple-darwin"].sha256,
+            content.targets["universal-apple-darwin"].sha256,
             content.targets["x86_64-unknown-linux-gnu"].sha256
         );
     }
