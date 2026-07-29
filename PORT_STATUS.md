@@ -425,6 +425,27 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Windows file associations and the `clonk:` protocol.**
+  The runtime accepted classic launch arguments but nothing registered the
+  shell entries that deliver them. `clonk-platform::file_classes` now carries
+  `SetC4FileClasses`' full table (`C4FileClasses.cpp:46-71`): all eleven classes
+  with their names, icon ordinals — including the deliberately skipped 5 and 12 —
+  extension mappings and content types (three of which are not the group type),
+  the `clonk:` URL protocol, the default-made `Update` verb for `.c4u`, and the
+  `AppUserModelId` display name. Key and value shapes follow
+  `StdRegistry.cpp:224-279`; everything is written as `REG_SZ` under
+  `HKEY_CLASSES_ROOT`. `main` registers it after the window exists, graphical
+  Windows builds only, best-effort with the result logged at debug — C++ ignores
+  the result outright because it "will only work if we have administrator
+  rights" (`C4Application.cpp:219-223`). The composition is host-independent and
+  pinned everywhere by `windows_file_classes_match_the_native_registry_entries`;
+  the registry write is Windows-gated and was verified to compile and clippy
+  clean against `x86_64-pc-windows-msvc`. **Not carried over:** the deletion of
+  the stale `HKLM\...\App Paths\Clonk.exe` key (`C4FileClasses.cpp:68`) — the
+  constant is recorded as `STALE_APP_PATHS_KEY` but nothing deletes it, since
+  this port never created that key and removing an `HKEY_LOCAL_MACHINE` entry
+  belonging to a different product is not something to do unasked.
+
 - Closed 2026-07-29: **Developer console Help > About.** The menu item existed
   but only appended a log line. It now opens `ConsoleAboutModal`, owned and laid
   out by the console itself the way `C4Console::HelpAbout` opens its dialog

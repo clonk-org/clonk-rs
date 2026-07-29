@@ -3,6 +3,7 @@ mod console;
 #[cfg(unix)]
 pub mod crash;
 pub mod crash_win32;
+pub mod file_classes;
 mod paths;
 pub mod privileges;
 pub mod startup_dialog;

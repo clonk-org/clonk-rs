@@ -599,6 +599,21 @@ fn run() -> Result<()> {
     // Past this point a failure is no longer a startup failure, so it is
     // reported by the running application rather than a native dialog.
     clonk_platform::startup_dialog::note_window_created();
+    // `C4Application::DoInit` registers the file classes in the graphical
+    // Windows build only, best-effort — C++ notes it "will only work if we have
+    // administrator rights" and ignores the result (C4Application.cpp:219-223).
+    #[cfg(windows)]
+    if !classic.console {
+        let registered = std::env::current_exe()
+            .ok()
+            .map(|module| {
+                clonk_platform::file_classes::register_file_classes(&module.to_string_lossy())
+            })
+            .unwrap_or(false);
+        if !registered {
+            tracing::debug!("could not register the Clonk file classes");
+        }
+    }
     if classic.console {
         window.set_title(native_window_title(true));
     }
