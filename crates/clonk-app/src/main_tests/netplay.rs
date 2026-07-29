@@ -19772,3 +19772,55 @@ fn configured_network_work_path_controls_resource_staging_directory() {
     assert_eq!(staging(Some("[Network]\nWorkPath=/tmp/escape\n")), "Network");
     assert_eq!(staging(Some("[Network]\nWorkPath=./here\n")), "Network");
 }
+
+/// `C4Application::DoInit` builds the global asynchronous pool with exactly
+/// `Config.General.ThreadPoolThreadCount` workers on every non-Windows target,
+/// defaulting to 8 (C4Config.cpp:406-408; C4Application.cpp:152-159). Windows
+/// uses the system pool, so the key is not read there.
+#[cfg(not(windows))]
+#[test]
+fn configured_thread_pool_count_builds_runtime_with_requested_workers() {
+    let workers = |body: Option<&str>| {
+        let root = tempdir().expect("thread-pool config root");
+        let user_data = tempdir().expect("thread-pool user data");
+        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        if let Some(body) = body {
+            fs::write(paths.config_file(), body).expect("write fixture config");
+        }
+        load_thread_pool_thread_count(Some(&paths))
+    };
+
+    // The native default survives an absent config, key and unparsable value.
+    assert_eq!(workers(None), 8);
+    assert_eq!(workers(Some("[General]\nName=Tester\n")), 8);
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=many\n")), 8);
+    // Zero and negative counts cannot ask tokio for an invalid pool.
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=0\n")), 8);
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=-4\n")), 8);
+    // A configured count is honoured verbatim.
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=1\n")), 1);
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=16\n")), 16);
+
+    // The count reaches the runtime builder, and a zero request still falls
+    // back rather than reaching tokio.
+    use clonk_app_netplay::network::{
+        network_runtime_worker_threads, set_network_runtime_worker_threads,
+        DEFAULT_NETWORK_RUNTIME_WORKER_THREADS,
+    };
+    let restore = network_runtime_worker_threads();
+    set_network_runtime_worker_threads(3);
+    assert_eq!(network_runtime_worker_threads(), 3);
+    set_network_runtime_worker_threads(0);
+    assert_eq!(
+        network_runtime_worker_threads(),
+        DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
+    );
+    assert_eq!(DEFAULT_NETWORK_RUNTIME_WORKER_THREADS, 8);
+    set_network_runtime_worker_threads(restore);
+}

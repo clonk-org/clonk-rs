@@ -3770,6 +3770,23 @@ pub(crate) fn network_work_directory(paths: Option<&AppPaths>) -> Option<PathBuf
     })
 }
 
+/// `Config.General.ThreadPoolThreadCount`, default 8 (C4Config.cpp:406-408).
+/// Windows builds its pool from the system default instead, so the key is
+/// non-Windows only (C4Application.cpp:152-159).
+#[cfg(not(windows))]
+pub(crate) fn load_thread_pool_thread_count(paths: Option<&AppPaths>) -> usize {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        "General",
+        "ThreadPoolThreadCount",
+    )
+    .as_deref()
+    .and_then(|value| crate::parse_startup_config_integer(value.as_bytes()))
+    .and_then(|value| usize::try_from(value).ok())
+    .filter(|workers| *workers > 0)
+    .unwrap_or(clonk_app_netplay::network::DEFAULT_NETWORK_RUNTIME_WORKER_THREADS)
+}
+
 pub(crate) fn load_network_ports(paths: Option<&AppPaths>) -> NetworkPorts {
     sanitized_network_ports(&load_native_config_bytes(paths))
 }

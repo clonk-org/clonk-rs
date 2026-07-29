@@ -344,6 +344,13 @@ fn main() -> Result<()> {
         .as_deref()
         .or(cli.config_file.as_deref());
     let app_paths = discover_validated_startup_paths(explicit_config)?;
+    // `C4Application::DoInit` sizes the global asynchronous pool from
+    // `General.ThreadPoolThreadCount` on every non-Windows target
+    // (C4Application.cpp:152-159). Must precede any worker thread.
+    #[cfg(not(windows))]
+    clonk_app_netplay::network::set_network_runtime_worker_threads(load_thread_pool_thread_count(
+        app_paths.as_deref(),
+    ));
     if let Some(paths) = app_paths.as_ref() {
         let log_path = paths.logs_dir().join("Clonk.log");
         match clonk_logging::init_verbose_with_file_and_capture(

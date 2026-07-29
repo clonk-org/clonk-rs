@@ -2949,11 +2949,38 @@ impl ControlFrameAccumulator {
     }
 }
 
-const NETWORK_RUNTIME_WORKER_THREADS: usize = 4;
+/// `Config.General.ThreadPoolThreadCount` defaults to 8 and sizes the global
+/// asynchronous pool on every non-Windows target (C4Config.cpp:406-408;
+/// C4Application.cpp:152-159). Windows builds the pool from the system default
+/// instead, so the port keeps its own worker count there.
+#[cfg(not(windows))]
+pub const DEFAULT_NETWORK_RUNTIME_WORKER_THREADS: usize = 8;
+#[cfg(windows)]
+pub const DEFAULT_NETWORK_RUNTIME_WORKER_THREADS: usize = 4;
+
+/// Set once at startup, before any worker thread builds its runtime. C++ keeps
+/// the equivalent in `C4ThreadPool::Global`.
+static NETWORK_RUNTIME_WORKER_THREADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_NETWORK_RUNTIME_WORKER_THREADS);
+
+/// Sizes the asynchronous worker runtime. A zero or absent configuration keeps
+/// the native default rather than asking tokio for an invalid pool.
+pub fn set_network_runtime_worker_threads(workers: usize) {
+    let workers = if workers == 0 {
+        DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
+    } else {
+        workers
+    };
+    NETWORK_RUNTIME_WORKER_THREADS.store(workers, std::sync::atomic::Ordering::Release);
+}
+
+pub fn network_runtime_worker_threads() -> usize {
+    NETWORK_RUNTIME_WORKER_THREADS.load(std::sync::atomic::Ordering::Acquire)
+}
 
 fn build_network_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     RuntimeBuilder::new_multi_thread()
-        .worker_threads(NETWORK_RUNTIME_WORKER_THREADS)
+        .worker_threads(network_runtime_worker_threads())
         .enable_all()
         .build()
 }
@@ -8306,10 +8333,31 @@ mod tests {
         // StdSchedulerThread (oracle-src-pinned src/C4InteractiveThread.cpp:48-67;
         // src/StdScheduler.cpp:229-244; src/C4Network2IO.cpp:71-88). Rust keeps
         // enough parallel service capacity for the per-peer UDP tasks without
-        // scaling every game process to the host's CPU count.
+        // scaling every game process to the host's CPU count. The budget is
+        // `Config.General.ThreadPoolThreadCount` on non-Windows targets, which
+        // C++ defaults to 8 (C4Config.cpp:406-408; C4Application.cpp:152-159).
+        let restore = network_runtime_worker_threads();
         let runtime = build_network_runtime().expect("build production network runtime");
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
+        );
+        drop(runtime);
 
-        assert_eq!(runtime.metrics().num_workers(), 4);
+        // A configured count sizes the pool; zero keeps the default so tokio is
+        // never asked for an invalid worker count.
+        set_network_runtime_worker_threads(2);
+        let configured = build_network_runtime().expect("build a configured runtime");
+        assert_eq!(configured.metrics().num_workers(), 2);
+        drop(configured);
+        set_network_runtime_worker_threads(0);
+        let fallback = build_network_runtime().expect("build the fallback runtime");
+        assert_eq!(
+            fallback.metrics().num_workers(),
+            DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
+        );
+        drop(fallback);
+        set_network_runtime_worker_threads(restore);
     }
 
     #[test]
