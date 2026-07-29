@@ -526,6 +526,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   the editor surfaces themselves, and wiring the accepted bytes into the
   scenario save projection.
 
+- **The edit cursor's overlay draw list landed.**
+  Unlike the console's dialogs, `C4EditCursor::Draw` is *not* a native widget —
+  it draws through the engine's own rasterizer, so it has an exact pixel oracle.
+  `clonk-engine::developer_overlay` ports it: a selection mark per selected
+  object in selection order, then the drag frame, then the drag line, then the
+  drop-target icon. `DrawSelectMark` is the fiddly part — **twelve individual
+  pixels** forming an L at each corner, not a rectangle outline, and nothing at
+  all when the shape is under a pixel wide or tall. The drag frame **normalises**
+  its corners (`min`/`max`) so dragging up-left frames the same rectangle as
+  down-right, while the drag line does not and keeps its direction. Holding
+  Shift interleaves an additive re-draw of each object after its mark
+  (`ColorMod = 0xffffff`, `C4GFXBLIT_CLRSFC_MOD2 | C4GFXBLIT_ADDITIVE`, both
+  restored), rather than appending a second pass. The drop-target icon is
+  centred horizontally on the target and rests on top of its shape. Nothing is
+  emitted in a fullscreen game, because `C4Viewport::Draw` only calls the cursor
+  when windowed. Pinned by
+  `console_overlay_emits_marks_frame_line_and_drop_target_in_cpp_order`.
+
 - **Edit-cursor mode, context enablement and gestures landed; overlays open.**
   `clonk-engine::developer_cursor` ports `C4EditCursor::ToggleMode`
   (`C4EditCursor.cpp:540-556`) — Play -> Edit -> Draw -> Play, gated on

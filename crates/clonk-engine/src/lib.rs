@@ -30,6 +30,7 @@ pub mod developer_file_monitor;
 pub mod developer_inspection;
 pub mod developer_landscape;
 pub mod developer_locals;
+pub mod developer_overlay;
 pub mod developer_property_text;
 pub mod developer_reload;
 pub mod developer_selection;
