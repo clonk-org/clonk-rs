@@ -7585,6 +7585,9 @@ pub(crate) fn client_settings_for_paths(
         if let Some(content) = paths.content_dir() {
             settings.local_resource_roots.push(content.to_path_buf());
         }
+        // `SearchLocal` bounds its candidate walk by the configured depth
+        // (C4Network2Res.cpp:460-490).
+        settings.max_resource_search_recursion = load_max_resource_search_recursion(Some(paths));
     }
     settings
 }

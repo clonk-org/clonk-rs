@@ -54,6 +54,10 @@ impl ClientBootstrapLocalCandidates {
         self.max_search_recursion = max_search_recursion;
     }
 
+    pub fn max_search_recursion(&self) -> usize {
+        self.max_search_recursion
+    }
+
     pub fn extend_from_roots(
         &mut self,
         _join_data: &JoinDataEnvelope,

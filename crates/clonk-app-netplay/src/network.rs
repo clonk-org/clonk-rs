@@ -162,6 +162,9 @@ pub struct ClientSettings {
     pub resource_directory: PathBuf,
     pub local_system_path: Option<PathBuf>,
     pub local_resource_roots: Vec<PathBuf>,
+    /// `Config.Network.MaxResSearchRecursion` (C4Config.cpp:527-533), the depth
+    /// `SearchLocal` walks candidate folders to (C4Network2Res.cpp:460-490).
+    pub max_resource_search_recursion: usize,
     pub league_transport: clonk_network::LeagueHttpTransportConfig,
     pub league_auth: clonk_network::LeagueAuthRequestHead,
     /// League HTTP host retained from accepted JoinData for later local-player
@@ -198,6 +201,7 @@ impl ClientSettings {
             resource_directory: PathBuf::from("Network"),
             local_system_path: None,
             local_resource_roots: Vec::new(),
+            max_resource_search_recursion: 1,
             league_transport: clonk_network::LeagueHttpTransportConfig::default(),
             league_auth: clonk_network::LeagueAuthRequestHead::default(),
             league_server_name: String::new(),
@@ -6998,6 +7002,7 @@ async fn run_client_worker(
         .with_password(settings.password)
         .with_resource_directory(settings.resource_directory)
         .with_local_resource_roots(settings.local_resource_roots)
+        .with_max_resource_search_recursion(settings.max_resource_search_recursion)
         .with_mesh_punchers(mesh_punchers);
     if let Some(bind_address) = settings.mesh_tcp_bind_address {
         client_config = client_config.with_mesh_tcp_bind_address(bind_address);

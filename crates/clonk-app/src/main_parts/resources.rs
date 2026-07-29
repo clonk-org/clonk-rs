@@ -3730,6 +3730,21 @@ pub(crate) fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, 
     (masterserver_signup, ports.tcp)
 }
 
+/// `Config.Network.MaxResSearchRecursion`, default 1 (C4Config.cpp:527-533).
+/// `C4Network2Res::SearchLocal` uses it both for the first basename lookup and
+/// as the hard recursion limit while walking candidate folders
+/// (C4Network2Res.cpp:460-490). A missing or unparsable value keeps the native
+/// default of one folder; a negative value cannot deepen the search.
+pub(crate) fn load_max_resource_search_recursion(paths: Option<&AppPaths>) -> usize {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        "Network",
+        "MaxResSearchRecursion",
+    )
+    .and_then(|value| value.trim().parse::<i32>().ok())
+    .map_or(1, |value| usize::try_from(value.max(0)).unwrap_or(1))
+}
+
 pub(crate) fn load_network_reference_port(paths: Option<&AppPaths>) -> u16 {
     load_network_ports(paths).reference
 }

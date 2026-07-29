@@ -482,6 +482,14 @@ impl ClientConfig {
         self
     }
 
+    /// Bounds `SearchLocal`'s candidate walk at the configured depth
+    /// (C4Network2Res.cpp:460-490).
+    pub fn with_max_resource_search_recursion(mut self, max_search_recursion: usize) -> Self {
+        self.bootstrap_local_candidates
+            .set_max_search_recursion(max_search_recursion);
+        self
+    }
+
     pub fn with_bootstrap_local_candidates(
         mut self,
         candidates: crate::ClientBootstrapLocalCandidates,

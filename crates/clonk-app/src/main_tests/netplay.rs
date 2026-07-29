@@ -19662,3 +19662,57 @@ fn focus_loss_does_not_submit_cpp_player_control() {
     assert!(app.pressed_engine_keys.is_empty());
     assert_eq!(app.ingame_pointer, None);
 }
+
+/// `Config.Network.MaxResSearchRecursion` defaults to 1 (C4Config.cpp:527-533)
+/// and bounds `C4Network2Res::SearchLocal`'s candidate walk
+/// (C4Network2Res.cpp:460-490). The live application has to load it and hand it
+/// to client bootstrap, not merely expose it in the advanced editor.
+#[test]
+fn configured_max_resource_search_recursion_reaches_client_candidates() {
+    let load = |body: Option<&str>| {
+        let root = tempdir().expect("recursion config root");
+        let user_data = tempdir().expect("recursion user data");
+        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("fixture System group");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        if let Some(body) = body {
+            fs::write(paths.config_file(), body).expect("write fixture config");
+        }
+        (
+            load_max_resource_search_recursion(Some(&paths)),
+            client_settings_for_paths(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Depth tester".to_string(),
+                Some(&paths),
+            )
+            .max_resource_search_recursion,
+        )
+    };
+
+    // The C++ default survives an absent config, an absent key and a
+    // non-numeric value.
+    assert_eq!(load(None), (1, 1));
+    assert_eq!(load(Some("[Network]\nName=Tester\n")), (1, 1));
+    assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=deep\n")), (1, 1));
+    // A configured depth is loaded and carried into the client settings.
+    assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=0\n")), (0, 0));
+    assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=3\n")), (3, 3));
+    // A negative depth cannot deepen the search.
+    assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=-2\n")), (0, 0));
+
+    // The settings value reaches the bootstrap candidate walk.
+    let config = clonk_network::ClientConfig::new("Depth tester", ParticipantKind::Player)
+        .with_max_resource_search_recursion(3);
+    assert_eq!(config.bootstrap_local_candidates.max_search_recursion(), 3);
+    assert_eq!(
+        clonk_network::ClientConfig::new("Depth tester", ParticipantKind::Player)
+            .bootstrap_local_candidates
+            .max_search_recursion(),
+        1,
+        "an unconfigured client keeps the native single-folder default"
+    );
+}
