@@ -30,6 +30,36 @@ pub enum FolderSaveAddFailure {
     Ignore,
 }
 
+/// The group mutations a set of edited component hosts contributes to the next
+/// scenario save (`C4ComponentHost::Save`, `C4ComponentHost.cpp:231-236`).
+///
+/// The three-way projection is the point: an **unmodified** host contributes
+/// *nothing*, which is what stops a save rewriting components the user never
+/// opened; an **emptied** one contributes a delete rather than a zero-byte
+/// write; and only a modified, non-empty host is written. Order follows the
+/// caller's host order.
+pub fn component_save_mutations(
+    actions: impl IntoIterator<Item = clonk_engine::developer_components::ComponentSaveAction>,
+) -> Vec<FolderSaveMutation> {
+    use clonk_engine::developer_components::ComponentSaveAction;
+    actions
+        .into_iter()
+        .filter_map(|action| match action {
+            ComponentSaveAction::Skip => None,
+            ComponentSaveAction::Delete { filename } => Some(FolderSaveMutation::DeleteEntry {
+                name: filename.into_bytes(),
+            }),
+            ComponentSaveAction::Write { filename, data } => Some(FolderSaveMutation::PutFile {
+                name: filename.into_bytes(),
+                payload: data,
+                // A component the user just edited failing to write is fatal:
+                // silently dropping it would lose their edit.
+                failure: FolderSaveAddFailure::Fatal,
+            }),
+        })
+        .collect()
+}
+
 /// One physical mutation performed immediately by a native `GRPF_Folder`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FolderSaveMutation {
@@ -1798,5 +1828,63 @@ mod tests {
             })
             .expect("later Teams mutation remains queued");
         assert!(objects_index < teams_index);
+    }
+
+    // C4ComponentHost.cpp:231-236 — the three-way save projection reaching the
+    // group journal.
+    #[test]
+    fn edited_component_hosts_reach_the_scenario_save_as_group_mutations() {
+        use clonk_engine::developer_components::{ComponentHost, ComponentSaveAction};
+
+        // A host nobody opened contributes nothing at all.
+        let untouched = ComponentHost::loaded("Script.c", b"func Init() {}".to_vec());
+        assert_eq!(untouched.save_action(), ComponentSaveAction::Skip);
+        assert!(component_save_mutations([untouched.save_action()]).is_empty());
+
+        // An accepted edit is written with exactly its bytes and filename.
+        let mut edited = ComponentHost::loaded("Script.c", b"old".to_vec());
+        edited.accept(b"new body".to_vec());
+        assert_eq!(
+            component_save_mutations([edited.save_action()]),
+            vec![FolderSaveMutation::PutFile {
+                name: b"Script.c".to_vec(),
+                payload: b"new body".to_vec(),
+                failure: FolderSaveAddFailure::Fatal,
+            }],
+            "losing a just-edited component silently would discard the user's edit"
+        );
+
+        // An emptied editor deletes the component rather than writing zero bytes.
+        let mut emptied = ComponentHost::loaded("Info.txt", b"text".to_vec());
+        emptied.accept(Vec::new());
+        assert_eq!(
+            component_save_mutations([emptied.save_action()]),
+            vec![FolderSaveMutation::DeleteEntry {
+                name: b"Info.txt".to_vec()
+            }]
+        );
+
+        // Several hosts keep the caller's order, and skipped ones leave no gap.
+        let mut title = ComponentHost::loaded("Title.txt", b"Castle".to_vec());
+        title.accept(b"Keep".to_vec());
+        let mutations = component_save_mutations([
+            untouched.save_action(),
+            title.save_action(),
+            emptied.save_action(),
+        ]);
+        assert_eq!(mutations.len(), 2);
+        assert!(matches!(
+            mutations.as_slice(),
+            [
+                FolderSaveMutation::PutFile { name, .. },
+                FolderSaveMutation::DeleteEntry { .. }
+            ] if name == b"Title.txt"
+        ));
+
+        // A saved host stops contributing, so saving twice writes once.
+        let mut saved = ComponentHost::loaded("Script.c", b"a".to_vec());
+        saved.accept(b"b".to_vec());
+        saved.mark_saved();
+        assert!(component_save_mutations([saved.save_action()]).is_empty());
     }
 }

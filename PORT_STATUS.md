@@ -530,9 +530,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `Engine::relink_after_component_edit` is that second arm. Pinned by
   `console_component_editors_commit_bytes_and_relink_script` and
   `console_component_editors_commit_bytes_and_relink_script_through_the_engine`,
-  which drives a live engine through two edits and a bare relink. **Still open:**
-  the editor surfaces themselves, and wiring the accepted bytes into the
-  scenario save projection.
+  which drives a live engine through two edits and a bare relink.
+  The accepted bytes now reach the save.
+  `developer_console_save::component_save_mutations` projects each host onto the
+  group journal three ways: an **unmodified** host contributes nothing — which
+  is what stops a save rewriting components the user never opened — an
+  **emptied** one contributes a `DeleteEntry` rather than a zero-byte write, and
+  only a modified non-empty host is written, as `PutFile` with
+  `FolderSaveAddFailure::Fatal`, because silently dropping a component the user
+  just edited would lose their edit. Pinned by
+  `edited_component_hosts_reach_the_scenario_save_as_group_mutations`.
+  **Still open:** the editor surfaces — which do not exist on the reference
+  build; see the console-dialog note above.
 
 - **The edit cursor's overlay draw list landed.**
   Unlike the console's dialogs, `C4EditCursor::Draw` is *not* a native widget —
