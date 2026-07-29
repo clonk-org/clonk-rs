@@ -150,8 +150,19 @@ fn c4group_cli_round_trips_native_command_matrix() {
     let bad_wait = c4group(&[group, "-w", "soon"]);
     assert!(!bad_wait.status.success());
 
-    // An unimplemented command says so and fails rather than silently passing.
-    let unsupported = c4group(&[group, "-g", "a", "b", "Title"]);
+    // `-g` is implemented, so a missing source is a file error rather than an
+    // "unimplemented" one — the failure must name the file it could not read.
+    let missing_source = c4group(&[group, "-g", "a", "b", "Title"]);
+    assert!(!missing_source.status.success());
+    let missing_source_error = String::from_utf8_lossy(&missing_source.stderr);
+    assert!(
+        missing_source_error.contains('a') && !missing_source_error.contains("not implemented"),
+        "unexpected -g error: {missing_source_error}"
+    );
+
+    // A command that genuinely is not implemented says so and fails rather
+    // than silently passing.
+    let unsupported = c4group(&[group, "-y"]);
     assert!(!unsupported.status.success());
     assert!(String::from_utf8_lossy(&unsupported.stderr).contains("not implemented"));
 
