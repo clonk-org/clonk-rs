@@ -425,6 +425,25 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Keyed developer window host landed; live records not yet wired.**
+  The runner owns exactly one Window/Pixels/FramePresenter, so console
+  viewports, the Tools/Property toolbox and the object-list window had nowhere
+  to live. `clonk-app::developer_windows` is the registry: records keyed by
+  `WindowId`, each owning one host plus a `HostPurpose`, and every operation
+  addresses exactly one record. Close semantics follow the oracle rather than
+  one rule — a viewport or the object list is destroyed
+  (`C4Viewport.cpp:775-834`), the toolbox is only *hidden* so its notebook
+  pages survive (`C4DevmodeDlg.cpp:79-101`), and the shell ignores a
+  child-style close entirely, so closing a child can never take the console
+  down. `request_redraw_visible` skips hidden hosts, and `present_visible`
+  reports each failure against its own `WindowId`, so one host's lost surface is
+  never attributed to another. Pinned by
+  `developer_window_host_routes_resize_redraw_hide_and_close_by_window_id`
+  against three mock records. **Still open:** the app still constructs and
+  filters events for its single window — nothing registers a live record yet, so
+  the registry routes nothing in production. That wiring is what M10-P4-L044's
+  criterion 7 and the console viewport work (M10-P4-L047) depend on.
+
 - **Developer draw-tool state machine landed; dialog and control queue open.**
   `clonk-engine::developer_tools` carries `C4ToolsDlg`'s retained state and
   `C4EditCursor`'s gesture cadence. `ToggleTool` is `(Tool + 1) % 4`
