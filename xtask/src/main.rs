@@ -1089,8 +1089,17 @@ impl GenerateManifestOptions {
 }
 
 /// A full Git object name, which is what a submodule pin always is.
+///
+/// Lowercase, like [`is_sha256_hex`] and for the same reason: this pin becomes
+/// the release tag `content-<sha>`, and GitHub matches a tag byte for byte. An
+/// uppercase pin would name a release that does not exist while looking
+/// perfectly valid here. Git renders object names in lowercase, so the stricter
+/// rule turns nothing legitimate away.
 fn is_commit_sha(text: &str) -> bool {
-    text.len() == 40 && text.chars().all(|digit| digit.is_ascii_hexdigit())
+    text.len() == 40
+        && text
+            .chars()
+            .all(|digit| digit.is_ascii_digit() || matches!(digit, 'a'..='f'))
 }
 
 /// Lowercase hex SHA-256, the form the manifest records and a client compares.
@@ -3354,6 +3363,48 @@ mod tests {
                 ])
                 .is_err(),
                 "commit {commit:?} / digest {sha256:?} / size {size:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn hex_arguments_are_lowercase_or_refused() {
+        // Both are lowercase hex or nothing, and for the same reason: each is
+        // compared as text somewhere that will not case-fold it. The pin
+        // becomes the release tag `content-<sha>`, which GitHub matches byte
+        // for byte, so an uppercase pin would pass validation and then resolve
+        // to no release at all; the digest is compared against the client's own
+        // lowercase rendering. Git and `sha256sum` only ever emit lowercase, so
+        // nothing legitimate is turned away.
+        for (commit, sha256) in [
+            (
+                CONTENT_COMMIT_FIXTURE.to_uppercase(),
+                CONTENT_SHA256_FIXTURE.to_string(),
+            ),
+            (
+                CONTENT_COMMIT_FIXTURE.to_string(),
+                CONTENT_SHA256_FIXTURE.to_uppercase(),
+            ),
+        ] {
+            assert!(
+                GenerateManifestOptions::parse(&[
+                    "--version".to_string(),
+                    "0.4.0".to_string(),
+                    "--released-at".to_string(),
+                    "2026-07-28T10:00:00Z".to_string(),
+                    "--components".to_string(),
+                    "components".to_string(),
+                    "--out-dir".to_string(),
+                    "release".to_string(),
+                    "--content-commit".to_string(),
+                    commit.clone(),
+                    "--content-sha256".to_string(),
+                    sha256.clone(),
+                    "--content-size".to_string(),
+                    "236117973".to_string(),
+                ])
+                .is_err(),
+                "uppercase hex must be refused: commit {commit:?} / digest {sha256:?}"
             );
         }
     }
