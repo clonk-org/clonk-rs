@@ -360,6 +360,128 @@
         reset_cached_app_paths();
     }
 
+    /// The client's `C4GameLobby::MainDlg` is as long-lived as the host's, and
+    /// tooltip timing belongs to the one `CMouse` on the screen, not to the
+    /// dialog: motion and clicks call `ResetToolTipTime`, and the tip appears
+    /// only after `C4GUI_ToolTipShowTime` of stillness
+    /// (src/C4Gui.cpp:502-536; src/C4Gui.h:148,1712-1713).
+    #[test]
+    fn joined_lobby_tooltips_survive_frames_and_use_shared_delay() {
+        let mut app = new_menu_app(640, 480);
+        app.network_lobby = Some(
+            NetworkLobbyState::new(7, "Client".to_string(), false)
+                .with_preloading(false, LobbyLabels::default()),
+        );
+        app.startup_view = StartupView::NetworkLobby;
+        app.sync_network_lobby_game_option_state();
+        let assets = Arc::clone(&app.assets);
+        let layout = app
+            .network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .with_classic_controller_input(
+                app.graphics.surface(),
+                assets.as_ref(),
+                &app.scenario_game_options,
+                |_, layout, _| layout.clone(),
+            )
+            .expect("layout retained joined lobby");
+        let mut point = GuiPoint::new(
+            (layout.chat_edit.x + 2) as f32,
+            (layout.chat_edit.y + 2) as f32,
+        );
+        let tooltip_at = |app: &GameApp, now: Instant| {
+            app.network_lobby
+                .as_ref()
+                .and_then(|lobby| lobby.controller.tooltip_state_at(now))
+                .is_some()
+        };
+        let tooltip_text = |app: &GameApp| {
+            app.network_lobby.as_ref().and_then(|lobby| {
+                lobby
+                    .controller
+                    .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                    .map(|tooltip| tooltip.text)
+            })
+        };
+
+        app.handle_network_lobby_pointer_move(point)
+            .expect("prime joined hover");
+        // Below C4GUI_ToolTipShowTime the retained clock keeps the tip hidden.
+        assert!(!tooltip_at(&app, Instant::now() + Duration::from_millis(100)));
+        assert!(tooltip_at(&app, Instant::now() + Duration::from_secs(1)));
+
+        // The tracker survives the per-frame projection rather than being
+        // rebuilt: a reconstructed controller would restart the clock at draw
+        // time and lose the hover owner.
+        let mut surface = Surface::new(640, 480, clonk_graphics::PixelFormat::Rgba8888);
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .render_classic(
+                &mut surface,
+                assets.as_ref(),
+                &app.scenario_game_options,
+                false,
+                true,
+                &startup_identity_gamma().clone(),
+            )
+            .expect("project one joined lobby frame");
+        assert!(tooltip_at(&app, Instant::now() + Duration::from_secs(1)));
+        assert!(!tooltip_at(&app, Instant::now() + Duration::from_millis(100)));
+
+        // Non-pointer input suppresses until real motion, exactly as on the host.
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("route physical key");
+        assert!(!tooltip_at(&app, Instant::now() + Duration::from_secs(1)));
+        app.handle_network_lobby_pointer_move(point)
+            .expect("route synthesized same-pixel motion");
+        assert!(
+            !tooltip_at(&app, Instant::now() + Duration::from_secs(1)),
+            "same-pixel motion must not reactivate the tooltip"
+        );
+        point.x += 1.0;
+        app.handle_network_lobby_pointer_move(point)
+            .expect("reactivate after physical key");
+        assert!(tooltip_at(&app, Instant::now() + Duration::from_secs(1)));
+
+        // A new hover target takes ownership and restarts the clock, so the
+        // retained tracker reports the newly owned element's text.
+        let chat_tip = tooltip_text(&app).expect("chat tooltip");
+        let exit = GuiPoint::new(
+            (layout.exit_button.x + layout.exit_button.w / 2) as f32,
+            (layout.exit_button.y + layout.exit_button.h / 2) as f32,
+        );
+        app.handle_network_lobby_pointer_move(exit)
+            .expect("hover the Exit button");
+        assert!(!tooltip_at(&app, Instant::now() + Duration::from_millis(100)));
+        let exit_tip = tooltip_text(&app).expect("exit tooltip");
+        assert_ne!(chat_tip, exit_tip);
+        app.handle_network_lobby_pointer_move(point)
+            .expect("return to the chat edit");
+
+        // A wheel is mouse input, so `ResetToolTipTime` restarts the stillness
+        // clock rather than disabling the tip outright.
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("route wheel");
+        assert!(!tooltip_at(&app, Instant::now() + Duration::from_millis(100)));
+        assert!(tooltip_at(&app, Instant::now() + Duration::from_secs(1)));
+
+        // A covering modal owns the pointer, so the lobby beneath draws no tip.
+        point.x += 1.0;
+        app.handle_network_lobby_pointer_move(point)
+            .expect("re-arm before the modal");
+        assert!(tooltip_at(&app, Instant::now() + Duration::from_secs(1)));
+        assert!(app
+            .render_startup_tooltips()
+            .expect("uncovered lobby tooltip pass"));
+        app.open_network_join_password_dialog()
+            .expect("cover the lobby with a modal");
+        assert!(!app
+            .render_startup_tooltips()
+            .expect("covered lobby tooltip pass"));
+    }
+
     #[test]
     fn persistent_classic_lobby_non_pointer_input_suppresses_tooltip_until_motion() {
         let mut app = new_menu_app(640, 480);
