@@ -197,8 +197,10 @@ pub(crate) fn generate_update(
         allow_missing_target,
         source_checksums: vec![group_file_crc(&source_bytes)],
         target_checksum: group_file_crc(&target_bytes),
-        source_contents_crcs: vec![0],
-        target_contents_crc: 0,
+        // Without these, `Execute`'s verdict can only succeed by reproducing
+        // the target byte for byte; with them an equivalent repack passes.
+        source_contents_crcs: vec![contents_crc(&source)?],
+        target_contents_crc: contents_crc(&target)?,
     };
 
     let mut update = clonk_resources::MutableGroup::new(file_name(output_path));
@@ -225,6 +227,20 @@ pub(crate) fn generate_update(
     crate::edit::write_back(&update, Path::new(output_path))
         .map_err(|error| format!("{output_path}: {error}"))?;
     Ok(plan.include_in_update)
+}
+
+/// `C4Group_GetFileContentsCRC` — the XOR of every entry's CRC.
+fn contents_crc(group: &clonk_resources::Group) -> Result<u32, String> {
+    let entries = group.entries().map_err(|error| error.to_string())?;
+    let mut crc = 0;
+    for entry in entries.iter().filter(|entry| !entry.is_directory) {
+        let bytes = group
+            .read_entry_bytes_exact(entry)
+            .map_err(|error| error.to_string())?;
+        let name = String::from_utf8_lossy(&entry.name_bytes).into_owned();
+        crc ^= crate::update_core::entry_crc(&name, &bytes);
+    }
+    Ok(crc)
 }
 
 fn file_name(path: &str) -> String {

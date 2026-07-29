@@ -774,13 +774,23 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `removed.txt` deleted — where C++'s own package deletes every entry, because
   its manifest is corrupt. Its core matches C++'s field for field
   (`GrpChks1=1686362931`, `GrpChks2=1194512086`).
-  **What that run also established, and it refines an earlier note here:**
-  C++ still prints "Failed" afterwards, because `DoGrpUpdate` ends by comparing
-  the repacked group's file CRC against `GrpChks2`. Reproducing that requires
-  **byte-identical repacking** of the target — entry order, times and header
-  included. So the `GrpChks2` constraint is real, but it binds the **apply**
-  path, not the generate path: `-g` is unconstrained by it, and `-y` must
-  reconstruct the target exactly, not merely equivalently. Caveat: reproduced on one
+  **And byte-identical repacking is not required after all** — which finally
+  settles a claim this file carried in two earlier forms.
+  `C4UpdatePackage::Execute`'s verdict is
+  `if ((!GrpContentsCRC2 || GrpContentsCRC2 != iResContentsChks) && iResChks != GrpChks2) return false;`
+  — success needs the result's *contents* CRC to match `GrpContentsCRC2` **or**
+  its *file* CRC to match `GrpChks2`. The contents CRC
+  (`C4Group_GetFileContentsCRC` -> `C4Group::EntryCRC32(nullptr)`) is the
+  **XOR** of every entry's CRC, so it is order- and packing-independent: that is
+  the escape hatch that lets an equivalent repack pass.
+  One trap in it, and it is the whole reason a first attempt fails: an entry's
+  CRC is **not** a CRC of its data. C++ computes `crc32(0, data)` and then
+  *continues the same CRC over the entry's filename bytes*. `entry_crc` and
+  `group_contents_crc` reproduce that, verified numerically —
+  `GrpContentsCRC2=3949291798` is exactly that XOR over the fixture's three
+  entries.
+  With those written, the oracle's own `c4group -y` reports **`Ok`** on a
+  Rust-generated package, where its own package fails. Caveat: reproduced on one
   toolchain; `std::format` over `char[N]` may differ elsewhere.
 
 - **Actionable ready-check toasts: the concurrency core landed, backends open.**

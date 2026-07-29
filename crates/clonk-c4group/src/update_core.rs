@@ -58,6 +58,44 @@ pub(crate) fn group_file_crc(bytes: &[u8]) -> u32 {
     crc ^ u32::MAX
 }
 
+/// `C4Group::CalcCRC32` for one entry (`C4Group.cpp`).
+///
+/// The entry's CRC is **not** a CRC of its data alone: C++ computes
+/// `crc32(0, data)` and then *continues* the same CRC over the entry's
+/// **filename** bytes. Omitting the name gives a plausible-looking value that
+/// never matches a real package.
+pub(crate) fn entry_crc(name: &str, data: &[u8]) -> u32 {
+    crc32_continue(crc32_continue(0, data), name.as_bytes())
+}
+
+/// `C4Group::EntryCRC32(nullptr)` (`C4Group.cpp`) — the **XOR** of every
+/// entry's CRC, which `C4Group_GetFileContentsCRC` returns.
+///
+/// Being an XOR makes it order- and packing-independent, and that is exactly
+/// why it exists: `C4UpdatePackage::Execute`'s verdict accepts a result whose
+/// *contents* CRC matches `GrpContentsCRC2` **or** whose *file* CRC matches
+/// `GrpChks2`. Without the contents CRC an update can only succeed by
+/// reproducing the target byte for byte; with it, an equivalent repack passes.
+pub(crate) fn group_contents_crc<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> u32 {
+    entries
+        .into_iter()
+        .fold(0, |crc, (name, data)| crc ^ entry_crc(name, data))
+}
+
+fn crc32_continue(initial: u32, data: &[u8]) -> u32 {
+    let mut crc = initial ^ u32::MAX;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    crc ^ u32::MAX
+}
+
 /// `C4UP_MaxUpGrpCnt` (`C4Update.h:25`).
 pub(crate) const MAX_UPDATE_GROUP_COUNT: usize = 50;
 
@@ -240,6 +278,33 @@ mod tests {
         // against the two groups the fixture package was generated from: the
         // oracle wrote GrpChks1=1686362931 for g1.c4f and GrpChks2=1194512086
         // for g2.c4f, and those are exactly their file CRCs.
+        // C4Group::EntryCRC32 XORs entry CRCs, and each entry's CRC continues
+        // over its filename. Checked against the fixture: the oracle wrote
+        // GrpContentsCRC2=3949291798 for g2.c4f's three entries.
+        assert_eq!(
+            group_contents_crc([
+                ("a.txt", b"alpha two\n".as_slice()),
+                ("added.txt", b"new file\n".as_slice()),
+                ("keep.txt", b"shared\n".as_slice()),
+            ]),
+            3_949_291_798
+        );
+        // Order-independent, which is what lets an equivalent repack pass.
+        assert_eq!(
+            group_contents_crc([
+                ("keep.txt", b"shared\n".as_slice()),
+                ("a.txt", b"alpha two\n".as_slice()),
+                ("added.txt", b"new file\n".as_slice()),
+            ]),
+            3_949_291_798
+        );
+        // Dropping the filename from the entry CRC gives a different, wrong
+        // value — the trap this pins.
+        assert_ne!(
+            entry_crc("a.txt", b"alpha two\n"),
+            group_file_crc(b"alpha two\n")
+        );
+
         assert_eq!(group_file_crc(b""), 0);
         assert_eq!(
             group_file_crc(b"123456789"),
