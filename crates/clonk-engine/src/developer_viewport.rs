@@ -90,6 +90,67 @@ pub fn scroll_ranges(
     ))
 }
 
+/// The window a console viewport materialises with (`C4Viewport.cpp:1350-1351`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ViewportWindowSpec {
+    /// `ceilf(400 * scale)` — **ceiling**, not rounding or truncation, so a
+    /// fractional scale always rounds the window up.
+    pub width: i32,
+    /// `ceilf(250 * scale)`.
+    pub height: i32,
+    /// `IDS_CNS_VIEWPORT` for an ownerless viewport, otherwise the player's
+    /// name — so a per-player window is titled after its player, not "Viewport".
+    pub title: ViewportWindowTitle,
+    /// `std::format("Viewport{}", cvp->Player + 1)`
+    /// (`C4ViewportWindow::GetPositionData`). Note the `+ 1`: an ownerless
+    /// viewport is `Viewport0`, player 0 is `Viewport1`.
+    pub position_id: String,
+    /// `Config.GetSubkeyPath("Console")` — viewport geometry lives under the
+    /// console's config subkey, not the game's.
+    pub position_subkey: &'static str,
+    /// `storeSize = true`: the size is remembered along with the position.
+    pub store_size: bool,
+}
+
+/// Which title an opening viewport window takes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ViewportWindowTitle {
+    /// `IDS_CNS_VIEWPORT`, for `NO_OWNER`.
+    Resource,
+    /// `Game.Players.Get(Player)->GetName()`.
+    PlayerName(String),
+}
+
+/// `Config.GetSubkeyPath("Console")`.
+pub const VIEWPORT_POSITION_SUBKEY: &str = "Console";
+
+/// The native default viewport window extent before scaling.
+pub const VIEWPORT_DEFAULT_WIDTH: f32 = 400.0;
+pub const VIEWPORT_DEFAULT_HEIGHT: f32 = 250.0;
+
+/// Builds the spec for a viewport window. `player_name` is consulted only for
+/// an owned viewport; an owner with no player row falls back to the resource
+/// title rather than an empty one.
+pub fn viewport_window_spec(
+    player: i32,
+    player_name: Option<&str>,
+    scale: f32,
+) -> ViewportWindowSpec {
+    let scaled = |extent: f32| (extent * scale).ceil() as i32;
+    ViewportWindowSpec {
+        width: scaled(VIEWPORT_DEFAULT_WIDTH),
+        height: scaled(VIEWPORT_DEFAULT_HEIGHT),
+        title: match (player, player_name) {
+            (crate::OWNER_NONE, _) => ViewportWindowTitle::Resource,
+            (_, Some(name)) => ViewportWindowTitle::PlayerName(name.to_owned()),
+            (_, None) => ViewportWindowTitle::Resource,
+        },
+        position_id: format!("Viewport{}", player + 1),
+        position_subkey: VIEWPORT_POSITION_SUBKEY,
+        store_size: true,
+    }
+}
+
 /// Where a viewport window's input goes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ViewportEventRoute {
@@ -174,6 +235,45 @@ mod tests {
                 page: 250,
                 position: 20
             }
+        );
+
+        // C4Viewport.cpp:1350-1351 — the window a viewport materialises with.
+        let ownerless = viewport_window_spec(crate::OWNER_NONE, None, 1.0);
+        assert_eq!((ownerless.width, ownerless.height), (400, 250));
+        assert_eq!(ownerless.title, ViewportWindowTitle::Resource);
+        assert_eq!(
+            ownerless.position_id, "Viewport0",
+            "the id is Player + 1, so an ownerless viewport is Viewport0"
+        );
+        assert_eq!(ownerless.position_subkey, "Console");
+        assert!(ownerless.store_size);
+
+        // An owned viewport takes its player's name and the next id.
+        let owned = viewport_window_spec(0, Some("Red"), 1.0);
+        assert_eq!(
+            owned.title,
+            ViewportWindowTitle::PlayerName("Red".to_owned())
+        );
+        assert_eq!(owned.position_id, "Viewport1");
+        // Duplicate owners still get distinct ids by player, not by list index.
+        assert_eq!(
+            viewport_window_spec(3, Some("Blue"), 1.0).position_id,
+            "Viewport4"
+        );
+        // An owner with no player row falls back rather than titling it empty.
+        assert_eq!(
+            viewport_window_spec(2, None, 1.0).title,
+            ViewportWindowTitle::Resource
+        );
+
+        // The extent is `ceilf`, so a fractional scale always rounds up.
+        let scaled = viewport_window_spec(crate::OWNER_NONE, None, 1.5);
+        assert_eq!((scaled.width, scaled.height), (600, 375));
+        let awkward = viewport_window_spec(crate::OWNER_NONE, None, 1.01);
+        assert_eq!(
+            (awkward.width, awkward.height),
+            (404, 253),
+            "ceil, not round: 400*1.01 = 404.0 and 250*1.01 = 252.5 -> 253"
         );
 
         // Input routes by cursor mode; concrete edit behaviour is L043's.
