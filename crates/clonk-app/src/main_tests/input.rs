@@ -6897,3 +6897,51 @@ fn l128_running_f4_only_stronger_escape_owns_keyboard_input() {
     app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
         .expect("consume the dedicated Escape release");
 }
+
+/// C++ has no F11 shortcut: `C4KeyboardInput` maps it as an ordinary physical
+/// key (C4KeyboardInput.cpp:185-197) and `C4Game::InitKeyboard` registers no
+/// action for it (C4Game.cpp:3371-3448). Display mode changes only through the
+/// startup Options combo (C4StartupOptionsDlg.cpp:1317-1322).
+#[test]
+fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
+    // An unbound F11 is inert in the startup screens.
+    let mut app = new_menu_app(320, 200);
+    app.set_display_mode(DisplayMode::Window);
+    let view = app.startup_view;
+    app.handle_key(VirtualKeyCode::F11, ElementState::Pressed)
+        .expect("unbound F11 is inert in Menu");
+    app.handle_key(VirtualKeyCode::F11, ElementState::Released)
+        .expect("release unbound F11");
+    assert!(!app.display_flags.is_fullscreen);
+    assert_eq!(app.startup_view, view);
+
+    // ... and while running.
+    let mut app = new_classic_running_sandbox_app();
+    app.set_display_mode(DisplayMode::Window);
+    app.handle_key(VirtualKeyCode::F11, ElementState::Pressed)
+        .expect("unbound F11 is inert while running");
+    app.handle_key(VirtualKeyCode::F11, ElementState::Released)
+        .expect("release unbound F11");
+    assert!(!app.display_flags.is_fullscreen);
+    assert!(app.pending_screenshots.is_empty());
+
+    // A KeyConfig action bound to F11 reaches ordinary classic dispatch.
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(
+            parse_runtime_key_config(b"[Keys]\nToggleShowHelp=F11\n")
+                .expect("parse an F11 scoreboard binding"),
+        ))
+        .expect("install the F11 binding");
+    assert!(!app.runtime_help_visible);
+    app.handle_key(VirtualKeyCode::F11, ElementState::Pressed)
+        .expect("the bound F11 action dispatches");
+    assert!(
+        app.runtime_help_visible,
+        "a KeyConfig action bound to F11 must reach classic dispatch"
+    );
+    assert!(
+        !app.display_flags.is_fullscreen,
+        "dispatching the bound action must not change the display mode"
+    );
+}

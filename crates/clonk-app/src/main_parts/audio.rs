@@ -748,20 +748,11 @@ pub(crate) fn handle_window_event(
                 },
             ..
         } => {
-            if state == ElementState::Pressed
-                && keycode == VirtualKeyCode::F11
-                && !app.options_keyboard_control_capture_active()
-            {
-                app.startup_tooltip.note_non_pointer_input();
-                app.note_classic_lobby_non_pointer_input();
-                if app.mode == AppMode::Menu {
-                    app.menu_frame_cache = None;
-                }
-                app.reject_classic_global_gui_bootstrap()?;
-                toggle_fullscreen(window, display_options);
-                app.set_display_mode(display_options.mode);
-                return Ok(());
-            }
+            // F11 is an ordinary physical key in C++: `C4KeyboardInput` maps
+            // its name (C4KeyboardInput.cpp:185-197) and `C4Game::InitKeyboard`
+            // registers no fullscreen action for it (C4Game.cpp:3371-3448), so
+            // it reaches classic dispatch like every other key. Display mode is
+            // changed only through the Options combo.
             app.handle_key(keycode, state)
                 .context("failed to process key input")?;
             if !app.pending_screenshots.is_empty() {
@@ -809,18 +800,6 @@ pub(crate) fn classic_platform_cursor_visible(
     pointer_inside_window: bool,
 ) -> bool {
     !(window_active && pointer_inside_window)
-}
-
-fn toggle_fullscreen(window: &Window, display_options: &mut DisplayOptions) {
-    if window.fullscreen().is_some() {
-        window.set_fullscreen(None);
-        display_options.record_mode(DisplayMode::Window);
-        display_options.record_maximized(window.is_maximized());
-    } else {
-        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
-        display_options.record_mode(DisplayMode::Fullscreen);
-        display_options.record_maximized(false);
-    }
 }
 
 #[derive(Debug)]
