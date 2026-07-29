@@ -2554,6 +2554,8 @@ impl GameApp {
         defer_monitor_gamma: bool,
     ) -> Result<()> {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        self.graphics
+            .set_scroll_smooth(self.display_flags.scroll_smooth);
         self.graphics.set_renderer_config(
             self.display_flags.show_player_hud_always,
             self.display_flags.splitscreen_dividers,

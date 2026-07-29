@@ -2626,6 +2626,12 @@ pub(crate) fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
     flags.fire_particles = graphics_bool("FireParticles", flags.fire_particles);
     flags.clock = graphics_bool("ShowClock", flags.clock);
     flags.fps = general_bool("FPS", flags.fps);
+    // C++ keeps the raw configured value and clamps it only where the camera
+    // divides by it (C4Config.cpp:381-388; C4Viewport.cpp:1195-1207).
+    flags.scroll_smooth = config
+        .get_in(Some("General"), "ScrollSmooth")
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(flags.scroll_smooth);
     flags.white_chat = general_bool("UseWhiteIngameChat", flags.white_chat);
     if let Some(mode) = config.get_in(Some("Graphics"), "UpperBoard") {
         flags.upper_board = match mode.trim().to_ascii_lowercase().as_str() {

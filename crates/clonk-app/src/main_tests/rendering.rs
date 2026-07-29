@@ -4066,6 +4066,7 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     // C4Player.cpp:926-928,1491-1521,1692-1715).
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
+    app.display_flags.scroll_smooth = 1;
     app.graphics.set_scroll_smooth(1);
     let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
     app.engine
@@ -4179,6 +4180,7 @@ fn continuous_edge_execute_reprojects_world_pointer_before_scrolling_again() {
         .expect("place camera away from every scroll bound");
     app.snapshot = app.engine.snapshot();
     app.display_flags.show_commands = false;
+    app.display_flags.scroll_smooth = 1;
     app.graphics.set_scroll_smooth(1);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.render(&mut frame).expect("establish mouse viewport");
@@ -5678,4 +5680,54 @@ fn set_plr_show_command_request_force_enables_display_once() {
     app.display_flags.show_commands = false;
     app.apply_show_commands_enable_request();
     assert!(!app.display_flags.show_commands);
+}
+
+/// `Config.General.ScrollSmooth` defaults to 4 (C4Config.cpp:381-388) and
+/// divides every fixed-point camera delta after a 1..=50 clamp
+/// (C4Viewport.cpp:1195-1207). Production has to load it, not just expose it in
+/// the advanced editor.
+#[test]
+fn configured_scroll_smooth_drives_runtime_camera_divisor() {
+    let load = |body: &str| {
+        let root = tempdir().expect("scroll-smooth config root");
+        let user_data = tempdir().expect("scroll-smooth user data");
+        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("fixture System group");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        fs::write(paths.config_file(), body).expect("write fixture config");
+        load_display_flags(Some(&paths)).scroll_smooth
+    };
+
+    // The C++ default survives an absent key and an unparsable value.
+    assert_eq!(load("[General]\nName=Tester\n"), 4);
+    assert_eq!(load("[General]\nScrollSmooth=not a number\n"), 4);
+    // A configured value is loaded raw, including out-of-range input: C++
+    // stores it unclamped and clamps only where it divides.
+    assert_eq!(load("[General]\nScrollSmooth=1\n"), 1);
+    assert_eq!(load("[General]\nScrollSmooth=25\n"), 25);
+    assert_eq!(load("[General]\nScrollSmooth=0\n"), 0);
+    assert_eq!(load("[General]\nScrollSmooth=9999\n"), 9999);
+
+    // The loaded scalar reaches the camera through the render path, and the
+    // divisor clamps at use.
+    let mut app = new_classic_running_sandbox_app();
+    let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
+    for (configured, effective) in [(1, 1), (4, 4), (25, 25), (0, 1), (9_999, 50)] {
+        app.display_flags.scroll_smooth = configured;
+        app.render(&mut frame).expect("render applies the divisor");
+        assert_eq!(
+            app.graphics.scroll_smooth(),
+            configured,
+            "the raw configured value reaches the graphics model"
+        );
+        assert_eq!(
+            app.graphics.scroll_smooth().clamp(1, 50),
+            effective,
+            "the effective divisor clamps to 1..=50 like AdjustPosition"
+        );
+    }
 }

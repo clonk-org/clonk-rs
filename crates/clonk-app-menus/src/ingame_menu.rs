@@ -588,11 +588,17 @@ pub struct DisplayFlags {
     pub clock: bool,
     pub white_chat: bool,
     pub is_fullscreen: bool,
+    /// `Config.General.ScrollSmooth`, the raw viewport-camera smoothing
+    /// divisor. C++ stores it unclamped with a default of 4
+    /// (C4Config.cpp:381-388) and clamps to 1..=50 at use
+    /// (C4Viewport.cpp:1195-1207).
+    pub scroll_smooth: i32,
 }
 
 impl Default for DisplayFlags {
     fn default() -> Self {
         Self {
+            scroll_smooth: 4,
             player_names: true,
             clonk_names: true,
             portraits: true,

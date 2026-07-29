@@ -2776,7 +2776,8 @@ fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
                        SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CELL_TEXT");
                    }"#,
     );
-    eligible.graphics.set_scroll_smooth(1);
+    eligible.display_flags.scroll_smooth = 1;
+        eligible.graphics.set_scroll_smooth(1);
     let mut hidden = vec![0_u8; 320 * 200 * 4];
     eligible
         .render(&mut hidden)

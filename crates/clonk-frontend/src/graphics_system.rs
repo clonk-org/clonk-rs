@@ -778,6 +778,11 @@ impl GraphicsSystem {
         self.scroll_smooth = scroll_smooth;
     }
 
+    /// The raw configured value, before the 1..=50 clamp the camera applies.
+    pub fn scroll_smooth(&self) -> i32 {
+        self.scroll_smooth
+    }
+
     pub fn hud_graphics(&self) -> Arc<HudGraphics> {
         Arc::clone(&self.hud_graphics)
     }
