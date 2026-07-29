@@ -63,7 +63,7 @@ pub struct TargetArchive {
 ///
 /// Keyed by triple even for the shared components, which record the *same*
 /// archive and digest under every triple and differ only in `install`. The
-/// redundancy is what lets `engine`, which ships four genuinely different
+/// redundancy is what lets `engine`, which ships three genuinely different
 /// builds, be expressed in the same shape.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ComponentEntry {
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn each_triple_resolves_to_its_own_engine_archive() {
-        // The engine ships four genuinely different builds, so a single
+        // The engine ships three genuinely different builds, so a single
         // archive field per component could not say which one to fetch: a
         // client would take whichever was recorded last.
         let manifest = Manifest::parse(VALID.as_bytes()).expect("valid manifest");

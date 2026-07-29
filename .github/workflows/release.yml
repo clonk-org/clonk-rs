@@ -709,8 +709,9 @@ jobs:
           # Publish time, which is the client's replay guard: a manifest older
           # than the one already applied is refused.
           released_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          # Refuses to write anything unless all four triples can complete an
-          # install, so a build pass that uploaded nothing fails here.
+          # Refuses to write anything unless all six triples in
+          # UPDATE_TARGET_TRIPLES can complete an install, so a build pass that
+          # uploaded nothing fails here.
           ./release-tool/xtask-engine-tools update-manifest generate \
             --version "$VERSION" \
             --released-at "$released_at" \

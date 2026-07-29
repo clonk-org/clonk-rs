@@ -61,7 +61,7 @@ pub struct TargetArchive {
 ///
 /// Keyed by triple even for the shared components, which record the *same*
 /// archive under every triple. That redundancy is deliberate: `engine` ships
-/// four genuinely different archives, and a single `archive` field could not
+/// three genuinely different archives, and a single `archive` field could not
 /// express which one a given client should fetch — a Windows client would
 /// otherwise read whichever archive happened to be recorded last.
 ///

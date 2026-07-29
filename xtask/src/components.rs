@@ -16,7 +16,7 @@
 //!    built here, or `content/` would stop being covered by it.
 //! 2. The `planet` archive is **prefix-free**, so its bytes are identical on
 //!    every platform. Its name is its own digest, so a platform-dependent
-//!    prefix would produce four different hashes for identical data and defeat
+//!    prefix would produce a different hash per shipped triple for identical data and defeat
 //!    deduplication entirely.
 //!
 //! `content` is a component a client fetches but this repository does **not**
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn the_engine_component_is_versioned_per_triple_not_content_addressed() {
         // Engine changes every release, so digest naming would only churn the
-        // store; the four per-triple archives must also stay distinguishable.
+        // store; the three per-build archives must also stay distinguishable.
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
         let linux = emit(

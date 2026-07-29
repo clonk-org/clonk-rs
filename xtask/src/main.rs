@@ -1122,7 +1122,7 @@ fn missing_manifest_argument(name: &str) -> anyhow::Error {
 /// Which component an emitted archive is, and which triple it was built for.
 ///
 /// `None` means every triple: `planet` is prefix-free, so its bytes are
-/// identical on all four. `engine` is the reason the manifest is keyed by
+/// identical on every shipped triple. `engine` is the reason the manifest is keyed by
 /// triple at all, and its filename is the only place that triple survives —
 /// the archives arrive in the publishing job as a flat directory.
 fn archive_identity(
@@ -3430,9 +3430,10 @@ mod tests {
     /// `content` is absent because this repository no longer builds it — it is
     /// referenced from the content repository's own release instead.
     ///
-    /// Three engine archives for five shipped triples: macOS ships one
-    /// universal build for both of its triples, and Windows serves its retired
-    /// gnu triple from the msvc archive. See [`UPDATE_TRIPLE_ALIASES`].
+    /// Three engine archives for the six triples in [`UPDATE_TARGET_TRIPLES`]:
+    /// macOS ships one universal build for its universal triple and both real
+    /// architecture triples, and Windows serves its retired gnu triple from the
+    /// msvc archive. See [`UPDATE_TRIPLE_ALIASES`].
     ///
     /// Every archive carries different bytes, so a manifest that mixed two of
     /// them up cannot pass by coincidence.
