@@ -251,6 +251,46 @@ fn classic_argument_value<'a>(argument: &'a str, prefix: &str) -> Option<&'a str
         .then(|| &argument[prefix.len()..])
 }
 
+/// `atoi` semantics for `/client:N`: the longest leading decimal prefix, zero
+/// when there is none. C++ feeds the result straight into its port formula
+/// (C4Game.cpp:3298-3301), so a non-numeric index behaves like index 0.
+fn classic_atoi(value: &str) -> i64 {
+    let value = value.trim_start();
+    let (sign, digits) = match value.strip_prefix('-') {
+        Some(rest) => (-1, rest),
+        None => (1, value.strip_prefix('+').unwrap_or(value)),
+    };
+    let magnitude: i64 =
+        digits
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .fold(0_i64, |accumulated, byte| {
+                accumulated
+                    .saturating_mul(10)
+                    .saturating_add(i64::from(byte - b'0'))
+            });
+    sign * magnitude
+}
+
+/// `#ifndef NDEBUG` in `C4Game::ParseCommandLine` (C4Game.cpp:3288-3304). The
+/// two shortcuts stand up a local lobby on predictable ports; release builds
+/// never see them, matching the C++ gate.
+pub(crate) const DEBUG_CLASSIC_SHORTCUTS: bool = cfg!(debug_assertions);
+
+/// `/client:N` port pair: TCP `11112 + 2 * (N + 1)`, UDP `11113 + 2 * (N + 1)`
+/// (C4Game.cpp:3300-3301).
+pub(crate) fn classic_debug_client_ports(index: &str) -> (u16, u16) {
+    let offset = classic_atoi(index).saturating_add(1).saturating_mul(2);
+    (
+        i64::from(11_112_u16)
+            .saturating_add(offset)
+            .clamp(0, i64::from(u16::MAX)) as u16,
+        i64::from(11_113_u16)
+            .saturating_add(offset)
+            .clamp(0, i64::from(u16::MAX)) as u16,
+    )
+}
+
 fn classic_port(value: &str) -> u16 {
     value
         .trim()
@@ -367,6 +407,26 @@ pub(crate) fn parse_classic_command_line(arguments: &[OsString]) -> ClassicComma
                 parsed.direct_join = Some(target.to_string());
                 parsed.network_active = Some(true);
             }
+        } else if DEBUG_CLASSIC_SHORTCUTS && argument.eq_ignore_ascii_case("/host") {
+            // C4Game.cpp:3288-3296: network + lobby on the fixed pair, with
+            // both signup modes off.
+            parsed.network_active = Some(true);
+            parsed.lobby_timeout = Some(None);
+            parsed.tcp_port = Some(11_112);
+            parsed.udp_port = Some(11_113);
+            parsed.master_server_signup = Some(false);
+            parsed.league_server_signup = Some(false);
+        } else if let Some(value) =
+            classic_argument_value(argument, "/client:").filter(|_| DEBUG_CLASSIC_SHORTCUTS)
+        {
+            // C4Game.cpp:3297-3303: join localhost with a lobby on the
+            // index-derived pair. Signup state is deliberately untouched.
+            let (tcp, udp) = classic_debug_client_ports(value);
+            parsed.network_active = Some(true);
+            parsed.direct_join = Some("localhost".to_string());
+            parsed.lobby_timeout = Some(None);
+            parsed.tcp_port = Some(tcp);
+            parsed.udp_port = Some(udp);
         } else if let Some(value) = classic_argument_value(argument, "/tcpport:") {
             parsed.tcp_port = Some(classic_port(value));
         } else if let Some(value) = classic_argument_value(argument, "/udpport:") {

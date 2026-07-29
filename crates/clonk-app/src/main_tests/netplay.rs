@@ -19824,3 +19824,62 @@ fn configured_thread_pool_count_builds_runtime_with_requested_workers() {
     assert_eq!(DEFAULT_NETWORK_RUNTIME_WORKER_THREADS, 8);
     set_network_runtime_worker_threads(restore);
 }
+
+/// The `#ifndef NDEBUG` shortcuts in `C4Game::ParseCommandLine`
+/// (C4Game.cpp:3288-3304): `/host` stands up a lobby on the fixed pair with
+/// both signups off, and `/client:N` joins localhost on
+/// TCP `11112 + 2 * (N + 1)` / UDP `11113 + 2 * (N + 1)` using `atoi`.
+#[test]
+fn debug_classic_host_client_arguments_apply_cpp_lobby_ports() {
+    let parse = |argument: &str| parse_classic_command_line(&[argument.to_string().into()]);
+
+    if !DEBUG_CLASSIC_SHORTCUTS {
+        // A release build must not expose behaviour C++ compiles out.
+        let host = parse("/host");
+        assert_eq!(host.network_active, None);
+        assert_eq!(host.tcp_port, None);
+        let client = parse("/client:0");
+        assert_eq!(client.direct_join, None);
+        return;
+    }
+
+    let host = parse("/host");
+    assert_eq!(host.network_active, Some(true));
+    assert_eq!(host.lobby_timeout, Some(None));
+    assert_eq!(host.tcp_port, Some(11_112));
+    assert_eq!(host.udp_port, Some(11_113));
+    assert_eq!(host.master_server_signup, Some(false));
+    assert_eq!(host.league_server_signup, Some(false));
+    // `/host` does not set a join address; it is the host.
+    assert_eq!(host.direct_join, None);
+    // Case-insensitive, like SEqualNoCase.
+    assert_eq!(parse("/HOST").tcp_port, Some(11_112));
+
+    // `/client:N` targets localhost with a lobby and the derived pair.
+    for (index, tcp, udp) in [
+        ("0", 11_114, 11_115),
+        ("1", 11_116, 11_117),
+        ("2", 11_118, 11_119),
+        ("7", 11_128, 11_129),
+    ] {
+        let client = parse(&format!("/client:{index}"));
+        assert_eq!(client.network_active, Some(true));
+        assert_eq!(client.direct_join.as_deref(), Some("localhost"));
+        assert_eq!(client.lobby_timeout, Some(None));
+        assert_eq!(client.tcp_port, Some(tcp), "client {index} TCP");
+        assert_eq!(client.udp_port, Some(udp), "client {index} UDP");
+        // Unlike `/host`, signup state is left alone.
+        assert_eq!(client.master_server_signup, None);
+        assert_eq!(client.league_server_signup, None);
+    }
+    assert_eq!(parse("/CLIENT:1").tcp_port, Some(11_116));
+
+    // `atoi` takes the leading decimal prefix and yields zero without one, so
+    // these behave like index 0 rather than failing the argument.
+    for value in ["", "abc", "0x2"] {
+        let client = parse(&format!("/client:{value}"));
+        assert_eq!(client.tcp_port, Some(11_114), "/client:{value}");
+    }
+    // A trailing suffix keeps the numeric prefix.
+    assert_eq!(parse("/client:3rd").tcp_port, Some(11_120));
+}
