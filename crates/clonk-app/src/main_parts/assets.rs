@@ -7204,13 +7204,40 @@ impl FrontendAssets {
             return Ok(());
         }
 
-        let mut missing = Vec::new();
-        if hud.background.is_none() {
-            missing.push("Background.png");
-        }
-        if hud.upper_board.is_none() {
-            missing.push("UpperBoard.png");
-        }
+        // `C4GraphicsResource::Init` returns false on the first game/HUD file
+        // it cannot load, so every entry below is mandatory
+        // (C4GraphicsResource.cpp:200-231). The order mirrors that sequence, so
+        // the reported set reads like the native load order. `Options`, the
+        // cursor atlas and `Liquid` have their own gates.
+        let mandatory: [(&str, bool); 23] = [
+            ("Control.png", hud.control.is_none()),
+            ("Fire.png", hud.fire.is_none()),
+            ("Background.png", hud.background.is_none()),
+            ("Flag.png", hud.flag.is_none()),
+            ("Crew.png", hud.crew.is_none()),
+            ("Score.png", hud.score.is_none()),
+            ("Wealth.png", hud.wealth.is_none()),
+            ("Player.png", hud.player.is_none()),
+            ("Rank.png", hud.rank.is_none()),
+            ("Captain.png", hud.captain.is_none()),
+            ("SelectMark.png", hud.select_mark.is_none()),
+            ("Menu.png", hud.menu.is_none()),
+            ("Logo.png", hud.logo.is_none()),
+            ("Construction.png", hud.construction.is_none()),
+            ("Energy.png", hud.energy.is_none()),
+            ("Magic.png", hud.magic.is_none()),
+            ("UpperBoard.png", hud.upper_board.is_none()),
+            ("Arrow.png", hud.arrow.is_none()),
+            ("Exit.png", hud.exit.is_none()),
+            ("Hand.png", hud.hand.is_none()),
+            ("Gamepad.png", hud.gamepad.is_none()),
+            ("Build.png", hud.build.is_none()),
+            ("EnergyBars.png", hud.energy_bars.is_none()),
+        ];
+        let missing: Vec<&str> = mandatory
+            .into_iter()
+            .filter_map(|(name, absent)| absent.then_some(name))
+            .collect();
         if missing.is_empty() {
             Ok(())
         } else {

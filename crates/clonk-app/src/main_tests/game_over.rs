@@ -2097,6 +2097,23 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
     );
 }
 
+/// `C4GraphicsResource::Init` refuses the whole graphics load for any missing
+/// mandatory game/HUD file (C4GraphicsResource.cpp:200-231), so those facets
+/// are reported by the earlier global gate rather than by the game-over
+/// dialog's own recursive presentation inventory.
+fn assert_hud_resource_boundary(error: &anyhow::Error, expected_missing: Vec<&'static str>) {
+    assert_eq!(
+        error.downcast_ref::<ClassicParityBoundary>(),
+        Some(&ClassicParityBoundary::HudResources {
+            missing: expected_missing
+        })
+    );
+    assert!(
+        error.to_string().contains("refusing generic Rust fallback"),
+        "boundary must explain why the fallback is unreachable: {error:#}"
+    );
+}
+
 fn assert_game_over_resource_boundary(error: &anyhow::Error, expected_missing: Vec<&'static str>) {
     let expected = ClassicParityBoundary::GameOverResources {
         missing: expected_missing.into_iter().map(str::to_string).collect(),
@@ -2143,7 +2160,7 @@ fn game_over_missing_resources_fail_typed_before_touching_output_frame() {
         .render(&mut frame)
         .expect_err("asset-less game over must not render a fallback");
 
-    assert_game_over_resource_boundary(&error, vec!["Player.png", "Score.png"]);
+    assert_hud_resource_boundary(&error, vec!["Score.png", "Player.png"]);
     assert_eq!(frame, sentinel, "preflight must precede every output write");
     assert_eq!(runtime_global_ui_snapshot(&app), before);
 }
@@ -2212,7 +2229,7 @@ fn game_over_recursive_inventory_covers_global_sheets_crew_and_frozen_images() {
     let error = app
         .render(&mut frame)
         .expect_err("missing recursive Crew resource must fail before drawing");
-    assert_game_over_resource_boundary(&error, vec!["Crew.png"]);
+    assert_hud_resource_boundary(&error, vec!["Crew.png"]);
     assert_eq!(frame, sentinel);
 
     let mut app = new_game_over_keyboard_app();
@@ -2469,7 +2486,9 @@ fn every_game_over_icon_source_obeys_global_then_overlay_preflight() {
         let error = app
             .render(&mut frame)
             .expect_err("missing game-over icon source must fail typed");
-        assert_game_over_resource_boundary(&error, vec![name]);
+        // Removing the HUD facet too now trips the earlier mandatory-graphics
+        // gate, which is where `C4GraphicsResource::Init` would have refused.
+        assert_hud_resource_boundary(&error, vec![name]);
         assert_eq!(frame, sentinel, "{name} guard must run before pixels");
 
         let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
@@ -2489,7 +2508,7 @@ fn every_game_over_icon_source_obeys_global_then_overlay_preflight() {
     let error = app
         .render(&mut frame)
         .expect_err("missing score source must fail typed");
-    assert_game_over_resource_boundary(&error, vec!["Score.png"]);
+    assert_hud_resource_boundary(&error, vec!["Score.png"]);
     assert_eq!(frame, sentinel, "Score.png guard must run before pixels");
     let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
     Arc::make_mut(&mut assets.hud_graphics).score = Some(score);

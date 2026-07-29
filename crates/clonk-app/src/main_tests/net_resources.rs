@@ -3538,6 +3538,101 @@ fn script_menu_pointer_requires_global_resources_before_fallback_layout() {
     assert!(error.to_string().contains("FontRegular: missing"));
 }
 
+/// `C4GraphicsResource::Init` returns false on the first game/HUD file it
+/// cannot load, so each of these is mandatory and none may reach pixels through
+/// an optional fallback (C4GraphicsResource.cpp:200-231).
+#[test]
+fn running_hud_rejects_each_missing_mandatory_graphics_facet() {
+    let mut app = new_classic_lightweight_running_sandbox_app();
+    // Every mandatory facet, in native `Init` order.
+    type MandatoryFacet = (
+        &'static str,
+        fn(&mut clonk_frontend::HudGraphics) -> &mut Option<ImageData>,
+    );
+    let facets: [MandatoryFacet; 23] = [
+        ("Control.png", |hud| &mut hud.control),
+        ("Fire.png", |hud| &mut hud.fire),
+        ("Background.png", |hud| &mut hud.background),
+        ("Flag.png", |hud| &mut hud.flag),
+        ("Crew.png", |hud| &mut hud.crew),
+        ("Score.png", |hud| &mut hud.score),
+        ("Wealth.png", |hud| &mut hud.wealth),
+        ("Player.png", |hud| &mut hud.player),
+        ("Rank.png", |hud| &mut hud.rank),
+        ("Captain.png", |hud| &mut hud.captain),
+        ("SelectMark.png", |hud| &mut hud.select_mark),
+        ("Menu.png", |hud| &mut hud.menu),
+        ("Logo.png", |hud| &mut hud.logo),
+        ("Construction.png", |hud| &mut hud.construction),
+        ("Energy.png", |hud| &mut hud.energy),
+        ("Magic.png", |hud| &mut hud.magic),
+        ("UpperBoard.png", |hud| &mut hud.upper_board),
+        ("Arrow.png", |hud| &mut hud.arrow),
+        ("Exit.png", |hud| &mut hud.exit),
+        ("Hand.png", |hud| &mut hud.hand),
+        ("Gamepad.png", |hud| &mut hud.gamepad),
+        ("Build.png", |hud| &mut hud.build),
+        ("EnergyBars.png", |hud| &mut hud.energy_bars),
+    ];
+
+    // With the whole inventory present the frame renders.
+    let mut frame = vec![0x5a; app.graphics.surface().pixels().len()];
+    app.render(&mut frame)
+        .expect("a complete graphics pack renders");
+    let _ = &frame;
+
+    for (name, field) in facets {
+        let taken = {
+            let hud = Arc::make_mut(
+                &mut Arc::get_mut(&mut app.assets)
+                    .expect("frontend assets are app-owned")
+                    .hud_graphics,
+            );
+            field(hud).take().unwrap_or_else(|| {
+                panic!("the classic fixture must ship {name} for this sweep to mean anything")
+            })
+        };
+
+        app.graphics.surface_mut().fill(Color::opaque(91, 47, 13));
+        let surface_before = app.graphics.surface().pixels().to_vec();
+        let mut frame = vec![0x5a; surface_before.len()];
+        let frame_before = frame.clone();
+        let error = match app.render(&mut frame) {
+            Err(error) => error,
+            Ok(_) => panic!("a missing {name} must fail closed, not fall back"),
+        };
+        assert_eq!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(&ClassicParityBoundary::HudResources {
+                missing: vec![name]
+            }),
+            "{name} must be reported as the single missing facet"
+        );
+        assert_eq!(
+            frame, frame_before,
+            "{name}: preflight must precede output writes"
+        );
+        assert_eq!(
+            app.graphics.surface().pixels(),
+            surface_before.as_slice(),
+            "{name}: preflight must precede logical-surface writes"
+        );
+
+        let hud = Arc::make_mut(
+            &mut Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .hud_graphics,
+        );
+        *field(hud) = Some(taken);
+    }
+
+    // Restoring the whole inventory renders again, so the sweep left no
+    // facet behind.
+    let mut frame = vec![0x5a; app.graphics.surface().pixels().len()];
+    app.render(&mut frame)
+        .expect("the restored graphics pack renders");
+}
+
 #[test]
 fn upper_board_and_message_board_fail_closed_when_resources_missing() {
     let mut app = new_classic_lightweight_running_sandbox_app();
