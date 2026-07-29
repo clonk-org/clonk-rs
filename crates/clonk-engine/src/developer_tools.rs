@@ -199,6 +199,70 @@ impl DeveloperTools {
         let (x, y) = self.anchor?;
         Some(DrawControl::Fill { x, y, y2: y })
     }
+
+    /// The `fThroughControl == true` arm of `C4ToolsDlg::SetLandscapeMode`
+    /// (`C4ToolsDlg.cpp:880-894`), applied to this dialog state.
+    ///
+    /// Call this only when the queued `EMDT_SetMode` control *executes*; the
+    /// local request path must change nothing — see
+    /// [`landscape_mode_needs_confirmation`].
+    pub fn apply_landscape_mode(
+        &mut self,
+        current: LandscapeMode,
+        target: LandscapeMode,
+    ) -> LandscapeModeChange {
+        let change = landscape_mode_change(current, target, self.tool);
+        self.set_tool(change.tool, false);
+        change
+    }
+}
+
+/// `C4LSC_*` (`C4Landscape.h:38-41`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LandscapeMode {
+    Undefined,
+    Dynamic,
+    Static,
+    Exact,
+}
+
+/// Whether the local `SetLandscapeMode` must show `IDS_CNS_EXACTTOSTATIC`
+/// before enqueueing anything (`C4ToolsDlg.cpp:869-874`).
+///
+/// Only Exact -> Static loses data, and only the *local* path asks — a mode
+/// change arriving through the control queue is never re-confirmed. Declining
+/// aborts: nothing is enqueued and nothing changes.
+pub fn landscape_mode_needs_confirmation(current: LandscapeMode, target: LandscapeMode) -> bool {
+    current == LandscapeMode::Exact && target == LandscapeMode::Static
+}
+
+/// What executing an `EMDT_SetMode` control does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LandscapeModeChange {
+    pub mode: LandscapeMode,
+    /// `Game.Landscape.MapToLandscape()` — Exact -> Static redraws the
+    /// landscape from the map (`C4ToolsDlg.cpp:884-886`).
+    pub redraw_from_map: bool,
+    /// The tool after `SetTool(C4TLS_Brush, false)`'s correction: Fill exists
+    /// only in Exact mode, so any other mode falls back to Brush
+    /// (`:888-890`). Every other tool is left alone.
+    pub tool: Tool,
+}
+
+/// `C4ToolsDlg::SetLandscapeMode(iMode, true)` (`C4ToolsDlg.cpp:880-894`).
+pub fn landscape_mode_change(
+    current: LandscapeMode,
+    target: LandscapeMode,
+    tool: Tool,
+) -> LandscapeModeChange {
+    LandscapeModeChange {
+        mode: target,
+        redraw_from_map: current == LandscapeMode::Exact && target == LandscapeMode::Static,
+        tool: match (target, tool) {
+            (mode, Tool::Fill) if mode != LandscapeMode::Exact => Tool::Brush,
+            (_, tool) => tool,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -330,5 +394,65 @@ mod tests {
         assert!(!tools.ift());
         tools.set_ift(true);
         assert!(tools.ift());
+
+        // C4ToolsDlg.cpp:865-894 — the landscape-mode change is a control, not
+        // a local edit. Only Exact -> Static warns, and only from the local
+        // path; the control-executed arm never re-asks.
+        assert!(landscape_mode_needs_confirmation(
+            LandscapeMode::Exact,
+            LandscapeMode::Static
+        ));
+        assert!(!landscape_mode_needs_confirmation(
+            LandscapeMode::Static,
+            LandscapeMode::Exact
+        ));
+        assert!(!landscape_mode_needs_confirmation(
+            LandscapeMode::Exact,
+            LandscapeMode::Dynamic
+        ));
+        assert!(!landscape_mode_needs_confirmation(
+            LandscapeMode::Exact,
+            LandscapeMode::Exact
+        ));
+
+        // Exact -> Static also redraws the landscape from the map.
+        assert_eq!(
+            landscape_mode_change(LandscapeMode::Exact, LandscapeMode::Static, Tool::Brush),
+            LandscapeModeChange {
+                mode: LandscapeMode::Static,
+                redraw_from_map: true,
+                tool: Tool::Brush,
+            }
+        );
+        assert!(
+            !landscape_mode_change(LandscapeMode::Static, LandscapeMode::Exact, Tool::Brush)
+                .redraw_from_map
+        );
+
+        // Fill exists only in Exact mode, so leaving Exact forces Brush...
+        assert_eq!(
+            landscape_mode_change(LandscapeMode::Exact, LandscapeMode::Static, Tool::Fill).tool,
+            Tool::Brush
+        );
+        assert_eq!(
+            landscape_mode_change(LandscapeMode::Exact, LandscapeMode::Dynamic, Tool::Fill).tool,
+            Tool::Brush
+        );
+        // ...while staying in Exact keeps it, and no other tool is corrected.
+        assert_eq!(
+            landscape_mode_change(LandscapeMode::Static, LandscapeMode::Exact, Tool::Fill).tool,
+            Tool::Fill
+        );
+        assert_eq!(
+            landscape_mode_change(LandscapeMode::Exact, LandscapeMode::Static, Tool::Line).tool,
+            Tool::Line
+        );
+
+        // Applying it to live dialog state moves the tool with it.
+        let mut exact = DeveloperTools::default();
+        exact.set_tool(Tool::Fill, false);
+        let applied = exact.apply_landscape_mode(LandscapeMode::Exact, LandscapeMode::Static);
+        assert!(applied.redraw_from_map);
+        assert_eq!(exact.tool(), Tool::Brush);
     }
 }

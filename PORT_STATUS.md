@@ -642,7 +642,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   the registry routes nothing in production. That wiring is what M10-P4-L044's
   criterion 7 and the console viewport work (M10-P4-L047) depend on.
 
-- **Developer draw-tool state machine landed; dialog and control queue open.**
+- **Developer draw-tool state machine and mode control landed; dialog open.**
   `clonk-engine::developer_tools` carries `C4ToolsDlg`'s retained state and
   `C4EditCursor`'s gesture cadence. `ToggleTool` is `(Tool + 1) % 4`
   (`C4ToolsDlg.h:148`), which never lands on Picker — including from Picker
@@ -654,13 +654,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   repeats from `Execute` every frame while the game runs, refusing while halted
   or when the console is not editing. Alt selects the Picker temporarily in Draw
   mode only and restores the previous tool on release
-  (`C4EditCursor.cpp:773-792`). Pinned by
+  (`C4EditCursor.cpp:773-792`).
+  Landscape-mode changes are now modelled as the *control* they are
+  (`C4ToolsDlg::SetLandscapeMode`, `C4ToolsDlg.cpp:865-894`). The local path
+  changes nothing: it asks `IDS_CNS_EXACTTOSTATIC` only for Exact -> Static,
+  and on confirmation enqueues `EMDT_SetMode` as `CDT_Decide`. All the state
+  lives in the `fThroughControl` arm — `landscape_mode_change` sets the mode,
+  redraws from the map on Exact -> Static, and corrects the tool, because Fill
+  exists only in Exact mode and any other mode falls back to Brush. No other
+  tool is corrected, and a mode arriving through the queue is never
+  re-confirmed. Pinned by
   `console_draw_mode_routes_pointer_gestures_through_tools_state`. The material
   and texture catalogue and the picker itself already exist in
   `developer_landscape` (M10-P4-L084). **Still open:** the dialog chrome and its
-  window host (gated on M10-P4-L081), and routing `EMDT_SetMode` through the
-  control queue so landscape-mode changes only mutate local state once the
-  control executes (`fThroughControl`, `C4ToolsDlg.cpp:865-896`).
+  window host, gated on M10-P4-L081.
 
 - Closed 2026-07-29: **Options control sheets draw the classic facets.**
   `C4StartupOptionsDlg` draws the Keyboard/Gamepad pages from facets, not text
