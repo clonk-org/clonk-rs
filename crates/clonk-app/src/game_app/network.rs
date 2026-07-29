@@ -7108,6 +7108,18 @@ impl GameApp {
                     .get(player_info_id)
                     .map(|info| info.league_score)
             },
+            |player_info_id| {
+                // A row that *is* a free savegame player joins itself;
+                // otherwise the association names a RestorePlayerInfos entry
+                // (src/C4PlayerInfoListBox.cpp:701-716).
+                let info = self.control_player_infos.get(player_info_id)?;
+                let joined = if info.savegame_player == 0 {
+                    return None;
+                } else {
+                    self.classic_lobby_restore_player(info.savegame_player)?
+                };
+                Some(joined.color)
+            },
         );
         let network_result = self.snapshot.round_results.network_result;
         let network_result_text =

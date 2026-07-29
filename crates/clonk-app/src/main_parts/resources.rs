@@ -5941,6 +5941,11 @@ pub(crate) fn build_game_over_dialog(
     // into this round, which UpdateScoreLabel reads from the live info rather
     // than from the frozen result (src/C4PlayerInfoListBox.cpp:380-401).
     mut player_league_score: impl FnMut(i32) -> Option<i32>,
+    // `GetJoinedInfo()`'s lobby colour (src/C4PlayerInfoListBox.cpp:701-716):
+    // the row's own colour for a free savegame player, otherwise the colour of
+    // the `Game.RestorePlayerInfos` entry it took over, and `None` when the
+    // row is not a savegame join at all.
+    mut player_joined_color: impl FnMut(i32) -> Option<u32>,
 ) -> GameOverState {
     // C4GameOverDlg freezes C4RoundResults into presentation state; player
     // results are joined through C4PlayerInfo::ID, not the runtime player
@@ -6018,6 +6023,7 @@ pub(crate) fn build_game_over_dialog(
             league_score_old: player_league_score(state.player_info_id).filter(|score| *score != 0),
             league_score_gain: (result.league_score_gain >= 0).then_some(result.league_score_gain),
             league_score_new: (result.league_score_new >= 0).then_some(result.league_score_new),
+            joined_color_dw: player_joined_color(state.player_info_id),
         });
     }
     let separate_team_ids =

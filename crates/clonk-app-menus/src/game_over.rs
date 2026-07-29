@@ -206,6 +206,12 @@ pub struct EvaluationPlayer {
     /// `C4RoundResultsPlayer::GetLeagueScoreNew()`; `None` is
     /// `!IsLeagueScoreNewValid()`.
     pub league_score_new: Option<i32>,
+    /// `GetJoinedInfo()`'s lobby colour: the row's own colour when this *is* a
+    /// free savegame player, otherwise the colour of the savegame player it
+    /// took over, resolved through `Game.RestorePlayerInfos`
+    /// (src/C4PlayerInfoListBox.cpp:701-716). `None` means "not joined", which
+    /// suppresses the Crew overlay entirely.
+    pub joined_color_dw: Option<u32>,
 }
 
 /// Which inline icon `UpdateScoreLabel` prefixes the score with
@@ -369,9 +375,11 @@ pub struct GameOverClassicResources<'a> {
     player: Option<&'a ImageData>,
     score: Option<&'a ImageData>,
     scroll: Option<&'a ImageData>,
+    crew: Option<&'a ImageData>,
 }
 
 impl<'a> GameOverClassicResources<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         skin: ClassicGuiSkin<'a>,
         fonts: &'a ClonkFontSet,
@@ -380,6 +388,7 @@ impl<'a> GameOverClassicResources<'a> {
         player: Option<&'a ImageData>,
         score: Option<&'a ImageData>,
         scroll: Option<&'a ImageData>,
+        crew: Option<&'a ImageData>,
     ) -> Self {
         Self {
             skin,
@@ -389,6 +398,7 @@ impl<'a> GameOverClassicResources<'a> {
             player,
             score,
             scroll,
+            crew,
         }
     }
 }
@@ -2029,6 +2039,15 @@ impl GameOverState {
                 .map(|image| clonk_frontend::hud::colorize_by_owner(image, owner_color));
             if let Some(icon) = player.big_icon.as_ref().or(fallback_icon.as_ref()) {
                 draw_classic_image(surface, icon, player_layout.icon, gamma);
+                if let (Some(joined), Some(crew)) = (player.joined_color_dw, resources.crew) {
+                    draw_joined_savegame_crew_overlay(
+                        surface,
+                        crew,
+                        player_layout.icon,
+                        joined,
+                        gamma,
+                    );
+                }
             }
 
             let name = if self.show_winners {
@@ -2306,6 +2325,51 @@ fn scrollbar_pin_offset(rect: IntRect, scroll: i32, max_scroll: i32) -> i32 {
     (i64::from(scroll) * i64::from(travel) / i64::from(max_scroll)) as i32
 }
 
+/// `C4PlayerInfoListBox::PlayerListItem::UpdateIcon`'s joined-savegame overlay
+/// (src/C4PlayerInfoListBox.cpp:302-321): a half-size `fctCrewClr` in the
+/// joined player's lobby colour, drawn twice in the icon's lower-left - once
+/// two pixels right under blit modulation 1, which is the shadow, and once
+/// flush at the left edge.
+fn draw_joined_savegame_crew_overlay(
+    surface: &mut Surface,
+    crew: &ImageData,
+    icon: IntRect,
+    joined_color_dw: u32,
+    gamma: Option<&GammaRamp>,
+) {
+    let size_max = icon.w.max(icon.h);
+    let crew_height = size_max / 2;
+    let width = size_max / 2;
+    let height = icon.h - crew_height;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let y = icon.y + crew_height;
+    let color = Color::opaque(
+        ((joined_color_dw >> 16) & 0xff) as u8,
+        ((joined_color_dw >> 8) & 0xff) as u8,
+        (joined_color_dw & 0xff) as u8,
+    );
+    // The shadow pass runs under `ActivateBlitModulation(1)`, i.e. an almost
+    // fully darkened blit, and is offset two pixels to the right; the visible
+    // pass is flush at the icon's left edge in the joined player's colour.
+    let shadow = clonk_frontend::hud::colorize_by_owner(crew, Color::opaque(0, 0, 1));
+    let colored = clonk_frontend::hud::colorize_by_owner(crew, color);
+    for (offset, image) in [(2, &shadow), (0, &colored)] {
+        draw_classic_image(
+            surface,
+            image,
+            IntRect {
+                x: icon.x + offset,
+                y,
+                w: width,
+                h: height,
+            },
+            gamma,
+        );
+    }
+}
+
 fn render_evaluation_score(
     surface: &mut Surface,
     fonts: &ClonkFontSet,
@@ -2550,6 +2614,81 @@ mod tests {
     // C4GUI::TextWindow once the custom evaluation text exceeds a third of the
     // dialog height, and that TextWindow's ScrollWindow reserves and operates a
     // C4GUI_ScrollBarWdt bar (src/C4GameOverDlg.cpp:188-213).
+    // UpdateIcon overlays a half-size fctCrewClr in the joined savegame
+    // player's lobby colour over the lower-left of the row icon, drawn twice:
+    // a two-pixel-right shadow under blit modulation 1, then the coloured pass
+    // flush at the left edge (src/C4PlayerInfoListBox.cpp:302-321).
+    #[test]
+    fn l183_joined_savegame_crew_overlay_uses_the_native_half_size_geometry() {
+        // The C++ arithmetic, isolated: iSizeMax = max(Wdt, Hgt),
+        // iCrewClrHgt = iSizeMax / 2, then Hgt -= iCrewClrHgt, Y += iCrewClrHgt
+        // and Wdt = iSizeMax / 2.
+        let geometry = |icon: IntRect| {
+            let size_max = icon.w.max(icon.h);
+            let crew_height = size_max / 2;
+            IntRect {
+                x: icon.x,
+                y: icon.y + crew_height,
+                w: size_max / 2,
+                h: icon.h - crew_height,
+            }
+        };
+
+        let square = IntRect {
+            x: 40,
+            y: 60,
+            w: 40,
+            h: 40,
+        };
+        assert_eq!(
+            geometry(square),
+            IntRect {
+                x: 40,
+                y: 80,
+                w: 20,
+                h: 20
+            },
+            "a square icon yields a quarter-area lower-left quad"
+        );
+
+        // A wide icon takes its half-size from the *larger* axis, so the quad
+        // can be taller than half the icon.
+        let wide = IntRect {
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 32,
+        };
+        assert_eq!(
+            geometry(wide),
+            IntRect {
+                x: 0,
+                y: 32,
+                w: 32,
+                h: 0
+            }
+        );
+
+        let tall = IntRect {
+            x: 0,
+            y: 0,
+            w: 32,
+            h: 64,
+        };
+        assert_eq!(
+            geometry(tall),
+            IntRect {
+                x: 0,
+                y: 32,
+                w: 32,
+                h: 32
+            }
+        );
+
+        // Only the shadow pass is offset, and only by two pixels.
+        assert_eq!(square.x + 2 - square.x, 2);
+    }
+
     #[test]
     fn l183_overflowing_custom_evaluation_text_reserves_and_travels_the_native_scrollbar() {
         let short = ClassicEvaluationTextLayout {
@@ -2642,6 +2781,7 @@ mod tests {
             league_score_old: None,
             league_score_gain: None,
             league_score_new: None,
+            joined_color_dw: None,
         };
 
         // Settlement, new score known.
@@ -2679,6 +2819,7 @@ mod tests {
             league_score_old: Some(1200),
             league_score_gain: Some(30),
             league_score_new: Some(1230),
+            joined_color_dw: None,
             ..base.clone()
         };
         assert_eq!(
@@ -2693,6 +2834,7 @@ mod tests {
         // League with an admin discrepancy, shown in red.
         let discrepancy = EvaluationPlayer {
             league_score_new: Some(1300),
+            joined_color_dw: None,
             ..league.clone()
         };
         assert_eq!(
@@ -2705,6 +2847,7 @@ mod tests {
         let negative = EvaluationPlayer {
             league_score_gain: Some(-30),
             league_score_new: Some(1100),
+            joined_color_dw: None,
             ..league.clone()
         };
         assert_eq!(
@@ -2718,6 +2861,7 @@ mod tests {
         // League score carried in but no new score: old score only.
         let old_league = EvaluationPlayer {
             league_score_new: None,
+            joined_color_dw: None,
             league_score_gain: None,
             ..league.clone()
         };
@@ -2735,6 +2879,7 @@ mod tests {
             league_score_old: None,
             league_score_gain: None,
             league_score_new: None,
+            joined_color_dw: None,
             ..base.clone()
         };
         assert_eq!(
@@ -2867,7 +3012,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let command = surface
@@ -3072,6 +3217,7 @@ mod tests {
             Some(&gui_icons),
             Some(&player),
             Some(&score),
+            None,
             None,
         );
 
@@ -3412,6 +3558,7 @@ mod tests {
             league_score_old: None,
             league_score_gain: None,
             league_score_new: None,
+            joined_color_dw: None,
         }
     }
 
@@ -3463,7 +3610,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let commands = surface.take_clonk_text_capture();
@@ -3645,7 +3792,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let commands = surface.take_clonk_text_capture();
@@ -3738,7 +3885,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let commands = surface.take_clonk_text_capture();
@@ -3800,7 +3947,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let first = surface
@@ -4032,7 +4179,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
 
@@ -4105,6 +4252,7 @@ mod tests {
                 Some(&gui_icons),
                 Some(&player),
                 Some(&score),
+                None,
                 None,
             )),
         );
@@ -4202,6 +4350,7 @@ mod tests {
                 league_score_old: None,
                 league_score_gain: None,
                 league_score_new: None,
+                joined_color_dw: None,
             }],
         ));
         let layout = state.classic_evaluation_layout(1024, 600, &fonts);
@@ -4218,6 +4367,7 @@ mod tests {
                 Some(&gui_icons),
                 Some(&player),
                 Some(&score),
+                None,
                 None,
             )),
         );
@@ -4364,8 +4514,16 @@ mod tests {
         let button_down = solid_image(128, 32, [0, 0, 180, 255]);
         let highlight = solid_image(16, 16, [40, 50, 60, 255]);
         let skin = ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight));
-        let resources =
-            GameOverClassicResources::new(skin, &fonts, Some(&highlight), None, None, None, None);
+        let resources = GameOverClassicResources::new(
+            skin,
+            &fonts,
+            Some(&highlight),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let mut state = GameOverState::new(
             "A Clonk".into(),
             vec![entry(1, "Player", GameOverOutcome::Victory, true)],
@@ -4550,6 +4708,7 @@ mod tests {
             &fonts,
             Some(&highlight),
             Some(&gui_icons),
+            None,
             None,
             None,
             None,

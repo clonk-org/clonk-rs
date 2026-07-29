@@ -954,7 +954,7 @@ impl GameApp {
             })
     }
 
-    fn classic_lobby_restore_player(
+    pub(crate) fn classic_lobby_restore_player(
         &self,
         player_id: i32,
     ) -> Option<&clonk_engine::ControlPlayerInfoEntry> {
