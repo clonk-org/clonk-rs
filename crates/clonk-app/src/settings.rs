@@ -191,11 +191,22 @@ fn bool_config_value(value: bool) -> &'static str {
     }
 }
 
+/// `StdCompilerINIRead::Boolean` (StdCompiler.cpp:692-715). C++ reads the raw
+/// value in place: a leading `1`/`0` not followed by another digit, or a
+/// case-sensitive `true`/`false` prefix. No trimming and no case folding, so
+/// `TRUE`, ` 1` and `10` are all not-found and leave the adapted default.
 fn parse_bool(raw: &str) -> Option<bool> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" => Some(true),
-        "false" | "0" => Some(false),
-        _ => None,
+    let value = raw.as_bytes();
+    if value.first() == Some(&b'1') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(true)
+    } else if value.first() == Some(&b'0') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(false)
+    } else if value.starts_with(b"true") {
+        Some(true)
+    } else if value.starts_with(b"false") {
+        Some(false)
+    } else {
+        None
     }
 }
 

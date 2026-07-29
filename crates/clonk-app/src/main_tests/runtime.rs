@@ -6813,3 +6813,90 @@
             assert!(!app.take_exit_request());
         }
     }
+
+    /// `StdCompilerINIRead::Boolean` (StdCompiler.cpp:692-715) accepts a
+    /// leading `1`/`0` not followed by another digit, or a case-sensitive
+    /// `true`/`false` prefix. Anything else signals not-found, so the field's
+    /// adapted default stays in force — it does not collapse to false.
+    #[test]
+    fn runtime_config_booleans_follow_stdcompiler_grammar_and_preserve_defaults() {
+        // The token grammar itself.
+        for (raw, expected) in [
+            ("1", Some(true)),
+            ("0", Some(false)),
+            ("true", Some(true)),
+            ("false", Some(false)),
+            // A prefix is enough: C++ advances pPos and ignores the rest.
+            ("1 ; trailing comment", Some(true)),
+            ("truely", Some(true)),
+            ("falsehood", Some(false)),
+            // A following digit rejects the numeric form.
+            ("10", None),
+            ("01", None),
+            // Case-sensitive, and no leading whitespace is skipped.
+            ("TRUE", None),
+            ("True", None),
+            ("FALSE", None),
+            (" 1", None),
+            ("\t0", None),
+            // Non-native aliases C++ never accepted.
+            ("yes", None),
+            ("on", None),
+            ("no", None),
+            ("off", None),
+            ("", None),
+            ("wobble", None),
+        ] {
+            assert_eq!(
+                parse_native_config_bool(raw),
+                expected,
+                "{raw:?} must follow the native Boolean grammar"
+            );
+        }
+
+        // Invalid input keeps each key's adapted default, in both directions.
+        let flags = |body: &str| {
+            let root = tempdir().expect("boolean config root");
+            let user_data = tempdir().expect("boolean user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            fs::write(paths.config_file(), body).expect("write fixture config");
+            load_display_flags(Some(&paths))
+        };
+
+        // ShowCrewNames adapts true, ShowClock adapts false.
+        let defaults = flags("[Graphics]\nName=Tester\n");
+        assert!(defaults.player_names);
+        assert!(!defaults.clock);
+
+        // Valid tokens flip both.
+        let flipped = flags("[Graphics]\nShowCrewNames=0\nShowClock=1\n");
+        assert!(!flipped.player_names);
+        assert!(flipped.clock);
+
+        // Invalid values leave both adapted defaults untouched. The old
+        // permissive parser collapsed these to false, silently disabling a
+        // default-true flag.
+        // `" 1"` is only reachable at the raw-value level above: the INI
+        // reader strips the whitespace after `=` before the Boolean field
+        // consumes it.
+        for invalid in ["TRUE", "yes", "on", "10", "wobble"] {
+            let kept = flags(&format!(
+                "[Graphics]\nShowCrewNames={invalid}\nShowClock={invalid}\n"
+            ));
+            assert!(
+                kept.player_names,
+                "{invalid:?} must leave the default-true ShowCrewNames alone"
+            );
+            assert!(
+                !kept.clock,
+                "{invalid:?} must leave the default-false ShowClock alone"
+            );
+        }
+    
+}

@@ -2464,11 +2464,30 @@ pub(crate) fn load_save_entry(path: &Path) -> Result<SaveEntry> {
     })
 }
 
+/// `StdCompilerINIRead::Boolean` (StdCompiler.cpp:692-715): a leading `1`/`0`
+/// not followed by another digit, or a case-sensitive `true`/`false` prefix.
+/// Anything else signals not-found, so the caller keeps the field's adapted
+/// default. No trimming, no case folding, and no `yes`/`on` aliases — C++ reads
+/// the raw value in place.
+pub(crate) fn parse_native_config_bool(raw: &str) -> Option<bool> {
+    let value = raw.as_bytes();
+    if value.first() == Some(&b'1') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(true)
+    } else if value.first() == Some(&b'0') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(false)
+    } else if value.starts_with(b"true") {
+        Some(true)
+    } else if value.starts_with(b"false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Callers that have no adapted default of their own. C4Config's own fields
+/// keep theirs through [`parse_native_config_bool`].
 pub(crate) fn parse_config_bool(raw: &str) -> bool {
-    matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    parse_native_config_bool(raw).unwrap_or(false)
 }
 
 const DEFAULT_IRC_SERVER: &str = "irc.euirc.net";
@@ -2560,7 +2579,7 @@ pub(crate) fn load_startup_alphabetical_sorting(paths: Option<&AppPaths>) -> boo
         .and_then(|config| {
             config
                 .get_in(Some("Startup"), "AlphabeticalSorting")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(false)
 }
@@ -2602,13 +2621,13 @@ pub(crate) fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
     let graphics_bool = |key: &str, fallback: bool| {
         config
             .get_in(Some("Graphics"), key)
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(fallback)
     };
     let general_bool = |key: &str, fallback: bool| {
         config
             .get_in(Some("General"), key)
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(fallback)
     };
     flags.player_names = graphics_bool("ShowCrewNames", flags.player_names);
@@ -2661,7 +2680,7 @@ pub(crate) fn load_white_lobby_chat(paths: Option<&AppPaths>) -> bool {
         .and_then(|config| {
             config
                 .get_in(Some("General"), "UseWhiteLobbyChat")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(false)
 }
@@ -2684,7 +2703,7 @@ pub(crate) fn load_graphics_color_animation(paths: Option<&AppPaths>) -> bool {
     ["ColorAnimation", "Shader"].into_iter().all(|key| {
         config
             .get_in(Some("Graphics"), key)
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(false)
     })
 }
@@ -2695,7 +2714,7 @@ pub(crate) fn load_show_folder_maps(paths: Option<&AppPaths>) -> bool {
         .and_then(|config| {
             config
                 .get_in(Some("Graphics"), "ShowFolderMaps")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(true)
 }
@@ -2708,7 +2727,7 @@ pub(crate) fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
     match Config::load(&config_path) {
         Ok(config) => config
             .get_in(Some("General"), "Record")
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(false),
         Err(err) => {
             if err.kind() != io::ErrorKind::NotFound {
@@ -3221,22 +3240,22 @@ pub(crate) fn load_options_program_state(
     state.white_chat_ingame = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "UseWhiteIngameChat"))
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(false);
     state.white_chat_lobby = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "UseWhiteLobbyChat"))
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(false);
     state.show_log_timestamps = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "ShowLogTimestamps"))
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(false);
     state.preloading = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "Preloading"))
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(!cfg!(target_os = "macos"));
     let fair_crew_strength = config
         .as_ref()
@@ -3281,7 +3300,7 @@ pub(crate) fn load_show_log_timestamps(paths: Option<&AppPaths>) -> bool {
         .and_then(|config| {
             config
                 .get_in(Some("General"), "ShowLogTimestamps")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(false)
 }
@@ -3292,7 +3311,7 @@ pub(crate) fn load_message_board_enabled(paths: Option<&AppPaths>) -> bool {
         .and_then(|config| {
             config
                 .get_in(Some("Graphics"), "MsgBoard")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(true)
 }
@@ -3323,7 +3342,7 @@ pub(crate) fn load_options_graphics_state(
         config
             .as_ref()
             .and_then(|config| config.get_in(Some("Graphics"), key))
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(fallback)
     };
     let integer = |key: &str, fallback: i32| {
@@ -3364,7 +3383,7 @@ pub(crate) fn load_options_network_state(
     let ports = load_network_ports(paths);
     let boolean = |section: &str, key: &str, fallback: bool| {
         value(section, key)
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(fallback)
     };
     NetworkSheetState::new(
@@ -3759,7 +3778,7 @@ pub(crate) fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, 
     let config = load_native_config_bytes(paths);
     let masterserver_signup = native_config_text(&config, "Network", "MasterServerSignUp")
         .as_deref()
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(true);
     let ports = sanitized_network_ports(&config);
     (masterserver_signup, ports.tcp)
@@ -3872,7 +3891,7 @@ pub(crate) fn build_network_host_preparation(
     };
     let boolean = |section: &str, key: &str, default: bool| {
         value(section, key)
-            .map(|value| parse_config_bool(&value))
+            .and_then(|value| parse_native_config_bool(&value))
             .unwrap_or(default)
     };
     let (definition_executable_path, definition_path) = staged_definition_paths
@@ -4098,11 +4117,11 @@ pub(crate) fn load_network_search_settings(
     let value = |key| native_config_text(&config, "Network", key);
     let internet_enabled = value("MasterServerSignUp")
         .as_deref()
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(true);
     let use_alternate = value("UseAlternateServer")
         .as_deref()
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(false);
     let server_key = if use_alternate {
         "AlternateServerAddress"
@@ -4165,7 +4184,7 @@ pub(crate) fn load_league_auth_settings(
 pub(crate) fn load_league_auto_login(paths: Option<&AppPaths>) -> bool {
     let config = load_native_config_bytes(paths);
     clonk_app_netplay::configured_native_value(&config, "Network", "LeagueAutoLogin")
-        .map(|value| parse_config_bool(&legacy_presentation_text(value.as_bytes())))
+        .and_then(|value| parse_native_config_bool(&legacy_presentation_text(value.as_bytes())))
         .unwrap_or(true)
 }
 
@@ -4383,7 +4402,7 @@ pub(crate) fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> Game
     let bool_value = |section: &str, key: &str, default| {
         native_config_text(&config, section, key)
             .as_deref()
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(default)
     };
     let string_value = |section: &str, key: &str, default: &str| {
