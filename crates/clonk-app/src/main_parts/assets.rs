@@ -6407,6 +6407,7 @@ impl FrontendAssets {
                 .as_ref()
                 .or_else(|| self.startup_dialog_images.get("Player.png")),
             hud.score.as_ref(),
+            self.startup_dialog_images.get("GUIScroll.png"),
         ))
     }
 

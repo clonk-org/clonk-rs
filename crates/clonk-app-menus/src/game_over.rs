@@ -1,5 +1,7 @@
 use clonk_engine::RoundResultsNetworkResult;
-use clonk_frontend::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
+use clonk_frontend::classic_gui::{
+    draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect,
+};
 use clonk_frontend::{expand_hotkey_markup, ClonkFontSet, ImageData};
 use clonk_graphics::clonk_font::TextAlign;
 use clonk_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
@@ -8,6 +10,9 @@ const CLASSIC_DIALOG_TITLE: &str = "Evaluation";
 const CLASSIC_MIN_CAPTION_HEIGHT: i32 = 23;
 const CLASSIC_BUTTON_HEIGHT: i32 = 32;
 const CLASSIC_INDENT_X: i32 = 10;
+/// `C4GUI_ScrollBarWdt` (src/C4Gui.h) — the column `ScrollWindow` reserves and
+/// the width of every `GUIScroll.png` facet cell.
+const CLASSIC_SCROLLBAR_EXTENT: i32 = 16;
 const CLASSIC_INDENT_Y: i32 = 6;
 const CLASSIC_GOAL_SIZE: i32 = 64;
 const CLASSIC_GOAL_MARGIN: i32 = 4;
@@ -363,6 +368,7 @@ pub struct GameOverClassicResources<'a> {
     gui_icons: Option<&'a ImageData>,
     player: Option<&'a ImageData>,
     score: Option<&'a ImageData>,
+    scroll: Option<&'a ImageData>,
 }
 
 impl<'a> GameOverClassicResources<'a> {
@@ -373,6 +379,7 @@ impl<'a> GameOverClassicResources<'a> {
         gui_icons: Option<&'a ImageData>,
         player: Option<&'a ImageData>,
         score: Option<&'a ImageData>,
+        scroll: Option<&'a ImageData>,
     ) -> Self {
         Self {
             skin,
@@ -381,6 +388,7 @@ impl<'a> GameOverClassicResources<'a> {
             gui_icons,
             player,
             score,
+            scroll,
         }
     }
 }
@@ -418,6 +426,10 @@ pub struct ClassicEvaluationTextLayout {
     pub viewport: IntRect,
     pub content_height: i32,
     pub scrollable: bool,
+    /// `C4GUI::ScrollWindow`'s reserved `C4GUI_ScrollBarWdt` column. Present
+    /// only for the overflowing `TextWindow` variant, which is the only one
+    /// C++ gives a bar (src/C4GameOverDlg.cpp:196-206).
+    pub scrollbar: Option<IntRect>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1425,6 +1437,12 @@ impl GameOverState {
                         viewport,
                         content_height: classic_multiline_label_height(&lines, text_font),
                         scrollable: true,
+                        scrollbar: Some(IntRect {
+                            x: area.x + area.w - CLASSIC_SCROLLBAR_EXTENT,
+                            y: area.y,
+                            w: CLASSIC_SCROLLBAR_EXTENT,
+                            h: area.h,
+                        }),
                     }
                 } else {
                     ClassicEvaluationTextLayout {
@@ -1432,6 +1450,7 @@ impl GameOverState {
                         viewport: area,
                         content_height: measured_height,
                         scrollable: false,
+                        scrollbar: None,
                     }
                 }
             });
@@ -1965,6 +1984,19 @@ impl GameOverState {
                 Some(clip) => surface.set_clip(clip),
                 None => surface.clear_clip(),
             }
+            // The overflowing variant is a real C4GUI::TextWindow, whose
+            // ScrollWindow reserves and operates a ScrollBar
+            // (src/C4GameOverDlg.cpp:196-206).
+            if let (Some(bar), Some(scroll_facet)) = (text_layout.scrollbar, resources.scroll) {
+                draw_classic_scrollbar(
+                    surface,
+                    bar,
+                    scroll_facet,
+                    scrollbar_pin_offset(bar, scroll, maximum_scroll),
+                    maximum_scroll,
+                    gamma,
+                );
+            }
         }
 
         let split_player_lists = layout.player_lists.len() == 2;
@@ -2197,6 +2229,81 @@ fn grayscale_image(image: &ImageData, offset: i32) -> ImageData {
         pixel[..3].fill(gray);
     }
     ImageData::new(image.width(), image.height(), pixels)
+}
+
+/// `C4GUI::ScrollBar::DrawElement` (src/C4GuiContainers.cpp:309-470): the
+/// facet's three 16px cells are the up arrow, the tiled shaft and the down
+/// arrow, with the pin drawn from column 16 of the shaft row.
+fn draw_classic_scrollbar(
+    surface: &mut Surface,
+    rect: IntRect,
+    scroll: &ImageData,
+    pin: i32,
+    max_scroll: i32,
+    gamma: Option<&GammaRamp>,
+) {
+    if rect.h <= 0 {
+        return;
+    }
+    let extent = CLASSIC_SCROLLBAR_EXTENT as f32;
+    draw_facet_stretch(
+        surface,
+        scroll,
+        (0.0, 0.0, extent, extent),
+        (rect.x as f32, rect.y as f32, extent, extent),
+        gamma,
+    );
+    let mut y = CLASSIC_SCROLLBAR_EXTENT;
+    while y < rect.h - 5 {
+        let height = CLASSIC_SCROLLBAR_EXTENT.min(rect.h - 5 - y);
+        if height <= 0 {
+            break;
+        }
+        draw_facet_stretch(
+            surface,
+            scroll,
+            (0.0, extent, extent, height as f32),
+            (rect.x as f32, (rect.y + y) as f32, extent, height as f32),
+            gamma,
+        );
+        y += CLASSIC_SCROLLBAR_EXTENT;
+    }
+    draw_facet_stretch(
+        surface,
+        scroll,
+        (0.0, 2.0 * extent, extent, extent),
+        (
+            rect.x as f32,
+            (rect.y + rect.h - CLASSIC_SCROLLBAR_EXTENT) as f32,
+            extent,
+            extent,
+        ),
+        gamma,
+    );
+    if max_scroll > 0 && rect.h > 3 * CLASSIC_SCROLLBAR_EXTENT {
+        draw_facet_stretch(
+            surface,
+            scroll,
+            (extent, extent, extent, extent),
+            (
+                rect.x as f32,
+                (rect.y + CLASSIC_SCROLLBAR_EXTENT + pin) as f32,
+                extent,
+                extent,
+            ),
+            gamma,
+        );
+    }
+}
+
+/// `C4GUI::ScrollBar::Update`: the pin travels the shaft between the two arrow
+/// buttons, proportionally to the scrolled fraction.
+fn scrollbar_pin_offset(rect: IntRect, scroll: i32, max_scroll: i32) -> i32 {
+    let travel = (rect.h - 3 * CLASSIC_SCROLLBAR_EXTENT).max(0);
+    if max_scroll <= 0 || travel <= 0 {
+        return 0;
+    }
+    (i64::from(scroll) * i64::from(travel) / i64::from(max_scroll)) as i32
 }
 
 fn render_evaluation_score(
@@ -2439,6 +2546,86 @@ mod tests {
     // variants and a strict precedence: any league state wins over settlement
     // state, and a hidden settlement score suppresses the label entirely
     // (src/C4PlayerInfoListBox.cpp:376-418).
+    // C4GameOverDlg replaces the plain MultilineLabel with a real
+    // C4GUI::TextWindow once the custom evaluation text exceeds a third of the
+    // dialog height, and that TextWindow's ScrollWindow reserves and operates a
+    // C4GUI_ScrollBarWdt bar (src/C4GameOverDlg.cpp:188-213).
+    #[test]
+    fn l183_overflowing_custom_evaluation_text_reserves_and_travels_the_native_scrollbar() {
+        let short = ClassicEvaluationTextLayout {
+            area: IntRect {
+                x: 0,
+                y: 0,
+                w: 200,
+                h: 40,
+            },
+            viewport: IntRect {
+                x: 0,
+                y: 0,
+                w: 200,
+                h: 40,
+            },
+            content_height: 40,
+            scrollable: false,
+            scrollbar: None,
+        };
+        assert!(
+            short.scrollbar.is_none(),
+            "a fitting MultilineLabel has no bar at all"
+        );
+
+        let area = IntRect {
+            x: 10,
+            y: 20,
+            w: 200,
+            h: 96,
+        };
+        let tall = ClassicEvaluationTextLayout {
+            area,
+            viewport: IntRect {
+                x: area.x + 10,
+                y: area.y + 8,
+                w: area.w - 10 - 5 - 16,
+                h: area.h - 16,
+            },
+            content_height: 400,
+            scrollable: true,
+            scrollbar: Some(IntRect {
+                x: area.x + area.w - 16,
+                y: area.y,
+                w: 16,
+                h: area.h,
+            }),
+        };
+        let bar = tall.scrollbar.expect("overflowing text reserves a bar");
+        assert_eq!(bar.w, 16, "C4GUI_ScrollBarWdt");
+        assert_eq!(bar.x + bar.w, tall.area.x + tall.area.w);
+        assert_eq!((bar.y, bar.h), (tall.area.y, tall.area.h));
+        assert_eq!(
+            tall.viewport.x + tall.viewport.w,
+            bar.x - 5,
+            "the text viewport stops before the reserved bar column"
+        );
+
+        // The pin travels the shaft between the two arrow buttons.
+        let maximum = tall.content_height - tall.viewport.h;
+        assert_eq!(scrollbar_pin_offset(bar, 0, maximum), 0);
+        let travel = bar.h - 3 * 16;
+        assert_eq!(scrollbar_pin_offset(bar, maximum, maximum), travel);
+        assert_eq!(scrollbar_pin_offset(bar, maximum / 2, maximum), travel / 2);
+        assert_eq!(
+            scrollbar_pin_offset(bar, 10, 0),
+            0,
+            "an unscrollable window pins to the top"
+        );
+        let squat = IntRect { h: 3 * 16, ..bar };
+        assert_eq!(
+            scrollbar_pin_offset(squat, maximum, maximum),
+            0,
+            "a bar with no shaft left cannot travel"
+        );
+    }
+
     #[test]
     fn l183_evaluation_score_label_matches_the_native_league_and_settlement_variants() {
         let base = EvaluationPlayer {
@@ -2680,7 +2867,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None,
             )),
         );
         let command = surface
@@ -2885,6 +3072,7 @@ mod tests {
             Some(&gui_icons),
             Some(&player),
             Some(&score),
+            None,
         );
 
         assert_eq!(
@@ -3275,7 +3463,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None,
             )),
         );
         let commands = surface.take_clonk_text_capture();
@@ -3457,7 +3645,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None,
             )),
         );
         let commands = surface.take_clonk_text_capture();
@@ -3550,7 +3738,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None,
             )),
         );
         let commands = surface.take_clonk_text_capture();
@@ -3612,7 +3800,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None,
             )),
         );
         let first = surface
@@ -3844,7 +4032,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None,
             )),
         );
 
@@ -3917,6 +4105,7 @@ mod tests {
                 Some(&gui_icons),
                 Some(&player),
                 Some(&score),
+                None,
             )),
         );
 
@@ -4029,6 +4218,7 @@ mod tests {
                 Some(&gui_icons),
                 Some(&player),
                 Some(&score),
+                None,
             )),
         );
 
@@ -4175,7 +4365,7 @@ mod tests {
         let highlight = solid_image(16, 16, [40, 50, 60, 255]);
         let skin = ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight));
         let resources =
-            GameOverClassicResources::new(skin, &fonts, Some(&highlight), None, None, None);
+            GameOverClassicResources::new(skin, &fonts, Some(&highlight), None, None, None, None);
         let mut state = GameOverState::new(
             "A Clonk".into(),
             vec![entry(1, "Player", GameOverOutcome::Victory, true)],
@@ -4360,6 +4550,7 @@ mod tests {
             &fonts,
             Some(&highlight),
             Some(&gui_icons),
+            None,
             None,
             None,
         );
