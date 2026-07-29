@@ -3630,6 +3630,15 @@ impl GameApp {
     pub(crate) fn open_about_dialog(&mut self) {
         self.close_context_menu_silently();
         let mut dialog = clonk_frontend::startup_about_dlg::AboutDlgState::new();
+        // C4StartupAboutDlg's constructor resolves its bottom-line captions
+        // through LoadResStr (C4StartupAboutDlg.cpp:279-284).
+        dialog.set_labels(clonk_frontend::startup_about_dlg::AboutLabels {
+            buttons: [
+                self.runtime_resource_text("IDS_BTN_BACK", "Back"),
+                self.runtime_resource_text("IDS_BTN_CHECKFORUPDATES", "Check for &updates"),
+                self.runtime_resource_text("IDS_BTN_LICENSES", "&Licenses"),
+            ],
+        });
         if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
             dialog.resize(
                 self.graphics.surface().width() as i32,

@@ -372,6 +372,65 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     );
 }
 
+/// `C4StartupAboutDlg`'s constructor resolves its title and the Back, Check for
+/// updates and Licenses captions through `LoadResStr`
+/// (C4StartupAboutDlg.cpp:262,279-284). The mnemonic markers travel with the
+/// resolved text, because `Button::SetText` is what turns them into hotkeys.
+#[test]
+fn about_chrome_uses_runtime_resource_strings() {
+    let mut app = new_real_classic_menu_app(640, 480);
+    for (key, value) in [
+        ("IDS_DLG_ABOUT", "&Programminfo"),
+        ("IDS_BTN_BACK", "Zurueck"),
+        ("IDS_BTN_CHECKFORUPDATES", "Nach &Updates suchen"),
+        ("IDS_BTN_LICENSES", "&Lizenzen"),
+    ] {
+        app.startup_tooltip_resources
+            .insert(key.to_string(), value.to_string());
+    }
+    app.open_about_dialog();
+    assert_eq!(
+        app.startup_about_dialog
+            .as_ref()
+            .expect("about dialog")
+            .labels()
+            .buttons,
+        [
+            "Zurueck".to_string(),
+            "Nach &Updates suchen".to_string(),
+            "&Lizenzen".to_string(),
+        ]
+    );
+
+    // The title strip still reads the same key it always did.
+    let about = clonk_frontend::startup_about_dlg::about_layout(640, 480);
+    let at_anchor = GuiPoint::new(
+        about.title_anchor.0 as f32,
+        about.title_anchor.1 as f32 + 1.0,
+    );
+    assert_eq!(
+        app.about_tooltip_target_at(at_anchor),
+        Some(StartupTooltip::text("&Programminfo"))
+    );
+
+    // The relocated mnemonic activates, and the old English one does not.
+    app.keyboard_modifiers = ModifiersState::ALT;
+    app.handle_key(VirtualKeyCode::U, ElementState::Pressed)
+        .expect("dispatch the translated update mnemonic");
+    assert_eq!(app.message_dialogs.len(), 1);
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+        .expect("abort the update check");
+    app.handle_key(VirtualKeyCode::L, ElementState::Pressed)
+        .expect("dispatch the translated licenses mnemonic");
+    assert_eq!(
+        app.startup_about_dialog
+            .as_ref()
+            .expect("about dialog")
+            .current_page(),
+        clonk_frontend::startup_about_dlg::AboutPage::Licenses
+    );
+}
+
 /// `C4StartupOptionsDlg`'s constructor resolves every caption, label, button
 /// and checkbox text through `LoadResStr` (C4StartupOptionsDlg.cpp:609-1033),
 /// so the whole subtree follows the active language - including the widths it
