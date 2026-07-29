@@ -19632,3 +19632,33 @@ fn a_long_catch_up_still_draws_at_the_render_floor() {
         "drawing resets the counter, so the floor is a rate and not a one-shot"
     );
 }
+
+/// No native window backend clears player controls on focus loss: Win32
+/// deactivation only minimizes a fullscreen window (C4FullScreen.cpp:139-145),
+/// X11 FocusOut/Unmap only clears `Application.Active` (:310-315), and the SDL
+/// branch does not handle focus at all (:432-447). A synchronized
+/// `ClearPressed` belongs to the explicit modal flows
+/// (C4PlayerList.cpp:588-595), so Alt-Tab must add nothing to the session.
+#[test]
+fn focus_loss_does_not_submit_cpp_player_control() {
+    let mut app = new_running_sandbox_app();
+    let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+    // Drain whatever joining the sandbox already queued.
+    let _ = commands.take_submitted_local();
+
+    app.handle_focus_lost().expect("handle focus loss");
+
+    assert!(
+        commands.take_submitted_local().is_empty(),
+        "focus loss must not submit a network player control"
+    );
+    // The nonfatal UI/pointer cleanup still runs.
+    assert!(app.pressed_engine_keys.is_empty());
+    assert_eq!(app.ingame_pointer, None);
+}

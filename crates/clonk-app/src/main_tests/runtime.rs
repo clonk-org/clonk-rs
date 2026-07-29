@@ -1086,9 +1086,11 @@
         assert_ne!(control(&app, 0).pressed_coms, 0);
         assert_ne!(control(&app, 1).pressed_coms, 0);
         app.handle_focus_lost()
-            .expect("focus loss clears every local player");
-        assert_eq!(control(&app, 0).pressed_coms, 0);
-        assert_eq!(control(&app, 1).pressed_coms, 0);
+            .expect("focus loss runs its nonfatal UI cleanup");
+        // No native backend clears player controls on focus loss
+        // (C4FullScreen.cpp:139-145,310-315,432-447).
+        assert_ne!(control(&app, 0).pressed_coms, 0);
+        assert_ne!(control(&app, 1).pressed_coms, 0);
 
         app.return_to_menu();
         fs::write(

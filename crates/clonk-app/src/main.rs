@@ -3032,12 +3032,14 @@ impl GameApp {
         self.ingame_menu_close_pointer_capture = None;
         self.script_menu_close_pointer_capture = None;
         self.menu_title_drag = None;
-        // No key-up events are guaranteed after the window loses focus.
-        // Release synchronized controls and forget the physical repeat state
-        // so the first press after refocus is not discarded.
-        if matches!(self.mode, AppMode::Running) {
-            self.clear_local_controls()?;
-        }
+        // No native backend clears player controls on focus loss: Win32
+        // deactivation only minimizes a fullscreen window
+        // (C4FullScreen.cpp:139-145), X11 FocusOut/Unmap only clears
+        // `Application.Active` (:310-315), and the SDL branch does not handle
+        // focus at all (:432-447). Synchronized `ClearPressed` belongs to the
+        // explicit modal flows (C4PlayerList.cpp:588-595). Only the physical
+        // repeat state is forgotten below, so the first press after refocus is
+        // not discarded as a repeat.
         self.close_context_menu_silently();
         self.context_menu_pointer_capture = None;
         for dialog in &mut self.message_dialogs {

@@ -29,7 +29,10 @@ valid module against the effective Parameters capacity before landscape creation
 queues joins before `Initialize`, and executes them before frame-one simulation.
 Duplicate real paths retain separate infos but the later join is rejected like
 `FileInUse`; distinct local players receive their `.c4p` keyboard sets and route
-controls independently, including all-player focus-loss clearing. Scenario
+controls independently. Focus loss runs only the nonfatal UI/pointer
+cleanup: no native backend clears player controls there
+(C4FullScreen.cpp:139-145,310-315,432-447), so Alt-Tab adds nothing to a
+synchronized session. Scenario
 definition lists use classic quoted/numbered parsing and load explicit global
 packs before ancestor-local packs; later folder-local ID collisions overload
 the global definition, while packed parent graphics and materials resolve

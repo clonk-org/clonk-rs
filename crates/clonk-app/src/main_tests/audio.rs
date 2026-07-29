@@ -236,7 +236,7 @@
         app.handle_focus_lost().expect("handle focus loss");
 
         assert!(app.pressed_engine_keys.is_empty());
-        assert_eq!(
+        assert_ne!(
             app.engine
                 .snapshot()
                 .players
@@ -246,7 +246,8 @@
                 .control
                 .pressed_coms,
             0,
-            "focus loss clears synchronized held controls"
+            "no native backend clears player controls on focus loss \
+             (C4FullScreen.cpp:139-145,310-315,432-447)"
         );
         assert_eq!(
             app.ingame_pointer, None,
