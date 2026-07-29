@@ -28,6 +28,7 @@ image = { version = "0.24", default-features = false, features = ["bmp", "jpeg",
 # Match the mandatory workspace gate so a focused frontend run does not build
 # a default-feature engine that Cargo must replace with test-graph moments
 # later during landing.
+clonk-core = { path = "../clonk-core" }
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
 clonk-graphics = { path = "../clonk-graphics" }
 clonk-gui = { path = "../clonk-gui" }

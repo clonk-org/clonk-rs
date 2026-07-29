@@ -381,9 +381,6 @@ impl GameApp {
                 DeveloperConsoleAction::EditInfo => {
                     self.developer_console.out("Info component selected");
                 }
-                DeveloperConsoleAction::ShowAbout => {
-                    self.developer_console.out("Clonk Rust developer console");
-                }
             };
         }
         Ok(())

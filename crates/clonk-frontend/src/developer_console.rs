@@ -37,6 +37,34 @@ const LIGHT_EDGE: Color = Color::opaque(0xff, 0xff, 0xff);
 const DARK_EDGE: Color = Color::opaque(0x60, 0x60, 0x60);
 const MID_EDGE: Color = Color::opaque(0x9a, 0x9a, 0x9a);
 
+/// `C4COPYRIGHT_YEAR`/`C4COPYRIGHT_COMPANY` (`C4Console.cpp:1190-1191`).
+const ABOUT_COPYRIGHT_YEAR: &str = "2008";
+const ABOUT_COPYRIGHT_COMPANY: &str = "RedWolf Design GmbH";
+
+/// The console's About dialog (`C4Console::HelpAbout`, C4Console.cpp:1193-1200).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsoleAboutModal {
+    /// The window caption, `C4ENGINECAPTION` (:1197).
+    pub caption: String,
+    /// `"<caption> <version>"` (:1196).
+    pub title: String,
+    /// `"Copyright (c) <year> <company>"` (:1196).
+    pub copyright: String,
+}
+
+impl ConsoleAboutModal {
+    /// Builds the dialog for `caption`. The version comes from
+    /// `clonk-core`, the single source of truth for it — the *port* version,
+    /// since that is the running build (`C4VERSION` names the C++ engine).
+    pub fn new(caption: &str) -> Self {
+        Self {
+            caption: caption.to_owned(),
+            title: format!("{caption} {}", clonk_core::version::PORT_VERSION),
+            copyright: format!("Copyright (c) {ABOUT_COPYRIGHT_YEAR} {ABOUT_COPYRIGHT_COMPANY}"),
+        }
+    }
+}
+
 /// App-owned presentation strings for the native `C4Console` shell.
 ///
 /// Resource-backed defaults match `LanguageUS.txt`; strings that C++ renders
@@ -225,7 +253,6 @@ pub enum DeveloperConsoleAction {
     EliminatePlayer(i32),
     NewViewport(Option<i32>),
     KickClient(i32),
-    ShowAbout,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -661,6 +688,7 @@ pub struct DeveloperConsoleLayout {
     pub completion_dropdown: Vec<ConsoleCompletionEntryLayout>,
     pub path_dialog: Option<IntRect>,
     pub path_input: Option<IntRect>,
+    pub about_dialog: Option<IntRect>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -683,6 +711,8 @@ pub struct DeveloperConsole {
     log: ConsoleLogBuffer,
     command: TextEdit,
     path_entry: Option<PathEntryState>,
+    /// `C4Console::HelpAbout`'s task-modal dialog (C4Console.cpp:1193-1200).
+    about_modal: Option<ConsoleAboutModal>,
     open_menu: Option<ConsoleMenu>,
     menu_selection: Option<usize>,
     completion_selection: Option<usize>,
@@ -708,6 +738,7 @@ impl DeveloperConsole {
             log: ConsoleLogBuffer::default(),
             command: TextEdit::new(String::new()),
             path_entry: None,
+            about_modal: None,
             open_menu: None,
             menu_selection: None,
             completion_selection: None,
@@ -1110,7 +1141,10 @@ impl DeveloperConsole {
             ConsoleMenuItemId::NetClient(client) => {
                 vec![DeveloperConsoleAction::KickClient(*client)]
             }
-            ConsoleMenuItemId::About => vec![DeveloperConsoleAction::ShowAbout],
+            ConsoleMenuItemId::About => {
+                self.open_about_modal();
+                Vec::new()
+            }
         }
     }
 
@@ -1118,6 +1152,32 @@ impl DeveloperConsole {
         let token = self.next_path_token.max(1);
         self.next_path_token = token.wrapping_add(1).max(1);
         token
+    }
+
+    /// `C4Console::HelpAbout` opens its dialog directly (C4Console.cpp:1193).
+    /// The console owns it, so activating Help > About needs no host round trip.
+    fn open_about_modal(&mut self) {
+        self.about_modal = Some(ConsoleAboutModal::new(&self.view.strings.default_caption));
+        self.open_menu = None;
+        self.menu_selection = None;
+        self.completion_selection = None;
+        self.bump_revision();
+    }
+
+    /// The open About dialog, if any.
+    pub fn about_modal(&self) -> Option<&ConsoleAboutModal> {
+        self.about_modal.as_ref()
+    }
+
+    /// Dismisses the About dialog, returning focus to the command line. The
+    /// running game is untouched — the dialog is presentation only.
+    pub fn dismiss_about_modal(&mut self) -> bool {
+        let dismissed = self.about_modal.take().is_some();
+        if dismissed {
+            self.command_focused = true;
+            self.bump_revision();
+        }
+        dismissed
     }
 
     fn begin_path_request(
@@ -1273,6 +1333,17 @@ impl DeveloperConsole {
         }
         if key == DeveloperConsoleKey::Pause && self.path_entry.is_none() && self.view.game_open {
             return vec![DeveloperConsoleAction::TogglePause];
+        }
+        if self.about_modal.is_some() {
+            // A task-modal dialog takes the keyboard until acknowledged
+            // (C4Console.cpp:1197 uses MB_TASKMODAL).
+            if matches!(
+                key,
+                DeveloperConsoleKey::Enter | DeveloperConsoleKey::Escape
+            ) {
+                self.dismiss_about_modal();
+            }
+            return Vec::new();
         }
         if self.path_entry.is_some() {
             match key {
@@ -1668,6 +1739,17 @@ impl DeveloperConsole {
             (None, None)
         };
 
+        let about_dialog = self.about_modal.as_ref().map(|_| {
+            let dialog_width = (width - 24).clamp(220, 420).min(width);
+            let dialog_height = 96.min(height);
+            IntRect {
+                x: (width - dialog_width) / 2,
+                y: (height - dialog_height) / 2,
+                w: dialog_width,
+                h: dialog_height,
+            }
+        });
+
         DeveloperConsoleLayout {
             menu_bar,
             menu_tabs,
@@ -1686,6 +1768,7 @@ impl DeveloperConsole {
             completion_dropdown,
             path_dialog,
             path_input,
+            about_dialog,
         }
     }
 
@@ -1955,6 +2038,28 @@ impl DeveloperConsole {
         self.render_completion_dropdown(surface, font, &layout.completion_dropdown);
         if let Some(menu) = self.open_menu {
             self.render_dropdown(surface, font, menu, &layout.dropdown);
+        }
+        if let (Some(about), Some(dialog)) = (self.about_modal.as_ref(), layout.about_dialog) {
+            draw_raised(surface, dialog, WINDOW_BACKGROUND);
+            for (index, line) in [about.title.as_str(), about.copyright.as_str()]
+                .into_iter()
+                .enumerate()
+            {
+                draw_fitted_text(
+                    surface,
+                    font,
+                    IntRect {
+                        x: dialog.x + 10,
+                        y: dialog.y + 12 + (index as i32) * 28,
+                        w: dialog.w - 20,
+                        h: 20,
+                    },
+                    line,
+                    CONTROL_TEXT,
+                    FONT_SIZE,
+                    1,
+                );
+            }
         }
         if let (Some(entry), Some(dialog), Some(input)) = (
             self.path_entry.as_ref(),
@@ -3116,6 +3221,68 @@ mod tests {
                     .request
             )]
         );
+    }
+
+    // C4Console.cpp:1190-1200 — Help > About opens the console's own modal
+    // carrying the caption, the running version and the classic copyright,
+    // rather than appending a log line.
+    #[test]
+    fn console_about_action_opens_versioned_modal() {
+        let mut console = DeveloperConsole::new();
+        console.set_view_model(running_view());
+        let logged_before = console.log().text().to_owned();
+        assert!(console.about_modal().is_none());
+
+        let actions = console.activate_menu_item(&ConsoleMenuItemId::About);
+        assert!(
+            actions.is_empty(),
+            "the console owns the dialog, so activating it needs no host action"
+        );
+
+        let about = console
+            .about_modal()
+            .expect("the About modal is open")
+            .clone();
+        let caption = ConsoleStrings::default().default_caption;
+        assert_eq!(about.caption, caption);
+        // One canonical version source: the running port build.
+        assert_eq!(
+            about.title,
+            format!("{caption} {}", clonk_core::version::PORT_VERSION)
+        );
+        assert_eq!(about.copyright, "Copyright (c) 2008 RedWolf Design GmbH");
+        assert!(
+            console.layout(640, 360).about_dialog.is_some(),
+            "the modal must be laid out, not merely recorded"
+        );
+        assert_eq!(
+            console.log().text(),
+            logged_before,
+            "About must not append a log line"
+        );
+
+        // It is task-modal: other keys are swallowed until acknowledged.
+        assert!(console.handle_key(DeveloperConsoleKey::Up, true).is_empty());
+        assert!(console
+            .handle_key(DeveloperConsoleKey::Tab, true)
+            .is_empty());
+        assert!(console.about_modal().is_some());
+
+        // Dismissing returns focus to the command line and changes nothing else.
+        assert!(console
+            .handle_key(DeveloperConsoleKey::Escape, true)
+            .is_empty());
+        assert!(console.about_modal().is_none());
+        assert!(console.layout(640, 360).about_dialog.is_none());
+        assert_eq!(console.log().text(), logged_before);
+
+        // Enter acknowledges it too (MB_OK).
+        console.activate_menu_item(&ConsoleMenuItemId::About);
+        assert!(console.about_modal().is_some());
+        assert!(console
+            .handle_key(DeveloperConsoleKey::Enter, true)
+            .is_empty());
+        assert!(console.about_modal().is_none());
     }
 
     #[test]

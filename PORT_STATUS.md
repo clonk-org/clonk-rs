@@ -425,6 +425,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Developer console Help > About.** The menu item existed
+  but only appended a log line. It now opens `ConsoleAboutModal`, owned and laid
+  out by the console itself the way `C4Console::HelpAbout` opens its dialog
+  directly (`C4Console.cpp:1193-1200`), carrying the caption, the running
+  version, and `"Copyright (c) 2008 RedWolf Design GmbH"` from the
+  `C4COPYRIGHT_YEAR`/`C4COPYRIGHT_COMPANY` defines (:1190-1191). The version
+  comes from `clonk-core`, the single source — specifically `PORT_VERSION`,
+  since that names the running build, whereas C++'s `C4VERSION` names the C++
+  engine. The dialog is task-modal like C++'s `MB_TASKMODAL`: it swallows other
+  keys until Enter or Escape acknowledges it (`MB_OK`), then returns focus to
+  the command line without touching the running game or the log. Pinned by
+  `console_about_action_opens_versioned_modal`. `DeveloperConsoleAction::ShowAbout`
+  and its host arm were removed — the console no longer needs a host round trip
+  for this, and a never-emitted variant would be dead API.
+
 - Closed 2026-07-29: **Native startup-failure dialog.** Failures before the
   window existed were only returned and logged, so a packaged graphical launch
   could vanish with no visible explanation. `main` is now a thin wrapper over
