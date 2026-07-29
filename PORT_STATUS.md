@@ -425,6 +425,22 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **File-monitor arming and the external reload trigger landed; the watcher is
+  open.** `clonk-engine::developer_file_monitor` ports the two gates.
+  A monitor starts only when `Developer.AutoFileReload` is set, the app is
+  **not** fullscreen, and none is already running (`C4Game.cpp:2414`) — a
+  fullscreen session never watches however the key is set. The external
+  `WM_USER_RELOADFILE` payload is accepted only when its **last byte is NUL**
+  (`C4Console.cpp:243-249`); C++ tests that byte alone and `break`s otherwise,
+  so an unterminated buffer is silently ignored rather than truncated. An
+  embedded NUL earlier in the buffer still passes, and the path simply ends
+  there, because C++ then reads it as a C string. Pinned by
+  `console_auto_file_reload_watches_unpacked_sources_and_dispatches_paths` and
+  `external_reload_trigger_validates_path_and_reload_particle_is_name_based`.
+  **Still open:** the watcher itself, its app-thread delivery, and
+  `ReloadParticle` — the last of which needs the definition reload from
+  M10-P4-L086.
+
 - **Viewport lock, scroll ranges and input routing landed; windows open.**
   `clonk-engine::developer_viewport` ports `C4Viewport::TogglePlayerLock`
   (`C4Viewport.cpp:250-267`) with its asymmetry intact: unlocking always

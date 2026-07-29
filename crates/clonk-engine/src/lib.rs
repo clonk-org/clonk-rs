@@ -26,6 +26,7 @@ mod control_execution;
 mod definition;
 pub mod developer_components;
 pub mod developer_cursor;
+pub mod developer_file_monitor;
 pub mod developer_landscape;
 pub mod developer_reload;
 pub mod developer_selection;
