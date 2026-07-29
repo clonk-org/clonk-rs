@@ -2918,6 +2918,20 @@ fn render_engine_normal_menu(
             );
         }
     }
+
+    // `C4GUI::ScrollWindow` draws its bar after the client contents
+    // (C4GuiContainers.cpp:309-470). A missing facet leaves it undrawn, as a
+    // null `C4Facet` does in C++.
+    if let (Some(bar), Some(scroll)) = (layout.scrollbar, gfx.scroll.as_ref()) {
+        crate::scrollbar::draw_classic_scrollbar(
+            surface,
+            crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
+            scroll,
+            crate::scrollbar::pin_offset(bar.height as i32, layout.scroll_y, layout.max_scroll_y),
+            layout.max_scroll_y,
+            gamma,
+        );
+    }
 }
 
 #[derive(Clone, Debug)]

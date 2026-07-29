@@ -436,12 +436,13 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   keeping its own copy, and all 123 menu tests still pass. Pinned by
   `overflow_menu_scrollbar_arrows_track_and_thumb_match_cpp`, which covers the
   arrow/shaft boundaries, out-of-range clamping, the pin/scroll round trip, and
-  a bar too short for two full arrows. **Still open:** the menu draw paths do not yet *render* the bar —
-  `IngameMenuGraphics` and the object-menu graphics carry `menu_scroll_y` (a
-  position) but not the scroll facet itself, which today reaches only
-  `game_over`'s resources. Feeding that facet through is the remaining step, plus
-  criterion 4's `MENU_PARITY.md` rows. Rects and pointer routing are in place for
-  every surface that should have a bar. This replaces the earlier note about
+  a bar too short for two full arrows. Both menu draw paths now render it:
+  `IngameMenuGraphics` carries the `scroll` facet and the in-game and
+  engine-script draws call the shared `draw_classic_scrollbar` after their client
+  contents, leaving it undrawn when the facet is absent as a null `C4Facet` does.
+  The `MENU_PARITY.md` row is updated. **Still open:** arrow auto-repeat while
+  held, and paging the bare track on click — the hit regions report both, but
+  nothing acts on them yet. This replaces the earlier note about
   ticket's first criterion asks for — the **engine object menu is now wired**:
   its layout exposes the reserved column as a `scrollbar` rect (present only
   while the menu overflows, the same condition that reserves its width), and

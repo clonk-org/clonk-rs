@@ -1719,6 +1719,19 @@ impl IngameMenuState {
             .unwrap_or(area);
         surface.set_clip(viewport_clip);
         draw_menu(self, &layout, surface, area, font, tiny_font, gfx, gamma);
+        // `C4GUI::ScrollWindow` draws its bar after the client contents
+        // (C4GuiContainers.cpp:309-470). A missing facet leaves it undrawn,
+        // exactly as a null `C4Facet` does in C++.
+        if let (Some(bar), Some(scroll)) = (layout.scrollbar, gfx.scroll.as_ref()) {
+            crate::scrollbar::draw_classic_scrollbar(
+                surface,
+                crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
+                scroll,
+                crate::scrollbar::pin_offset(bar.height as i32, layout.scroll_y, layout.max_scroll),
+                layout.max_scroll,
+                gamma,
+            );
+        }
         match previous_clip {
             Some(clip) => surface.set_clip(clip),
             None => surface.clear_clip(),
@@ -2024,6 +2037,10 @@ pub struct IngameMenuGraphics {
     /// Presentation-only logical-pixel scroll displacement for the active
     /// script menu's client `ScrollWindow`.
     pub menu_scroll_y: i32,
+    /// Scroll.png — the `C4GUI::ScrollBar` facet's three 16px cells
+    /// (`C4Gui.cpp`). Absent leaves the bar undrawn, as a missing facet does
+    /// in C++.
+    pub scroll: Option<ImageData>,
     /// `Config.Graphics.ShowCommands` (C4Config.cpp:449) — draws the bottom
     /// command bar (C4Menu.cpp:851-880).
     pub show_commands: bool,
