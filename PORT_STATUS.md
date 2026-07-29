@@ -425,6 +425,26 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Developer ordered edit selection.** The engine retained
+  only a single hovered `edit_cursor_target`, so nothing owned the ordered
+  selection the edit cursor, property panel and object tree share.
+  `clonk-engine::developer_selection` now does. Entries append at the tail the
+  way `C4ObjectList::stNone` does (`C4ObjectList.cpp:110-135`) and never
+  duplicate; a plain click replaces (`C4EditCursor.cpp:219`), ctrl-click
+  removes-or-appends (:213-214) so a re-added object moves to the tail, and a
+  frame drag takes the enumerated order with duplicates collapsed. Pruning drops
+  removed or unknown objects without reordering survivors, in one revision
+  rather than one per removal. The hovered object stays a separate scalar, as
+  C++ keeps `Target` outside the list (`C4EditCursor.h:39`) — setting it never
+  advances the revision, though a vanished hover is pruned. Every mutator
+  returns a snapshot only when something actually changed, so a no-op notifies
+  nobody, and each snapshot carries its `SelectionWriter` so a subscriber can
+  suppress its own echo (`C4ObjectListDlg.cpp:599-646`). Pinned by
+  `developer_selection_preserves_toggle_frame_and_tree_order` and
+  `developer_selection_prunes_removed_objects_and_notifies_once`. Hit testing,
+  gestures and dialog content stay out by design; the parity row flips when the
+  dependent edit/object UI lands.
+
 - Closed 2026-07-29: **Developer landscape-tool read model.**
   `clonk-engine::developer_landscape` exposes the material/texture catalog and
   tool picker the native `C4ToolsDlg` reads, without the console reconstructing

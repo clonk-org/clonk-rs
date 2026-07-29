@@ -25,6 +25,7 @@ mod control;
 mod control_execution;
 mod definition;
 pub mod developer_landscape;
+pub mod developer_selection;
 mod direct_com;
 #[doc(hidden)]
 pub mod effect;
