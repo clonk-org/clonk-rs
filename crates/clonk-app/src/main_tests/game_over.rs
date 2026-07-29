@@ -1851,6 +1851,86 @@
         );
     }
 
+    // C4GoalDisplay::GoalPicture resolves the goal as a *live object* through
+    // Game.Objects.FindInternal and draws through
+    // `C4Def::Draw(Picture, false, 0, pGoalObj)`, so the picture carries that
+    // object's graphics rather than the bare definition picture; only then is
+    // the unfulfilled grayscale applied
+    // (src/C4GameOverDlg.cpp:52-63; src/C4GameObjects.cpp:264-268).
+    #[test]
+    fn game_over_goal_picture_includes_live_goal_object_overlays() {
+        let mut app = new_classic_running_sandbox_app();
+        let mut definition =
+            Definition::from_script("GOAL", "Goal", "#strict 3\n").expect("goal definition");
+        definition.set_picture(Some(clonk_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        definition.set_sprite_image(Some(clonk_engine::DefinitionSpriteImage {
+            width: 2,
+            height: 1,
+            pixels: Arc::from([0x11, 0x22, 0x33, 0xff, 0x44, 0x55, 0x66, 0xff]),
+            color_mask: None,
+        }));
+        app.engine
+            .register_definition(definition)
+            .expect("goal definition registers");
+        app.snapshot.round_results.goals = vec!["GOAL".into()];
+        app.snapshot.round_results.fulfilled_goals = vec!["GOAL".into()];
+
+        // This fixture has no cached definition Picture facet, so a
+        // definition-only freeze produces nothing to draw.
+        app.snapshot.objects.clear();
+        assert!(app.engine.definition_picture_image("GOAL").is_none());
+        app.handle_game_over().expect("show goal evaluation");
+        assert!(
+            app.game_over_dialog
+                .as_ref()
+                .expect("evaluation dialog")
+                .evaluation()
+                .goals()[0]
+                .picture
+                .is_none(),
+            "without a live goal object there is only the definition picture"
+        );
+        app.game_over_dialog = None;
+        app.game_over_handled = false;
+
+        // A live goal object draws through its own graphics, which this
+        // definition does have.
+        app.engine
+            .spawn_object(SpawnConfig::new("GOAL"))
+            .expect("live goal object");
+        app.snapshot = app.engine.snapshot();
+        app.snapshot.round_results.goals = vec!["GOAL".into()];
+        app.snapshot.round_results.fulfilled_goals = vec!["GOAL".into()];
+        let object = app
+            .snapshot
+            .objects
+            .iter()
+            .find(|candidate| candidate.definition_id.as_str() == "GOAL")
+            .expect("the goal object is in the live snapshot");
+        let expected = app
+            .engine
+            .object_picture_image(object)
+            .expect("object graphics resolve");
+        app.handle_game_over().expect("show goal evaluation again");
+        let picture = app
+            .game_over_dialog
+            .as_ref()
+            .expect("evaluation dialog")
+            .evaluation()
+            .goals()[0]
+            .picture
+            .clone()
+            .expect("the live goal object supplies the picture");
+        assert_eq!(picture.width(), expected.width());
+        assert_eq!(picture.height(), expected.height());
+        assert_eq!(picture.pixels(), expected.pixels().as_ref());
+    }
+
     #[test]
     fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
         let mut app = new_classic_running_sandbox_app();

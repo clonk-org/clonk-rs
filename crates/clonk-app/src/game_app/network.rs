@@ -7078,9 +7078,21 @@ impl GameApp {
             scenario_title.clone(),
             next_mission,
             |definition_id, fulfilled| {
-                let picture = self
-                    .engine
-                    .definition_picture_image(definition_id)
+                // `C4GoalDisplay::GoalPicture` looks the goal up as a live
+                // object first and hands it to `C4Def::Draw(.., pGoalObj)`, so
+                // the picture carries that object's current graphics rather
+                // than the bare definition picture
+                // (src/C4GameOverDlg.cpp:52-59; src/C4GameObjects.cpp:264-268
+                // -> C4ObjectList::Find, which takes the first live entry with
+                // that id).
+                let goal_object = self
+                    .snapshot
+                    .objects
+                    .iter()
+                    .find(|object| object.definition_id.as_str() == definition_id);
+                let picture = goal_object
+                    .and_then(|object| self.engine.object_picture_image(object))
+                    .or_else(|| self.engine.definition_picture_image(definition_id))
                     .map(definition_menu_picture);
                 let name = self
                     .engine
