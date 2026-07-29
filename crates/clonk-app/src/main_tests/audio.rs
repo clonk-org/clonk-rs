@@ -5269,4 +5269,67 @@
         assert!(frame.iter().any(|byte| *byte != 0x7a));
     }
 
+    /// C++ resolves every path through the live selected configuration object
+    /// (C4Config.cpp:1351-1357,1612-1627), so an explicit `/config` selection
+    /// has to reach the sound and music resolvers. Neither may rediscover
+    /// ambient defaults and read a different tree than the running app.
+    #[test]
+    fn explicit_config_paths_feed_audio_and_live_user_root() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("audio provenance install root");
+        let selected = tempdir().expect("selected user root");
+        let ambient = tempdir().expect("ambient user root");
+        fs::create_dir_all(install.path().join("planet/System.c4g")).expect("System group");
 
+        // Two distinct trees: only the selected one holds the sample.
+        let selected_sound = selected.path().join("Sound.c4g");
+        let ambient_sound = ambient.path().join("Sound.c4g");
+        fs::create_dir_all(&selected_sound).expect("selected sound group");
+        fs::create_dir_all(&ambient_sound).expect("ambient sound group");
+        fs::write(selected_sound.join("Selected.wav"), silent_pcm_wav(1_000))
+            .expect("selected sample");
+        fs::write(ambient_sound.join("Ambient.wav"), silent_pcm_wav(1_000))
+            .expect("ambient sample");
+
+        let names = |root: &Path| {
+            let (libraries, _) = discover_global_sound_libraries_at(root);
+            let mut resolver = SoundResolver::empty();
+            resolver.global = libraries;
+            resolver.sample_names()
+        };
+        assert_eq!(names(selected.path()), vec!["selected.wav".to_string()]);
+        assert_eq!(names(ambient.path()), vec!["ambient.wav".to_string()]);
+
+        // An explicit config selection whose UserPath points at the selected
+        // tree must drive discovery, even while the ambient environment points
+        // somewhere else.
+        let config_file = install.path().join("explicit.ini");
+        fs::write(
+            &config_file,
+            format!(
+                "[General]\nUserPath={}\n",
+                selected.path().display()
+            ),
+        )
+        .expect("write explicit config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", None),
+            ("LC_CONFIG_FILE", None),
+            ("LC_CONTENT_DIR", Some(selected.path())),
+        ]);
+        let paths = AppPaths::discover_with_config_file(Some(&config_file))
+            .expect("discover from the explicit config");
+        assert_eq!(paths.config_file(), config_file);
+        assert_eq!(paths.user_data_dir(), selected.path());
+
+        // The resolver built from those paths sees the selected tree only.
+        let resolver = SoundResolver::discover_for_paths(Some(&paths));
+        assert_eq!(resolver.sample_names(), vec!["selected.wav".to_string()]);
+
+        // A pathless app walks no install media at all rather than guessing.
+        assert!(SoundResolver::discover_for_paths(None)
+            .sample_names()
+            .is_empty());
+    
+}

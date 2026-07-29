@@ -975,7 +975,7 @@ impl AudioContext {
         #[cfg(test)]
         let (resolver, music_resolver) = if audio_resources_enabled {
             (
-                SoundResolver::new(),
+                SoundResolver::discover_for_paths(paths),
                 MusicResolver::discover_for_paths(paths),
             )
         } else {
@@ -986,7 +986,7 @@ impl AudioContext {
         };
         #[cfg(not(test))]
         let (resolver, music_resolver) = (
-            SoundResolver::new(),
+            SoundResolver::discover_for_paths(paths),
             MusicResolver::discover_for_paths(paths),
         );
         let mut context = Self {
@@ -2516,8 +2516,12 @@ impl SoundResolver {
         }
     }
 
-    fn new() -> Self {
-        let (global, base_sample_loads) = discover_global_sound_libraries();
+    /// C++ resolves every path through the live selected configuration
+    /// (C4Config.cpp:1351-1357,1612-1627), so sound discovery uses the same
+    /// `AppPaths` the application was started with rather than rediscovering
+    /// ambient defaults — an explicit `/config` selection must not be lost.
+    pub(crate) fn discover_for_paths(paths: Option<&AppPaths>) -> Self {
+        let (global, base_sample_loads) = discover_global_sound_libraries_for(paths);
         let mut resolver = Self::empty();
         resolver.global = global;
         resolver.base_sample_loads = base_sample_loads;
@@ -2946,16 +2950,15 @@ fn sound_name_has_extension(name: &str) -> bool {
         .is_some_and(|index| component_start + index + 1 < name.len())
 }
 
-fn discover_global_sound_libraries() -> (Vec<SoundLibrary>, Vec<String>) {
-    match AppPaths::discover() {
-        Ok(paths) => {
-            discover_global_sound_libraries_at(paths.content_dir().unwrap_or(paths.install_root()))
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "sound asset discovery skipped");
-            (Vec::new(), Vec::new())
-        }
-    }
+fn discover_global_sound_libraries_for(
+    paths: Option<&AppPaths>,
+) -> (Vec<SoundLibrary>, Vec<String>) {
+    let Some(paths) = paths else {
+        // A pathless app has no install media to walk; C++ has no equivalent
+        // state, so this stays empty rather than guessing a root.
+        return (Vec::new(), Vec::new());
+    };
+    discover_global_sound_libraries_at(paths.content_dir().unwrap_or(paths.install_root()))
 }
 
 pub(crate) fn discover_global_sound_libraries_at(
