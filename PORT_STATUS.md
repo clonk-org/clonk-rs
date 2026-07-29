@@ -435,10 +435,15 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   grouped by section on the clean-exit path only — an aborted run discards them,
   which is the behaviour the ticket asks for. Pinned by
   `runtime_config_mutations_remain_process_local_until_shutdown_save`.
-  **Migrated so far: only the two toggles the oracle classifies unambiguously** —
-  `Network.MasterServerSignUp` and `General.Record`, which
-  `C4StartupNetDlg::OnBtnInternet`/`OnBtnRecord` change in memory alone
-  (`C4StartupNetDlg.cpp:840-850`). **Still open:** every other
+  **Migrated so far, each with an oracle citation:**
+  `Network.MasterServerSignUp` and `General.Record`
+  (`C4StartupNetDlg::OnBtnInternet`/`OnBtnRecord`, `C4StartupNetDlg.cpp:840-850`),
+  and `General.MissionAccess` — both of *its* native mutation sites,
+  `FnGainMissionAccess` (`C4Script.cpp:2466-2471`) and the cheat-code
+  add/remove (`C4StartupScenSelDlg.cpp:1838-1856`), change the string in memory
+  and return; `C4StartupScenSelDlg.cpp` contains no `Config.Save()` at all.
+  Two tests asserted the file was written immediately and were updated to assert
+  the pending value instead — they had pinned the divergence. **Still open:** every other
   `persist_config_value` caller needs its own C++ site read before being moved —
   MissionAccess, Participants, sound toggles, ServerAddress and the Startup
   checkboxes are *not* settled by the oracle lines this ticket cites, and the

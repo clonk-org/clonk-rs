@@ -304,9 +304,11 @@
         .expect("grant and reload Mission Access");
         wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "secret");
+        // Memory-only until shutdown, as both native sites are
+        // (C4Script.cpp:2466-2471; C4StartupScenSelDlg.cpp:1838-1856).
         assert_eq!(
-            load_configured_mission_access(&paths).expect("load persisted mission access"),
-            "secret"
+            app.deferred_config.get("General", "MissionAccess"),
+            Some("secret")
         );
         assert_eq!(app.scenario_entry_enabled.get("Locked.c4s"), Some(&true));
         assert_eq!(app.scenario_entry_enabled.get("Native.c4s"), Some(&false));
@@ -3132,9 +3134,13 @@
         .expect("grant mission access");
         wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "Secret;Second");
+        // Both native mutation sites change `Config.General.MissionAccess` in
+        // memory alone and neither calls `Config.Save()`
+        // (C4Script.cpp:2466-2471; C4StartupScenSelDlg.cpp:1838-1856), so the
+        // grant is pending until a clean shutdown rather than on disk now.
         assert_eq!(
-            load_configured_mission_access(&paths).expect("load persisted mission access"),
-            "Secret;Second"
+            app.deferred_config.get("General", "MissionAccess"),
+            Some("Secret;Second")
         );
 
         app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
@@ -3146,8 +3152,9 @@
         wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "Second");
         assert_eq!(
-            load_configured_mission_access(&paths).expect("load updated mission access"),
-            "Second"
+            app.deferred_config.get("General", "MissionAccess"),
+            Some("Second"),
+            "a removal replaces the pending value rather than queueing a second write"
         );
         reset_cached_app_paths();
     }

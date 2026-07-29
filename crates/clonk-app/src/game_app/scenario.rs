@@ -176,12 +176,11 @@ impl GameApp {
             .selected_scenario()
             .map(|entry| entry.identifier.clone());
         let value = self.mission_access.update_modules(modules, remove);
-        if let Some(paths) = self.app_paths.as_ref() {
-            if let Err(error) = persist_config_value(paths, "General", "MissionAccess", value) {
-                tracing::warn!(%error, "failed to persist General.MissionAccess");
-                self.status_text = format!("Unable to save mission access: {error}");
-            }
-        }
+        // Both native mutation sites change `Config.General.MissionAccess` in
+        // memory alone — `FnGainMissionAccess` (C4Script.cpp:2466-2471) and the
+        // cheat-code removal (C4StartupScenSelDlg.cpp:1838-1846) — so the file
+        // is written once at shutdown.
+        self.deferred_config.set("General", "MissionAccess", value);
         // C4StartupScenSelDlg::UpdateList begins with AbortRenaming. Empty or
         // cancelled input never reaches this accepted/rebuild path.
         self.abort_scenario_rename();
