@@ -425,6 +425,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **macOS app translocation.** A quarantined bundle runs from
+  a read-only `AppTranslocation` mount whose siblings are absent, so resource
+  discovery saw a copy with no `Contents/Resources`. `clonk-platform` now
+  resolves `SecTranslocateIsTranslocatedURL` /
+  `SecTranslocateCreateOriginalPathForURL` out of Security.framework at run time
+  the way C++ does (`MacAppTranslocation.cpp:27-63`) — dynamically, so a system
+  without those symbols simply reports "not translocated" — and `main` chdirs to
+  the directory holding the `.app` before path discovery
+  (`C4WinMain.cpp:233-238`). Non-translocated bundles and explicit
+  `LC_INSTALL_ROOT`/`/config` overrides are unchanged; the recovery returns the
+  original path only when the probe positively reports translocation. Unlike
+  C++, an unusual path encoding recovers through `CFStringGetCString` instead of
+  throwing on a null `CFStringGetCStringPtr`. Pinned by the platform-gated
+  `macos_translocated_bundle_uses_original_root_and_cwd`.
+
 - Open gap (found 2026-07-28, not closed): **point and line raster width does
   not track world zoom.** `DrawProjection::line_width` is
   `presentation.scale` alone (`draw_projection`,

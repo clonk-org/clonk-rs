@@ -317,6 +317,11 @@ use winit::event_loop::{ControlFlow, EventLoopBuilder};
 use winit::window::{Fullscreen, UserAttentionType, Window, WindowBuilder};
 
 fn main() -> Result<()> {
+    // C++ recovers a translocated bundle path and chdirs to the directory
+    // holding the .app before anything else (C4WinMain.cpp:233-238;
+    // MacAppTranslocation.cpp:27-63). It must precede path discovery.
+    #[cfg(target_os = "macos")]
+    clonk_platform::establish_macos_bundle_working_directory();
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
