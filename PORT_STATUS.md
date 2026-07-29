@@ -703,11 +703,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   a fake sink, and by
   `concurrent_ready_check_resolution_submits_exactly_one_answer`, which races
   four threads 64 times and asserts a single winner and a single hide.
-  **Still open:** the Linux and Windows backends, which advertise the localized
-  actions and deliver activations. They are deliberately not written here — a
-  signal-listener or WinRT callback that cannot be run on the authoring host is
-  exactly where the concurrency bugs this core exists to prevent would be
-  introduced blind.
+  The freedesktop wire encoding is ported too, because it is the part of a Linux
+  backend that is both easy to get wrong and testable without a bus.
+  `org.freedesktop.Notifications.Notify` takes actions as a **flat
+  `key, label, key, label` array**, not as pairs — swapping that shows the key
+  as the button text — and `"default"` is the reserved key that fires on a body
+  click with no button of its own, which is where
+  `NotificationActivation::Default` comes from. An unrecognised `ActionInvoked`
+  key is **ignored rather than guessed at**, so another application's action can
+  never be read as an answer. For `NotificationClosed`, only reason 3
+  (`CloseNotification`) is our own doing and leaves the continuation alone;
+  expiry, user dismissal and undefined all end the prompt. Pinned by
+  `freedesktop_actions_interleave_keys_and_labels_with_a_default_entry`.
+  **Still open:** the D-Bus and WinRT plumbing itself — the `Notify` call, the
+  signal listener thread and `CloseNotification`. No Linux target is installed
+  here (`rustup target list --installed` shows only darwin and windows), so that
+  code could not be compiled, let alone run; writing a signal listener that
+  cannot even be type-checked is exactly where the concurrency bugs this core
+  exists to prevent would enter.
 
 - **`Network.UseCurl` now selects the HTTP backend, as a policy rather than a
   second stack.** `C4Network2HTTPClient` picks one of two implementations at

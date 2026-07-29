@@ -66,6 +66,52 @@ pub(crate) trait NotificationSink {
     fn hide(&self, id: NotificationId) -> anyhow::Result<()>;
 }
 
+/// The freedesktop notification protocol's action encoding.
+///
+/// `org.freedesktop.Notifications.Notify` takes actions as a **flat array of
+/// alternating key and label** — `[key, label, key, label, ...]` — not as
+/// pairs. Getting that interleaving wrong shows the key as the button text.
+/// `"default"` is reserved: it has no button and fires when the body is
+/// clicked, which is why [`NotificationActivation::Default`] exists.
+pub(crate) const DEFAULT_ACTION_KEY: &str = "default";
+pub(crate) const YES_ACTION_KEY: &str = "clonk-ready-yes";
+pub(crate) const NO_ACTION_KEY: &str = "clonk-ready-no";
+
+/// Builds the `Notify` actions array.
+pub(crate) fn freedesktop_actions(actions: &NotificationActions) -> Vec<String> {
+    vec![
+        DEFAULT_ACTION_KEY.to_owned(),
+        String::new(),
+        YES_ACTION_KEY.to_owned(),
+        actions.yes.clone(),
+        NO_ACTION_KEY.to_owned(),
+        actions.no.clone(),
+    ]
+}
+
+/// Maps an `ActionInvoked(id, key)` signal onto an activation. An unknown key
+/// is ignored rather than guessed at — a foreign key must never be read as an
+/// answer.
+pub(crate) fn activation_for_action_key(key: &str) -> Option<NotificationActivation> {
+    match key {
+        DEFAULT_ACTION_KEY => Some(NotificationActivation::Default),
+        YES_ACTION_KEY => Some(NotificationActivation::Chosen(NotificationAction::Yes)),
+        NO_ACTION_KEY => Some(NotificationActivation::Chosen(NotificationAction::No)),
+        _ => None,
+    }
+}
+
+/// Whether a `NotificationClosed(id, reason)` signal should close the
+/// continuation.
+///
+/// Reasons are 1 expired, 2 dismissed by the user, 3 closed by
+/// `CloseNotification`, 4 undefined. Only reason 3 is *our* doing — the
+/// continuation is already resolved in that case — so it alone is ignored;
+/// every other reason means the toast went away without an answer.
+pub(crate) fn closed_reason_ends_prompt(reason: u32) -> bool {
+    reason != 3
+}
+
 /// How a ready check finished.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReadyCheckOutcome {
@@ -343,6 +389,57 @@ mod tests {
             continuation.outcome(),
             Some(ReadyCheckOutcome::Answered(true))
         );
+    }
+
+    // The freedesktop wire encoding — the part of a Linux backend that is
+    // testable without a bus, and the part that is easy to get wrong.
+    #[test]
+    fn freedesktop_actions_interleave_keys_and_labels_with_a_default_entry() {
+        let encoded = freedesktop_actions(&actions());
+        assert_eq!(
+            encoded,
+            vec![
+                "default".to_owned(),
+                String::new(),
+                "clonk-ready-yes".to_owned(),
+                "Ja".to_owned(),
+                "clonk-ready-no".to_owned(),
+                "Nein".to_owned(),
+            ],
+            "Notify takes a flat key,label,key,label array — not pairs"
+        );
+        // Labels sit at the odd indices; a swapped pair would show the key as
+        // the button text.
+        assert_eq!(encoded[3], actions().yes);
+        assert_eq!(encoded[5], actions().no);
+
+        assert_eq!(
+            activation_for_action_key("clonk-ready-yes"),
+            Some(NotificationActivation::Chosen(NotificationAction::Yes))
+        );
+        assert_eq!(
+            activation_for_action_key("clonk-ready-no"),
+            Some(NotificationActivation::Chosen(NotificationAction::No))
+        );
+        assert_eq!(
+            activation_for_action_key("default"),
+            Some(NotificationActivation::Default)
+        );
+        assert_eq!(
+            activation_for_action_key("some-other-app"),
+            None,
+            "a foreign action key must never be read as an answer"
+        );
+
+        // NotificationClosed: only reason 3 is our own CloseNotification, so
+        // only that one leaves the continuation alone.
+        assert!(closed_reason_ends_prompt(1), "expired");
+        assert!(closed_reason_ends_prompt(2), "dismissed by the user");
+        assert!(
+            !closed_reason_ends_prompt(3),
+            "closed by us — already resolved"
+        );
+        assert!(closed_reason_ends_prompt(4), "undefined");
     }
 
     #[test]
