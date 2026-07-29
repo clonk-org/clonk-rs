@@ -510,10 +510,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   never opened, and an **emptied host deletes the component** rather than
   writing a zero-byte file. Only the Script editor relinks the script tree
   (`C4Console.cpp:1328-1351`), and all three are refused outright in a network
-  game. Pinned by
-  `console_component_editors_commit_bytes_and_relink_script`. **Still open:** the
-  editor surfaces themselves, and wiring the accepted bytes into the scenario
-  save projection.
+  game.
+  The Script commit is now wired through the engine.
+  `Engine::apply_scenario_script_edit` reproduces `C4Console::EditScript`
+  (`C4Console.cpp:1335-1342`), where two details are easy to lose: it must
+  **not** re-run `Initialize` — C++ only replaces the host's `Data` and relinks,
+  and the scenario is already running, so re-initialising would recreate its
+  objects — and the relink is **unconditional**, because
+  `Game.ScriptEngine.ReLink(&Game.Defs)` sits outside the `#ifdef _WIN32` and
+  runs even when the dialog was cancelled or never opened.
+  `Engine::relink_after_component_edit` is that second arm. Pinned by
+  `console_component_editors_commit_bytes_and_relink_script` and
+  `console_component_editors_commit_bytes_and_relink_script_through_the_engine`,
+  which drives a live engine through two edits and a bare relink. **Still open:**
+  the editor surfaces themselves, and wiring the accepted bytes into the
+  scenario save projection.
 
 - **Edit-cursor mode, context enablement and gestures landed; overlays open.**
   `clonk-engine::developer_cursor` ports `C4EditCursor::ToggleMode`
