@@ -425,6 +425,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Component-host edit model landed; the editors themselves open.**
+  `clonk-engine::developer_components` ports `C4ComponentHost`'s commit and save
+  rules. OK replaces the bytes and sets `Modified`
+  (`C4ComponentHost.cpp:330-334`) — including when the text is unchanged, since
+  C++ does not compare; Cancel mutates nothing, not even the flag. Saving
+  (`:231-236`) has two behaviours a naive port loses: an **unmodified host is
+  skipped entirely**, which is what stops a save touching components the user
+  never opened, and an **emptied host deletes the component** rather than
+  writing a zero-byte file. Only the Script editor relinks the script tree
+  (`C4Console.cpp:1328-1351`), and all three are refused outright in a network
+  game. Pinned by
+  `console_component_editors_commit_bytes_and_relink_script`. **Still open:** the
+  editor surfaces themselves, and wiring the accepted bytes into the scenario
+  save projection.
+
 - **Edit-cursor mode and context enablement landed; gestures open.**
   `clonk-engine::developer_cursor` ports `C4EditCursor::ToggleMode`
   (`C4EditCursor.cpp:540-556`) — Play -> Edit -> Draw -> Play, gated on
