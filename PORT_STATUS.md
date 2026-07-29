@@ -559,6 +559,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   need the window host (M10-P4-L081) and the detached overlay hook
   (M10-P4-L082).
 
+- **The viewport draw order and the console overlay's place in it landed.**
+  The console's edit cursor draws *inside* the ordinary viewport pass, not on a
+  finished frame, so where its hook sits is a parity question.
+  `clonk-frontend::viewport_draw_order` ports `C4Viewport::Draw`'s phase
+  sequence (`C4Viewport.cpp:1023-1119`). Three things a from-scratch version
+  gets wrong: the hook goes **after** the foreground and custom-GUI objects but
+  **before** `DrawOverlay`, the per-player HUD — last would draw over the HUD,
+  earlier would let the HUD cover it; it runs **after the border inset is
+  undone** (`:1093-1099`), so the console draws across the whole viewport
+  including the border strips the world was clipped out of; and it is gated on
+  `!Application.isFullScreen`, *not* on `fDrawOverlay` — so a full-map
+  screenshot pass still draws it while dropping borders, clipper and HUD. Fog of
+  war is disabled before both, so neither is modulated. Cursors are skipped only
+  when a film **and** a replay (`if (!Film || !Replay)`). Pinned by
+  `detached_viewport_overlay_hook_precedes_player_hud`. **Still open:** drawing
+  a single identity into a supplied target, and keying camera state by identity
+  — the parts that touch the rasterizer.
+
 - **Per-viewport pointer projection landed; identity-addressed rendering open.**
   `clonk-frontend::viewport_projection` ports `C4Viewport`'s local-to-world
   conversion (`C4Viewport.cpp:112,181,192`):

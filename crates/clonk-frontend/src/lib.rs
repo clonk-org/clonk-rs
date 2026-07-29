@@ -56,6 +56,7 @@ pub mod startup_scensel;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod viewport;
+pub mod viewport_draw_order;
 pub mod viewport_projection;
 
 use clonk_engine::landscape::PixelGrid;
