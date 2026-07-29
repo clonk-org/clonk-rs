@@ -232,6 +232,16 @@ enum MenuStyle {
     Context,
 }
 
+/// `C4GUI::GUISound` effects the scroll bar raises
+/// (`C4GuiContainers.cpp:421,427`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollbarSound {
+    /// `GUISound("ArrowHit")` — raised when the held-arrow state *changes*.
+    ArrowHit,
+    /// `GUISound("Command")` — raised when a pin or track press starts a drag.
+    Command,
+}
+
 /// One `C4MenuItem` (C4Menu.h:76-132) as used by C4MainMenu: caption,
 /// symbol, command and info caption; all main-menu items are selectable and
 /// use `C4MN_Item_NoCount`.
@@ -723,6 +733,9 @@ pub struct IngameMenuState {
     /// Presentation-only `C4GUI::ScrollWindow::iScrollY`. Unlike the
     /// synchronized selection, this survives draws and wheel input locally.
     scroll_y: Cell<i32>,
+    /// Queued `C4GUI::GUISound` effects from scroll-bar interaction, drained
+    /// by the host (`C4GuiContainers.cpp:421,427`).
+    scrollbar_sounds: RefCell<Vec<ScrollbarSound>>,
     /// Arrow currently held on the overflow scroll bar. `C4GUI::ScrollBar`
     /// keeps `fTopDown`/`fBottomDown` and steps one unit per drawn frame
     /// (C4GuiContainers.cpp:398-427,446-457).
@@ -777,6 +790,7 @@ impl IngameMenuState {
             close_action,
             time_on_selection: 0,
             scroll_y: Cell::new(0),
+            scrollbar_sounds: RefCell::new(Vec::new()),
             scroll_arrow_held: Cell::new(None),
             scroll_selection: Cell::new(None),
             location: Cell::new(None),
@@ -1572,8 +1586,14 @@ impl IngameMenuState {
         gfx: &IngameMenuGraphics,
         point: GuiPoint,
     ) -> bool {
+        let previously_down = self.scroll_arrow_held.get().is_some();
         let Some(hit) = self.scrollbar_hit(area, font, gfx, point) else {
             self.scroll_arrow_held.set(None);
+            if previously_down {
+                self.scrollbar_sounds
+                    .borrow_mut()
+                    .push(ScrollbarSound::ArrowHit);
+            }
             return false;
         };
         match hit {
@@ -1596,7 +1616,11 @@ impl IngameMenuState {
 
     /// Releases a held arrow (`C4GuiContainers.cpp:443`).
     pub fn release_scrollbar(&self) {
-        self.scroll_arrow_held.set(None);
+        if self.scroll_arrow_held.replace(None).is_some() {
+            self.scrollbar_sounds
+                .borrow_mut()
+                .push(ScrollbarSound::ArrowHit);
+        }
     }
 
     /// Whether an arrow is currently held, which also selects the pressed
@@ -1778,12 +1802,13 @@ impl IngameMenuState {
         // (C4GuiContainers.cpp:309-470). A missing facet leaves it undrawn,
         // exactly as a null `C4Facet` does in C++.
         if let (Some(bar), Some(scroll)) = (layout.scrollbar, gfx.scroll.as_ref()) {
-            crate::scrollbar::draw_classic_scrollbar(
+            crate::scrollbar::draw_classic_scrollbar_held(
                 surface,
                 crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
                 scroll,
                 crate::scrollbar::pin_offset(bar.height as i32, layout.scroll_y, layout.max_scroll),
                 layout.max_scroll,
+                self.scroll_arrow_held.get(),
                 gamma,
             );
         }

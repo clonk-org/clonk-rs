@@ -425,7 +425,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
-- **Overflow menu scrollbars: shared model landed, per-menu wiring open.**
+- Closed 2026-07-29: **Overflow menu scrollbars.**
   `C4GUI::ScrollBar` had two independent implementations — the drawing half in
   `clonk-app-menus::game_over` (`draw_classic_scrollbar`, pinned by the
   evaluation-dialog tests) and the interaction half in `clonk-frontend`'s
@@ -444,8 +444,10 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   drawn frame exactly as `ScrollBar::DrawElement` does, and a track click
   **jumps** the thumb to the pointer rather than paging — C++ has no paging
   behaviour here at all (`C4GuiContainers.cpp:414-423`), which corrects an
-  earlier note on this work. **Still open:** the held arrow does not swap to its
-  pressed facet cell, and the `ArrowHit`/`Command` sounds are unwired. This replaces the earlier note about
+  earlier note on this work. A held arrow draws from its pressed
+  facet cell and the `ArrowHit`/`Command` sounds are raised on C++'s exact
+  transitions, so the `Mouse hit testing/scrollbars/tooltips` parity row is now
+  **Complete**. This replaces the earlier note about
   ticket's first criterion asks for — the **engine object menu is now wired**:
   its layout exposes the reserved column as a `scrollbar` rect (present only
   while the menu overflows, the same condition that reserves its width), and

@@ -139,14 +139,41 @@ pub fn draw_classic_scrollbar(
     max_scroll: i32,
     gamma: Option<&GammaRamp>,
 ) {
+    draw_classic_scrollbar_held(surface, rect, scroll, pin, max_scroll, None, gamma);
+}
+
+/// As [`draw_classic_scrollbar`], but a held arrow is drawn from its pressed
+/// cell: `fctScrollDTop` at column 16 row 0 and `fctScrollDBottom` at column 16
+/// row 32 (`C4Gui.cpp:209,214`), which `DrawElement` substitutes while the
+/// button is down (`C4GuiContainers.cpp:459-461`).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_classic_scrollbar_held(
+    surface: &mut Surface,
+    rect: IntRect,
+    scroll: &ImageData,
+    pin: i32,
+    max_scroll: i32,
+    held: Option<ScrollbarHit>,
+    gamma: Option<&GammaRamp>,
+) {
     if rect.h <= 0 {
         return;
     }
     let extent = SCROLLBAR_EXTENT as f32;
+    let top_column = if held == Some(ScrollbarHit::ScrollUp) {
+        extent
+    } else {
+        0.0
+    };
+    let bottom_column = if held == Some(ScrollbarHit::ScrollDown) {
+        extent
+    } else {
+        0.0
+    };
     draw_facet_stretch(
         surface,
         scroll,
-        (0.0, 0.0, extent, extent),
+        (top_column, 0.0, extent, extent),
         (rect.x as f32, rect.y as f32, extent, extent),
         gamma,
     );
@@ -168,7 +195,7 @@ pub fn draw_classic_scrollbar(
     draw_facet_stretch(
         surface,
         scroll,
-        (0.0, 2.0 * extent, extent, extent),
+        (bottom_column, 2.0 * extent, extent, extent),
         (
             rect.x as f32,
             (rect.y + rect.h - SCROLLBAR_EXTENT) as f32,
