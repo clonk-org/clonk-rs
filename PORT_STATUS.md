@@ -604,9 +604,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   screenshot pass still draws it while dropping borders, clipper and HUD. Fog of
   war is disabled before both, so neither is modulated. Cursors are skipped only
   when a film **and** a replay (`if (!Film || !Replay)`). Pinned by
-  `detached_viewport_overlay_hook_precedes_player_hud`. **Still open:** drawing
-  a single identity into a supplied target, and keying camera state by identity
-  — the parts that touch the rasterizer.
+  `detached_viewport_overlay_hook_precedes_player_hud`.
+  Addressing by identity landed with it. `ActiveViewportProjection` now carries
+  the concrete viewport's `identity`, and `viewport_projection_for_identity`
+  resolves it. That matters because both handles a caller previously had are
+  wrong for a detached window: `index` is the *rendered layout* order and moves
+  whenever the layout is recalculated, and `owner` repeats when two viewports
+  follow the same player — exactly what a console second window on an
+  already-viewed player produces. The camera store was already keyed by
+  `CameraKey::Physical`; what was missing was exposing that identity to the
+  caller. Pinned by
+  `detached_viewport_projection_is_addressable_by_physical_identity`, which
+  renders two same-owner viewports, swaps their layout order, and checks the
+  indices move while the identities do not. **Still open:** drawing a single
+  identity into a supplied target — the part that touches the rasterizer.
 
 - **Per-viewport pointer projection landed; identity-addressed rendering open.**
   `clonk-frontend::viewport_projection` ports `C4Viewport`'s local-to-world
