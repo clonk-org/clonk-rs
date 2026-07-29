@@ -7126,6 +7126,103 @@ mod tests {
     }
 
     #[test]
+    fn action_overlay_clamps_a_scaled_facet_to_the_source_sheet() {
+        // blit_face clamps the source rect to the sheet after applying the
+        // definition Scale and shrinks the destination by the same ratio
+        // (graphics_system.rs:7285-7299), mirroring the per-tile clamp C++
+        // performs in CStdDDraw::Blit (src/StdDDraw2.cpp:757-766).
+        // draw_action_graphic checked `source_within_image` on the UNSCALED
+        // facet and then scaled it, so a facet that fits the logical grid but
+        // overflows once multiplied by Scale reached the rasterizer unclamped.
+        //
+        // Facet (6,0,4,4) fits a 16x16 sheet; at Scale=200 it reads (12,0,8,8),
+        // which runs four pixels past the right edge. Only the four columns
+        // that exist may be drawn, into a correspondingly narrower destination.
+        let red = Color::opaque(200, 40, 40);
+        let green = Color::opaque(0, 200, 0);
+        let mut pixels = [red.r, red.g, red.b, red.a].repeat(16 * 16);
+        for y in 0..16 {
+            for x in 12..16 {
+                let base = (y * 16 + x) * 4;
+                pixels[base..base + 4].copy_from_slice(&[green.r, green.g, green.b, green.a]);
+            }
+        }
+        let sprite = DefinitionSprite {
+            graphics_scale: 2.0,
+            image: ImageData::new(16, 16, pixels),
+            actions: HashMap::from([(
+                "Wave".to_string(),
+                DefinitionActionGraphics {
+                    facet: Some(clonk_engine::DefinitionActionFacet {
+                        x: 6,
+                        y: 0,
+                        width: 4,
+                        height: 4,
+                        target_x: 0,
+                        target_y: 0,
+                    }),
+                    length: Some(1),
+                    ..DefinitionActionGraphics::default()
+                },
+            )]),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "HdClamp".to_string();
+        object.position = Vector2::new(8, 4);
+        object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
+            .with_definition(Some("HdClamp".to_string()))
+            .with_action(Some("Wave".to_string()))];
+
+        let background = Color::opaque(10, 10, 10);
+        let mut graphics = GraphicsSystem::new(
+            16,
+            8,
+            8,
+            "HD facet clamp",
+            test_font(),
+            Arc::new(HashMap::from([(sprite_map_key("HdClamp", None), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(background);
+        graphics.draw_object_overlays(
+            &object,
+            &[],
+            &[],
+            OWNER_NONE,
+            None,
+            8.0,
+            4.0,
+            1.0,
+            0.0,
+            None,
+            None,
+        );
+
+        // Half the eight scaled source columns exist, so the 4-wide facet is
+        // drawn two pixels wide from the same origin.
+        assert_eq!(
+            graphics.surface().get_pixel(6, 3),
+            Some(green),
+            "the in-bounds half of the scaled facet must still be drawn"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(9, 3),
+            Some(background),
+            "a scaled facet may not be drawn past the columns the sheet actually has"
+        );
+    }
+
+    #[test]
     fn parallax_action_overlay_ignores_viewport_scroll() {
         // C4Object::Draw resolves its output origin through TargetPos before
         // the face draw (src/C4Object.cpp:2271), and C4GraphicsOverlay::Draw

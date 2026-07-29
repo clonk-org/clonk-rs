@@ -5971,6 +5971,59 @@ Jump=40000junk
     }
 
     #[test]
+    fn hd_crew_pack_defcore_and_action_facets_parse() {
+        // Verbatim from a Scale=300 crew pack emitted by RenderClonkAddon, the
+        // shape every high-resolution definition takes. No shipped definition
+        // sets DefCore Scale, so this path had no end-to-end coverage: the
+        // parse of `Scale=` was pinned in isolation and the six-component
+        // `Facet=` was pinned only through synthetic rects.
+        //
+        // Two things have to hold together for such a pack to render. The
+        // sheet grows but every ActMap number stays LOGICAL, so `Facet=` must
+        // keep its unscaled values; and the fifth and sixth components are
+        // C4TargetRect's tx/ty (C4Def.h:158), which HD packs use for the
+        // headroom their taller cells need and which a four-component parse
+        // would silently drop.
+        let core = parse_def_core(
+            b"[DefCore]\nid=CLNK\nName=Clonk\nWidth=16\nHeight=20\n\
+              Offset=-8, -10\nPicture=280,242,32,40\nScale=300\n",
+        )
+        .expect("HD crew DefCore parses");
+
+        assert_eq!(core.graphics_scale, 300);
+        let shape = core
+            .shape
+            .expect("Width/Height give the definition a shape");
+        assert_eq!(
+            (shape.width, shape.height),
+            (16, 20),
+            "the collision box stays in game units at any Scale — scaling it \
+             would move the object, not just its picture"
+        );
+
+        let walk = parse_action_facet("0,0,16,22,0,-2").expect("HD walk facet parses");
+        assert_eq!(
+            (walk.x, walk.y, walk.width, walk.height),
+            (0, 0, 16, 22),
+            "the facet rect stays logical; only the sheet is scaled"
+        );
+        assert_eq!(
+            (walk.target_x, walk.target_y),
+            (0, -2),
+            "the fifth and sixth components are C4TargetRect tx/ty, not padding"
+        );
+
+        // The very next action on the same sheet uses a different cell size —
+        // which is why cell geometry can only come from the ActMap.
+        let scale_action = parse_action_facet("0,22,20,22,-2,-1").expect("HD scale facet parses");
+        assert_eq!(
+            (scale_action.width, scale_action.height),
+            (20, 22),
+            "actions on one sheet legitimately differ in cell size"
+        );
+    }
+
+    #[test]
     fn line_compiles_named_tokens_as_a_bitfield() {
         // C4Def::CompileFunc passes Line through mkBitfieldAdapt with the
         // C4D_Line_* table (C4Def.cpp:319-333). DrainPipe.c4d encodes the
