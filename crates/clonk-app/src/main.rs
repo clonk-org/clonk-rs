@@ -1580,6 +1580,9 @@ impl GameApp {
         let mut app = Self {
             engine,
             graphics,
+            taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress::new(
+                clonk_platform::taskbar_progress::NoTaskbarProgress,
+            ),
             sky: None,
             material_texture_images: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
@@ -6415,6 +6418,9 @@ impl GameApp {
                     // way C4MessageBoard drops the startup buffer once the
                     // round is up (src/C4MessageBoard.cpp:223-251).
                     clonk_logging::deactivate_loader_log();
+                    // Entering startup removes the taskbar indicator
+                    // (C4Application.cpp:422-426).
+                    self.taskbar_progress.enter_startup();
                     completion =
                         Some((state.scenario.clone(), result, state.prepared_go.is_some()));
                     break;

@@ -297,6 +297,12 @@ pub(crate) struct GameApp {
     /// scenario load. A missing screen is paired with `loader_error` and is
     /// always a logged typed boundary, never a generic pane.
     pub(crate) loader_screen: Option<LoaderScreen>,
+    /// Loader percentage mirrored to the platform taskbar
+    /// (`C4Game.cpp:4094-4106`; `StdWindow.cpp:183-196`). The backend is
+    /// injected because C++'s SDL and X11 windows implement it as no-ops.
+    pub(crate) taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress<
+        clonk_platform::taskbar_progress::NoTaskbarProgress,
+    >,
     pub(crate) loader_error: Option<String>,
     pub(crate) loader_render_config: Option<LoaderRenderConfig>,
     pub(crate) loader_render_error: Option<String>,

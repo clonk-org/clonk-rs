@@ -425,6 +425,27 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Windows taskbar loading progress is wired but has no COM backend.**
+  `clonk-platform::taskbar_progress` now carries C++'s logic: `LoaderTaskbarProgress`
+  applies `C4Game::SetInitProgress`'s strictly-increasing gate
+  (`C4Game.cpp:4094-4106`) and `CStdWindow::SetProgress`'s branch — 100 clears the
+  indicator, anything else sets `TBPF_INDETERMINATE` plus the value
+  (`StdWindow.cpp:183-196`) — and entering startup clears it and re-arms the gate
+  (`C4Application.cpp:422-426`). The app drives it from
+  `apply_scenario_loader_frame` and clears it when the loader consumes
+  `Finished`. Pinned by `windows_loader_progress_updates_and_clears_taskbar_state`
+  against an injected recording sink. **What is missing:** the only sink shipped
+  is `NoTaskbarProgress`, so nothing reaches a real taskbar on Windows yet — the
+  correct behaviour on the SDL/X11 targets C++ also leaves as no-ops, but not on
+  Windows. `windows-sys` 0.52 types `ITaskbarList3` as an opaque
+  `*mut c_void` with no vtable, so a real sink needs hand-written COM bindings
+  (`CoCreateInstance` with `CLSID_TaskbarList`, then vtable slots 9
+  `SetProgressValue` and 10 `SetProgressState` after `IUnknown`'s 3,
+  `ITaskbarList`'s 5 and `ITaskbarList2`'s 1) or a switch to the `windows`
+  crate. Those indices are from `ShObjIdl.h` and are **unverified** — calling the
+  wrong slot crashes, and this worker had no Windows machine to test on, so the
+  binding was deliberately not written blind.
+
 - Closed 2026-07-29: **Loading-screen GUI log capture.** The loader's log box
   showed only its own hard-coded phase labels: `ScenarioLoadingReporter` kept a
   private `VecDeque` that `report` replaced wholesale, so engine diagnostics

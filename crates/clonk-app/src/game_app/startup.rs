@@ -4974,6 +4974,10 @@ impl GameApp {
             return;
         };
         let (progress, log) = state.accept_loader_frame(progress, log);
+        // `C4Game::SetInitProgress` mirrors each increasing percentage to the
+        // window, which publishes it on the taskbar (C4Game.cpp:4102-4105).
+        self.taskbar_progress
+            .report(u32::try_from(progress).unwrap_or(0));
         if let Some(loader) = self.loader_screen.as_mut() {
             loader.update(LoaderUpdate::SetProgress(progress));
             if let Some(lines) = log {
