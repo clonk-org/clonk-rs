@@ -3242,18 +3242,21 @@ impl NetworkManager {
             .record_broadcast_datagram(protocol, broadcast_bytes);
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     /// Seed the bound local addresses the status overlay reads to decide which
     /// NetIO backs the message and data protocols.
     pub fn set_test_local_addresses(&self, addresses: impl IntoIterator<Item = NetworkAddress>) {
         self.netpuncher_state.lock().local_addresses = addresses.into_iter().collect();
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     /// `C4Network2IO::GenerateStatistics`'s interval boundary, exposed so a
     /// test can close one sample deterministically.
     pub fn generate_test_statistics(&self, now_ms: u64) {
         self.network_io_statistics.generate_statistics(now_ms);
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_test_runtime_client_states(
         &self,
         states: impl IntoIterator<Item = RuntimeNetworkClientState>,
