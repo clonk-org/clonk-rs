@@ -515,7 +515,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   editor surfaces themselves, and wiring the accepted bytes into the scenario
   save projection.
 
-- **Edit-cursor mode and context enablement landed; gestures open.**
+- **Edit-cursor mode, context enablement and gestures landed; overlays open.**
   `clonk-engine::developer_cursor` ports `C4EditCursor::ToggleMode`
   (`C4EditCursor.cpp:540-556`) — Play -> Edit -> Draw -> Play, gated on
   `EditingOK()`, which is just `Console.Editing` (`:683-692`); a refused toggle
@@ -525,11 +525,28 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   something, and **Properties is gated on mode alone** — enabled with no
   selection and without editing rights, disabled only in Play. Its caption also
   switches: outside Edit mode the entry reads `IDS_CNS_TOOLS`, not
-  `IDS_CNS_PROPERTIES` (`:605`). Pinned by
+  `IDS_CNS_PROPERTIES` (`:605`).
+  The pointer gestures are now ported too. `edit_target` mirrors
+  `C4EditCursor::Move`'s `do`/`while` (`:143-151`): the target is picked at
+  least once, Shift resumes after `Selection.Last` rather than from the top and
+  keeps advancing past anything already selected, and — easy to get wrong —
+  there is **no wrap-around**, so an all-selected stack ends at `nullptr`.
+  `edit_move` gives a held non-frame drag `MoveSelection(xoff, yoff)` while a
+  rubber-band drag keeps re-targeting, and `edit_tick_move` reproduces
+  `Execute`'s **zero-offset** `EMMO_Move` re-issued every tick while `Hold` is
+  set (`:65-69`) — a stationary held selection still emits control traffic.
+  `drop_target` ports `UpdateDropTarget` (`:653-670`): Ctrl plus a non-empty
+  selection, then the first object in `Game.Objects` order whose shape rectangle
+  contains the cursor, skipping deleted, contained and selected ones; the
+  rectangle is half-open (`Inside(.., 0, Wdt - 1)`), so a zero-area shape
+  contains nothing. `edit_release` emits `FrameSelection` before the
+  `EMMO_Enter` of `PutContents`, both optional and in that order (`:672-682`).
+  `EditCursor()` already reaches the hovered object —
+  `Engine::set_edit_cursor_target` feeds the host world context. Pinned by
   `console_edit_cursor_selects_cycles_drags_and_emits_cpp_ordered_controls`.
-  **Still open:** targeting iteration, drag/`EMMO_Move` cadence, Ctrl-hover drop
-  targets, and the overlay marks — all of which need the detached overlay hook
-  (M10-P4-L082) and the window host (M10-P4-L081).
+  **Still open:** the Property/Tools page handoff and the overlay marks, which
+  need the window host (M10-P4-L081) and the detached overlay hook
+  (M10-P4-L082).
 
 - **Per-viewport pointer projection landed; identity-addressed rendering open.**
   `clonk-frontend::viewport_projection` ports `C4Viewport`'s local-to-world
