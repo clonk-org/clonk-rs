@@ -425,26 +425,32 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
-- **`c4group` CLI exists but implements only the read commands.** The C++
-  product builds and installs a standalone `c4group` (`CMakeLists.txt:431-437`);
-  the port had no binary at all. `crates/clonk-c4group` now provides one. Its
-  argument parser is **complete** — the whole native matrix from
-  `c4group_ng.cpp:146-400` (`-a`/`-as`, `-m`, `-e`/`-et`, `-d`, `-s`, `-r`,
-  `-l`/`-v`, `-o`, `-p`, `-u`, `-x`, `-k`, `-g`, `-y`, `-z`, `-w`), the leading
-  options (:545-576, including `-x:<command>` reading from `argv+3` and `fQuiet`
-  defaulting to true), multi-group dispatch, and the "argument beginning with
-  `-` ends the previous command's arguments" rule that makes `-a f1 f2 -e g`
-  parse. Execution covers the commands the group library already supports:
-  the default listing (:120-124), `-l`/`-v` with wildcard filtering (:270-284),
-  `-k` (:346-348), and `-e`/`-et`. **Every other command prints
-  `is not implemented yet` and exits non-zero** rather than silently succeeding.
-  Pinned by six parser tests plus the end-to-end
-  `c4group_cli_round_trips_native_command_matrix` against a packed fixture.
-  **Deliberately NOT added to packaging/install rules** (the ticket's last
-  criterion): shipping a `c4group` that silently lacks pack/unpack/add/delete
-  would be worse than shipping none. Remaining work is the mutating commands
-  over `MutableGroup`, the sort list, update generation/application, Windows
-  shell registration (`-i`/`-u`), prompt/execute-at-end, and then packaging.
+- Closed 2026-07-29: **`c4group` command-line utility.** The C++ product builds
+  and installs a standalone `c4group` (`CMakeLists.txt:431-437,749-750`); the
+  port had no binary. `crates/clonk-c4group` provides one, and it is installed
+  by `xtask` alongside the runtime. The argument parser is complete — the whole
+  matrix from `c4group_ng.cpp:146-400`, the leading options (:545-576, including
+  `-x:<command>` reading from `argv+3` and `fQuiet` defaulting to true),
+  multi-group dispatch, and the rule that a `-` argument ends the previous
+  command's argument list. Implemented: the default listing (:120-124),
+  `-l`/`-v` with wildcard filtering (:270-284), `-k` (:346-348), `-e`/`-et`,
+  `-a`/`-as`, `-m` (which deletes its sources only after the rewrite succeeds,
+  :181-200), `-d`, `-r`, `-o`, and in-place `-p`/`-u`, which replace the path
+  with the other representation as C++ does (:289-326).
+  **Mutation strategy:** this port's writer builds groups rather than opening
+  them for mutation, so a mutating command rebuilds the group into a
+  `MutableGroup` and repacks. The rebuild preserves each entry's timestamp and
+  executable bit and re-adds nested groups *already packed* with their stored
+  CRC, so children are never unpacked and repacked;
+  `untouched_rebuild_round_trips_byte_for_byte` pins that a no-op rebuild
+  reproduces the file byte for byte, without which every mutating command would
+  silently rewrite unrelated entries. Pinned by six parser tests, three rebuild
+  tests, and the end-to-end `c4group_cli_round_trips_native_command_matrix`.
+  **Still unimplemented, and each reports itself and exits non-zero rather than
+  silently succeeding:** `-s` (sort list), `-x` (explode), `-g`/`-y` (update
+  generation and application), `-z` (internal structures), `-w` (wait), the
+  `-i`/`-u` Windows shell registration, and the `-p`/`-x:` end-of-run
+  prompt/execute options.
 
 - Closed 2026-07-29: **Live `UserPath` re-expansion.** `AppPaths` resolved
   `General.UserPath` once at discovery and cached everything derived from it,

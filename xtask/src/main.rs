@@ -46,8 +46,10 @@ const MACOS_UNIVERSAL_TRIPLE: &str = "universal-apple-darwin";
 /// executables.
 const MACOS_UNIVERSAL_ARCHES: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
-/// The executables a release ships, in every layout.
-const RUNTIME_BINARIES: [&str; 2] = ["clonk-game", "clonk-app"];
+/// The executables a release ships, in every layout. `c4group` is the classic
+/// standalone group tool, installed alongside the runtime as C++ does
+/// (`CMakeLists.txt:431-437,749-750`).
+const RUNTIME_BINARIES: [&str; 3] = ["clonk-game", "clonk-app", "c4group"];
 
 fn main() -> Result<()> {
     clonk_logging::init();

@@ -8,6 +8,7 @@
 //! silently ignored — see the `c4group` row in `PORT_STATUS.md`.
 
 mod cli;
+mod edit;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -60,31 +61,46 @@ fn run_group(path: &str, line: &CommandLine) -> bool {
     }
     // Collected before testing: every command runs, as C++ walks the whole
     // list regardless of an earlier failure. `all` alone would short-circuit.
+    let mut group = Some(group);
     let results: Vec<bool> = line
         .commands
         .iter()
-        .map(|command| run_command(&group, path, command))
+        .map(|command| run_command(&mut group, path, command))
         .collect();
     results.into_iter().all(|succeeded| succeeded)
 }
 
-fn run_command(group: &clonk_resources::Group, path: &str, command: &Command) -> bool {
+/// Runs one command. `group` is taken by `Option` because a mutating command
+/// must close the read handle before repacking over the same path.
+fn run_command(group: &mut Option<clonk_resources::Group>, path: &str, command: &Command) -> bool {
+    let Some(open) = group.as_ref() else {
+        eprintln!("Error: {path}: group is no longer open");
+        return false;
+    };
     match command {
-        Command::List { wildcards } => list_entries(group, path, wildcards),
+        Command::List { wildcards } => list_entries(open, path, wildcards),
         Command::PrintMaker => {
             // `std::println("{}", hGroup.GetMaker())` (:346-348).
-            println!("{}", group.maker().unwrap_or_default());
+            println!("{}", open.maker().unwrap_or_default());
             true
         }
         Command::Extract { files } => {
             // Every named file is extracted even if an earlier one failed.
             let results: Vec<bool> = files
                 .iter()
-                .map(|file| extract_entry(group, file, Path::new(file)))
+                .map(|file| extract_entry(open, file, Path::new(file)))
                 .collect();
             results.into_iter().all(|succeeded| succeeded)
         }
-        Command::ExtractTo { file, target } => extract_entry(group, file, Path::new(target)),
+        Command::ExtractTo { file, target } => extract_entry(open, file, Path::new(target)),
+        Command::Unpack => unpack(group, path),
+        Command::Pack => pack(group, path),
+        Command::Add { .. }
+        | Command::AddAs { .. }
+        | Command::Move { .. }
+        | Command::Delete { .. }
+        | Command::Rename { .. }
+        | Command::MakeOriginal => mutate(group, path, command),
         Command::Unknown { argument } => {
             eprintln!("Unknown command {argument}");
             false
@@ -173,6 +189,243 @@ fn matches_wildcard(pattern: &str, name: &str) -> bool {
         }
     }
     pattern[p..].iter().all(|character| *character == '*')
+}
+
+/// Applies a mutating command by rebuilding the group and repacking it
+/// (see `edit`). The read handle is dropped first so the write cannot race it.
+fn mutate(group: &mut Option<clonk_resources::Group>, path: &str, command: &Command) -> bool {
+    let Some(open) = group.as_ref() else {
+        return false;
+    };
+    let filename = Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned());
+    let mut mutable = match edit::to_mutable(open, &filename) {
+        Ok(mutable) => mutable,
+        Err(error) => {
+            eprintln!("Error: {path}: {error}");
+            return false;
+        }
+    };
+    // The rebuild copied everything; release the reader before rewriting.
+    *group = None;
+
+    let mut moved_sources: Vec<&String> = Vec::new();
+    let applied = match command {
+        Command::Add { files } => add_files(&mut mutable, files, None),
+        Command::AddAs { file, stored_as } => {
+            add_files(&mut mutable, std::slice::from_ref(file), Some(stored_as))
+        }
+        Command::Move { files } => {
+            moved_sources = files.iter().collect();
+            add_files(&mut mutable, files, None)
+        }
+        Command::Delete { files } => {
+            let removed: Vec<bool> = files
+                .iter()
+                .map(|file| {
+                    mutable.remove_entry(file) || {
+                        eprintln!("Error: {file}: no such entry");
+                        false
+                    }
+                })
+                .collect();
+            removed.into_iter().all(|one| one)
+        }
+        Command::Rename { from, to } => {
+            mutable.rename_entry(from, to) || {
+                eprintln!("Error: {from}: no such entry");
+                false
+            }
+        }
+        Command::MakeOriginal => {
+            mutable.make_original(true);
+            true
+        }
+        _ => false,
+    };
+
+    if let Err(error) = edit::write_back(&mutable, Path::new(path)) {
+        eprintln!("Error: {path}: {error}");
+        return false;
+    }
+    // `-m` deletes the sources only once the group has been rewritten (:181-200).
+    if applied {
+        for source in moved_sources {
+            if let Err(error) = std::fs::remove_file(source) {
+                eprintln!("Error: {source}: {error}");
+            }
+        }
+    }
+    // Reopen so later commands in the same run see the new contents.
+    match clonk_resources::Group::open(Path::new(path)) {
+        Ok(reopened) => *group = Some(reopened),
+        Err(error) => eprintln!("Error: {path}: {error}"),
+    }
+    applied
+}
+
+/// Reads each source from disk and stores it, optionally under another name.
+fn add_files(
+    mutable: &mut clonk_resources::group_writer::MutableGroup,
+    files: &[String],
+    stored_as: Option<&String>,
+) -> bool {
+    let results: Vec<bool> = files
+        .iter()
+        .map(|file| {
+            let source = Path::new(file);
+            let name = stored_as.map(String::as_str).unwrap_or_else(|| {
+                source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(file)
+            });
+            match std::fs::read(source) {
+                Ok(bytes) => {
+                    // Replace an existing entry rather than duplicating it.
+                    mutable.remove_entry(name);
+                    match mutable.add_file_bytes(name, bytes) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            eprintln!("Error: {file}: {error}");
+                            false
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Error: {file}: {error}");
+                    false
+                }
+            }
+        })
+        .collect();
+    results.into_iter().all(|added| added)
+}
+
+/// `-p` — pack an unpacked group in place (`c4group_ng.cpp:289-307`). The
+/// directory is replaced by a packed file of the same name.
+fn pack(group: &mut Option<clonk_resources::Group>, path: &str) -> bool {
+    let Some(open) = group.as_ref() else {
+        return false;
+    };
+    let target = Path::new(path);
+    if target.is_file() {
+        // Already packed: C++ repacks, which for this port is the same rebuild.
+        return mutate_noop(group, path);
+    }
+    let filename = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned());
+    let mutable = match edit::to_mutable(open, &filename) {
+        Ok(mutable) => mutable,
+        Err(error) => {
+            eprintln!("Error: {path}: {error}");
+            return false;
+        }
+    };
+    *group = None;
+    let packed = match mutable.pack() {
+        Ok(packed) => packed,
+        Err(error) => {
+            eprintln!("Error: {path}: {error}");
+            return false;
+        }
+    };
+    // Replace the directory with the packed file of the same name.
+    let staged = target.with_extension("c4group-packing");
+    if let Err(error) = std::fs::write(&staged, packed) {
+        eprintln!("Error: {}: {error}", staged.display());
+        return false;
+    }
+    if let Err(error) = std::fs::remove_dir_all(target) {
+        eprintln!("Error: {path}: {error}");
+        let _ = std::fs::remove_file(&staged);
+        return false;
+    }
+    if let Err(error) = std::fs::rename(&staged, target) {
+        eprintln!("Error: {path}: {error}");
+        return false;
+    }
+    reopen(group, path);
+    true
+}
+
+/// A repack that changes nothing, used when `-p` targets an already-packed
+/// group. The rebuild is byte-identical (see `edit`).
+fn mutate_noop(group: &mut Option<clonk_resources::Group>, path: &str) -> bool {
+    mutate(group, path, &Command::Delete { files: Vec::new() })
+}
+
+fn reopen(group: &mut Option<clonk_resources::Group>, path: &str) {
+    match clonk_resources::Group::open(Path::new(path)) {
+        Ok(reopened) => *group = Some(reopened),
+        Err(error) => eprintln!("Error: {path}: {error}"),
+    }
+}
+
+/// `-u` — unpack in place: the group file is replaced by a directory of the
+/// same name holding its entries (`c4group_ng.cpp:308-326`).
+fn unpack(group: &mut Option<clonk_resources::Group>, path: &str) -> bool {
+    let Some(open) = group.as_ref() else {
+        return false;
+    };
+    let target = Path::new(path);
+    if target.is_dir() {
+        // Already unpacked; nothing to do, as C++'s UnpackDirectory reports.
+        return true;
+    }
+    let staged = target.with_extension("c4group-unpacking");
+    if let Err(error) = std::fs::create_dir_all(&staged) {
+        eprintln!("Error: {}: {error}", staged.display());
+        return false;
+    }
+    let entries = match open.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("Error: {path}: {error}");
+            return false;
+        }
+    };
+    let results: Vec<bool> = entries
+        .iter()
+        .map(|entry| {
+            let name = String::from_utf8_lossy(&entry.name_bytes).into_owned();
+            match open.read_entry_bytes_exact(entry) {
+                Ok(bytes) => match std::fs::write(staged.join(&name), bytes) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        eprintln!("Error: {name}: {error}");
+                        false
+                    }
+                },
+                Err(error) => {
+                    eprintln!("Error: {name}: {error}");
+                    false
+                }
+            }
+        })
+        .collect();
+    let written = results.into_iter().all(|one| one);
+    if !written {
+        let _ = std::fs::remove_dir_all(&staged);
+        return false;
+    }
+    // Release the reader before replacing the file it was opened from.
+    *group = None;
+    if let Err(error) = std::fs::remove_file(target) {
+        eprintln!("Error: {path}: {error}");
+        let _ = std::fs::remove_dir_all(&staged);
+        return false;
+    }
+    if let Err(error) = std::fs::rename(&staged, target) {
+        eprintln!("Error: {path}: {error}");
+        return false;
+    }
+    reopen(group, path);
+    true
 }
 
 fn command_name(command: &Command) -> &'static str {

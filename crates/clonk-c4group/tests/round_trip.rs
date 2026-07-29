@@ -74,8 +74,69 @@ fn c4group_cli_round_trips_native_command_matrix() {
     assert!(!incomplete.status.success());
     assert!(String::from_utf8_lossy(&incomplete.stderr).contains("Missing argument for add as"));
 
+    // `-a` adds a file from disk; `-as` stores it under another name (:148-158).
+    let source = directory.path().join("Gamma.txt");
+    std::fs::write(&source, b"gamma").expect("write source");
+    let source = source.to_str().expect("utf-8 source");
+    let added = c4group(&[group, "-a", source]);
+    assert!(
+        added.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let renamed = c4group(&[group, "-as", source, "Delta.txt"]);
+    assert!(renamed.status.success());
+    let listed = String::from_utf8_lossy(&c4group(&[group]).stdout).into_owned();
+    assert!(listed.contains("Gamma.txt"), "listing was {listed:?}");
+    assert!(listed.contains("Delta.txt"), "listing was {listed:?}");
+
+    // `-r` renames in place and `-d` deletes (:228-269).
+    assert!(c4group(&[group, "-r", "Gamma.txt", "Epsilon.txt"])
+        .status
+        .success());
+    assert!(c4group(&[group, "-d", "Delta.txt"]).status.success());
+    let listed = String::from_utf8_lossy(&c4group(&[group]).stdout).into_owned();
+    assert!(listed.contains("Epsilon.txt"), "listing was {listed:?}");
+    assert!(!listed.contains("Delta.txt"), "listing was {listed:?}");
+    // The untouched entries survived every rewrite.
+    assert!(listed.contains("Alpha.txt"));
+    assert!(listed.contains("Beta.png"));
+
+    // Deleting an absent entry reports and fails rather than passing silently.
+    let absent = c4group(&[group, "-d", "NotThere.txt"]);
+    assert!(!absent.status.success());
+    assert!(String::from_utf8_lossy(&absent.stderr).contains("no such entry"));
+
+    // `-m` adds and then removes the source file (:181-200).
+    let moved = directory.path().join("Moved.txt");
+    std::fs::write(&moved, b"moved").expect("write moved");
+    assert!(c4group(&[group, "-m", moved.to_str().expect("utf-8")])
+        .status
+        .success());
+    assert!(!moved.exists(), "-m must delete the source");
+
+    // `-u` then `-p` round-trips in place: the file becomes a directory of the
+    // same name and back again (:289-326).
+    assert!(c4group(&[group, "-u"]).status.success());
+    let path = Path::new(group);
+    assert!(path.is_dir(), "-u must replace the file with a directory");
+    assert_eq!(
+        std::fs::read(path.join("Alpha.txt")).expect("unpacked Alpha"),
+        b"alpha"
+    );
+    let repacked = c4group(&[group, "-p"]);
+    assert!(
+        repacked.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&repacked.stderr)
+    );
+    assert!(path.is_file(), "-p must replace the directory with a file");
+    let listed = String::from_utf8_lossy(&c4group(&[group]).stdout).into_owned();
+    assert!(listed.contains("Alpha.txt"), "after repack: {listed:?}");
+    assert!(listed.contains("Epsilon.txt"), "after repack: {listed:?}");
+
     // An unimplemented command says so and fails rather than silently passing.
-    let unsupported = c4group(&[group, "-p"]);
+    let unsupported = c4group(&[group, "-g", "a", "b", "Title"]);
     assert!(!unsupported.status.success());
     assert!(String::from_utf8_lossy(&unsupported.stderr).contains("not implemented"));
 
