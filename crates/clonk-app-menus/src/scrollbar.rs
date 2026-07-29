@@ -16,6 +16,12 @@ use clonk_frontend::classic_gui::IntRect;
 /// `C4GUI_ScrollArrowHgt` — the facet cell size, and the arrow button extent.
 pub const SCROLLBAR_EXTENT: i32 = 16;
 
+/// Builds a bar rectangle from plain coordinates, so callers holding a
+/// different rectangle type need not depend on `IntRect`'s shape.
+pub fn bar_rect(x: i32, y: i32, w: i32, h: i32) -> IntRect {
+    IntRect { x, y, w, h }
+}
+
 /// Which part of the bar a pointer landed on (`C4GuiContainers.cpp:477-623`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScrollbarHit {

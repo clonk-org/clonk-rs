@@ -438,7 +438,16 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   arrow/shaft boundaries, out-of-range clamping, the pin/scroll round trip, and
   a bar too short for two full arrows. **Still open:** wiring it into the
   Normal, Context, Info, Dialog and engine object menus, which is what the
-  ticket's first criterion asks for. Two hazards recorded on the ticket: the
+  ticket's first criterion asks for — the **engine object menu is now wired**:
+  its layout exposes the reserved column as a `scrollbar` rect (present only
+  while the menu overflows, the same condition that reserves its width), and
+  `engine_menu_scrollbar_hit`/`engine_menu_scroll_from_pointer` route pointer
+  input through the shared model. Pinned by
+  `engine_menu_overflow_scrollbar_routes_arrows_track_and_thumb`. Note that
+  menu's bar is only two 16px rows tall, so the two arrows consume it entirely
+  and the pin has no travel — `rect.h - 3 * extent` is negative — which is what
+  C++ does for a bar that short; the shared model's own test covers a bar with
+  travel. Two hazards recorded on the ticket: the
   in-game menu render is cached and version-gated, so a newly interactive
   element must bump `menu_render_version` or the frame goes stale; and
   `object_menu.rs` already reserves a scrollbar column, so check the reserved

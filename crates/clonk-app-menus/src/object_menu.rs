@@ -48,7 +48,7 @@ const CLASSIC_COMMAND_HEIGHT: i32 = 16;
 pub fn classic_context_item_height(font_line_height: i32) -> i32 {
     font_line_height.max(CLASSIC_COMMAND_HEIGHT).max(1)
 }
-const CLASSIC_SCROLLBAR_WIDTH: i32 = 16;
+use crate::scrollbar::SCROLLBAR_EXTENT as CLASSIC_SCROLLBAR_WIDTH;
 const CLASSIC_TITLE_HEIGHT: i32 = 23;
 const CLASSIC_INFO_DEFAULT_WIDTH: i32 = 270;
 const CLASSIC_PICTURE_SIZE: i32 = 64;
@@ -202,6 +202,10 @@ pub struct EngineScriptMenuLayout {
     /// Persistent logical-pixel `C4GUI::ScrollWindow::iScrollY`.
     pub scroll_y: i32,
     pub max_scroll_y: i32,
+    /// The overflow scrollbar's column, present only while the menu overflows
+    /// — `C4GUI::ScrollWindow` shows the bar on the same condition that
+    /// reserves its width (`C4GuiContainers.cpp:477-480`).
+    pub scrollbar: Option<Rect>,
     pub first_index: usize,
     /// Number of item slots which can intersect the client. A partial first
     /// row exposes one additional row at the bottom.
@@ -1885,9 +1889,47 @@ fn engine_script_menu_layout_impl(
         item_height,
         scroll_y,
         max_scroll_y,
+        scrollbar: (scrollbar_width > 0).then(|| {
+            Rect::new(
+                client_x + columns * item_width,
+                client_y,
+                scrollbar_width as u32,
+                (lines * item_height) as u32,
+            )
+        }),
         first_index,
         visible,
     }
+}
+
+/// Which part of the engine object menu's overflow scrollbar `point` hits, if
+/// any. Routes through the shared `C4GUI::ScrollBar` model so the object menu,
+/// the evaluation dialog and the startup chat agree
+/// (`C4GuiContainers.cpp:477-623`).
+pub fn engine_menu_scrollbar_hit(
+    layout: &EngineScriptMenuLayout,
+    point: (i32, i32),
+) -> Option<crate::scrollbar::ScrollbarHit> {
+    let bar = layout.scrollbar?;
+    crate::scrollbar::hit(
+        crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
+        point,
+        layout.scroll_y,
+        layout.max_scroll_y,
+    )
+}
+
+/// The scroll a pin drag to `pointer_y` selects in the engine object menu.
+pub fn engine_menu_scroll_from_pointer(
+    layout: &EngineScriptMenuLayout,
+    pointer_y: i32,
+) -> Option<i32> {
+    let bar = layout.scrollbar?;
+    Some(crate::scrollbar::scroll_from_pointer(
+        crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
+        pointer_y,
+        layout.max_scroll_y,
+    ))
 }
 
 /// Draws a script-created `C4ObjectMenu` from the engine's live runtime
@@ -4489,6 +4531,88 @@ mod tests {
             }
             other => panic!("unexpected action: {:?}", other),
         }
+    }
+
+    // C4GuiContainers.cpp:477-623 — an overflowing engine menu shows the bar in
+    // the column its layout already reserves, and routes pointer input through
+    // the shared C4GUI::ScrollBar model.
+    #[test]
+    fn engine_menu_overflow_scrollbar_routes_arrows_track_and_thumb() {
+        use crate::scrollbar::ScrollbarHit;
+
+        let fallback = clonk_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let images = HashMap::new();
+        let mut menu = engine_script_menu_fixture(1, 12);
+        menu.columns = 3;
+        // Two visible rows of four leaves the rest scrollable.
+        let layout = engine_script_menu_layout_with_presentation(
+            Rect::new(0, 0, 640, 480),
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((0, 0)),
+            0,
+            false,
+            Some(2),
+        );
+
+        let bar = layout
+            .scrollbar
+            .expect("an overflowing menu reserves the bar");
+        assert_eq!(
+            bar.width as i32,
+            crate::scrollbar::SCROLLBAR_EXTENT,
+            "the drawn bar must fill the reserved column"
+        );
+        assert_eq!(
+            bar.x,
+            layout.client_x + layout.columns * layout.item_width,
+            "the bar sits in the column the layout reserved, not over the items"
+        );
+        assert!(
+            layout.max_scroll_y > 0,
+            "the fixture must actually overflow"
+        );
+
+        let centre = bar.x + bar.width as i32 / 2;
+        let top = bar.y;
+        let bottom = bar.y + bar.height as i32 - 1;
+        assert_eq!(
+            engine_menu_scrollbar_hit(&layout, (centre, top)),
+            Some(ScrollbarHit::ScrollUp)
+        );
+        assert_eq!(
+            engine_menu_scrollbar_hit(&layout, (centre, bottom)),
+            Some(ScrollbarHit::ScrollDown)
+        );
+        // Outside the bar the menu items keep the pointer.
+        assert_eq!(engine_menu_scrollbar_hit(&layout, (bar.x - 1, top)), None);
+
+        // This menu's bar is two 16px rows tall, so the two arrows consume it
+        // entirely and the pin has nowhere to travel — `rect.h - 3 * extent` is
+        // negative. C++ behaves the same way for a bar this short, so a drag
+        // selects nothing; the shared model's own test covers a bar with travel.
+        assert_eq!(crate::scrollbar::pin_travel(bar.height as i32), 0);
+        assert_eq!(engine_menu_scroll_from_pointer(&layout, bottom), Some(0));
+        assert_eq!(engine_menu_scroll_from_pointer(&layout, top), Some(0));
+
+        // A menu that fits shows no bar at all and swallows no input.
+        let fits = engine_script_menu_layout_with_presentation(
+            Rect::new(0, 0, 640, 480),
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((0, 0)),
+            0,
+            false,
+            None,
+        );
+        assert_eq!(fits.max_scroll_y, 0);
+        assert!(fits.scrollbar.is_none());
+        assert_eq!(engine_menu_scrollbar_hit(&fits, (centre, top)), None);
     }
 
     // `C4Menu::SetSize` assigns Lines and reruns only `InitSize`, which applies
@@ -7434,6 +7558,7 @@ mod tests {
             item_height: 35,
             scroll_y: 0,
             max_scroll_y: 0,
+            scrollbar: None,
             first_index: 0,
             visible: 5,
         };
