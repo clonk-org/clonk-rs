@@ -6945,3 +6945,85 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
         "dispatching the bound action must not change the display mode"
     );
 }
+
+/// On the SDL backend `C4KeyCodeEx::String2KeyCode` delegates every physical
+/// key name to `SDL_GetScancodeFromName` and accepts any non-UNKNOWN result
+/// (C4KeyboardInput.cpp:315-330), so a migrated `KeyConfig.txt` may legitimately
+/// name media, browser, modifier or international keys. Only names SDL itself
+/// rejects may disable a binding.
+#[test]
+fn keyconfig_accepts_extended_sdl_scancode_names() {
+    let config = parse_runtime_key_config(
+        b"[Keys]\n          MusicToggle=Mute\n          SoundToggle=VolumeDown\n          ToggleChat=NonUSBackslash\n          Screenshot=AC Home\n          ScreenshotEx=Left GUI\n          ScoreboardToggle=International3\n          ToggleShowHelp=Paste\n          NetClientListDlgToggle=Calculator\n          MsgBoardScrollUp=AudioNext\n          MsgBoardScrollDown=NotAnSdlScancodeName\n",
+    )
+    .expect("extended scancode names parse");
+
+    let physical = |name: &str| {
+        config
+            .override_for(name)
+            .and_then(|chords| chords.first())
+            .map(|chord| chord.physical)
+            .unwrap_or_else(|| panic!("{name} has no override"))
+    };
+    // Media and volume keys.
+    assert_eq!(
+        physical("MusicToggle"),
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::Mute)
+    );
+    assert_eq!(
+        physical("SoundToggle"),
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::VolumeDown)
+    );
+    assert_eq!(
+        physical("MsgBoardScrollUp"),
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::NextTrack)
+    );
+    // The extra ISO key next to left Shift, which winit reports as OEM102.
+    assert_eq!(
+        physical("ToggleChat"),
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::OEM102)
+    );
+    // Application-control, modifier, international and editing keys.
+    assert_eq!(
+        physical("Screenshot"),
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::WebHome)
+    );
+    assert_eq!(
+        physical("ScreenshotEx"),
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::LWin)
+    );
+    assert_eq!(
+        physical("ScoreboardToggle"),
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::Yen)
+    );
+    assert_eq!(
+        physical("ToggleShowHelp"),
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::Paste)
+    );
+    assert_eq!(
+        physical("NetClientListDlgToggle"),
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::Calculator)
+    );
+    // A name SDL does not know keeps the disabled outcome.
+    assert_eq!(
+        physical("MsgBoardScrollDown"),
+        RuntimePhysicalKey::Disabled
+    );
+
+    // A bound extended key dispatches like any other physical key.
+    let mut app = new_classic_running_sandbox_app();
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(
+            parse_runtime_key_config(b"[Keys]\nToggleShowHelp=Mute\n")
+                .expect("parse the Mute help binding"),
+        ))
+        .expect("install the Mute binding");
+    assert!(!app.runtime_help_visible);
+    app.handle_key(VirtualKeyCode::Mute, ElementState::Pressed)
+        .expect("an extended-scancode binding dispatches");
+    assert!(
+        app.runtime_help_visible,
+        "a KeyConfig action bound to an extended SDL scancode must execute"
+    );
+}

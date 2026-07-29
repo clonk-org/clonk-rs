@@ -3975,6 +3975,74 @@ fn parse_runtime_help_language_table_with_charset(
     Ok(table)
 }
 
+/// The rest of SDL's physical scancode-name space, spelled exactly as
+/// `SDL_GetScancodeName` returns it. `String2KeyCode` accepts every non-UNKNOWN
+/// result (C4KeyboardInput.cpp:315-330), so a migrated `KeyConfig.txt` may name
+/// any of these; the port resolves the ones this event backend can deliver.
+/// Names SDL knows but winit cannot report stay unmapped and disable the
+/// binding, which is the same dead-binding outcome as `SDL_SCANCODE_UNKNOWN`.
+const EXTENDED_SDL_SCANCODE_NAMES: &[(&str, VirtualKeyCode)] = &[
+    // Modifiers (SDL_SCANCODE_LCTRL..RGUI).
+    ("Left Ctrl", VirtualKeyCode::LControl),
+    ("Right Ctrl", VirtualKeyCode::RControl),
+    ("Left Shift", VirtualKeyCode::LShift),
+    ("Right Shift", VirtualKeyCode::RShift),
+    ("Left Alt", VirtualKeyCode::LAlt),
+    ("Right Alt", VirtualKeyCode::RAlt),
+    ("Left GUI", VirtualKeyCode::LWin),
+    ("Right GUI", VirtualKeyCode::RWin),
+    // Media and volume keys.
+    ("Mute", VirtualKeyCode::Mute),
+    ("AudioMute", VirtualKeyCode::Mute),
+    ("VolumeUp", VirtualKeyCode::VolumeUp),
+    ("VolumeDown", VirtualKeyCode::VolumeDown),
+    ("AudioNext", VirtualKeyCode::NextTrack),
+    ("AudioPrev", VirtualKeyCode::PrevTrack),
+    ("AudioStop", VirtualKeyCode::MediaStop),
+    ("AudioPlay", VirtualKeyCode::PlayPause),
+    ("MediaSelect", VirtualKeyCode::MediaSelect),
+    // Application launch keys.
+    ("Mail", VirtualKeyCode::Mail),
+    ("Computer", VirtualKeyCode::MyComputer),
+    ("Calculator", VirtualKeyCode::Calculator),
+    ("Sleep", VirtualKeyCode::Sleep),
+    ("Power", VirtualKeyCode::Power),
+    ("Stop", VirtualKeyCode::Stop),
+    // Application-control (browser) keys.
+    ("AC Search", VirtualKeyCode::WebSearch),
+    ("AC Home", VirtualKeyCode::WebHome),
+    ("AC Back", VirtualKeyCode::WebBack),
+    ("AC Forward", VirtualKeyCode::WebForward),
+    ("AC Stop", VirtualKeyCode::WebStop),
+    ("AC Refresh", VirtualKeyCode::WebRefresh),
+    ("AC Bookmarks", VirtualKeyCode::WebFavorites),
+    // Editing keys SDL names separately from the Ctrl chords.
+    ("Cut", VirtualKeyCode::Cut),
+    ("Copy", VirtualKeyCode::Copy),
+    ("Paste", VirtualKeyCode::Paste),
+    // International and non-US keys. SDL names the extra ISO key next to the
+    // left Shift `NonUSBackslash`; winit reports it as OEM102. The JIS keys
+    // carry SDL's positional `International*`/`Lang*` names.
+    ("NonUSBackslash", VirtualKeyCode::OEM102),
+    ("International1", VirtualKeyCode::AbntC1),
+    ("International2", VirtualKeyCode::Kana),
+    ("International3", VirtualKeyCode::Yen),
+    ("International4", VirtualKeyCode::Convert),
+    ("International5", VirtualKeyCode::NoConvert),
+    ("Lang1", VirtualKeyCode::Kana),
+    ("Lang2", VirtualKeyCode::Kanji),
+    // Keypad names outside the arithmetic set handled above.
+    ("Keypad 00", VirtualKeyCode::Numpad0),
+    ("Keypad Equals", VirtualKeyCode::NumpadEquals),
+];
+
+fn extended_sdl_scancode_name(name: &str) -> Option<VirtualKeyCode> {
+    EXTENDED_SDL_SCANCODE_NAMES
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, key)| *key)
+}
+
 fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     let name = name.trim();
     if name.len() == 1 {
@@ -4162,6 +4230,9 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     };
     if named_key.is_some() {
         return named_key;
+    }
+    if let Some(key) = extended_sdl_scancode_name(name) {
+        return Some(key);
     }
 
     if let Some(number) = lower_name
