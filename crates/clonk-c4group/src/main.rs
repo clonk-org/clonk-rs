@@ -9,6 +9,8 @@
 
 mod cli;
 mod edit;
+#[allow(dead_code)]
+mod make_update;
 // The `-g`/`-y` update commands are not wired yet (M10-P4-L087): this is the
 // manifest half, landed with its regression test because it documents a proven
 // C++ defect that would otherwise be reproduced by the next implementer.

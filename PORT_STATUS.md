@@ -758,7 +758,16 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   Pinned by
   `update_entry_manifest_round_trips_and_tolerates_cpp_uninitialised_names`,
   which also asserts that parsing those records *literally* would delete the
-  whole group — the observed C++ behaviour. Caveat: reproduced on one
+  whole group — the observed C++ behaviour.
+  `clonk-c4group::make_update` ports `MkUp`'s diff, which decides **two**
+  separate things that are easy to conflate. Which entries to *copy*: changed
+  when `EntrySize` **or** `EntryCRC32` differs — size-then-CRC, never a byte
+  compare — or when there is no source group. And whether the group is written
+  at all (`includeInUpdate`): set by a copied entry, but *also* by a header
+  difference or an **entry-order** difference on its own, so two groups with
+  identical entries in a different order still produce an update. `group_file_crc`
+  is verified numerically against the oracle's own output. Pinned by
+  `update_plan_copies_changed_entries_and_lists_every_target_entry`. Caveat: reproduced on one
   toolchain; `std::format` over `char[N]` may differ elsewhere.
 
 - **Actionable ready-check toasts: the concurrency core landed, backends open.**
