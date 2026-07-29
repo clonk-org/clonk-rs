@@ -623,7 +623,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   many `main_tests` callers are fixture set-up that must keep writing
   immediately.
 
-- **Keyed developer window host landed; live records not yet wired.**
+- **Keyed developer window host landed, with the console shell as a live record.**
   The runner owns exactly one Window/Pixels/FramePresenter, so console
   viewports, the Tools/Property toolbox and the object-list window had nowhere
   to live. `clonk-app::developer_windows` is the registry: records keyed by
@@ -636,11 +636,26 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   down. `request_redraw_visible` skips hidden hosts, and `present_visible`
   reports each failure against its own `WindowId`, so one host's lost surface is
   never attributed to another. Pinned by
-  `developer_window_host_routes_resize_redraw_hide_and_close_by_window_id`
-  against three mock records. **Still open:** the app still constructs and
-  filters events for its single window — nothing registers a live record yet, so
-  the registry routes nothing in production. That wiring is what M10-P4-L044's
-  criterion 7 and the console viewport work (M10-P4-L047) depend on.
+  `developer_window_host_routes_resize_redraw_hide_and_close_by_window_id`.
+  Presenting needed a design fix before any live record was possible. C++ gets
+  its drawing state for free — `C4Viewport::Execute` reads the global `Game`, so
+  a viewport appears to present itself — while the port passes that state
+  explicitly and it differs per purpose. `present` therefore moved to a separate
+  `DeveloperWindowPresenter<Ctx>` trait: mocks present with `()`, and
+  `shell_window_host::ShellWindowHost` presents with `GameApp` through the
+  retained GPU pipeline. Without that split the shell simply could not implement
+  the host contract.
+  The runner now registers the shell under the reserved `SHELL_WINDOW` key. Its
+  window, pixel surface, frame presenter and retained GPU renderer used to be
+  four separate locals; they are one record's worth of state — the renderer is
+  built from the surface's own device, queue and format — and bundling them is
+  what makes them addressable by id. The event loop destructures the record once
+  per event, so the per-site borrows are unchanged. This is deliberately pure
+  indirection today: with one window it changes no behaviour, and it pays off
+  when the console opens its second (M10-P4-L047). **Still open:** the
+  feature-specific surfaces themselves — the Tools/Property toolbox
+  (M10-P4-L044's criterion 7), the property and object-list windows
+  (M10-P4-L045) and console viewports (M10-P4-L047).
 
 - **Developer draw-tool state machine and mode control landed; dialog open.**
   `clonk-engine::developer_tools` carries `C4ToolsDlg`'s retained state and

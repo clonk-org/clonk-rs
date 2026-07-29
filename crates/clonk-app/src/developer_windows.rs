@@ -12,6 +12,11 @@
 
 use std::collections::HashMap;
 
+/// The console shell's fixed key. winit's `WindowId` is opaque and cannot be
+/// known before the window exists, and the shell is a singleton for the
+/// process, so it gets a reserved id rather than a derived one.
+pub const SHELL_WINDOW: WindowId = WindowId(0);
+
 /// A platform window id. The app maps its own window handles onto these.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WindowId(pub u64);
@@ -38,16 +43,26 @@ pub enum HostPurpose {
     ObjectList,
 }
 
-/// One window's surface. Implementations own the real window, pixel buffer and
-/// presenter; the registry only routes.
+/// One window's surface lifecycle. Implementations own the real window, pixel
+/// buffer and presenter; the registry only routes.
 pub trait DeveloperWindowHost {
     fn resize(&mut self, width: u32, height: u32);
     /// Marks the host as needing a redraw before the next present.
     fn request_redraw(&mut self);
-    /// Presents the pending frame. An error is reported against this host only.
-    fn present(&mut self) -> Result<(), String>;
     fn set_visible(&mut self, visible: bool);
     fn visible(&self) -> bool;
+}
+
+/// Drawing a developer window needs the state it draws.
+///
+/// C++ gets this for free: `C4Viewport::Execute` reads the global `Game`, so a
+/// viewport appears to present itself. The port passes that state explicitly,
+/// and it is not the same for every purpose — the console shell renders from
+/// `GameApp` through the retained GPU pipeline, while a mock needs nothing —
+/// so the context is a parameter rather than baked into the host.
+pub trait DeveloperWindowPresenter<Ctx>: DeveloperWindowHost {
+    /// Presents the pending frame. An error is reported against this host only.
+    fn present(&mut self, context: &mut Ctx) -> Result<(), String>;
 }
 
 struct Record<H> {
@@ -102,6 +117,12 @@ impl<H: DeveloperWindowHost> DeveloperWindows<H> {
         self.records.get_mut(&id).map(|record| &mut record.host)
     }
 
+    /// The console shell's host. Present for the whole process once the runner
+    /// has registered it.
+    pub fn shell_mut(&mut self) -> Option<&mut H> {
+        self.host_mut(SHELL_WINDOW)
+    }
+
     /// Routes a resize to one record. Unknown ids are ignored, which is what an
     /// event for an already-closed window is.
     pub fn resize(&mut self, id: WindowId, width: u32, height: u32) -> bool {
@@ -131,12 +152,15 @@ impl<H: DeveloperWindowHost> DeveloperWindows<H> {
 
     /// Presents every visible host, returning each failure against its own id.
     /// One host's failure never suppresses or is attributed to another.
-    pub fn present_visible(&mut self) -> Vec<(WindowId, String)> {
+    pub fn present_visible<Ctx>(&mut self, context: &mut Ctx) -> Vec<(WindowId, String)>
+    where
+        H: DeveloperWindowPresenter<Ctx>,
+    {
         let mut failures: Vec<(WindowId, String)> = self
             .records
             .iter_mut()
             .filter(|(_, record)| record.host.visible())
-            .filter_map(|(id, record)| record.host.present().err().map(|error| (*id, error)))
+            .filter_map(|(id, record)| record.host.present(context).err().map(|error| (*id, error)))
             .collect();
         // Deterministic order for callers that log or test them.
         failures.sort_by_key(|(id, _)| *id);
@@ -232,11 +256,6 @@ mod tests {
             self.redraws += 1;
         }
 
-        fn present(&mut self) -> Result<(), String> {
-            self.presents += 1;
-            self.fail_present.clone().map_or(Ok(()), Err)
-        }
-
         fn set_visible(&mut self, visible: bool) {
             self.visible = visible;
         }
@@ -246,7 +265,16 @@ mod tests {
         }
     }
 
-    const SHELL: WindowId = WindowId(1);
+    impl DeveloperWindowPresenter<()> for MockHost {
+        fn present(&mut self, _context: &mut ()) -> Result<(), String> {
+            self.presents += 1;
+            self.fail_present.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    // The production key, so the routing is tested against the id the runner
+    // actually registers the console shell under.
+    const SHELL: WindowId = SHELL_WINDOW;
     const VIEWPORT: WindowId = WindowId(2);
     const TOOLBOX: WindowId = WindowId(3);
 
@@ -271,10 +299,30 @@ mod tests {
     // C4Viewport.cpp:775-834; C4DevmodeDlg.cpp:50-121; C4ObjectListDlg.cpp:726-787
     // — events address one record, viewports destroy, the toolbox hides and
     // switches page, and a child close never takes the shell down.
+    /// The live console shell must satisfy the same contract as the mocks —
+    /// including `present`, which needs `GameApp` and therefore could not be
+    /// implemented at all before the presenter trait took a context. This is a
+    /// compile-time check; constructing a real window needs an event loop.
+    #[allow(dead_code)]
+    fn shell_host_is_a_live_presenter(
+        host: &mut crate::shell_window_host::ShellWindowHost,
+        app: &mut crate::GameApp,
+    ) {
+        host.resize(640, 480);
+        host.request_redraw();
+        host.set_visible(host.visible());
+        let _: Result<(), String> = host.present(app);
+    }
+
     #[test]
     fn developer_window_host_routes_resize_redraw_hide_and_close_by_window_id() {
         let mut windows = registry();
         assert_eq!(windows.len(), 3);
+
+        // The shell is addressable by its reserved key, which is how the runner
+        // reaches its own surfaces now that they live in a record.
+        assert!(windows.shell_mut().is_some());
+        assert_eq!(windows.purpose(SHELL_WINDOW), Some(HostPurpose::Shell));
 
         // A resize reaches only its own record.
         assert!(windows.resize(VIEWPORT, 640, 480));
@@ -311,7 +359,7 @@ mod tests {
         // One host's presentation failure is reported against that host alone.
         windows.host_mut(VIEWPORT).expect("viewport").fail_present =
             Some("surface lost".to_owned());
-        let failures = windows.present_visible();
+        let failures = windows.present_visible(&mut ());
         assert_eq!(failures, vec![(VIEWPORT, "surface lost".to_owned())]);
         // The other visible host still presented.
         assert_eq!(windows.host(SHELL).expect("shell").presents, 1);

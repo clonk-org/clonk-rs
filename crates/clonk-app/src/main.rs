@@ -48,6 +48,7 @@ use clonk_app_netplay::resource_path_identity;
 mod runtime_join_save;
 mod save_browser;
 mod settings;
+mod shell_window_host;
 mod startup_player_files;
 mod system_fonts;
 mod update_check;
@@ -625,7 +626,7 @@ fn run() -> Result<()> {
     }
 
     let size = enforce_min_size(window.inner_size());
-    let mut pixels = build_framebuffer(&window, size)?;
+    let pixels = build_framebuffer(&window, size)?;
     let mut retained_gpu_renderer = gpu_renderer::RetainedGpuRenderer::new(
         pixels.device(),
         pixels.queue(),
@@ -638,7 +639,7 @@ fn run() -> Result<()> {
     // The app lays out and renders at the GUI resolution; the presenter
     // scales the finished frame to the window like the C++ engine scales
     // its GUI output (C4Gui.cpp:461).
-    let mut presenter = clonk_scaling::FramePresenter::new(
+    let presenter = clonk_scaling::FramePresenter::new(
         if classic.console {
             1.0
         } else {
@@ -707,20 +708,41 @@ fn run() -> Result<()> {
     let presentation_benchmark_asserts_native_tick = presentation_benchmark_asserts_native_tick();
     let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
 
+    // The shell is a registry record like every other developer window, so a
+    // WindowId arriving from winit resolves to a purpose before it is routed
+    // (M10-P4-L081). It is the only record until the console opens its own.
+    let mut developer_windows: developer_windows::DeveloperWindows<
+        shell_window_host::ShellWindowHost,
+    > = developer_windows::DeveloperWindows::new();
+    developer_windows.insert(
+        developer_windows::SHELL_WINDOW,
+        developer_windows::HostPurpose::Shell,
+        shell_window_host::ShellWindowHost::new(window, pixels, presenter, retained_gpu_renderer),
+    );
+
     event_loop.run(move |event, _, control_flow| {
+        let shell_window_host::ShellWindowHost {
+            window,
+            pixels,
+            presenter,
+            renderer: retained_gpu_renderer,
+            ..
+        } = developer_windows
+            .shell_mut()
+            .expect("the console shell record lives for the whole process");
         match event {
             Event::Resumed => {
-                if reconcile_deferred_fullscreen(&window, display_options.mode) {
+                if reconcile_deferred_fullscreen(window, display_options.mode) {
                     deferred_fullscreen_retry_at =
                         Some(Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
                 }
             }
             Event::WindowEvent { window_id, event } if window_id == window.id() => {
                 if let Err(err) = handle_window_event(
-                    &window,
+                    window,
                     &mut app,
-                    &mut pixels,
-                    &mut presenter,
+                    pixels,
+                    presenter,
                     &mut display_options,
                     event,
                     control_flow,
@@ -778,9 +800,9 @@ fn run() -> Result<()> {
                     return;
                 }
                 if let Err(err) = apply_options_display_requests(
-                    &window,
+                    window,
                     &mut app,
-                    &mut presenter,
+                    presenter,
                     &mut display_options,
                     app_paths.as_deref(),
                 ) {
@@ -793,7 +815,7 @@ fn run() -> Result<()> {
                 // state to windowed on failure, so retry the configured mode.
                 if deferred_fullscreen_retry_at.is_some_and(|retry_at| Instant::now() >= retry_at) {
                     deferred_fullscreen_retry_at =
-                        reconcile_deferred_fullscreen(&window, display_options.mode)
+                        reconcile_deferred_fullscreen(window, display_options.mode)
                             .then(|| Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
                 }
                 if app.take_exit_request() {
@@ -970,9 +992,9 @@ fn run() -> Result<()> {
                     }
                     match present_retained_gpu_frame(
                         &mut app,
-                        &pixels,
-                        &presenter,
-                        &mut retained_gpu_renderer,
+                        pixels,
+                        presenter,
+                        retained_gpu_renderer,
                     ) {
                         Ok(()) => {
                             if app.mode == AppMode::Running && !app.console_mode {
@@ -1033,9 +1055,9 @@ fn run() -> Result<()> {
                                     "retained GPU device or surface requires recreation"
                                 );
                                 match rebuild_retained_gpu_device(
-                                    &window,
-                                    &mut pixels,
-                                    &mut retained_gpu_renderer,
+                                    window,
+                                    pixels,
+                                    retained_gpu_renderer,
                                 ) {
                                     Ok(()) => window.request_redraw(),
                                     Err(rebuild_error) => {
