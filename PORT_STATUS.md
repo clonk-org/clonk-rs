@@ -431,13 +431,43 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   (type, owner, contents, action, locals, effects), and the `fFirstLocal`-style
   headers that appear **once** before their first entry and not at all when the
   section is empty. Section *values* are supplied by the caller, so this is
-  independent of the value formatting tracked as M10-P4-L085 — which means the
-  composition can be pinned now even though indexed locals do not yet exist in
-  the engine. Pinned by
+  independent of the value formatting, which M10-P4-L085 supplies. Pinned by
   `object_list_and_property_dialog_share_edit_cursor_selection_order`.
   **Still open:** the panel and object-list surfaces (which need the developer
   window host, M10-P4-L081), the script input's `EMMO_Script` fan-out, and the
   refresh cadence.
+
+- **Object-inspection read model landed; the windows that consume it are open.**
+  `clonk-engine::developer_inspection` and `::developer_locals` supply the
+  native ordering the console needs and nothing else exposes.
+  `object_tree` reverses `SimulationSnapshot::render_order` — which is the draw
+  direction, `Last -> Prev` (`C4ObjectList.cpp:390-395`) — to recover
+  `Game.Objects` First -> Next, then skips contained objects at the top level
+  and recurses through each `Contents` list, matching `C4ObjectListDlg`'s
+  repeated "Skip Contained Objects in the main list"
+  (`C4ObjectListDlg.cpp:100-101,557-560`). `name_list` ports
+  `GetListID`/`GetNameList` including the fixed 500-slot id buffer and the
+  separator keyed on the *index* rather than on what was emitted, so a skipped
+  unknown leading definition still leaves its comma
+  (`C4ObjectList.cpp:55-83,536-574`). `locals_in_emission_order` ports
+  `C4PropertyDlg.cpp:210-234`'s two asymmetric loops: indexed `Local[n]` slots
+  ascending and **truthy-only**, then **every** declared named local, assigned
+  or not. Declaration order is the *definition's* — `SetNameList` /
+  `OnNameListChanged` (`C4ValueMap.cpp`) re-map a loaded object's `LocalNamed=`
+  onto the definition's name list and drop anything it no longer declares — so
+  it comes from `Script::var_decls`, not from the object's map. Numbered slots
+  already exist in the port as `__local_{n}` keys, the same keys
+  `Local(n)`/`SetLocal` use. `clonk_script::data_string` is now the public
+  `C4Value::GetDataString`. Completion keeps C++'s two *different* rules:
+  the engine list tests `GetPublic()`, so every global script function shows
+  even when declared private, while a definition function must be exactly
+  `AA_PUBLIC` (`C4PropertyDlg.cpp:337-358`). Pinned by
+  `developer_object_inspection_preserves_master_contents_local_and_effect_order`,
+  `developer_object_inspection_exposes_data_strings_and_public_def_functions`
+  and `locals_split_into_indexed_then_named_like_the_property_panel`.
+  **Still open:** the tree and property windows themselves (M10-P4-L045 and the
+  window host M10-P4-L081), and wiring the engine's live function tables into
+  `completion_functions`.
 
 - **File-monitor arming and the external reload trigger landed; the watcher is
   open.** `clonk-engine::developer_file_monitor` ports the two gates.

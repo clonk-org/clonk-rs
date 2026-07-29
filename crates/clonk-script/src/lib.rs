@@ -7,7 +7,7 @@ mod parser;
 mod token;
 mod vm;
 
-pub use crate::ast::{AppendTo, Function, TypeAnnotation};
+pub use crate::ast::{AccessLevel, AppendTo, Function, TypeAnnotation};
 pub use crate::ast::{VarDecl, VarDeclKind};
 pub use crate::debugger::DebuggerHooks;
 pub use crate::engine::{
@@ -31,7 +31,7 @@ pub use crate::value::{
 pub use crate::vm::{
     active_direct_exec_diagnostic_frames, caller_host_identity, caller_is_temporary_script,
     caller_origin_strictness, caller_strictness, caller_uses_engine_scope, caller_var_slots,
-    start_call_trace, start_script_profiler, stop_script_profiler, value_cell,
+    data_string, start_call_trace, start_script_profiler, stop_script_profiler, value_cell,
     with_diagnostic_object_formatter, CallerVarSlots, HostCallArg, HostCallerStrictness,
     LocalCells, ScriptHostIdentity, ScriptProfileEntry, ValueCell, ValueReference,
 };
