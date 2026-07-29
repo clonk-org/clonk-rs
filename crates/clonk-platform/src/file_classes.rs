@@ -213,8 +213,9 @@ pub fn file_class_registry_keys_for_removal(engine_path: &str) -> Vec<String> {
         .collect();
     keys.sort();
     keys.dedup();
-    // Deepest first: more separators means deeper.
-    keys.sort_by(|left, right| right.matches('\\').count().cmp(&left.matches('\\').count()));
+    // Deepest first: more separators means deeper. `sort_by_key` is stable, so
+    // the alphabetical order established above survives within each depth.
+    keys.sort_by_key(|key| std::cmp::Reverse(key.matches('\\').count()));
     keys
 }
 

@@ -425,6 +425,25 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Overflow menu scrollbars: shared model landed, per-menu wiring open.**
+  `C4GUI::ScrollBar` had two independent implementations — the drawing half in
+  `clonk-app-menus::game_over` (`draw_classic_scrollbar`, pinned by the
+  evaluation-dialog tests) and the interaction half in `clonk-frontend`'s
+  startup chat transcript. They agreed on the arithmetic, so
+  `clonk-app-menus::scrollbar` is the promotion of both: the arrow/pin/track hit
+  regions, the proportional pin placement, and the drag-to-scroll inverse
+  (`C4GuiContainers.cpp:309-470,477-623`). `game_over` now calls it rather than
+  keeping its own copy, and all 123 menu tests still pass. Pinned by
+  `overflow_menu_scrollbar_arrows_track_and_thumb_match_cpp`, which covers the
+  arrow/shaft boundaries, out-of-range clamping, the pin/scroll round trip, and
+  a bar too short for two full arrows. **Still open:** wiring it into the
+  Normal, Context, Info, Dialog and engine object menus, which is what the
+  ticket's first criterion asks for. Two hazards recorded on the ticket: the
+  in-game menu render is cached and version-gated, so a newly interactive
+  element must bump `menu_render_version` or the frame goes stale; and
+  `object_menu.rs` already reserves a scrollbar column, so check the reserved
+  extent matches `SCROLLBAR_EXTENT` before drawing into it.
+
 - Closed 2026-07-29: **`c4group` command-line utility.** The C++ product builds
   and installs a standalone `c4group` (`CMakeLists.txt:431-437,749-750`); the
   port had no binary. `crates/clonk-c4group` provides one, and it is installed

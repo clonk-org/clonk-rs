@@ -15,7 +15,9 @@ const CLASSIC_INDENT_X: i32 = 10;
 const CLASSIC_TEAM_HEADER_ICON: i32 = 35;
 /// `C4GUI_ScrollBarWdt` (src/C4Gui.h) — the column `ScrollWindow` reserves and
 /// the width of every `GUIScroll.png` facet cell.
-const CLASSIC_SCROLLBAR_EXTENT: i32 = 16;
+use crate::scrollbar::{
+    pin_offset as scrollbar_pin_offset_for, SCROLLBAR_EXTENT as CLASSIC_SCROLLBAR_EXTENT,
+};
 const CLASSIC_INDENT_Y: i32 = 6;
 const CLASSIC_GOAL_SIZE: i32 = 64;
 const CLASSIC_GOAL_MARGIN: i32 = 4;
@@ -2475,14 +2477,10 @@ fn draw_classic_scrollbar(
     }
 }
 
-/// `C4GUI::ScrollBar::Update`: the pin travels the shaft between the two arrow
-/// buttons, proportionally to the scrolled fraction.
+/// `C4GUI::ScrollBar::Update` for a bar rectangle. The arithmetic lives in
+/// `crate::scrollbar`; this keeps the rect-shaped call sites here unchanged.
 fn scrollbar_pin_offset(rect: IntRect, scroll: i32, max_scroll: i32) -> i32 {
-    let travel = (rect.h - 3 * CLASSIC_SCROLLBAR_EXTENT).max(0);
-    if max_scroll <= 0 || travel <= 0 {
-        return 0;
-    }
-    (i64::from(scroll) * i64::from(travel) / i64::from(max_scroll)) as i32
+    scrollbar_pin_offset_for(rect.h, scroll, max_scroll)
 }
 
 /// `C4PlayerInfoListBox::PlayerListItem::UpdateIcon`'s joined-savegame overlay
