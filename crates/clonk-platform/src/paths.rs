@@ -168,7 +168,9 @@ impl AppPaths {
     pub fn screenshot_dir(&self) -> PathBuf {
         let configured = configured_general_value(&self.config_file, "ScreenshotFolder")
             .unwrap_or_else(|| SCREENSHOT_FOLDER_NAME.to_string());
-        self.install_root.join(configured.trim())
+        // C4Config.cpp:1326-1332 appends `ScreenshotFolder` to ExePath verbatim;
+        // trimming it here would silently accept a value C++ keeps as written.
+        self.install_root.join(configured)
     }
 
     pub fn playlists_dir(&self) -> PathBuf {

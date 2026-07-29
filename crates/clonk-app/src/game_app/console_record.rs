@@ -389,6 +389,18 @@ impl GameApp {
         Ok(())
     }
 
+    /// `C4Record::Start` prepares the configured record root through
+    /// `CreateSaveFolder` (C4Record.cpp:118-145), which also writes the
+    /// language-prefixed `Title.txt` naming the folder (C4Config.cpp:1397-1412).
+    fn prepare_recording_root(&self, directory: &std::path::Path) -> std::io::Result<()> {
+        let language = classic_save_folder_language(self.app_paths.as_ref());
+        crate::output_folders::create_save_folder(
+            directory,
+            &self.runtime_resource_string("IDS_GAME_RECORDSTITLE"),
+            &String::from_utf8_lossy(&language),
+        )
+    }
+
     pub(crate) fn finish_console_shutdown(&mut self) {
         self.finish_recording();
         self.finalize_pending_league_end_for_teardown();
@@ -1126,7 +1138,8 @@ impl GameApp {
         let Some(dir) = self.recordings_dir.as_ref() else {
             return Ok(());
         };
-        fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        self.prepare_recording_root(dir)
+            .map_err(|error| error.to_string())?;
         let index = next_recording_index(dir).map_err(|error| error.to_string())?;
         let raw_base_name = scenario_path
             .file_stem()
@@ -1524,7 +1537,8 @@ impl GameApp {
             .recordings_dir
             .as_ref()
             .ok_or_else(|| "runtime recording has no record directory".to_string())?;
-        fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        self.prepare_recording_root(dir)
+            .map_err(|error| error.to_string())?;
         let index = next_recording_index(dir).map_err(|error| error.to_string())?;
         let raw_base_name = seed
             .scenario_path

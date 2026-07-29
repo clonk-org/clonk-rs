@@ -40,6 +40,7 @@ mod network_team_assignment;
 use clonk_app_menus::object_menu;
 mod offline_savegame;
 mod offline_startup;
+mod output_folders;
 use clonk_app_netplay::prepared_host_bootstrap;
 use clonk_app_netplay::resource_path_identity;
 mod runtime_join_save;

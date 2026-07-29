@@ -425,6 +425,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Recording and screenshot output-folder semantics.**
+  `clonk-app::output_folders` now carries C++'s rules. The record root gains the
+  language-prefixed `Title.txt` that `C4ConfigGeneral::CreateSaveFolder` writes
+  (`C4Config.cpp:1397-1412`), taken from `IDS_GAME_RECORDSTITLE` and the existing
+  two-character `classic_save_folder_language`; an existing title is never
+  overwritten, matching C++'s `FileExists` guard. Screenshot handling drops the
+  non-native `trim()` on the configured `ScreenshotFolder`, so the value composes
+  verbatim as `C4Config.cpp:1326-1332` leaves it, and
+  `prepare_numbered_screenshot_path` now attempts a single directory creation
+  with the ExePath fallback instead of `create_dir_all`, matching
+  `C4Config::AtScreenshotPath` (:1381-1390) — a failed creation no longer builds
+  intermediate directories. Pinned by
+  `recording_root_writes_localized_title_component` and
+  `screenshot_folder_matches_native_raw_single_mkdir_fallback`. **Note:** the
+  record root still uses the port's `create_dir` on a path already rooted at the
+  install root, so its single-level creation matches C++; `Network.WorkPath` is
+  untouched, as the card requires.
+
 - Closed 2026-07-29: **Developer console window position.** Console mode forced
   `position = None` at startup and the exit path explicitly declined to persist
   anything, so the console reopened at the OS default every run.

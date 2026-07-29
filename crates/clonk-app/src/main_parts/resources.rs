@@ -2383,29 +2383,23 @@ pub(crate) fn encode_screenshot_png(width: u32, height: u32, rgba: &[u8]) -> Res
 
 pub(crate) fn prepare_numbered_screenshot_path(paths: Option<&AppPaths>) -> (PathBuf, Result<()>) {
     let (preferred, fallback) = screenshot_directories(paths);
-    let (directory, result) = match fs::create_dir_all(&preferred) {
-        Ok(()) => (preferred, Ok(())),
-        Err(error) if preferred != fallback => {
-            tracing::warn!(
-                path = %preferred.display(),
-                %error,
-                "failed to create screenshot folder; falling back to install root"
-            );
-            let result = fs::create_dir_all(&fallback).with_context(|| {
-                format!(
-                    "failed to create screenshot fallback at {}",
-                    fallback.display()
-                )
-            });
-            (fallback, result)
-        }
-        Err(error) => {
-            let error = anyhow::Error::new(error).context(format!(
-                "failed to create screenshot folder at {}",
-                preferred.display()
-            ));
-            (preferred, Err(error))
-        }
+    // `C4Config::AtScreenshotPath` attempts one directory creation and falls
+    // back to ExePath when it fails, rather than building a tree
+    // (C4Config.cpp:1381-1390).
+    let directory = crate::output_folders::resolve_screenshot_directory(&preferred, &fallback);
+    let result = if directory == fallback && preferred != fallback {
+        tracing::warn!(
+            path = %preferred.display(),
+            "could not create the screenshot folder; falling back to the install root"
+        );
+        fs::create_dir_all(&fallback).with_context(|| {
+            format!(
+                "failed to create screenshot fallback at {}",
+                fallback.display()
+            )
+        })
+    } else {
+        Ok(())
     };
     let path = next_screenshot_path(&directory);
     (path, result)
