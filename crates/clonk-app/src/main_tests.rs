@@ -363,6 +363,19 @@ impl<'app> AppVirtualKeyboard<'app> {
         self.app.handle_key(key, ElementState::Released)
     }
 
+    /// A keydown that already carries `C4KeyCodeEx::IsRepeated()`.
+    ///
+    /// Whether a physical auto-repeat *produces* that flag is a per-backend
+    /// question — Win32 and X11 do, SDL/macOS never does
+    /// (`game_app::input::BACKEND_SYNTHESIZES_KEY_REPEAT`) — so tests about
+    /// what the engine does *with* a repeat drive it explicitly instead of
+    /// pressing twice and hoping for the host's answer.
+    fn repeat(&mut self, key: VirtualKeyCode) -> Result<(), EngineError> {
+        self.app
+            .dispatch_engine_key_binding(key, ElementState::Pressed, true)
+            .map(|_| ())
+    }
+
     fn tap(&mut self, key: VirtualKeyCode) -> Result<(), EngineError> {
         self.press(key)?;
         self.release(key)

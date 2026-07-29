@@ -6,6 +6,36 @@
 
 use super::*;
 
+/// Whether this platform's C++ counterpart turns an operating-system key-repeat
+/// into `C4KeyCodeEx::IsRepeated()`.
+///
+/// C++ decides this per *windowing backend*, chosen at build time, and the port
+/// runs winit everywhere — so the equivalent choice is by target:
+///
+/// - **Win32** reads the real hardware bit: `DoKeyboardInput(..., !!(lParam &
+///   0x40000000), ...)` (`C4Viewport.cpp:89,100`, `C4FullScreen.cpp:59,64`,
+///   `C4GuiDialogs.cpp:231,240`). Repeats are repeats.
+/// - **X11** passes `false` and `C4Game::DoKeyboardInput` re-derives the flag
+///   from its own `PressedKeys` map — but only inside `#ifdef USE_X11`
+///   (`C4Game.cpp:2153-2166`). Same answer as Win32, synthesized.
+/// - **SDL** passes a literal `false` for *every* keydown and keyup
+///   (`C4FullScreen.cpp:388-400`) and gets no synthesis, because `USE_X11` is
+///   off. SDL is the default main loop on Apple and `USE_X11` is explicitly
+///   excluded there (`CMakeLists.txt:191-197`), so on macOS an auto-repeat down
+///   is a **fresh press**.
+///
+/// This is observable: `C4Game::LocalControlKey` swallows a repeat for
+/// AutoStopControl players (`C4Game.cpp:3580-3583`) and
+/// `C4Player::CountControl` turns a second identical com into `COM_Double`
+/// (`C4Player.cpp:1568`). Neither happens on macOS, where the flag is never set.
+pub(crate) const BACKEND_SYNTHESIZES_KEY_REPEAT: bool = !cfg!(target_os = "macos");
+
+/// The repeated-key flag handed to `C4KeyCodeEx`, given whether the key was
+/// already down and whether this backend reports repeats at all.
+pub(crate) const fn engine_key_repeated(already_pressed: bool, backend_repeats: bool) -> bool {
+    backend_repeats && already_pressed
+}
+
 impl GameApp {
     pub(crate) fn current_cursor_atlas(&self) -> Arc<CursorAtlas> {
         self.active_game_graphics
@@ -4414,17 +4444,18 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        let repeated = match state {
+        let already_pressed = match state {
             ElementState::Pressed => !self.pressed_engine_keys.insert(key),
             ElementState::Released => {
                 self.pressed_engine_keys.remove(&key);
                 false
             }
         };
+        let repeated = engine_key_repeated(already_pressed, BACKEND_SYNTHESIZES_KEY_REPEAT);
         self.dispatch_engine_key_binding(key, state, repeated)
     }
 
-    fn dispatch_engine_key_binding(
+    pub(crate) fn dispatch_engine_key_binding(
         &mut self,
         key: VirtualKeyCode,
         state: ElementState,
