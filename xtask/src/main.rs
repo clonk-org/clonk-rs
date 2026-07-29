@@ -947,7 +947,7 @@ const UPDATE_TRIPLE_ALIASES: [(&str, &str); 3] = [
 /// bytes. This one used to build them too and re-upload 225 MB on every daily
 /// release; two content-addressed producers would have to agree byte for byte
 /// forever, so it stopped and references the published artifact instead. See
-/// [`components::ComponentId::BUILT`].
+/// [`components::BuiltComponent`].
 const CONTENT_REPOSITORY: &str = "syb0rg/clonk-rs-content";
 
 /// The asset name that repository publishes.
@@ -1138,8 +1138,9 @@ fn archive_identity(
              uploading one of its own"
         );
     }
-    components::ComponentId::BUILT
+    components::BuiltComponent::ALL
         .into_iter()
+        .map(components::BuiltComponent::id)
         .filter(|component| component.is_platform_independent())
         .find(|component| name.starts_with(&format!("{}-", component.name())))
         .map(|component| Ok((component, None)))
@@ -1530,9 +1531,9 @@ fn package(options: PackageOptions) -> Result<()> {
     // before any platform prefix could reach their entry names. `content` is
     // not among them: the content repository builds and publishes that archive.
     if options.components.includes_shared() {
-        for component in components::ComponentId::BUILT
+        for component in components::BuiltComponent::ALL
             .into_iter()
-            .filter(|component| component.is_platform_independent())
+            .filter(|component| component.id().is_platform_independent())
         {
             let emitted = emit_update_component(component, &package_dir, &components_dir, &paths)?;
             tracing::info!(
@@ -1555,7 +1556,7 @@ fn package(options: PackageOptions) -> Result<()> {
     // `PkgInfo` and the icon only exist once the bundle has been assembled.
     if options.components.includes_engine() {
         let emitted = emit_update_component(
-            components::ComponentId::Engine,
+            components::BuiltComponent::Engine,
             &staged,
             &components_dir,
             &paths,
@@ -2081,12 +2082,12 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
 /// `_CodeSignature` seals whatever is present — neither belongs in an engine
 /// archive, and the seal would be stale by the time a client applied it.
 fn emit_update_component(
-    component: components::ComponentId,
+    component: components::BuiltComponent,
     source_dir: &Path,
     output_dir: &Path,
     paths: &WorkspacePaths,
 ) -> Result<components::EmittedComponent> {
-    let is_bundle = component == components::ComponentId::Engine
+    let is_bundle = component == components::BuiltComponent::Engine
         && paths.target_triple.contains("apple-darwin");
 
     let write = |archive: &Path, root: &Path, include: &dyn Fn(&Path) -> bool| -> Result<()> {
