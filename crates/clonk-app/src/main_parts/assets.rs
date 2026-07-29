@@ -7576,7 +7576,9 @@ pub(crate) fn client_settings_for_paths(
             (ports.tcp != 0).then_some(SocketAddr::from(([0_u16; 8], ports.tcp)));
         settings.mesh_udp_bind_address =
             (ports.udp != 0).then_some(SocketAddr::from(([0_u16; 8], ports.udp)));
-        settings.resource_directory = paths.cache_dir().join("Network");
+        settings.resource_directory = paths
+            .cache_dir()
+            .join(network_work_directory_name(Some(paths)));
         settings.local_system_path = Some(paths.system_group_path().to_path_buf());
         settings.local_resource_roots = vec![
             paths.install_root().to_path_buf(),

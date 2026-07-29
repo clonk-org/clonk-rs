@@ -3716,6 +3716,41 @@ pub(crate) fn sanitized_network_ports(config: &[u8]) -> NetworkPorts {
     ports
 }
 
+/// The directory `C4Network2Res` stages network resources in: dynamic groups,
+/// received files and temporary download artifacts all live beneath
+/// `Config.Network.WorkPath` (C4Config.cpp:527-533,1369-1374;
+/// C4Network2Res.cpp:1709-1775), which defaults to `Network`.
+///
+/// The configured value is a *relative* name under the network cache. An empty,
+/// absolute, root-anchored, non-ASCII or parent-traversing value cannot address
+/// a directory outside the cache, so it falls back to the native default rather
+/// than staging somewhere the user did not ask for.
+pub(crate) fn network_work_directory_name(paths: Option<&AppPaths>) -> String {
+    let configured = native_config_text(&load_native_config_bytes(paths), "Network", "WorkPath")
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    let candidate = Path::new(&configured);
+    let safe = !configured.is_empty()
+        && configured.is_ascii()
+        && !candidate.is_absolute()
+        && candidate
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+    if safe {
+        configured
+    } else {
+        "Network".to_string()
+    }
+}
+
+pub(crate) fn network_work_directory(paths: Option<&AppPaths>) -> Option<PathBuf> {
+    paths.map(|paths| {
+        paths
+            .cache_dir()
+            .join(network_work_directory_name(Some(paths)))
+    })
+}
+
 pub(crate) fn load_network_ports(paths: Option<&AppPaths>) -> NetworkPorts {
     sanitized_network_ports(&load_native_config_bytes(paths))
 }
@@ -3889,13 +3924,9 @@ pub(crate) fn build_network_host_preparation(
     let network_work_path = value("Network", "WorkPath")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "Network".to_string());
-    let network_directory = app
-        .app_paths
-        .as_ref()
-        .map(|paths| paths.cache_dir().join("Network"))
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("clonk-rust-network-{}", std::process::id()))
-        });
+    let network_directory = network_work_directory(app.app_paths.as_ref()).unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("clonk-rust-network-{}", std::process::id()))
+    });
     let (host_name, host_nick) = if let Some((name, nick)) = staged_identity {
         (name.to_owned(), nick.to_owned())
     } else if let Some(paths) = app.app_paths.as_ref() {

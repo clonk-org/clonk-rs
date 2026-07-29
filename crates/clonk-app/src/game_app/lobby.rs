@@ -1381,16 +1381,9 @@ impl GameApp {
                 .prepared
                 .as_ref()
                 .and_then(|prepared| prepared.host_config().resource_directory.clone())
-                .or_else(|| {
-                    self.app_paths
-                        .as_ref()
-                        .map(|paths| paths.cache_dir().join("Network"))
-                })
+                .or_else(|| network_work_directory(self.app_paths.as_ref()))
                 .unwrap_or_else(|| PathBuf::from("Network")),
-            None => self
-                .app_paths
-                .as_ref()
-                .map(|paths| paths.cache_dir().join("Network"))
+            None => network_work_directory(self.app_paths.as_ref())
                 .unwrap_or_else(|| PathBuf::from("Network")),
         }
     }

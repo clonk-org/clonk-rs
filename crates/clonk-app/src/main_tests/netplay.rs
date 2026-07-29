@@ -19716,3 +19716,59 @@ fn configured_max_resource_search_recursion_reaches_client_candidates() {
         "an unconfigured client keeps the native single-folder default"
     );
 }
+
+/// `C4Network2Res` creates dynamic groups, received files and temporary
+/// download artifacts beneath `Config.Network.WorkPath`
+/// (C4Config.cpp:527-533,1369-1374; C4Network2Res.cpp:1709-1775), so a
+/// configured value has to move the staging directory as well as the wire
+/// names. The value is a relative name under the network cache; anything that
+/// could address a directory outside it keeps the native default.
+#[test]
+fn configured_network_work_path_controls_resource_staging_directory() {
+    let staging = |body: Option<&str>| {
+        let root = tempdir().expect("work-path config root");
+        let user_data = tempdir().expect("work-path user data");
+        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("fixture System group");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        if let Some(body) = body {
+            fs::write(paths.config_file(), body).expect("write fixture config");
+        }
+        let cache = paths.cache_dir().to_path_buf();
+        let name = network_work_directory_name(Some(&paths));
+        let directory = network_work_directory(Some(&paths)).expect("staging directory");
+        let client = client_settings_for_paths(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Work-path tester".to_string(),
+            Some(&paths),
+        )
+        .resource_directory;
+        // Host and client staging agree, and both stay inside the cache.
+        assert_eq!(directory, cache.join(&name));
+        assert_eq!(client, cache.join(&name));
+        assert!(directory.starts_with(&cache));
+        name
+    };
+
+    // The native default survives an absent config and an absent/empty key.
+    assert_eq!(staging(None), "Network");
+    assert_eq!(staging(Some("[Network]\nName=Tester\n")), "Network");
+    assert_eq!(staging(Some("[Network]\nWorkPath=\n")), "Network");
+    // A plain relative name moves the staging directory.
+    assert_eq!(staging(Some("[Network]\nWorkPath=NetCache\n")), "NetCache");
+    assert_eq!(
+        staging(Some("[Network]\nWorkPath=shared/net\n")),
+        "shared/net"
+    );
+
+    // Unsafe values cannot escape the cache and keep the default.
+    assert_eq!(staging(Some("[Network]\nWorkPath=..\n")), "Network");
+    assert_eq!(staging(Some("[Network]\nWorkPath=../escape\n")), "Network");
+    assert_eq!(staging(Some("[Network]\nWorkPath=net/../..\n")), "Network");
+    assert_eq!(staging(Some("[Network]\nWorkPath=/tmp/escape\n")), "Network");
+    assert_eq!(staging(Some("[Network]\nWorkPath=./here\n")), "Network");
+}
