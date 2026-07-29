@@ -320,6 +320,38 @@ use winit::event_loop::{ControlFlow, EventLoopBuilder};
 use winit::window::{Fullscreen, UserAttentionType, Window, WindowBuilder};
 
 fn main() -> Result<()> {
+    let result = run();
+    // `C4WinMain` reports a failure raised before the window exists through a
+    // native dialog, in addition to the diagnostic it already wrote, and still
+    // returns C4XRV_Failure (C4WinMain.cpp:97-117,274-289). Whether a dialog is
+    // actually shown depends on the platform sink, so a target without one —
+    // like C++'s Unix build without WITH_DEVELOPER_MODE — stays stderr-only.
+    if let Err(error) = &result {
+        if !clonk_platform::startup_dialog::window_was_created() {
+            let mut sink = native_startup_dialog_sink();
+            clonk_platform::startup_dialog::report_startup_failure(
+                &mut sink,
+                false,
+                &format!("{error:#}"),
+            );
+        }
+    }
+    result
+}
+
+/// The dialog backend for this target. Only Windows has one, matching C++,
+/// where the Unix path shows a dialog solely in developer builds.
+#[cfg(windows)]
+fn native_startup_dialog_sink() -> clonk_platform::startup_dialog::NativeStartupDialog {
+    clonk_platform::startup_dialog::NativeStartupDialog
+}
+
+#[cfg(not(windows))]
+fn native_startup_dialog_sink() -> clonk_platform::startup_dialog::NoStartupDialog {
+    clonk_platform::startup_dialog::NoStartupDialog
+}
+
+fn run() -> Result<()> {
     // C++ recovers a translocated bundle path and chdirs to the directory
     // holding the .app before anything else (C4WinMain.cpp:233-238;
     // MacAppTranslocation.cpp:27-63). It must precede path discovery.
@@ -564,6 +596,9 @@ fn main() -> Result<()> {
     )
     .build(&event_loop)
     .context("failed to create application window")?;
+    // Past this point a failure is no longer a startup failure, so it is
+    // reported by the running application rather than a native dialog.
+    clonk_platform::startup_dialog::note_window_created();
     if classic.console {
         window.set_title(native_window_title(true));
     }

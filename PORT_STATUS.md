@@ -425,6 +425,25 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Native startup-failure dialog.** Failures before the
+  window existed were only returned and logged, so a packaged graphical launch
+  could vanish with no visible explanation. `main` is now a thin wrapper over
+  `run()`: an error returned before `note_window_created()` is additionally
+  reported through `clonk-platform::startup_dialog`, under the `STD_PRODUCT`
+  caption this port already uses as its window title, with `MB_ICONERROR |
+  MB_OK` on Windows (`C4WinMain.cpp:97-117`). The original diagnostic still
+  reaches stderr and Clonk.log and the exit status still fails — the dialog is
+  an addition, exactly as C++ both prints and shows the message
+  (`C4WinMain.cpp:274-289`). Pinned by
+  `startup_failure_uses_native_error_dialog_before_window_exists`. **Platform
+  coverage:** only Windows has a real sink, mirroring C++ where the Unix dialog
+  exists solely under `WITH_DEVELOPER_MODE`; macOS and Linux select
+  `NoStartupDialog` and stay stderr-only, which is deterministic and cannot
+  block. `report_startup_failure` also takes a `headless` gate — tested, but
+  currently always passed `false` from `main`, because the port has no headless
+  signal resolved that early; the platform sink is what makes the fallback
+  deterministic today.
+
 - Closed 2026-07-29: **Recording and screenshot output-folder semantics.**
   `clonk-app::output_folders` now carries C++'s rules. The record root gains the
   language-prefixed `Title.txt` that `C4ConfigGeneral::CreateSaveFolder` writes
