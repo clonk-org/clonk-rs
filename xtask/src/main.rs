@@ -1096,15 +1096,20 @@ impl GenerateManifestOptions {
 /// perfectly valid here. Git renders object names in lowercase, so the stricter
 /// rule turns nothing legitimate away.
 fn is_commit_sha(text: &str) -> bool {
-    text.len() == 40
-        && text
-            .chars()
-            .all(|digit| digit.is_ascii_digit() || matches!(digit, 'a'..='f'))
+    is_lowercase_hex(text, 40)
 }
 
 /// Lowercase hex SHA-256, the form the manifest records and a client compares.
 fn is_sha256_hex(text: &str) -> bool {
-    text.len() == 64
+    is_lowercase_hex(text, 64)
+}
+
+/// Exactly `digits` lowercase hex characters, and nothing else.
+///
+/// Deliberately not `is_ascii_hexdigit`: every hex string in a manifest is
+/// compared as text by something downstream that will not case-fold it.
+fn is_lowercase_hex(text: &str, digits: usize) -> bool {
+    text.len() == digits
         && text
             .chars()
             .all(|digit| digit.is_ascii_digit() || matches!(digit, 'a'..='f'))
