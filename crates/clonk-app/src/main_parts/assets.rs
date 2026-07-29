@@ -4864,8 +4864,50 @@ fn validate_runtime_help_line_buffers(left: &str, right: &str) -> Result<()> {
     Ok(())
 }
 
+/// `C4KeyboardInput::GetKeyCodeNameByKeyName` renders the registered chord's
+/// current code, so a `KeyConfig` override changes the displayed name
+/// (C4GraphicsSystem.cpp:692-724). Modifiers precede the key, joined by `+`,
+/// exactly like `C4KeyCodeEx::ToString`.
+pub(crate) fn runtime_help_key_name(
+    config: Option<&RuntimeKeyConfig>,
+    name: &str,
+    index: usize,
+) -> String {
+    let Some(chord) = config
+        .and_then(|config| config.override_for(name))
+        .and_then(|chords| chords.get(index))
+    else {
+        return runtime_help_default_key_name(name, index).to_string();
+    };
+    let RuntimePhysicalKey::Keyboard(key) = chord.physical else {
+        // A gamepad override has no keyboard name, which is the empty string
+        // `GetKeyCodeNameByKeyName` yields for an unresolvable code.
+        return String::new();
+    };
+    let mut label = String::new();
+    for (active, modifier) in [
+        (chord.modifiers.shift(), "Shift"),
+        (chord.modifiers.ctrl(), "Ctrl"),
+        (chord.modifiers.alt(), "Alt"),
+    ] {
+        if active {
+            label.push_str(modifier);
+            label.push('+');
+        }
+    }
+    label.push_str(&crate::control_options::format_key_label(key));
+    label
+}
+
 pub(crate) fn build_runtime_help_columns(
     table: &HashMap<String, String>,
+) -> Result<RuntimeHelpColumns> {
+    build_runtime_help_columns_with_keys(table, None)
+}
+
+pub(crate) fn build_runtime_help_columns_with_keys(
+    table: &HashMap<String, String>,
+    keys: Option<&RuntimeKeyConfig>,
 ) -> Result<RuntimeHelpColumns> {
     let text = |key: &str| {
         table
@@ -4873,7 +4915,7 @@ pub(crate) fn build_runtime_help_columns(
             .cloned()
             .unwrap_or_else(|| format!("[Undefined: {key}]"))
     };
-    let key = runtime_help_default_key_name;
+    let key = |name: &str, index: usize| runtime_help_key_name(keys, name, index);
     let left = format!(
         "[{}]\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}/{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n",
         text("IDS_CTL_GAMEFUNCTIONS"),

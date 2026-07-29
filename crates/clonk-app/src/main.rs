@@ -1473,13 +1473,12 @@ impl GameApp {
         if let Some(names) = default_rank_names.as_ref() {
             engine.set_default_rank_names(names.clone());
         }
+        // Left empty so the lazy accessor can build it once the live
+        // KeyConfig is loadable; a language failure still surfaces there.
         let runtime_help_text_cache = OnceLock::new();
-        let _ = runtime_help_text_cache.set(match &runtime_language_table {
-            Ok(table) => {
-                build_runtime_help_columns(&table.entries).map_err(|error| format!("{error:#}"))
-            }
-            Err(error) => Err(format!("{error:#}")),
-        });
+        if let Err(error) = &runtime_language_table {
+            let _ = runtime_help_text_cache.set(Err(format!("{error:#}")));
+        }
         let runtime_flash_resources_cache = OnceLock::new();
         let _ = runtime_flash_resources_cache.set(match &runtime_language_table {
             Ok(table) => Ok(build_runtime_flash_resources(table)),
@@ -2680,8 +2679,14 @@ impl GameApp {
     fn runtime_help_columns(&self) -> Result<&RuntimeHelpColumns> {
         self.runtime_help_text_cache
             .get_or_init(|| {
-                build_runtime_help_columns(&self.startup_tooltip_resources)
-                    .map_err(|error| format!("{error:#}"))
+                // `GetKeyboardInputName` reads the live registration, so the
+                // displayed chord follows a KeyConfig override
+                // (C4GraphicsSystem.cpp:692-724).
+                build_runtime_help_columns_with_keys(
+                    &self.startup_tooltip_resources,
+                    self.runtime_key_config().ok(),
+                )
+                .map_err(|error| format!("{error:#}"))
             })
             .as_ref()
             .map_err(|detail| anyhow!(detail.clone()))
@@ -5078,10 +5083,9 @@ impl GameApp {
             );
         }
 
+        // Dropping the cache is enough; the accessor rebuilds it against the
+        // new table and the live KeyConfig.
         self.runtime_help_text_cache = OnceLock::new();
-        let _ = self
-            .runtime_help_text_cache
-            .set(build_runtime_help_columns(&table.entries).map_err(|error| format!("{error:#}")));
         self.runtime_flash_resources_cache = OnceLock::new();
         let _ = self
             .runtime_flash_resources_cache

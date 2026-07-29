@@ -5603,6 +5603,63 @@
         assert!(columns.left.contains("F1</c> - Hilfe"));
     }
 
+    /// `C4GraphicsSystem::DrawHelp` asks `GetKeyboardInputName` for each
+    /// registered key's *current* code, so a `KeyConfig` override changes the
+    /// displayed chord as well as the dispatch
+    /// (C4GraphicsSystem.cpp:692-724). The two columns keep their native draw
+    /// order and read the same process language table as the rest of the UI.
+    #[test]
+    fn runtime_f1_help_displays_live_remapped_key_names() {
+        let mut app = new_running_sandbox_app();
+        let default_columns = app
+            .runtime_help_columns()
+            .expect("shipped help columns")
+            .clone();
+        assert!(default_columns.left.contains("F1</c> - "));
+        assert!(default_columns.left.contains("Tab</c> - "));
+
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nToggleShowHelp=Shift+H\nScoreboardToggle=Escape,Return\n                  MusicToggle=Joy1A\nDbgModeToggle=Ctrl+Alt+D\n",
+            )
+            .expect("parse remapped help chords")))
+            .expect("install remapped help chords");
+        // The columns are rebuilt lazily, so drop the memoized text.
+        app.runtime_help_text_cache = OnceLock::new();
+        let columns = app
+            .runtime_help_columns()
+            .expect("remapped help columns")
+            .clone();
+
+        // Each remapped action shows its live ordered binding name.
+        assert!(
+            columns.left.contains("Shift+H</c> - "),
+            "{}",
+            columns.left
+        );
+        assert!(!columns.left.contains("F1</c> - "), "{}", columns.left);
+        // Only the first chord of an ordered list is shown for a single slot.
+        assert!(columns.left.contains("Escape</c> - "), "{}", columns.left);
+        assert!(!columns.left.contains("Tab</c> - "), "{}", columns.left);
+        // A gamepad override has no keyboard name, exactly like an
+        // unresolvable code.
+        assert!(columns.left.contains("<c ffff00></c> - "), "{}", columns.left);
+        // Modifier order follows C4KeyCodeEx::ToString.
+        assert!(
+            columns.right.contains("Ctrl+Alt+D</c> - "),
+            "{}",
+            columns.right
+        );
+
+        // Draw order and the localized right-hand column are untouched.
+        assert!(columns.left.starts_with('['));
+        assert_eq!(
+            columns.right.lines().count(),
+            default_columns.right.lines().count()
+        );
+    }
+
     #[test]
     fn runtime_language_table_loads_from_language_pack() {
         let _lock = env_lock().lock();
