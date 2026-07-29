@@ -1744,6 +1744,15 @@ impl GameApp {
         clonk_frontend::startup_options_dlg::OptionsLabels {
             // The caption strips its mnemonic marker like every FullscreenDialog title.
             title: text("IDS_DLG_OPTIONS", "&Options").replace('&', ""),
+            // The twelve IDS_CTL_* action labels in C++'s own order
+            // (C4StartupOptionsDlg.cpp:166-169), each falling back to the
+            // shipped US text.
+            control_keys: std::array::from_fn(|control| {
+                text(
+                    clonk_frontend::startup_options_controls::CONTROL_KEY_LABEL_KEYS[control],
+                    clonk_frontend::startup_options_controls::CONTROL_KEY_LABELS[control],
+                )
+            }),
             sheets: [
                 text("IDS_DLG_PROGRAM", "Program"),
                 text("IDS_DLG_GRAPHICS", "Graphics"),

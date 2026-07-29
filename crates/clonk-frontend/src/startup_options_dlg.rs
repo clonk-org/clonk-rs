@@ -98,6 +98,9 @@ pub struct OptionsLabels {
     pub sheets: [String; 6],
     /// `IDS_BTN_BACK`.
     pub back: String,
+    /// The twelve `IDS_CTL_*` action labels, in
+    /// `startup_options_controls::CONTROL_KEY_LABEL_KEYS` order.
+    pub control_keys: [String; CONTROL_KEY_COUNT],
     /// `IDS_CTL_LANGUAGE`.
     pub language: String,
     /// `IDS_CTL_FONT`.
@@ -155,6 +158,7 @@ impl Default for OptionsLabels {
     fn default() -> Self {
         Self {
             title: "Options".into(),
+            control_keys: CONTROL_KEY_LABELS.map(Into::into),
             sheets: [
                 "Program".into(),
                 "Graphics".into(),
@@ -5005,7 +5009,9 @@ impl OptionsDlgScreen {
                 gamma,
             );
         }
-        for (control, label) in CONTROL_KEY_LABELS
+        for (control, label) in state
+            .labels()
+            .control_keys
             .iter()
             .enumerate()
             .take(CONTROL_KEY_COUNT)

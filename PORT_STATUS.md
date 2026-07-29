@@ -425,6 +425,22 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Options control sheets: model and labels landed, facet drawing open.**
+  `C4StartupOptionsDlg` draws the Keyboard/Gamepad pages from facets, not text
+  buttons (`C4StartupOptionsDlg.cpp:215-345`). Two of the three pieces are in:
+  `startup_options_controls::key_button_facets` ports
+  `KeySelButton::DrawElement`'s geometry exactly — `fctKey` at phase `fDown`,
+  then `fctCommand` at phase `iKeyID` inset by a fifth of the button width
+  either side, three quarters of that above, and nudged down half an indent
+  while held — and the twelve action labels now resolve through the
+  `IDS_CTL_*` table in C++'s order (`:166-169`) via `OptionsLabels::control_keys`
+  instead of baked English, falling back to the shipped US text per key. Pinned
+  by `startup_options_control_sheets_render_classic_facets_and_resource_text`.
+  **Still open:** the draw path still calls `draw_small_button` rather than
+  blitting `fctKey`/`fctCommand`/`fctKeyboard`/`fctGamepad`, because those
+  facets are not yet among `OptionsDlgAssets`. That is asset plumbing plus a
+  draw swap; the geometry and phases to feed it are done and tested.
+
 - Closed 2026-07-29: **Overflow menu scrollbars.**
   `C4GUI::ScrollBar` had two independent implementations — the drawing half in
   `clonk-app-menus::game_over` (`draw_classic_scrollbar`, pinned by the
