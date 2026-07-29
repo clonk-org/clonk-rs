@@ -425,6 +425,25 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Windows `/allocconsole` bootstrap.** `C4WinMain.cpp:72-93`
+  allocates a console before normal initialization — unconditionally for debug
+  GUI builds, only for `/allocconsole` in release GUI builds — aborts startup
+  with `C4XRV_Failure` when allocation fails, and reopens stdin on `CONIN$` and
+  stdout/stderr on `CONOUT$`. `clonk-platform::alloc_console` now carries that
+  policy and `main` applies it before any output, ahead of the existing
+  `attach_parent_console` (which solves the different problem of a terminal
+  launch under `windows_subsystem = "windows"`). **Deliberate mechanism
+  divergence:** C++ reattaches the CRT `FILE` streams with `freopen`, but Rust's
+  `std::io` reads the process standard handles rather than the CRT, so the port
+  opens the console devices and publishes them with `SetStdHandle` to reach the
+  same observable state. A process that already owns a console makes
+  `AllocConsole` fail with `ERROR_ACCESS_DENIED`; that arm is treated as success
+  and only the streams are reattached, matching where C++'s `freopen` calls
+  leave such a process. Pinned by `console_policy_matches_the_cpp_build_gates`
+  on every platform and by the Windows-gated
+  `windows_release_allocconsole_attaches_standard_streams`, which asserts all
+  three standard handles are console devices via `GetConsoleMode`.
+
 - Closed 2026-07-29: **Unix effective-root startup refusal.** `C4WinMain.cpp:251-255`
   refuses `geteuid() == 0` before the debug facilities and application
   initialization. `clonk-platform::privileges` now supplies that guard and

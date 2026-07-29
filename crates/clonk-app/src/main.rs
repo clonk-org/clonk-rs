@@ -341,6 +341,19 @@ fn main() -> Result<()> {
     // lazily, so both are published below once they exist.
     #[cfg(windows)]
     clonk_platform::crash_win32::install();
+    // The classic GUI-build console policy runs before normal initialization:
+    // debug builds always allocate, release builds only for `/allocconsole`,
+    // and a failure aborts startup (C4WinMain.cpp:72-93).
+    #[cfg(windows)]
+    {
+        let arguments: Vec<String> = std::env::args().collect();
+        if clonk_platform::alloc_console::console_is_required(
+            cfg!(debug_assertions),
+            &arguments[..],
+        ) {
+            clonk_platform::alloc_console::allocate_console()?;
+        }
+    }
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
