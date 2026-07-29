@@ -18,7 +18,13 @@
 //! just the changed ones — because `DoGrpUpdate` deletes whatever the manifest
 //! does not name. See [`crate::update_entries`].
 
-use crate::update_entries::UpdateEntry;
+use crate::update_core::{group_file_crc, UpdateCore};
+use crate::update_entries::{format_entry_list, UpdateEntry};
+use std::path::Path;
+
+/// `C4CFN_UpdateCore` / `C4CFN_UpdateEntries`.
+pub(crate) const UPDATE_CORE_ENTRY: &str = "AutoUpdate.txt";
+pub(crate) const UPDATE_ENTRIES_ENTRY: &str = "GRPUP_Entries.txt";
 
 /// One entry as `MkUp` compares it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,6 +105,133 @@ pub(crate) fn plan_update(
             })
             .collect(),
     }
+}
+
+/// Reads one group's entries in the form `MkUp` compares them.
+///
+/// `EntryCRC32` is the stored CRC when the entry carries one and a computed
+/// CRC otherwise, which is what C++'s lazy `EntryCRC32` does.
+fn entries_for_diff(
+    group: &clonk_resources::Group,
+) -> Result<Vec<UpdateEntrySource>, clonk_resources::GroupError> {
+    group
+        .entries()?
+        .into_iter()
+        .filter(|entry| !entry.is_directory)
+        .map(|entry| {
+            let crc32 = if entry.crc_state != 0 {
+                entry.stored_crc
+            } else {
+                group_file_crc(&group.read_entry_bytes_exact(&entry)?)
+            };
+            Ok(UpdateEntrySource {
+                name: String::from_utf8_lossy(&entry.name_bytes).into_owned(),
+                size: entry.size,
+                crc32,
+                time: i64::from(entry.time),
+            })
+        })
+        .collect()
+}
+
+/// `C4UpdatePackage::MakeUpdate` for a single (non-recursive) group pair.
+///
+/// Writes `output`: the `[Update]` core, the full entry manifest, and every
+/// changed entry. `GrpChks1`/`GrpChks2` are the **file** CRCs of the two
+/// groups, which is what `Check` compares a candidate target against.
+///
+/// Child groups are not descended into yet; `MkUp` recurses, and a nested
+/// difference is currently reported rather than packed.
+pub(crate) fn generate_update(
+    source_path: &str,
+    target_path: &str,
+    output_path: &str,
+    title: &str,
+    allow_missing_target: bool,
+) -> Result<bool, String> {
+    let read = |path: &str| std::fs::read(path).map_err(|error| format!("{path}: {error}"));
+    let open = |path: &str| {
+        clonk_resources::Group::open(Path::new(path)).map_err(|error| format!("{path}: {error}"))
+    };
+
+    let source_bytes = read(source_path)?;
+    let target_bytes = read(target_path)?;
+    let source = open(source_path)?;
+    let target = open(target_path)?;
+
+    let source_entries = entries_for_diff(&source).map_err(|error| error.to_string())?;
+    let target_entries = entries_for_diff(&target).map_err(|error| error.to_string())?;
+    if source
+        .entries()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|e| e.is_directory)
+        || target
+            .entries()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|e| e.is_directory)
+    {
+        return Err(format!(
+            "{output_path}: child groups are not supported by this update generator yet"
+        ));
+    }
+
+    let plan = plan_update(
+        Some(&source_entries),
+        &target_entries,
+        allow_missing_target,
+        false,
+    );
+
+    let core = UpdateCore {
+        // `FormatWithNull(Name, "{} Update", GetFilename(strFile1))` when no
+        // title is given (`C4Update.cpp`).
+        name: if title.is_empty() {
+            format!("{} Update", file_name(source_path))
+        } else {
+            title.to_owned()
+        },
+        dest_path: source_path.to_owned(),
+        group_update: true,
+        allow_missing_target,
+        source_checksums: vec![group_file_crc(&source_bytes)],
+        target_checksum: group_file_crc(&target_bytes),
+        source_contents_crcs: vec![0],
+        target_contents_crc: 0,
+    };
+
+    let mut update = clonk_resources::MutableGroup::new(file_name(output_path));
+    let put = |update: &mut clonk_resources::MutableGroup,
+               name: &str,
+               bytes: Vec<u8>|
+     -> Result<(), String> {
+        update
+            .add_file_bytes(name, bytes)
+            .map_err(|error| format!("{name}: {error}"))
+    };
+    put(&mut update, UPDATE_CORE_ENTRY, core.to_ini().into_bytes())?;
+    put(
+        &mut update,
+        UPDATE_ENTRIES_ENTRY,
+        format_entry_list(&plan.manifest).into_bytes(),
+    )?;
+    for name in &plan.changed {
+        let bytes = target
+            .read_entry_bytes(name)
+            .map_err(|error| format!("{name}: {error}"))?;
+        put(&mut update, name, bytes)?;
+    }
+    crate::edit::write_back(&update, Path::new(output_path))
+        .map_err(|error| format!("{output_path}: {error}"))?;
+    Ok(plan.include_in_update)
+}
+
+fn file_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned())
 }
 
 #[cfg(test)]

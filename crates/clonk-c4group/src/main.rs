@@ -9,7 +9,6 @@
 
 mod cli;
 mod edit;
-#[allow(dead_code)]
 mod make_update;
 // The `-g`/`-y` update commands are not wired yet (M10-P4-L087): this is the
 // manifest half, landed with its regression test because it documents a proven
@@ -118,6 +117,30 @@ fn spawn_detached(command: &str) -> std::io::Result<()> {
 
 /// Runs every command against one group, reporting whether all succeeded.
 fn run_group(path: &str, line: &CommandLine) -> bool {
+    // `-g` creates its output group, so it runs before the open that every
+    // other command needs (`c4group_ng.cpp:350-379`).
+    if let [Command::GenerateUpdate {
+        source,
+        target,
+        title,
+    }] = line.commands.as_slice()
+    {
+        return match make_update::generate_update(source, target, path, title, false) {
+            Ok(true) => {
+                println!("Update package created.");
+                true
+            }
+            Ok(false) => {
+                println!("Update package not created.");
+                let _ = std::fs::remove_file(path);
+                false
+            }
+            Err(error) => {
+                eprintln!("Error: {error}");
+                false
+            }
+        };
+    }
     // `hGroup.Open(szFilename, true)` (:118).
     let group = match clonk_resources::Group::open(Path::new(path)) {
         Ok(group) => group,

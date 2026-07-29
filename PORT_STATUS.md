@@ -767,7 +767,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   difference or an **entry-order** difference on its own, so two groups with
   identical entries in a different order still produce an update. `group_file_crc`
   is verified numerically against the oracle's own output. Pinned by
-  `update_plan_copies_changed_entries_and_lists_every_target_entry`. Caveat: reproduced on one
+  `update_plan_copies_changed_entries_and_lists_every_target_entry`.
+  **`c4group -g` now works, and works better than C++'s.** Generating a package
+  from the same two groups and handing it to the *oracle's own* `c4group -y`
+  applies correctly: `a.txt` updated, `added.txt` added, `keep.txt` kept,
+  `removed.txt` deleted — where C++'s own package deletes every entry, because
+  its manifest is corrupt. Its core matches C++'s field for field
+  (`GrpChks1=1686362931`, `GrpChks2=1194512086`).
+  **What that run also established, and it refines an earlier note here:**
+  C++ still prints "Failed" afterwards, because `DoGrpUpdate` ends by comparing
+  the repacked group's file CRC against `GrpChks2`. Reproducing that requires
+  **byte-identical repacking** of the target — entry order, times and header
+  included. So the `GrpChks2` constraint is real, but it binds the **apply**
+  path, not the generate path: `-g` is unconstrained by it, and `-y` must
+  reconstruct the target exactly, not merely equivalently. Caveat: reproduced on one
   toolchain; `std::format` over `char[N]` may differ elsewhere.
 
 - **Actionable ready-check toasts: the concurrency core landed, backends open.**
