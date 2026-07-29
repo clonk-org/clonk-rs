@@ -425,6 +425,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Viewport lock, scroll ranges and input routing landed; windows open.**
+  `clonk-engine::developer_viewport` ports `C4Viewport::TogglePlayerLock`
+  (`C4Viewport.cpp:250-267`) with its asymmetry intact: unlocking always
+  succeeds, but locking requires `ValidPlr(Player)`, so an **ownerless
+  (`NO_OWNER`) viewport can never be locked** and keeps free scroll — the call
+  still reports success, so a caller cannot detect the refusal from its return
+  value. Locked viewports hide their scroll bars, and
+  `ScrollBarsByViewPosition` refuses outright while locked (`:272`); unlocked,
+  each bar spans the landscape with the view extent as its page and the view
+  origin as its position. Input routes by cursor mode — Play to ordinary mouse
+  control, Edit and Draw to the editor sink. Pinned by
+  `console_viewport_windows_route_redraw_resize_close_and_input_by_window_id`.
+  **Still open:** materialising the windows themselves, which needs the live
+  record in `clonk-app::developer_windows` (M10-P4-L081).
+
 - **Component-host edit model landed; the editors themselves open.**
   `clonk-engine::developer_components` ports `C4ComponentHost`'s commit and save
   rules. OK replaces the bytes and sets `Modified`

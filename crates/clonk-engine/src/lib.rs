@@ -30,6 +30,7 @@ pub mod developer_landscape;
 pub mod developer_reload;
 pub mod developer_selection;
 pub mod developer_tools;
+pub mod developer_viewport;
 mod direct_com;
 #[doc(hidden)]
 pub mod effect;
