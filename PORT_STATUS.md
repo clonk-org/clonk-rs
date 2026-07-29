@@ -1112,7 +1112,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   does with a null `HICON`. Pinned by
   `classic_window_icon_decodes_and_is_attached_to_both_shells`.
 
-- **Windows taskbar loading progress is wired but has no COM backend.**
+- **Windows taskbar loading progress landed, with a real COM backend.**
   `clonk-platform::taskbar_progress` now carries C++'s logic: `LoaderTaskbarProgress`
   applies `C4Game::SetInitProgress`'s strictly-increasing gate
   (`C4Game.cpp:4094-4106`) and `CStdWindow::SetProgress`'s branch — 100 clears the
@@ -1121,17 +1121,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   (`C4Application.cpp:422-426`). The app drives it from
   `apply_scenario_loader_frame` and clears it when the loader consumes
   `Finished`. Pinned by `windows_loader_progress_updates_and_clears_taskbar_state`
-  against an injected recording sink. **What is missing:** the only sink shipped
-  is `NoTaskbarProgress`, so nothing reaches a real taskbar on Windows yet — the
-  correct behaviour on the SDL/X11 targets C++ also leaves as no-ops, but not on
-  Windows. `windows-sys` 0.52 types `ITaskbarList3` as an opaque
-  `*mut c_void` with no vtable, so a real sink needs hand-written COM bindings
-  (`CoCreateInstance` with `CLSID_TaskbarList`, then vtable slots 9
-  `SetProgressValue` and 10 `SetProgressState` after `IUnknown`'s 3,
-  `ITaskbarList`'s 5 and `ITaskbarList2`'s 1) or a switch to the `windows`
-  crate. Those indices are from `ShObjIdl.h` and are **unverified** — calling the
-  wrong slot crashes, and this worker had no Windows machine to test on, so the
-  binding was deliberately not written blind.
+  against an injected recording sink.
+  `Win32TaskbarProgress` is the real sink: `CoCreateInstance(TaskbarList)`,
+  `HrInit()`, then `SetProgressState`/`SetProgressValue` exactly as
+  `CStdWindow` calls them, with every call best-effort because C++ simply skips
+  them when its interface pointer is null. A failed create or `HrInit` yields
+  `None` so the caller falls back to `NoTaskbarProgress` — a machine with no
+  shell taskbar shows no progress rather than failing to start.
+  The vtable is **generated**, not hand-written. An earlier note here proposed
+  counting slot indices by hand because `windows-sys` types `ITaskbarList3` as
+  an opaque `*mut c_void`; that was unnecessary — `clonk-app` already depends on
+  the `windows` crate at 0.54 with `Win32_UI_Shell`, which generates safe
+  bindings, so `clonk-platform` now does too. Hand-counted indices would have
+  been unverifiable without a Windows machine and an off-by-one calls the wrong
+  method with the wrong signature; generated bindings remove the risk entirely.
+  Verified with `cargo check -p clonk-platform --target x86_64-pc-windows-msvc
+  --all-targets`. **Still open:** constructing it in place of
+  `NoTaskbarProgress` in the app's `GameApp` initializer, which needs the
+  platform window handle, and observing it on a real taskbar.
 
 - Closed 2026-07-29: **Loading-screen GUI log capture.** The loader's log box
   showed only its own hard-coded phase labels: `ScenarioLoadingReporter` kept a
