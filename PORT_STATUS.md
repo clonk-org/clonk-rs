@@ -425,6 +425,22 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Edit-cursor mode and context enablement landed; gestures open.**
+  `clonk-engine::developer_cursor` ports `C4EditCursor::ToggleMode`
+  (`C4EditCursor.cpp:540-556`) — Play -> Edit -> Draw -> Play, gated on
+  `EditingOK()`, which is just `Console.Editing` (`:683-692`); a refused toggle
+  leaves the mode alone *and clears `Hold`*. It also ports the viewport context
+  entries (`:594-605`): Delete and Duplicate need a selection **and** editing
+  rights, Contents additionally needs the *first* selected object to hold
+  something, and **Properties is gated on mode alone** — enabled with no
+  selection and without editing rights, disabled only in Play. Its caption also
+  switches: outside Edit mode the entry reads `IDS_CNS_TOOLS`, not
+  `IDS_CNS_PROPERTIES` (`:605`). Pinned by
+  `console_edit_cursor_selects_cycles_drags_and_emits_cpp_ordered_controls`.
+  **Still open:** targeting iteration, drag/`EMMO_Move` cadence, Ctrl-hover drop
+  targets, and the overlay marks — all of which need the detached overlay hook
+  (M10-P4-L082) and the window host (M10-P4-L081).
+
 - **Per-viewport pointer projection landed; identity-addressed rendering open.**
   `clonk-frontend::viewport_projection` ports `C4Viewport`'s local-to-world
   conversion (`C4Viewport.cpp:112,181,192`):
