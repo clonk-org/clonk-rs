@@ -2580,6 +2580,7 @@ pub(crate) fn resolve_classic_startup_font_bundle_for_request_with_system_fonts(
             title,
             caption: caption.clone(),
             text: text.clone(),
+            small: small.clone(),
         }),
         options: Arc::new(clonk_frontend::startup_options_dlg::BookFonts {
             book: text.clone(),

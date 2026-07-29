@@ -75,6 +75,9 @@ pub struct BookFontSet {
     pub caption: ClonkFont,
     /// `BookFont` — C4FT_Main (14px, line height 22).
     pub text: ClonkFont,
+    /// `BookSmallFont` — C4FT_MainSmall, the first tier of
+    /// `C4StartupGraphics::GetBlackFontByHeight` (C4Startup.cpp:129).
+    pub small: ClonkFont,
 }
 
 /// Windows-1252 byte to Unicode, mirroring the C++ iconv conversion of the
@@ -187,8 +190,9 @@ pub(crate) fn build_shadowless_font(face: &freetype::Face, px_height: u32) -> Re
     Ok(font)
 }
 
-/// Builds the three book fonts from a TTF, sized like the GUI fonts
-/// (C4Fonts.cpp:280-288: Main 14, Caption 16, Title 22) but without shadow.
+/// Builds the four book fonts from a TTF, sized like the GUI fonts
+/// (C4Fonts.cpp:280-288: MainSmall 13, Main 14, Caption 16, Title 22) but
+/// without shadow.
 pub fn build_book_font_set(ttf_bytes: &[u8]) -> Result<BookFontSet> {
     let library = Library::init().context("FreeType init failed")?;
     let face = library
@@ -198,6 +202,7 @@ pub fn build_book_font_set(ttf_bytes: &[u8]) -> Result<BookFontSet> {
         title: build_shadowless_font(&face, 22)?.with_role(ClonkFontRole::BookTitle),
         caption: build_shadowless_font(&face, 16)?.with_role(ClonkFontRole::BookCaption),
         text: build_shadowless_font(&face, 14)?.with_role(ClonkFontRole::BookText),
+        small: build_shadowless_font(&face, 13)?.with_role(ClonkFontRole::BookSmall),
     })
 }
 

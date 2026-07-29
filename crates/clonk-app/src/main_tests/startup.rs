@@ -2010,14 +2010,19 @@ fn startup_bootstrap_issues_are_typed_and_aggregated_in_cpp_init_order() {
         "StartupPlrCtrlType.png".to_string(),
         "failed to decode image".to_string(),
     );
-    let (caption, text) = {
+    let (caption, text, small) = {
         let fonts = assets.book_fonts.as_deref().expect("book fonts");
-        (fonts.caption.clone(), fonts.text.clone())
+        (
+            fonts.caption.clone(),
+            fonts.text.clone(),
+            fonts.small.clone(),
+        )
     };
     assets.book_fonts = Some(Arc::new(clonk_frontend::startup_scensel::BookFontSet {
         title: clonk_graphics::clonk_font::ClonkFont::new(0),
         caption,
         text,
+        small,
     }));
 
     let error = assets

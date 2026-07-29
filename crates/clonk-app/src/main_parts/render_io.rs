@@ -192,6 +192,56 @@ pub(crate) fn map_folder_button_at(
         .rposition(|button| point_in_map_rect(point, &transform.rect(button.area)))
 }
 
+/// C++ tolerates a font zoom near unity rather than rescaling glyphs for it
+/// (`C4StartupScenSelDlg.cpp:380`).
+fn tolerated_font_zoom(height: i32, line_height: i32) -> f32 {
+    if line_height == 0 {
+        return 1.0;
+    }
+    let zoom = height as f32 / line_height as f32;
+    if (0.8..1.25).contains(&zoom) {
+        1.0
+    } else {
+        zoom
+    }
+}
+
+/// `C4GUI::Resource::GetFontByHeight` — the first font whose line height is at
+/// least the requested height, else the title font (`C4Gui.cpp:1235-1253`).
+pub(crate) fn gui_font_by_height(
+    fonts: &clonk_frontend::ClonkFontSet,
+    height: i32,
+) -> (&clonk_graphics::clonk_font::ClonkFont, f32) {
+    let font = if height <= fonts.mini.line_height {
+        &fonts.mini
+    } else if height <= fonts.text.line_height {
+        &fonts.text
+    } else if height <= fonts.caption.line_height {
+        &fonts.caption
+    } else {
+        &fonts.title
+    };
+    (font, tolerated_font_zoom(height, font.line_height))
+}
+
+/// `C4StartupGraphics::GetBlackFontByHeight` over the book faces
+/// (`C4Startup.cpp:125-143`).
+pub(crate) fn book_font_by_height(
+    fonts: &clonk_frontend::startup_scensel::BookFontSet,
+    height: i32,
+) -> (&clonk_graphics::clonk_font::ClonkFont, f32) {
+    let font = if height <= fonts.small.line_height {
+        &fonts.small
+    } else if height <= fonts.text.line_height {
+        &fonts.text
+    } else if height <= fonts.caption.line_height {
+        &fonts.caption
+    } else {
+        &fonts.title
+    };
+    (font, tolerated_font_zoom(height, font.line_height))
+}
+
 fn map_folder_text_color(color: u32) -> [u8; 4] {
     [
         ((color >> 16) & 0xff) as u8,
@@ -266,20 +316,10 @@ fn draw_scensel_map_dynamic(
         }
         if !button.title.is_empty() {
             let scaled_size = (button.title_font_size as f32 * transform.scale_y).round() as i32;
-            let font = if button.title_use_book_font {
-                if scaled_size >= 20 {
-                    &book_fonts.title
-                } else if scaled_size >= 15 {
-                    &book_fonts.caption
-                } else {
-                    &book_fonts.text
-                }
-            } else if scaled_size >= 20 {
-                &fonts.title
-            } else if scaled_size >= 15 {
-                &fonts.caption
+            let (font, _zoom) = if button.title_use_book_font {
+                book_font_by_height(book_fonts, scaled_size)
             } else {
-                &fonts.text
+                gui_font_by_height(fonts, scaled_size)
             };
             let (x, y) = transform.point(
                 button.area.x + button.title_offset_x,

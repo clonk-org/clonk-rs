@@ -6845,7 +6845,25 @@ fn build_map_folder_data(
             .map(|entry| entry.title.as_str())
             .unwrap_or("<c ff0000>ERROR</c>");
         let title = scenario.title.replace("TITLE", replacement);
-        let base_image = if scenario.base_image.is_empty() || scenario.image_dump {
+        let base_image = if scenario.image_dump {
+            // `Load` blits the scenario area out of the background into a
+            // fresh facet, saves it under BaseImage, then `continue`s past the
+            // ordinary base load - a failed dump only logs
+            // (C4StartupScenSelDlg.cpp:145-161).
+            if let Err(error) = dump_map_folder_base_image(
+                source_path,
+                &background,
+                scenario.area,
+                &scenario.base_image,
+            ) {
+                tracing::warn!(
+                    image = %scenario.base_image,
+                    %error,
+                    "FolderMap ImageDump could not be written"
+                );
+            }
+            None
+        } else if scenario.base_image.is_empty() {
             None
         } else {
             Some(load_map_folder_image(group, &scenario.base_image)?)
@@ -6898,6 +6916,48 @@ fn build_map_folder_data(
         access_overlays,
         selected_button: None,
     })
+}
+
+/// `C4MapFolderData::Load`'s developer ImageDump: crop `Area` out of the
+/// FolderMap background and write it beside the map as a PNG with alpha
+/// (C4StartupScenSelDlg.cpp:147-158). C++ blits into a facet of exactly the
+/// requested size, so a window reaching past the background edge keeps the
+/// uncovered pixels transparent.
+fn dump_map_folder_base_image(
+    source_path: &Path,
+    background: &ImageData,
+    area: MapFolderRect,
+    base_image: &str,
+) -> Result<()> {
+    anyhow::ensure!(!base_image.is_empty(), "ImageDump has no BaseImage name");
+    let width = u32::try_from(area.w).context("ImageDump width is negative")?;
+    let height = u32::try_from(area.h).context("ImageDump height is negative")?;
+    anyhow::ensure!(width > 0 && height > 0, "ImageDump area is empty");
+    let mut dump = image::RgbaImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let source_x = area.x + x as i32;
+            let source_y = area.y + y as i32;
+            if source_x < 0 || source_y < 0 {
+                continue;
+            }
+            let (Ok(source_x), Ok(source_y)) = (u32::try_from(source_x), u32::try_from(source_y))
+            else {
+                continue;
+            };
+            if source_x >= background.width() || source_y >= background.height() {
+                continue;
+            }
+            let offset = ((source_y * background.width() + source_x) * 4) as usize;
+            let Some(pixel) = background.pixels().get(offset..offset + 4) else {
+                continue;
+            };
+            dump.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], pixel[3]]));
+        }
+    }
+    let destination = source_path.join(base_image);
+    dump.save(&destination)
+        .with_context(|| format!("writing ImageDump to {}", destination.display()))
 }
 
 fn load_map_folder_background(group: &Group) -> Result<ImageData> {
