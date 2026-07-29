@@ -215,6 +215,12 @@ pub struct EvaluationPlayer {
     /// (src/C4PlayerInfoListBox.cpp:701-716). `None` means "not joined", which
     /// suppresses the Crew overlay entirely.
     pub joined_color_dw: Option<u32>,
+    /// One through nine, matching `Ico_Rank1..Ico_Rank9`. Resolved the way
+    /// `UpdateScoreLabel` does: the frozen result's
+    /// `GetLeagueRankSymbolNew()` when its league score is valid, otherwise
+    /// the live `C4PlayerInfo::getLeagueRankSymbol()`; zero hides the icon
+    /// (src/C4PlayerInfoListBox.cpp:439-456).
+    pub league_rank_symbol: Option<u8>,
 }
 
 /// Which inline icon `UpdateScoreLabel` prefixes the score with
@@ -301,6 +307,10 @@ pub struct EvaluationViewModel {
     separate_team_ids: Option<[i32; 2]>,
     team_order: Vec<i32>,
     teams: Vec<EvaluationTeam>,
+    /// `Game.Parameters.isLeague()` — the only condition under which a
+    /// `PlayerListItem` gets a rank icon at all
+    /// (src/C4PlayerInfoListBox.cpp:94-95).
+    league: bool,
 }
 
 impl EvaluationViewModel {
@@ -312,6 +322,7 @@ impl EvaluationViewModel {
             separate_team_ids: None,
             team_order: Vec::new(),
             teams: Vec::new(),
+            league: false,
         }
     }
 
@@ -337,6 +348,15 @@ impl EvaluationViewModel {
 
     pub fn team(&self, id: i32) -> Option<&EvaluationTeam> {
         self.teams.iter().find(|team| team.id == id)
+    }
+
+    pub fn with_league(mut self, league: bool) -> Self {
+        self.league = league;
+        self
+    }
+
+    pub const fn is_league(&self) -> bool {
+        self.league
     }
 
     pub fn goals(&self) -> &[EvaluationGoal] {
@@ -459,6 +479,10 @@ pub struct ClassicEvaluationPlayerLayout {
     pub score_anchor: (i32, i32),
     pub time_anchor: (i32, i32),
     pub custom_evaluation_anchor: Option<(i32, i32)>,
+    /// The league rank icon's own right-hand column during evaluation
+    /// (`caBounds.GetFromRight(caBounds.GetInnerHeight())`,
+    /// src/C4PlayerInfoListBox.cpp:199-206). Present only in a league game.
+    pub rank_icon: Option<IntRect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1597,7 +1621,18 @@ impl GameOverState {
                     w: row_width,
                     h: row_height,
                 };
-                let right_anchor = row.x + row.w - CLASSIC_PLAYER_LABEL_SPACING;
+                // In a league game the rank icon claims a square column at
+                // the row's right edge, and the score label's right edge is
+                // measured against it instead of the row width
+                // (src/C4PlayerInfoListBox.cpp:199-206,352).
+                let rank_icon = self.evaluation.is_league().then(|| IntRect {
+                    x: row.x + row.w - row.h,
+                    y: row.y,
+                    w: row.h,
+                    h: row.h,
+                });
+                let right_anchor =
+                    rank_icon.map_or(row.x + row.w, |rank| rank.x) - CLASSIC_PLAYER_LABEL_SPACING;
                 let score_y = if split.is_some() {
                     row.y + row.h
                         - (text_font.line_height + 4) * (1 + i32::from(has_custom_evaluation))
@@ -1623,6 +1658,7 @@ impl GameOverState {
                         right_anchor,
                         row.y + text_font.line_height + if has_custom_evaluation { 0 } else { 4 },
                     ),
+                    rank_icon,
                     custom_evaluation_anchor: has_custom_evaluation.then_some((
                         right_anchor,
                         row.y + row.h - text_font.line_height - CLASSIC_PLAYER_LABEL_SPACING,
@@ -2176,6 +2212,28 @@ impl GameOverState {
                 gamma,
             );
 
+            // Ico_Rank1..Ico_Rank9 are GUIIcons.png phases 35..43
+            // (src/C4PlayerInfoListBox.cpp:446-451).
+            if let (Some(rank), Some(rect), Some(icons)) = (
+                player.league_rank_symbol,
+                player_layout.rank_icon,
+                resources.gui_icons,
+            ) {
+                let phase = 35 + u32::from(rank.clamp(1, 9) - 1);
+                let columns = 6;
+                let cell = icons.width() as i32 / columns;
+                if let Some(icon) = crop_image(
+                    icons,
+                    IntRect {
+                        x: (phase as i32 % columns) * cell,
+                        y: (phase as i32 / columns) * cell,
+                        w: cell,
+                        h: cell,
+                    },
+                ) {
+                    draw_classic_image(surface, &icon, rect, gamma);
+                }
+            }
             if let Some((_icon, text)) = evaluation_score_label(player, "Score") {
                 render_evaluation_score(
                     surface,
@@ -2723,6 +2781,73 @@ mod tests {
     // A team-filtered evaluation list box emits exactly one TeamListItem
     // before its players, and only when the dialog is in the two-team layout
     // (src/C4PlayerInfoListBox.cpp:1536-1541; src/C4GameOverDlg.cpp:214-230).
+    // A PlayerListItem only gets a rank icon in a league game, and during
+    // evaluation that icon takes its own square right-hand column, against
+    // which the score label's right edge is measured
+    // (src/C4PlayerInfoListBox.cpp:94-95,199-206,352,439-456).
+    #[test]
+    fn l183_league_rank_icons_claim_their_own_column_and_move_the_score_edge() {
+        let player = EvaluationPlayer {
+            player_info_id: 1,
+            team_id: None,
+            name: "Player".into(),
+            won: true,
+            color_dw: 0,
+            total_playing_time: 0,
+            score_old: 0,
+            score_new: Some(10),
+            custom_evaluation_strings: String::new(),
+            big_icon: None,
+            league_score_old: Some(1200),
+            league_score_gain: Some(30),
+            league_score_new: Some(1230),
+            joined_color_dw: None,
+            league_rank_symbol: Some(4),
+        };
+        let fonts = endeavour_fonts();
+
+        let layout_for = |league: bool| {
+            let evaluation =
+                EvaluationViewModel::new(Vec::new(), vec![player.clone()]).with_league(league);
+            let mut state = GameOverState::new("Round over".into(), Vec::new(), false);
+            state.set_evaluation(evaluation);
+            state.classic_evaluation_layout(640, 480, &fonts)
+        };
+
+        let plain = layout_for(false);
+        let plain_row = plain.players[0];
+        assert!(
+            plain_row.rank_icon.is_none(),
+            "a non-league round has no rank icon at all"
+        );
+
+        let league = layout_for(true);
+        let row = league.players[0];
+        let rank = row.rank_icon.expect("a league round reserves the column");
+        assert_eq!(rank.w, rank.h, "the column is square");
+        assert_eq!(rank.h, row.row.h, "sized by the row's inner height");
+        assert_eq!(
+            rank.x + rank.w,
+            row.row.x + row.row.w,
+            "flush with the row's right edge"
+        );
+        assert_eq!(rank.y, row.row.y);
+        assert_eq!(
+            row.score_anchor.0,
+            rank.x - CLASSIC_PLAYER_LABEL_SPACING,
+            "the score label's right edge follows the rank icon"
+        );
+        assert_eq!(
+            plain_row.score_anchor.0,
+            plain_row.row.x + plain_row.row.w - CLASSIC_PLAYER_LABEL_SPACING,
+            "without a rank icon it follows the row width"
+        );
+        assert_eq!(
+            row.time_anchor.0, row.score_anchor.0,
+            "the playing-time label shares that right edge"
+        );
+    }
+
     #[test]
     fn l183_two_team_evaluation_lists_lead_with_one_native_team_header() {
         let player = |info_id: i32, team_id: i32, won: bool| EvaluationPlayer {
@@ -2740,6 +2865,7 @@ mod tests {
             league_score_gain: None,
             league_score_new: None,
             joined_color_dw: None,
+            league_rank_symbol: None,
         };
         let team = |id: i32, won: bool| EvaluationTeam {
             id,
@@ -2956,6 +3082,7 @@ mod tests {
             league_score_gain: None,
             league_score_new: None,
             joined_color_dw: None,
+            league_rank_symbol: None,
         };
 
         // Settlement, new score known.
@@ -2994,6 +3121,7 @@ mod tests {
             league_score_gain: Some(30),
             league_score_new: Some(1230),
             joined_color_dw: None,
+            league_rank_symbol: None,
             ..base.clone()
         };
         assert_eq!(
@@ -3009,6 +3137,7 @@ mod tests {
         let discrepancy = EvaluationPlayer {
             league_score_new: Some(1300),
             joined_color_dw: None,
+            league_rank_symbol: None,
             ..league.clone()
         };
         assert_eq!(
@@ -3022,6 +3151,7 @@ mod tests {
             league_score_gain: Some(-30),
             league_score_new: Some(1100),
             joined_color_dw: None,
+            league_rank_symbol: None,
             ..league.clone()
         };
         assert_eq!(
@@ -3036,6 +3166,7 @@ mod tests {
         let old_league = EvaluationPlayer {
             league_score_new: None,
             joined_color_dw: None,
+            league_rank_symbol: None,
             league_score_gain: None,
             ..league.clone()
         };
@@ -3054,6 +3185,7 @@ mod tests {
             league_score_gain: None,
             league_score_new: None,
             joined_color_dw: None,
+            league_rank_symbol: None,
             ..base.clone()
         };
         assert_eq!(
@@ -3733,6 +3865,7 @@ mod tests {
             league_score_gain: None,
             league_score_new: None,
             joined_color_dw: None,
+            league_rank_symbol: None,
         }
     }
 
@@ -4525,6 +4658,7 @@ mod tests {
                 league_score_gain: None,
                 league_score_new: None,
                 joined_color_dw: None,
+                league_rank_symbol: None,
             }],
         ));
         let layout = state.classic_evaluation_layout(1024, 600, &fonts);

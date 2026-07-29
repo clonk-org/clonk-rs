@@ -5949,6 +5949,10 @@ pub(crate) fn build_game_over_dialog(
     // `Game.DrawTextSpecImage(icon, IconSpec, team colour)` for a declared
     // team `IconSpec` (src/C4PlayerInfoListBox.cpp:1028-1031).
     mut team_icon: impl FnMut(&str, u32) -> Option<ImageData>,
+    // `C4PlayerInfo::getLeagueRankSymbol()`.
+    mut player_league_rank_symbol: impl FnMut(i32) -> Option<i32>,
+    // `Game.Parameters.isLeague()`.
+    league: bool,
 ) -> GameOverState {
     // C4GameOverDlg freezes C4RoundResults into presentation state; player
     // results are joined through C4PlayerInfo::ID, not the runtime player
@@ -6027,6 +6031,18 @@ pub(crate) fn build_game_over_dialog(
             league_score_gain: (result.league_score_gain >= 0).then_some(result.league_score_gain),
             league_score_new: (result.league_score_new >= 0).then_some(result.league_score_new),
             joined_color_dw: player_joined_color(state.player_info_id),
+            // The frozen result's rank wins while its league score is valid;
+            // otherwise the live info's rank symbol, and zero hides the icon
+            // (src/C4PlayerInfoListBox.cpp:439-456).
+            league_rank_symbol: u8::try_from(
+                (result.league_score_new >= 0)
+                    .then_some(result.league_rank_symbol_new)
+                    .filter(|symbol| *symbol != 0)
+                    .or_else(|| player_league_rank_symbol(state.player_info_id))
+                    .unwrap_or(0),
+            )
+            .ok()
+            .filter(|symbol| *symbol != 0),
         });
     }
     let separate_team_ids =
@@ -6056,7 +6072,8 @@ pub(crate) fn build_game_over_dialog(
             separate_team_ids,
         )
         .with_team_order(teams.iter().map(|team| team.id))
-        .with_teams(evaluation_teams);
+        .with_teams(evaluation_teams)
+        .with_league(league);
 
     // Keep the asset-less fallback usable, but derive it from the same frozen
     // evaluation instead of treating every still-Active player as a winner or

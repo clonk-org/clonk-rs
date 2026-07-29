@@ -7124,6 +7124,12 @@ impl GameApp {
                 let resources = self.script_text_spec_resources();
                 resolve_script_font_image(&self.engine, icon_spec, color, resources)
             },
+            |player_info_id| {
+                self.control_player_infos
+                    .get(player_info_id)
+                    .map(|info| info.league_rank_symbol)
+            },
+            self.network_is_league,
         );
         let network_result = self.snapshot.round_results.network_result;
         let network_result_text =
