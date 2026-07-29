@@ -3787,6 +3787,43 @@ pub(crate) fn load_thread_pool_thread_count(paths: Option<&AppPaths>) -> usize {
     .unwrap_or(clonk_app_netplay::network::DEFAULT_NETWORK_RUNTIME_WORKER_THREADS)
 }
 
+/// `C4ConfigGraphics::RenderInactive` bits (C4Config.h:128-129).
+pub(crate) const RENDER_INACTIVE_FULLSCREEN: u32 = 1 << 0;
+pub(crate) const RENDER_INACTIVE_CONSOLE: u32 = 1 << 1;
+
+/// `Graphics.RenderInactive`, a bitmask whose adapted default is `Console`
+/// alone (C4Config.cpp:481). `StartDrawing` refuses to draw while the
+/// application is inactive unless the bit for the *active shell* is set
+/// (C4GraphicsSystem.cpp:96-106).
+pub(crate) fn load_render_inactive_mask(paths: Option<&AppPaths>) -> u32 {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        "Graphics",
+        "RenderInactive",
+    )
+    .as_deref()
+    .and_then(|value| crate::parse_startup_config_integer(value.as_bytes()))
+    .map_or(RENDER_INACTIVE_CONSOLE, |value| value as u32)
+}
+
+/// `C4GraphicsSystem::StartDrawing`'s inactive gate: an active window always
+/// draws; an inactive one only when its own shell's bit is set.
+pub(crate) fn render_inactive_allows_drawing(
+    mask: u32,
+    window_active: bool,
+    console_shell: bool,
+) -> bool {
+    if window_active {
+        return true;
+    }
+    let bit = if console_shell {
+        RENDER_INACTIVE_CONSOLE
+    } else {
+        RENDER_INACTIVE_FULLSCREEN
+    };
+    mask & bit != 0
+}
+
 pub(crate) fn load_network_ports(paths: Option<&AppPaths>) -> NetworkPorts {
     sanitized_network_ports(&load_native_config_bytes(paths))
 }

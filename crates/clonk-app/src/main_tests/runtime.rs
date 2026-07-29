@@ -6990,3 +6990,68 @@
         assert!(native_window_title(true).starts_with(native_window_title(false)));
     
 }
+
+    /// `C4GraphicsSystem::StartDrawing` refuses to draw while the application
+    /// is inactive unless `Graphics.RenderInactive` carries the *active
+    /// shell's* bit — Fullscreen `1 << 0`, Console `1 << 1`, adapted default
+    /// Console alone (C4Config.h:128-129; C4Config.cpp:481;
+    /// C4GraphicsSystem.cpp:96-106).
+    #[test]
+    fn render_inactive_bitmask_gates_unfocused_fullscreen_and_console_redraw() {
+        let mask = |body: Option<&str>| {
+            let root = tempdir().expect("render-inactive config root");
+            let user_data = tempdir().expect("render-inactive user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            if let Some(body) = body {
+                fs::write(paths.config_file(), body).expect("write fixture config");
+            }
+            load_render_inactive_mask(Some(&paths))
+        };
+
+        // The adapted default is Console alone, and survives an unparsable
+        // value or an absent key.
+        assert_eq!(mask(None), RENDER_INACTIVE_CONSOLE);
+        assert_eq!(mask(Some("[Graphics]\nName=Tester\n")), RENDER_INACTIVE_CONSOLE);
+        assert_eq!(
+            mask(Some("[Graphics]\nRenderInactive=always\n")),
+            RENDER_INACTIVE_CONSOLE
+        );
+        // Explicit masks, including hex, are honoured verbatim.
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=0\n")), 0);
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=1\n")), 1);
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=3\n")), 3);
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=0x3\n")), 3);
+
+        // An active window always draws, whatever the mask says.
+        for shell_is_console in [false, true] {
+            for configured in [0, 1, 2, 3] {
+                assert!(
+                    render_inactive_allows_drawing(configured, true, shell_is_console),
+                    "an active window always draws (mask={configured}, console={shell_is_console})"
+                );
+            }
+        }
+
+        // Inactive: each shell consults only its own bit.
+        let game = |mask| render_inactive_allows_drawing(mask, false, false);
+        let console = |mask| render_inactive_allows_drawing(mask, false, true);
+        assert!(!game(0) && !console(0), "an empty mask suppresses both");
+        assert!(game(RENDER_INACTIVE_FULLSCREEN));
+        assert!(!console(RENDER_INACTIVE_FULLSCREEN));
+        assert!(console(RENDER_INACTIVE_CONSOLE));
+        assert!(!game(RENDER_INACTIVE_CONSOLE));
+        let both = RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE;
+        assert!(game(both) && console(both));
+
+        // The shipped default therefore keeps an unfocused game window from
+        // drawing while the developer console still repaints.
+        assert!(!game(RENDER_INACTIVE_CONSOLE));
+        assert!(console(RENDER_INACTIVE_CONSOLE));
+    
+}

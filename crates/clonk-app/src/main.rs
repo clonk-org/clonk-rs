@@ -546,6 +546,8 @@ fn main() -> Result<()> {
         arm_configured_engine_debug_mode(&mut app.engine, app_paths.as_deref(), true);
     }
     app.window_active = window.has_focus();
+    // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
+    let render_inactive_mask = load_render_inactive_mask(app.app_paths.as_ref());
     app.set_display_mode(display_options.mode);
     app.graphics
         .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
@@ -809,6 +811,17 @@ fn main() -> Result<()> {
                         ControlFlow::WaitUntil(next_graphics_deadline.min(simulation_deadline));
                 }
             }
+            // `C4GraphicsSystem::StartDrawing` refuses to draw while the
+            // application is inactive unless `Graphics.RenderInactive` carries
+            // the active shell's bit (C4GraphicsSystem.cpp:96-106). Placed
+            // ahead of the frame-skip arm so a suppressed frame costs nothing.
+            Event::RedrawRequested(id)
+                if id == window.id()
+                    && !render_inactive_allows_drawing(
+                        render_inactive_mask,
+                        app.window_active,
+                        app.console_mode,
+                    ) => {}
             Event::RedrawRequested(id)
                 if id == window.id()
                     && automatic_frame_skip.begin_graphics_pass(
