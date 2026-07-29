@@ -2214,6 +2214,7 @@ mod tests {
             archive: "content-abc.zip".to_string(),
             sha256: "cc".repeat(32),
             size: 4096,
+            source: None,
             destination: PathBuf::from("content"),
         };
         let staged =
