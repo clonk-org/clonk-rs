@@ -3787,6 +3787,34 @@ pub(crate) fn load_thread_pool_thread_count(paths: Option<&AppPaths>) -> usize {
     .unwrap_or(clonk_app_netplay::network::DEFAULT_NETWORK_RUNTIME_WORKER_THREADS)
 }
 
+/// The developer console's own remembered position (`C4Console.cpp:1278-1284`).
+/// Read from the `Console` section, never from the game window's geometry keys.
+pub(crate) fn load_console_window_position(
+    paths: Option<&AppPaths>,
+) -> Option<crate::console_window_position::ConsoleWindowPlacement> {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        crate::console_window_position::CONSOLE_POSITION_SECTION,
+        crate::console_window_position::CONSOLE_POSITION_KEY,
+    )
+    .as_deref()
+    .and_then(crate::console_window_position::parse_console_position)
+}
+
+/// `C4Console::StorePosition` (`C4Console.cpp:154-159`): the position alone,
+/// because `GetPositionData` sets `storeSize = false`.
+pub(crate) fn store_console_window_position(paths: &AppPaths, x: i32, y: i32) -> io::Result<()> {
+    let value = crate::console_window_position::format_console_position(x, y);
+    persist_native_config_values(
+        paths,
+        crate::console_window_position::CONSOLE_POSITION_SECTION,
+        &[(
+            crate::console_window_position::CONSOLE_POSITION_KEY,
+            clonk_app_netplay::NativeConfigValue::RawAscii(&value),
+        )],
+    )
+}
+
 /// `Graphics.VerboseObjectLoading`, default 0 (C4Config.cpp:453). Gates the
 /// definition and particle loading diagnostics in `clonk-engine`.
 pub(crate) fn load_verbose_object_loading(paths: Option<&AppPaths>) -> i32 {

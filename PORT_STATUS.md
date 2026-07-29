@@ -425,6 +425,22 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Developer console window position.** Console mode forced
+  `position = None` at startup and the exit path explicitly declined to persist
+  anything, so the console reopened at the OS default every run.
+  `clonk-app::console_window_position` now carries the stored grammar from
+  `StdRegistry.cpp:283-327` — the literals `Maximized`/`Minimized`, or `x,y`
+  (`x,y,w,h` only when `storeSize` is set, which the console never does, though a
+  four-field entry is still honoured for its position). Startup restores from the
+  `Console`/`Main` slot `C4Console::GetPositionData` names
+  (`C4Console.cpp:1278-1284`), and shutdown writes the position alone, beside but
+  separate from the game window's `persist_if_dirty` so the two never share keys.
+  The 320x320 console default size stands; a `Maximized`/`Minimized` entry is
+  logged and falls back to platform placement, since the port has no console
+  equivalent of `ShowWindow(SW_MAXIMIZE)`. Unparseable entries restore nothing
+  rather than moving to a garbage coordinate. Pinned by
+  `console_window_position_round_trips_without_overwriting_game_display`.
+
 - Closed 2026-07-29: **Window application icon.** Both shells built iconless
   windows. `startup_window_builder` now attaches a decoded product icon, which
   covers the game window and the developer console alike — the port routes both

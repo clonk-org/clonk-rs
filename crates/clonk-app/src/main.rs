@@ -22,6 +22,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod advanced_config;
 mod classic_record_stream;
+mod console_window_position;
 mod control_options;
 mod desktop_notification;
 mod developer_console_save;
@@ -516,7 +517,24 @@ fn main() -> Result<()> {
         // inherits the fullscreen game window configuration.
         display_options.mode = DisplayMode::Window;
         display_options.maximized = false;
-        display_options.position = None;
+        // `C4Console::RestorePosition` applies the console's own `Console/Main`
+        // slot right after the window is created (C4Console.cpp:296-305). It
+        // carries a position only — the 320x320 default size stands, and the
+        // game window's geometry is neither read nor written.
+        display_options.position =
+            load_console_window_position(app_paths.as_deref()).and_then(|placement| {
+                use crate::console_window_position::ConsoleWindowPlacement;
+                if matches!(
+                    placement,
+                    ConsoleWindowPlacement::Maximized | ConsoleWindowPlacement::Minimized
+                ) {
+                    // C++ shows the window zoomed or iconic rather than moving
+                    // it (StdRegistry.cpp:310-313); the port has no console
+                    // equivalent, so it falls back to platform placement.
+                    tracing::debug!("ignoring a non-positional console window placement");
+                }
+                placement.position()
+            });
         (320, 320)
     } else {
         display_options
@@ -1213,6 +1231,23 @@ fn main() -> Result<()> {
                 && !app.console_mode
         }) {
             display_options.persist_if_dirty(paths.as_ref());
+        }
+        // `C4Console::StorePosition` on window destruction (C4Console.cpp:154-159)
+        // writes the console's own slot and nothing else, so this is deliberately
+        // separate from the game window's `persist_if_dirty` above.
+        let console_shutdown = matches!(
+            *control_flow,
+            ControlFlow::Exit | ControlFlow::ExitWithCode(_)
+        ) && app.console_mode
+            && !app.configuration_reset_requested;
+        if let (true, Some(paths), Some((x, y))) = (
+            console_shutdown,
+            app_paths.as_ref(),
+            display_options.position,
+        ) {
+            if let Err(error) = store_console_window_position(paths.as_ref(), x, y) {
+                tracing::warn!(%error, "could not store the console window position");
+            }
         }
     });
 }
