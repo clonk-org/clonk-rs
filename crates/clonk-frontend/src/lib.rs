@@ -5758,6 +5758,21 @@ mod tests {
         assert_eq!(image.pixels().as_ref(), raw_base.as_raw());
         assert_eq!(overlay.as_ref(), raw_overlay.as_raw());
 
+        // Find a 16x20 window that actually contains antialiased owner-color
+        // edges rather than assuming they sit at the sheet origin. The crop is
+        // only a fixture for the two-pass blend, and where the interesting
+        // texels land moved when the crew art was re-rendered at DefCore
+        // `Scale=300` — the top-left corner of a high-resolution sheet is
+        // inside one frame's empty margin.
+        let (crop_x, crop_y) = (0..height.saturating_sub(20))
+            .flat_map(|y| (0..width.saturating_sub(16)).map(move |x| (x, y)))
+            .find(|&(ox, oy)| {
+                (0..20).any(|y| {
+                    (0..16).any(|x| (1..=254).contains(&raw_overlay.get_pixel(ox + x, oy + y).0[3]))
+                })
+            })
+            .expect("the shipped sheet must contain antialiased owner-color edges somewhere");
+
         let mut rendered = Surface::new(16, 20, PixelFormat::Rgba8888);
         rendered.fill(Color::opaque(0, 0, 0));
         draw_image_region(
@@ -5765,7 +5780,7 @@ mod tests {
             &GuiRect::new(0.0, 0.0, 16.0, 20.0),
             &ImageData::from_arc(width, height, image.into_pixels()),
             Some(&ColorByOwnerMask::new(width, height, overlay)),
-            &SourceRect::new(0, 0, 16, 20),
+            &SourceRect::new(crop_x as i32, crop_y as i32, 16, 20),
             false,
             Some(0x00ff_0000),
             SpriteBlitState::normal(),
@@ -5776,8 +5791,8 @@ mod tests {
         let mut partial_overlay_pixels = 0;
         for y in 0..20 {
             for x in 0..16 {
-                let base = raw_base.get_pixel(x, y).0;
-                let owner = raw_overlay.get_pixel(x, y).0;
+                let base = raw_base.get_pixel(crop_x + x, crop_y + y).0;
+                let owner = raw_overlay.get_pixel(crop_x + x, crop_y + y).0;
                 partial_overlay_pixels += usize::from((1..=254).contains(&owner[3]));
                 let base_alpha = u16::from(base[3]);
                 let base_rgb = [
