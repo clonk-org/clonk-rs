@@ -1204,6 +1204,47 @@ impl GameApp {
             ),
             not_on_channel: self
                 .runtime_resource_text("IDS_ERR_NOTONACHANNEL", "Not on a channel."),
+            connecting: self.runtime_resource_text("IDS_NET_CONNECTING", "Connecting to %s at %s"),
+        }
+    }
+
+    /// Projects the active language table onto the IRC transport's status
+    /// lines. C++ resolves each key through `LoadResStr` where
+    /// `C4Network2IRCClient` pushes the message (C4Network2IRC.cpp:224-421).
+    pub(crate) fn localized_irc_status_templates(&self) -> clonk_network::IrcStatusTemplates {
+        let template =
+            |key: &str, fallback: &str| self.runtime_resource_text(key, fallback).into_bytes();
+        clonk_network::IrcStatusTemplates {
+            disconnected_from_server: template(
+                "IDS_MSG_DISCONNECTEDFROMSERVER",
+                "Disconnected from server (%s).",
+            ),
+            you_joined_channel: template(
+                "IDS_MSG_YOUHAVEJOINEDCHANNEL",
+                "You have joined channel %s.",
+            ),
+            has_joined_channel: template(
+                "IDS_MSG_HASJOINEDTHECHANNEL",
+                "%s has joined the channel.",
+            ),
+            you_left_channel: template(
+                "IDS_MSG_YOUHAVELEFTCHANNEL",
+                "You have left channel %s (%s).",
+            ),
+            has_left_channel: template("IDS_MSG_HASLEFTTHECHANNEL", "%s has left the channel (%s)"),
+            you_were_kicked: template(
+                "IDS_MSG_YOUWEREKICKEDFROMCHANNEL",
+                "You were kicked from channel %s (%s).",
+            ),
+            was_kicked: template(
+                "IDS_MSG_WASKICKEDFROMTHECHANNEL",
+                "%s was kicked from the channel (%s).",
+            ),
+            has_disconnected: template("IDS_MSG_HASDISCONNECTED", "%s has disconnected (%s)."),
+            changes_topic: template("IDS_MSG_CHANGESTHETOPICTO", "%s changes the topic to: %s"),
+            sets_mode: template("IDS_MSG_SETSMODE", "%s sets mode %s %s"),
+            is_now_known_as: template("IDS_MSG_ISNOWKNOWNAS", "%s is now known as %s"),
+            topic_in: template("IDS_MSG_TOPICIN", "Topic in %s: %s"),
         }
     }
 

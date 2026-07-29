@@ -141,8 +141,8 @@ pub use initial_network_parameters::{
 pub use irc::{
     resolve_irc_server, IrcChannel, IrcClientError, IrcClientEvent, IrcClientHandle,
     IrcClientSnapshot, IrcClientState, IrcCommand, IrcConnectConfig, IrcConnectionState,
-    IrcLineDecoder, IrcMessage, IrcMessageType, IrcReduceResult, IrcUser, IRC_DEFAULT_PORT,
-    IRC_MAX_LOG_LENGTH, IRC_MAX_READ_LOG_LENGTH,
+    IrcLineDecoder, IrcMessage, IrcMessageType, IrcReduceResult, IrcStatusTemplates, IrcUser,
+    IRC_DEFAULT_PORT, IRC_MAX_LOG_LENGTH, IRC_MAX_READ_LOG_LENGTH,
 };
 pub use league::{
     decode_league_auth_response, decode_league_end_response, decode_league_join_response,

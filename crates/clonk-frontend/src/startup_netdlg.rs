@@ -651,6 +651,40 @@ pub struct NetDlgChatStrings {
     /// Use `{command}` for the command name.
     pub unknown_command: String,
     pub not_on_channel: String,
+    /// `IDS_NET_CONNECTING`. C4ChatControl substitutes the server address and
+    /// an empty second argument (C4ChatDlg.cpp:643).
+    pub connecting: String,
+}
+
+/// C4ResStrTable substitutes positional `%s`/`%d` arguments in template order.
+/// A placeholder without a matching argument stays literal, which is what the
+/// C++ `sprintf` fallback yields for a truncated language table.
+fn substitute_resource_arguments(template: &str, arguments: &[&str]) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut remainder = template;
+    let mut arguments = arguments.iter();
+    while let Some(placeholder) = remainder.find('%') {
+        output.push_str(&remainder[..placeholder]);
+        let rest = &remainder[placeholder..];
+        let mut characters = rest.chars();
+        characters.next();
+        match characters.next() {
+            Some('s' | 'd' | 'i') => match arguments.next() {
+                Some(argument) => output.push_str(argument),
+                None => output.push_str(&rest[..2]),
+            },
+            Some('%') => output.push('%'),
+            Some(_) => output.push_str(&rest[..2]),
+            None => {
+                output.push('%');
+                remainder = "";
+                break;
+            }
+        }
+        remainder = &rest[2..];
+    }
+    output.push_str(remainder);
+    output
 }
 
 impl Default for NetDlgChatStrings {
@@ -670,6 +704,7 @@ impl Default for NetDlgChatStrings {
             invalid_nick: "Invalid nickname".into(),
             unknown_command: "Unknown command: {command}".into(),
             not_on_channel: "Not on a channel".into(),
+            connecting: "Connecting to %s at %s".into(),
         }
     }
 }
@@ -1826,7 +1861,10 @@ impl NetDlgController {
                 &mut sheets[0],
                 NetDlgChatLine {
                     kind: NetDlgChatLineKind::Status,
-                    text: format!("Connecting to {}...", self.chat_server),
+                    text: substitute_resource_arguments(
+                        &self.chat_strings.connecting,
+                        &[&self.chat_server, ""],
+                    ),
                 },
                 true,
             );
@@ -8463,7 +8501,7 @@ mod tests {
         assert_eq!(controller.chat_page(), NetDlgChatPage::Chats);
         assert_eq!(
             controller.chat_sheets()[0].lines,
-            vec!["Connecting to irc.example.test..."]
+            vec!["Connecting to irc.example.test at "]
         );
 
         controller.sync_chat_snapshot(chat_snapshot(
@@ -8488,7 +8526,7 @@ mod tests {
         );
         assert_eq!(
             controller.chat_sheets()[0].lines,
-            vec!["Connecting to irc.example.test..."]
+            vec!["Connecting to irc.example.test at "]
         );
     }
 

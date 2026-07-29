@@ -1885,6 +1885,7 @@ impl GameApp {
         } else {
             Some(encode(&login.channel)?)
         };
+        config.status_templates = self.localized_irc_status_templates();
         match clonk_network::IrcClientHandle::connect(config) {
             Ok(client) => {
                 self.startup_irc_initial_connect_pending = true;
