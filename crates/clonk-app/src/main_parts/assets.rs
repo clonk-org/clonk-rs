@@ -5039,6 +5039,18 @@ fn classic_loader_resources(
     LoaderResources::new(fonts, progress)
 }
 
+/// `C4LoaderScreen::Init` answers a missing `C4CFN_StartupBackgroundMain` by
+/// seeking the requested extensions in the main graphics group and then the
+/// general `Loader*` wildcard, so a classic pack without `LoaderGoldmine1.png`
+/// still has a startup background (src/C4LoaderScreen.cpp:57-87). The search
+/// runs over the already-open group; the GroupSet pass belongs to the loader
+/// screen itself (`build_startup_loader`).
+fn startup_menu_background_wildcard(graphics: &GraphicsResource) -> Option<ImageData> {
+    let selected =
+        select_loader_with_safe_random(&[], graphics.group(), STARTUP_LOADER_SPECIFICATION).ok()?;
+    decode_selected_loader(&selected).ok()
+}
+
 pub(crate) fn build_startup_loader(
     paths: &AppPaths,
     assets: &FrontendAssets,
@@ -5894,7 +5906,8 @@ impl FrontendAssets {
                     menu_background = graphics
                         .load_image("LoaderGoldmine1.png")
                         .ok()
-                        .map(Self::image_to_data);
+                        .map(Self::image_to_data)
+                        .or_else(|| startup_menu_background_wildcard(&graphics));
                     scenario_browser_background = graphics
                         .load_image("StartupScenSelBG.png")
                         .ok()

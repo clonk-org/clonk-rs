@@ -3135,6 +3135,79 @@
             .expect("the next join renders the retained startup loader");
     }
 
+    /// `PreInit` asks for `C4CFN_StartupBackgroundMain`, but `C4LoaderScreen::Init`
+    /// falls through to the general `Loader*` wildcard when that named loader is
+    /// absent, so a classic pack without `LoaderGoldmine1.png` still boots
+    /// (src/C4Application.cpp:240-248; src/C4LoaderScreen.cpp:75-87).
+    #[test]
+    fn startup_main_uses_classic_loader_wildcard_when_goldmine_is_absent() {
+        let install = tempdir().expect("install root");
+        install_global_gui_test_root(install.path(), None);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repository root");
+        // The pack ships a loader, just not the requested one.
+        for name in [
+            "LoaderWatercave1.png",
+            "Logo.png",
+            "StartupBigButton.png",
+            "StartupBigButtonDown.png",
+        ] {
+            fs::copy(
+                repository.join("planet/Graphics.c4g").join(name),
+                install.path().join("planet/Graphics.c4g").join(name),
+            )
+            .unwrap_or_else(|error| panic!("copy fixture {name}: {error}"));
+        }
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        let app = new_menu_app_with_paths(640, 480, &paths);
+
+        assert!(
+            app.assets.menu_background.is_some(),
+            "the wildcard fallback must supply the startup background"
+        );
+        assert!(
+            app.assets.require_classic_startup_main_resources().is_ok(),
+            "preflight must not demand the named loader once a wildcard match exists"
+        );
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .map(|loader| loader.selection().selected_filename().to_string()),
+            Some("LoaderWatercave1.png".to_string())
+        );
+
+        // A pack with no eligible loader at all still fails the preflight, so
+        // the boundary is the absent wildcard rather than the absent name.
+        drop(_guard);
+        let bare = tempdir().expect("bare install root");
+        install_global_gui_test_root(bare.path(), None);
+        let _bare_guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(bare.path())),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let bare_paths = AppPaths::discover().expect("discover bare app paths");
+        bare_paths
+            .ensure_user_dirs()
+            .expect("create user directories");
+        let bare_assets = FrontendAssets::load(Some(&bare_paths));
+        assert!(bare_assets.menu_background.is_none());
+        assert!(matches!(
+            bare_assets.require_classic_startup_main_resources(),
+            Err(ClassicParityBoundary::StartupMainResources { missing })
+                if missing.contains(&"LoaderGoldmine1.png")
+        ));
+    }
+
     #[test]
     fn failed_startup_network_restart_reinitializes_the_startup_loader_screen() {
         // A failed host/join runs the same QuitGame -> PreInit -> DoStartup
