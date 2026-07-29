@@ -748,6 +748,13 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   simulation state, so it cannot affect determinism.
   `clonk-c4group::update_entries` writes the manifest `MkUp` intends and reads
   the corrupted form tolerantly, since C++-produced packages exist in the wild.
+  `clonk-c4group::update_core` does the same for `AutoUpdate.txt`, checked
+  against a package the oracle's own `c4group -g` produced. Two traps there:
+  the `UpGrpCnt` member is serialised under the key **`TargetCount`**, so
+  reading a key named after the member silently yields a zero-target package;
+  and only the first `TargetCount` array entries are meaningful, which is what
+  discards the uninitialised `GrpContentsCRC1` tail on read. Writing pads
+  nothing, so the same inputs give the same bytes every time — unlike C++.
   Pinned by
   `update_entry_manifest_round_trips_and_tolerates_cpp_uninitialised_names`,
   which also asserts that parsing those records *literally* would delete the
