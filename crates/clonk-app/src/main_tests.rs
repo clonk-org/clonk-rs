@@ -1210,6 +1210,7 @@ fn audio_viewport(index: usize, owner: i32, center: Vector2) -> ActiveViewportPr
     ActiveViewportProjection {
         index,
         owner,
+        identity: None,
         is_no_owner_viewport: false,
         rect: Rect::new(0, 0, 200, 100),
         content_rect: Rect::new(0, 0, 200, 100),

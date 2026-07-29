@@ -1059,6 +1059,10 @@ impl GraphicsSystem {
             .map(|(index, viewport)| ActiveViewportProjection {
                 index,
                 owner: viewport.owner,
+                identity: match viewport.camera_key {
+                    CameraKey::Physical { identity, .. } => Some(identity),
+                    CameraKey::Player { .. } => None,
+                },
                 is_no_owner_viewport: viewport.is_no_owner_viewport,
                 rect: viewport.rect,
                 content_rect: viewport.content_rect,
@@ -1071,6 +1075,20 @@ impl GraphicsSystem {
                 zoom: viewport.zoom,
             })
             .collect()
+    }
+
+    /// The projection for one physical viewport identity.
+    ///
+    /// Prefer this over indexing [`Self::active_viewport_projections`]: a
+    /// detached console window keeps its identity across a layout
+    /// recalculation, while its list index does not.
+    pub fn viewport_projection_for_identity(
+        &self,
+        identity: u64,
+    ) -> Option<ActiveViewportProjection> {
+        self.active_viewport_projections()
+            .into_iter()
+            .find(|projection| projection.identity == Some(identity))
     }
 
     /// Ordered special-object audibility calls produced by the most recent

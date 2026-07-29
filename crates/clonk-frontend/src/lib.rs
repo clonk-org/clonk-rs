@@ -10440,6 +10440,79 @@ mod tests {
         assert!(!graphics.scroll_observer_viewport(99, Vector2::new(10, 0)));
     }
 
+    // C4Viewport gives each window its own object, so a detached console
+    // window must address its viewport by identity — the list index is the
+    // rendered layout order and the owner repeats.
+    #[test]
+    fn detached_viewport_projection_is_addressable_by_physical_identity() {
+        let snapshot = camera_world_snapshot();
+        let mut graphics = test_graphics(100, 80, 80, "Identity addressing");
+        // Two viewports following the *same* player, as a console second
+        // window on an already-viewed player produces.
+        graphics.render_frame(
+            &snapshot,
+            &[
+                ViewportInput::new(0, Vector2::new(500, 500), 1.0, &snapshot.objects[0])
+                    .with_physical_camera_identity(41, 0),
+                ViewportInput::new(0, Vector2::new(500, 500), 1.0, &snapshot.objects[0])
+                    .with_physical_camera_identity(42, 1),
+            ],
+        );
+
+        let projections = graphics.active_viewport_projections();
+        assert_eq!(projections.len(), 2);
+        assert_eq!(
+            projections[0].owner, projections[1].owner,
+            "duplicate owners are exactly the case the index cannot disambiguate"
+        );
+        assert_eq!(projections[0].identity, Some(41));
+        assert_eq!(projections[1].identity, Some(42));
+
+        // Each identity resolves to its own projection, whatever its index.
+        assert_eq!(
+            graphics
+                .viewport_projection_for_identity(41)
+                .expect("identity 41 is live")
+                .index,
+            0
+        );
+        assert_eq!(
+            graphics
+                .viewport_projection_for_identity(42)
+                .expect("identity 42 is live")
+                .index,
+            1
+        );
+        assert!(graphics.viewport_projection_for_identity(99).is_none());
+
+        // Re-rendering with the layout order swapped moves the indices but not
+        // the identities, which is the whole point.
+        graphics.render_frame(
+            &snapshot,
+            &[
+                ViewportInput::new(0, Vector2::new(500, 500), 1.0, &snapshot.objects[0])
+                    .with_physical_camera_identity(42, 1),
+                ViewportInput::new(0, Vector2::new(500, 500), 1.0, &snapshot.objects[0])
+                    .with_physical_camera_identity(41, 0),
+            ],
+        );
+        assert_eq!(
+            graphics
+                .viewport_projection_for_identity(41)
+                .expect("identity 41 survives a relayout")
+                .index,
+            1,
+            "the index moved with the layout"
+        );
+        assert_eq!(
+            graphics
+                .viewport_projection_for_identity(42)
+                .expect("identity 42 survives a relayout")
+                .index,
+            0
+        );
+    }
+
     #[test]
     fn observer_scroll_queued_before_projection_moves_the_first_rendered_camera() {
         let snapshot = camera_world_snapshot();

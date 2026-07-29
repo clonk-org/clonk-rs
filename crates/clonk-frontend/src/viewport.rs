@@ -1112,6 +1112,14 @@ pub(crate) struct AudibilityFacet {
 pub struct ActiveViewportProjection {
     pub index: usize,
     pub owner: i32,
+    /// The concrete `C4Viewport`'s app-owned identity, when it has one.
+    ///
+    /// This is the only stable handle a detached console window has:
+    /// [`Self::index`] is the *rendered layout* order and moves whenever the
+    /// layout is recalculated, and [`Self::owner`] repeats when two viewports
+    /// follow the same player. Address a viewport by this, not by either of
+    /// those (`C4Viewport.cpp` gives each window its own object).
+    pub identity: Option<u64>,
     /// Physical `C4Viewport::fIsNoOwnerViewport` classification. Temporary
     /// film-view player assignment does not change it.
     pub is_no_owner_viewport: bool,

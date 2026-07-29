@@ -430,6 +430,7 @@ fn optional_initial_network_game_source_distinguishes_missing_and_unreadable_ent
 fn l068_context_command_coordinates_include_letterbox_and_ignore_camera_zoom() {
     let viewport = ActiveViewportProjection {
         index: 0,
+        identity: None,
         owner: 1,
         is_no_owner_viewport: false,
         rect: Rect::new(10, 20, 160, 100),

@@ -358,6 +358,7 @@ fn missing_player_scoped_messages_are_not_drawable() {
     let app = new_state_only_running_sandbox_app();
     let viewports = [ActiveViewportProjection {
         index: 0,
+        identity: None,
         owner: app.local_owner,
         is_no_owner_viewport: false,
         rect: Rect::new(0, 0, 320, 200),
@@ -554,6 +555,7 @@ fn target_message_regular_parallax_matches_cpp_integer_order() {
         .insert("__local_1".to_string(), Value::Int(150));
     let viewport = ActiveViewportProjection {
         index: 0,
+        identity: None,
         owner: 1,
         is_no_owner_viewport: false,
         rect: Rect::new(10, 20, 400, 200),
@@ -584,6 +586,7 @@ fn target_message_zero_parallax_negative_position_anchors_right_bottom() {
         .insert("__local_1".to_string(), Value::Int(0));
     let viewport = ActiveViewportProjection {
         index: 0,
+        identity: None,
         owner: 1,
         is_no_owner_viewport: false,
         rect: Rect::new(10, 20, 800, 400),
@@ -643,6 +646,7 @@ fn fractional_zoom_rounded_border_keeps_logical_edge_message_drawable() {
     };
     let viewport = ActiveViewportProjection {
         index: 0,
+        identity: None,
         owner: app.local_owner,
         is_no_owner_viewport: false,
         rect: Rect::new(10, 20, 100, 100),
