@@ -1824,7 +1824,35 @@ impl GameApp {
 
     fn close_options_menu(&mut self) -> Result<(), EngineError> {
         let save_result = self.persist_open_options_config();
+        // `C4StartupOptionsDlg::SaveConfig` ends with an outright
+        // `Config.Save()` — "make sure config is saved, in case the game
+        // crashes later on" (C4StartupOptionsDlg.cpp:1188-1189). Leaving the
+        // dialog is therefore an explicit save surface, so anything held for
+        // the shutdown flush is written here too.
+        self.flush_deferred_config();
         self.close_options_menu_with_persist_result(save_result)
+    }
+
+    /// Writes every pending runtime config change now. Used by the explicit
+    /// save surfaces; the clean-shutdown path flushes the same store.
+    pub(crate) fn flush_deferred_config(&mut self) {
+        let Some(paths) = self.app_paths.clone() else {
+            return;
+        };
+        for (section, entries) in self.deferred_config.take_by_section() {
+            let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.as_str(),
+                        clonk_app_netplay::NativeConfigValue::RawAscii(value.as_str()),
+                    )
+                })
+                .collect();
+            if let Err(error) = persist_native_config_values(&paths, &section, &updates) {
+                tracing::warn!(%error, section, "could not save deferred config values");
+            }
+        }
     }
 
     pub(crate) fn close_options_menu_with_persist_result(

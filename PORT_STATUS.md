@@ -443,7 +443,15 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   add/remove (`C4StartupScenSelDlg.cpp:1838-1856`), change the string in memory
   and return; `C4StartupScenSelDlg.cpp` contains no `Config.Save()` at all.
   Two tests asserted the file was written immediately and were updated to assert
-  the pending value instead — they had pinned the divergence. **Still open:** every other
+  the pending value instead — they had pinned the divergence.
+  **There are two flush points, not one.** `C4StartupOptionsDlg::SaveConfig`
+  ends with an outright `Config.Save()` — "make sure config is saved, in case
+  the game crashes later on" (`C4StartupOptionsDlg.cpp:1188-1189`) — so leaving
+  the Options dialog is an explicit save surface, not something to defer.
+  `close_options_menu` now flushes the pending store alongside its existing
+  options write, and the clean-shutdown path flushes the same store. Deferring
+  the Options save to shutdown would have lost exactly the crash protection that
+  comment describes. **Still open:** every other
   `persist_config_value` caller needs its own C++ site read before being moved —
   MissionAccess, Participants, sound toggles, ServerAddress and the Startup
   checkboxes are *not* settled by the oracle lines this ticket cites, and the
