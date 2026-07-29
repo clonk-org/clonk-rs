@@ -3937,6 +3937,10 @@ pub(crate) fn load_prepared_league_host_config(
                 .or_else(|| raw_value("General", "LanguageEx"))
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| startup_language_sequence(paths).join(",")),
+            // C++ defaults Network.UseCurl to true (C4Config.cpp:561).
+            http_backend: clonk_network::HttpBackend::from_use_curl(
+                integer("Network", "UseCurl", 1) != 0,
+            ),
         },
         update_period_secs: i64::from(integer("Network", "MasterReferencePeriod", 120)),
         league_server_signup,
@@ -4270,9 +4274,19 @@ pub(crate) fn load_reference_query_settings(
         .or_else(|| value("LanguageEx"))
         .filter(|sequence| !sequence.is_empty())
         .unwrap_or_else(|| startup_language_sequence(paths).join(","));
+    // Network.UseCurl picks the HTTP client implementation
+    // (C4Network2Reference.cpp:410-413). C++ defaults it to true
+    // (C4Config.cpp:561), so an absent or unparsable key keeps the curl policy.
+    let http_backend = clonk_network::HttpBackend::from_use_curl(
+        native_config_text(&config, "Network", "UseCurl")
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .map(|value| value != 0)
+            .unwrap_or(true),
+    );
     clonk_network::ReferenceQueryConfig {
         language_charset,
         language_sequence,
+        http_backend,
     }
 }
 

@@ -7630,6 +7630,7 @@ pub(crate) fn client_settings_for_paths(
     settings.league_transport = clonk_network::LeagueHttpTransportConfig {
         language_charset: query.language_charset,
         language_sequence: query.language_sequence,
+        http_backend: query.http_backend,
     };
     settings.league_auth = load_league_auth_settings(paths);
     if let Some(paths) = paths {

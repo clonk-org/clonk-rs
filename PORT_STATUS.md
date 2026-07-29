@@ -623,6 +623,31 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   many `main_tests` callers are fixture set-up that must keep writing
   immediately.
 
+- **`Network.UseCurl` now selects the HTTP backend, as a policy rather than a
+  second stack.** `C4Network2HTTPClient` picks one of two implementations at
+  construction (`C4Network2Reference.cpp:410-413`), and they differ on the wire,
+  not just internally. curl follows `Location` (`CURLOPT_FOLLOWLOCATION`), keeps
+  an in-memory cookie jar (`CURLOPT_COOKIEFILE ""`), reuses connections
+  (`CURLOPT_SHARE`) and bounds the connect phase plus a stalled transfer
+  (`C4HTTPClient.cpp:189-198`). NetIO does none of that: it writes `HTTP/1.0`
+  with `Connection: Close`, has **no `Location` handling at all**, no cookie
+  state, and one 20-second query timeout (`C4Network2Reference.cpp:404-405,
+  825-856`). `clonk-network::HttpBackend` is that difference, applied to a
+  `reqwest` client builder and threaded through `ReferenceQueryConfig` and
+  `LeagueHttpTransportConfig` so both reference and league traffic follow the
+  configured backend; the key defaults to true (`C4Config.cpp:561`), which is
+  the behaviour that already shipped.
+  **Deliberate divergence, with a reason.** The alternative reading — port
+  `C4Network2HTTPClientImplNetIO` literally — means a hand-written HTTP header
+  and gzip parser reading straight off the reference and league sockets,
+  duplicating `reqwest` on exactly the paths this repo forbids panicking on.
+  The acceptance criterion is observable request semantics, so the policy is
+  what is reproduced. Two residuals: `reqwest` cannot emit an `HTTP/1.0`
+  request line, so a version-sensitive server still sees `HTTP/1.1` with
+  `Connection: close`, and this `reqwest` has no happy-eyeballs builder, though
+  its connector default already matches C++'s 300 ms. Pinned by
+  `use_curl_false_selects_netio_compatible_http_transport`.
+
 - **Keyed developer window host landed, with the console shell as a live record.**
   The runner owns exactly one Window/Pixels/FramePresenter, so console
   viewports, the Tools/Property toolbox and the object-list window had nowhere

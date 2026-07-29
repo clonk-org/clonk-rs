@@ -852,7 +852,7 @@ fn spawn_league_record_runtime(
     endpoint: String,
     config: clonk_network::LeagueHttpTransportConfig,
 ) -> std::result::Result<LeagueRecordRuntimeHandle, clonk_network::LeagueHttpTransportError> {
-    let transport = clonk_network::LeagueHttpPostTransport::cpp_default()?;
+    let transport = clonk_network::LeagueHttpPostTransport::for_backend(config.http_backend)?;
     let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
     let status = Arc::new(Mutex::new(LeagueRecordStreamStatus::default()));
     tokio::spawn(run_league_record_runtime(
@@ -4905,8 +4905,9 @@ fn spawn_league_client(
     transport_config: clonk_network::LeagueHttpTransportConfig,
     event_tx: NetworkEventSender,
 ) -> Result<LeagueRuntimeHandle> {
-    let transport = clonk_network::LeagueHttpPostTransport::cpp_default()
-        .map_err(|error| anyhow!("cannot initialise league HTTP transport: {error}"))?;
+    let transport =
+        clonk_network::LeagueHttpPostTransport::for_backend(transport_config.http_backend)
+            .map_err(|error| anyhow!("cannot initialise league HTTP transport: {error}"))?;
     let (runtime, command_rx, gate) = league_runtime_channels();
     tokio::spawn(run_league_runtime(
         LeagueRuntimeState {

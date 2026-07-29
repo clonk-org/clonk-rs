@@ -14,6 +14,7 @@ mod forward_packet;
 mod host_game_reference;
 mod host_initial_resources;
 mod host_resource_core;
+mod http_backend;
 mod initial_network_dynamic;
 mod initial_network_metadata;
 mod initial_network_parameters;
@@ -126,6 +127,7 @@ pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
     HostResourceType, MAX_PLAYER_BIG_ICON_SIZE,
 };
+pub use http_backend::{HttpBackend, NETIO_HAPPY_EYEBALLS_TIMEOUT, NETIO_QUERY_TIMEOUT};
 pub use initial_network_dynamic::{
     compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,
     InitialNetworkDynamicError, InitialNetworkDynamicSpec,

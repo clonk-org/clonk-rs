@@ -404,6 +404,8 @@ pub struct ReferenceQueryConfig {
     pub language_charset: String,
     /// `Config.General.LanguageEx`, preserved as the HTTP language preference.
     pub language_sequence: String,
+    /// `Config.Network.UseCurl` (`C4Network2Reference.cpp:410-413`).
+    pub http_backend: crate::HttpBackend,
 }
 
 impl ReferenceQueryConfig {
@@ -1600,13 +1602,14 @@ impl ReferenceRequestPlan {
         }
     }
 
-    fn client_builder(&self) -> reqwest::ClientBuilder {
-        match self.connect_address {
+    fn client_builder(&self, backend: crate::HttpBackend) -> reqwest::ClientBuilder {
+        let builder = match self.connect_address {
             Some(address) => reqwest::Client::builder()
                 .no_proxy()
                 .resolve(SCOPED_IPV6_REQUEST_HOST, address),
             None => reqwest::Client::builder(),
-        }
+        };
+        backend.apply(builder)
     }
 
     fn get(&self, client: &reqwest::Client) -> reqwest::RequestBuilder {
@@ -1637,7 +1640,7 @@ pub async fn fetch_reference_query_endpoint_with_config(
 ) -> Result<ReferenceQueryResponse, ReferenceFetchError> {
     let plan = ReferenceRequestPlan::for_endpoint(endpoint);
     let client = plan
-        .client_builder()
+        .client_builder(config.http_backend)
         .user_agent(crate::league::LEAGUE_HTTP_USER_AGENT)
         .gzip(true)
         .timeout(timeout)
@@ -2381,7 +2384,10 @@ Address=TCP:"192.0.2.8:41112"
             }
         );
 
-        let client = plan.client_builder().build().unwrap();
+        let client = plan
+            .client_builder(crate::HttpBackend::default())
+            .build()
+            .unwrap();
         let request = plan.get(&client).build().unwrap();
         assert_eq!(
             request.url().as_str(),
@@ -2563,6 +2569,7 @@ Title=Empty\n",
             let config = ReferenceQueryConfig {
                 language_charset: configured.to_string(),
                 language_sequence: String::new(),
+                http_backend: Default::default(),
             };
             assert_eq!(config.charset_code_name(), expected, "{configured}");
         }
@@ -2594,6 +2601,7 @@ Title=Empty\n",
             let config = ReferenceQueryConfig {
                 language_charset: configured.to_string(),
                 language_sequence: String::new(),
+                http_backend: Default::default(),
             };
             let mut body = b"[Reference]\nTitle=\"".to_vec();
             body.extend_from_slice(encoded);

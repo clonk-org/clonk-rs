@@ -6792,6 +6792,7 @@ fn reference_query_settings_use_cpp_configured_locale() {
         clonk_network::ReferenceQueryConfig {
             language_charset: "RUSSIAN".to_string(),
             language_sequence: "RU,US,DE".to_string(),
+            http_backend: Default::default(),
         }
     );
     assert_eq!(
