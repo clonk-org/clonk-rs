@@ -599,9 +599,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   are removed, the script profiler is aborted, and the definition itself is
   dropped from the list. `Messages.UpdateDef(id)` runs after either arm. Pinned
   by `console_definition_reload_refuses_network_and_sweeps_every_matching_object`.
+  The watcher's dispatch is ported too. `C4Game::ReloadFile`
+  (`C4Game.cpp:2306-2319`) refuses in a network game, converts the path with
+  `Config.AtExeRelativePath` **before** matching — so an absolute watcher path
+  never reaches `GetByPath` — and falls through to
+  `ScriptEngine.ReloadScript` for anything no definition owns; the script host
+  is the fallback, not a sibling branch. `C4Game::ReloadParticle` is blunter
+  than it looks: an unknown name reloads nothing, and a *failed* reload clears
+  **every particle in the system**, not just that definition's, then deletes the
+  definition. Pinned by
+  `external_reload_routes_by_definition_and_clears_particles_on_failure`.
   **Still open:** the reload itself — retaining source provenance through
   production loading and rebuilding DefCore, ActMap, scripts, graphics,
-  portraits, ranks and localised components in place.
+  portraits, ranks and localised components in place — and the file watcher that
+  feeds it.
 
 - **Deferred runtime config save: mechanism landed, most callers still write
   through.** C++ mutates its process-wide `Config` for ordinary runtime toggles

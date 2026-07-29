@@ -93,6 +93,84 @@ fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str>
         .then(|| &value[prefix.len()..])
 }
 
+/// Where a changed file's reload goes (`C4Game::ReloadFile`, `C4Game.cpp:2306`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChangedFileRoute {
+    /// `if (Network.isEnabled()) return;` — the first line again. A network
+    /// game ignores the watcher entirely.
+    RefusedInNetwork,
+    /// `Defs.GetByPath` matched: reload that definition.
+    Definition { definition: String },
+    /// No definition owns the path, so it goes to the generic script host —
+    /// `ScriptEngine.ReloadScript(relativePath, &Defs)`. Note this is the
+    /// *fallback*, not a separate branch of the match: an unmatched path is
+    /// always offered to the script engine.
+    Script { relative_path: String },
+}
+
+/// `C4Game::ReloadFile` (`C4Game.cpp:2306-2319`).
+///
+/// `relative_path` must already be `Config.AtExeRelativePath(path)` — C++
+/// converts before matching, so an absolute watcher path never reaches
+/// `GetByPath`. `definition_for_path` is
+/// [`find_definition_by_path`] over the loaded definitions.
+pub fn changed_file_route(
+    network_game: bool,
+    relative_path: &str,
+    definition_for_path: impl FnOnce(&str) -> Option<String>,
+) -> ChangedFileRoute {
+    if network_game {
+        return ChangedFileRoute::RefusedInNetwork;
+    }
+    match definition_for_path(relative_path) {
+        Some(definition) => ChangedFileRoute::Definition { definition },
+        None => ChangedFileRoute::Script {
+            relative_path: relative_path.to_owned(),
+        },
+    }
+}
+
+/// `C4Game::ReloadParticle` (`C4Game.cpp`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ParticleReloadOutcome {
+    /// Network games refuse, like every other reload path.
+    RefusedInNetwork,
+    /// `Particles.GetDef(szName)` found nothing. Nothing is reloaded and
+    /// nothing is cleared.
+    UnknownParticle,
+    /// `pDef->Reload()` succeeded.
+    Reloaded,
+    /// `pDef->Reload()` failed. C++ is blunt about it: **every particle in the
+    /// system is cleared**, not just this definition's, and the definition is
+    /// deleted.
+    Failed {
+        clear_all_particles: bool,
+        remove_definition: bool,
+    },
+}
+
+/// `C4Game::ReloadParticle`. `reload` runs only when the name is known, and
+/// reports whether `C4ParticleDef::Reload` succeeded.
+pub fn particle_reload_outcome(
+    network_game: bool,
+    particle_known: bool,
+    reload: impl FnOnce() -> bool,
+) -> ParticleReloadOutcome {
+    if network_game {
+        return ParticleReloadOutcome::RefusedInNetwork;
+    }
+    if !particle_known {
+        return ParticleReloadOutcome::UnknownParticle;
+    }
+    if reload() {
+        return ParticleReloadOutcome::Reloaded;
+    }
+    ParticleReloadOutcome::Failed {
+        clear_all_particles: true,
+        remove_definition: true,
+    }
+}
+
 /// What `C4Game::ReloadDef` does before it touches anything (`C4Game.cpp`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DefinitionReloadPlan {
@@ -315,6 +393,61 @@ mod tests {
             DefinitionReloadOutcome::Failed {
                 remove_objects: Vec::new(),
                 abort_profiler: true,
+                remove_definition: true,
+            }
+        );
+    }
+
+    // C4Game::ReloadFile and C4Game::ReloadParticle — the watcher's dispatch
+    // and the particle path's blunt failure policy.
+    #[test]
+    fn external_reload_routes_by_definition_and_clears_particles_on_failure() {
+        let matches = |path: &str| (path == "Objects.c4d\\Rock.c4d").then(|| "ROCK".to_owned());
+
+        // Network games ignore the watcher entirely — the first line again.
+        assert_eq!(
+            changed_file_route(true, "Objects.c4d\\Rock.c4d", matches),
+            ChangedFileRoute::RefusedInNetwork
+        );
+
+        // A matched path reloads that definition.
+        assert_eq!(
+            changed_file_route(false, "Objects.c4d\\Rock.c4d", matches),
+            ChangedFileRoute::Definition {
+                definition: "ROCK".to_owned()
+            }
+        );
+
+        // An unmatched path is not dropped: it always falls through to the
+        // generic script host.
+        assert_eq!(
+            changed_file_route(false, "System.c4g\\Helper.c", matches),
+            ChangedFileRoute::Script {
+                relative_path: "System.c4g\\Helper.c".to_owned()
+            }
+        );
+
+        // Particles: refusal, unknown name, success, and the failure sweep.
+        assert_eq!(
+            particle_reload_outcome(true, true, || unreachable!("no reload in a network game")),
+            ParticleReloadOutcome::RefusedInNetwork
+        );
+        assert_eq!(
+            particle_reload_outcome(false, false, || unreachable!(
+                "an unknown particle is never reloaded"
+            )),
+            ParticleReloadOutcome::UnknownParticle
+        );
+        assert_eq!(
+            particle_reload_outcome(false, true, || true),
+            ParticleReloadOutcome::Reloaded
+        );
+        // Failure clears **every** particle in the system, not just this
+        // definition's, and deletes the definition.
+        assert_eq!(
+            particle_reload_outcome(false, true, || false),
+            ParticleReloadOutcome::Failed {
+                clear_all_particles: true,
                 remove_definition: true,
             }
         );
