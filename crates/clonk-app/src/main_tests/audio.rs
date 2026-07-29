@@ -43,6 +43,57 @@
         assert!(boot.boot_loading.is_none());
     }
 
+    /// `CStdApp::Execute` abandons a deadline more than two seconds overdue -
+    /// `LastExecute = tv` - and then fires `pWindow->Sec1Timer()` at most once,
+    /// on a plain `seconds != LastExecute.tv_sec` comparison that cannot queue a
+    /// backlog (StdAppUnix.cpp:261-291). A long stall must therefore advance the
+    /// clock by one second, not by the whole gap.
+    #[test]
+    fn sec1_timer_coalesces_stalls_over_two_seconds_like_cpp() {
+        let mut app = new_menu_app(320, 200);
+        let mut seconds = Duration::ZERO;
+        app.engine.tick().expect("tick arms clock");
+
+        // Sub-second input accumulates without a pulse, and the phase is kept.
+        for _ in 0..3 {
+            advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(300))
+                .expect("sub-second accumulation");
+        }
+        assert_eq!(app.game_time_seconds(), 0);
+        assert_eq!(seconds, Duration::from_millis(900));
+
+        // The exact one-second boundary pulses once and keeps the remainder.
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(250))
+            .expect("boundary pulse");
+        assert_eq!(app.game_time_seconds(), 1);
+        assert_eq!(seconds, Duration::from_millis(150));
+
+        // A five-second stall is one pulse, not five, and the sub-second phase
+        // survives so the timer cannot drift.
+        app.engine.tick().expect("re-arm the clock");
+        let before = app.game_time_seconds();
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(5_400))
+            .expect("coalesced stall");
+        assert_eq!(
+            app.game_time_seconds() - before,
+            1,
+            "a stall beyond the C++ reset threshold dispatches exactly one Sec1 callback"
+        );
+        assert_eq!(
+            seconds,
+            Duration::from_millis(550),
+            "the accumulator reanchors to the sub-second phase instead of holding the backlog"
+        );
+
+        // The next ordinary second still pulses exactly once from there.
+        app.engine.tick().expect("re-arm the clock");
+        let before = app.game_time_seconds();
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(450))
+            .expect("post-stall pulse");
+        assert_eq!(app.game_time_seconds() - before, 1);
+        assert_eq!(seconds, Duration::ZERO);
+    }
+
     #[test]
     fn event_loop_second_accumulator_pulses_the_engine_clock() {
         // StdApp's one-second callback is independent from frame scheduling
