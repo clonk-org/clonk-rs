@@ -3627,6 +3627,10 @@ pub(crate) enum MessageDialogContinuation {
     DeveloperConsoleNotice {
         follow_up: Option<String>,
     },
+    /// One wild savegame-player takeover warning. Its checkbox persists
+    /// `Config.Startup.HideMsgPlrTakeOver` (C4PlayerInfo.cpp:1390;
+    /// C4Config.cpp:1514) and the dialog itself changes no assignment.
+    SavegamePlayerTakeoverWarning,
     StartupNetworkConnectProgress,
     StartupIrcConnectWarning {
         login: clonk_frontend::startup_netdlg::NetDlgChatLogin,

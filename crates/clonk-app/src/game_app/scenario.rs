@@ -950,6 +950,63 @@ impl GameApp {
         Ok(())
     }
 
+    /// `RestoreSavegameInfos` logs `IDS_MSG_PLAYERASSIGNMENT` for every match
+    /// made past `PML_PlrName`, then - only with a GUI, in fullscreen, and
+    /// outside a replay - shows one modal per assignment whose checkbox writes
+    /// `Config.Startup.HideMsgPlrTakeOver` (C4PlayerInfo.cpp:1384-1390;
+    /// C4Config.cpp:1514). Logging happens on every path, including hidden,
+    /// replay and console runs.
+    pub(crate) fn report_offline_wild_takeovers(
+        &mut self,
+        takeovers: &[crate::offline_savegame::OfflineWildTakeover],
+    ) -> Result<(), EngineError> {
+        if takeovers.is_empty() {
+            return Ok(());
+        }
+        let template = self.runtime_resource_text(
+            "IDS_MSG_PLAYERASSIGNMENT",
+            "Participant %s will continue for player %s from the savegame.",
+        );
+        let messages = takeovers
+            .iter()
+            .map(|takeover| {
+                clonk_app_menus::substitute_resource_arguments(
+                    &template,
+                    &[
+                        &clonk_resources::decode_legacy_script_text(&takeover.participant),
+                        &clonk_resources::decode_legacy_script_text(&takeover.savegame_player),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
+        for message in &messages {
+            tracing::info!("{message}");
+        }
+        if self.startup_message_hidden("HideMsgPlrTakeOver") || self.engine.film_replay() {
+            return Ok(());
+        }
+        let caption = self.runtime_resource_text("IDS_MSG_FREESAVEGAMEPLRS", "Player assignment");
+        let checkbox = self.runtime_resource_text(
+            "IDS_MSG_DONTSHOW",
+            "&Don't display this message in the future.",
+        );
+        for message in messages {
+            self.push_message_dialog(
+                clonk_frontend::message_dialog::MessageDialogState::new(
+                    message,
+                    caption.clone(),
+                    clonk_frontend::message_dialog::MessageDialogButtons::OK,
+                    clonk_frontend::message_dialog::MessageDialogIcon::Standard(12),
+                    clonk_frontend::message_dialog::MessageDialogSize::Regular,
+                    false,
+                )
+                .with_checkbox(checkbox.clone(), false),
+                MessageDialogContinuation::SavegamePlayerTakeoverWarning,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn activate_loaded_scenario(
         &mut self,
         scenario: FrontendScenario,
@@ -1091,6 +1148,14 @@ impl GameApp {
             .loading_state
             .as_mut()
             .and_then(|loading| loading.offline_savegame.take());
+        // `RestoreSavegameInfos` logs every assignment made past `PML_PlrName`
+        // and, in graphical non-replay mode, shows one hideable modal per wild
+        // match (C4PlayerInfo.cpp:1384-1390).
+        if let Some(savegame) = offline_savegame.as_ref() {
+            if let Err(error) = self.report_offline_wild_takeovers(&savegame.wild_takeovers) {
+                tracing::warn!(%error, "failed to present the savegame takeover warning");
+            }
+        }
         let initial_game_data = prepared_initial_game_data.as_ref().or_else(|| {
             offline_savegame
                 .as_ref()

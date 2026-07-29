@@ -3954,6 +3954,11 @@ impl GameApp {
                     MessageDialogContinuation::StartupIrcConnectWarning { .. } => {
                         ("HideMsgIRCDangerous", "IRC disclaimer preference", true)
                     }
+                    MessageDialogContinuation::SavegamePlayerTakeoverWarning => (
+                        "HideMsgPlrTakeOver",
+                        "savegame player-takeover warning preference",
+                        false,
+                    ),
                     _ => return None,
                 };
                 Some((
@@ -4101,6 +4106,9 @@ impl GameApp {
                     self.show_developer_console_message(message, None)?;
                 }
             }
+            // The warning is informational: `RestoreSavegameInfos` has already
+            // made the assignment before showing it (C4PlayerInfo.cpp:1383-1390).
+            MessageDialogContinuation::SavegamePlayerTakeoverWarning => {}
             MessageDialogContinuation::StartupNetworkConnectProgress => {
                 if self
                     .startup_network_connection

@@ -5363,3 +5363,82 @@ fn quick_save_persists_across_sessions() {
     }
     reset_cached_app_paths();
 }
+
+/// `RestoreSavegameInfos` logs `IDS_MSG_PLAYERASSIGNMENT` for every wild match
+/// and, with a GUI in fullscreen outside a replay, shows one modal per
+/// assignment captioned `IDS_MSG_FREESAVEGAMEPLRS`; its checkbox persists
+/// `Config.Startup.HideMsgPlrTakeOver` without changing any assignment
+/// (C4PlayerInfo.cpp:1383-1391; C4Config.cpp:1514).
+#[test]
+fn offline_wild_takeover_logs_and_presents_hideable_warning() {
+    let install = tempdir().expect("takeover install root");
+    let user_data = tempdir().expect("takeover user data");
+    fs::create_dir_all(install.path().join("planet/System.c4g")).expect("fixture System group");
+    fs::write(
+        install.path().join("planet/System.c4g/LanguageUS.txt"),
+        b"IDS_MSG_PLAYERASSIGNMENT=Participant %s will continue for player %s from the savegame.\n          IDS_MSG_FREESAVEGAMEPLRS=Player assignment\n          IDS_MSG_DONTSHOW=&Don't display this message in the future.\n",
+    )
+    .expect("fixture takeover language resources");
+    let _guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(install.path())),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+    ]);
+    let paths = AppPaths::discover().expect("fixture app paths");
+    paths.ensure_user_dirs().expect("fixture user directories");
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+        .expect("fixture runtime language selection");
+
+    let takeovers = vec![
+        crate::offline_savegame::OfflineWildTakeover {
+            participant: b"Carol".to_vec(),
+            savegame_player: b"Ghost".to_vec(),
+        },
+        crate::offline_savegame::OfflineWildTakeover {
+            participant: b"Dave".to_vec(),
+            savegame_player: b"Stranger".to_vec(),
+        },
+    ];
+
+    // One modal per wild assignment, in order, with the native caption.
+    let mut app = new_menu_app(320, 200);
+    app.app_paths = Some(paths.clone());
+    app.startup_tooltip_resources = load_runtime_language_table(Some(&paths))
+        .map(|table| table.entries)
+        .unwrap_or_default();
+    app.report_offline_wild_takeovers(&takeovers)
+        .expect("present the takeover warnings");
+    assert_eq!(app.message_dialogs.len(), 2);
+    assert_eq!(
+        app.message_dialogs[0].state.message(),
+        "Participant Carol will continue for player Ghost from the savegame."
+    );
+    assert_eq!(app.message_dialogs[0].state.caption(), "Player assignment");
+    assert_eq!(
+        app.message_dialogs[1].state.message(),
+        "Participant Dave will continue for player Stranger from the savegame."
+    );
+
+    // The checkbox persists Startup.HideMsgPlrTakeOver.
+    // The `&Don't display...` mnemonic is how the native checkbox is toggled.
+    assert_eq!(app.message_dialogs[0].state.checkbox_checked(), Some(false));
+    app.message_dialogs[0].state.handle_hotkey('D');
+    assert_eq!(app.message_dialogs[0].state.checkbox_checked(), Some(true));
+    app.persist_message_dialog_checkbox_changes(0);
+    let config = Config::load(paths.config_file()).expect("reload config");
+    assert_eq!(config.get_in(Some("Startup"), "HideMsgPlrTakeOver"), Some("1"));
+
+    // With the preference set, later sessions log but show nothing.
+    let mut hidden = new_menu_app(320, 200);
+    hidden.app_paths = Some(paths.clone());
+    hidden
+        .report_offline_wild_takeovers(&takeovers)
+        .expect("hidden warnings still assign and log");
+    assert!(hidden.message_dialogs.is_empty());
+
+    // An empty set never opens a dialog at all.
+    let mut none = new_menu_app(320, 200);
+    none.app_paths = Some(paths.clone());
+    none.report_offline_wild_takeovers(&[])
+        .expect("no wild matches, no warning");
+    assert!(none.message_dialogs.is_empty());
+}

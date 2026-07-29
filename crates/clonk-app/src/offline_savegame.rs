@@ -17,6 +17,19 @@ pub(super) struct OfflineSavegameStartup {
     pub(super) initial_game_data: InitialNetworkGameData,
     pub(super) runtime_players: Vec<RuntimeJoinPlayerSource>,
     pub(super) external_player_paths: HashMap<i32, PathBuf>,
+    /// One entry per assignment made beyond `PML_PlrName`. C++ logs each and,
+    /// in graphical non-replay mode, shows a hideable modal
+    /// (C4PlayerInfo.cpp:1384-1390).
+    pub(super) wild_takeovers: Vec<OfflineWildTakeover>,
+}
+
+/// A savegame player taken over by a participant the weaker passes matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OfflineWildTakeover {
+    /// `pInfo->GetName()`, the joining participant.
+    pub(super) participant: Vec<u8>,
+    /// `pSavegameInfo->GetName()`, the savegame player being continued.
+    pub(super) savegame_player: Vec<u8>,
 }
 
 pub(super) fn prepare_offline_savegame_startup(
@@ -69,7 +82,7 @@ pub(super) fn prepare_offline_savegame_startup(
         effective_max_players,
         restore.last_player_id,
     );
-    let (runtime_players, external_player_paths) =
+    let (runtime_players, external_player_paths, wild_takeovers) =
         associate_offline_savegame_players(&mut startup, &restore);
 
     Ok((
@@ -78,6 +91,7 @@ pub(super) fn prepare_offline_savegame_startup(
             initial_game_data,
             runtime_players,
             external_player_paths,
+            wild_takeovers,
         },
     ))
 }
@@ -87,7 +101,11 @@ pub(super) fn prepare_offline_savegame_startup(
 fn associate_offline_savegame_players(
     startup: &mut OfflineStartupPlayers,
     restore: &clonk_network::PlayerInfoListSnapshot,
-) -> (Vec<RuntimeJoinPlayerSource>, HashMap<i32, PathBuf>) {
+) -> (
+    Vec<RuntimeJoinPlayerSource>,
+    HashMap<i32, PathBuf>,
+    Vec<OfflineWildTakeover>,
+) {
     let configured_paths = (0..startup.player_info.players.len())
         .filter_map(|row| {
             startup
@@ -95,14 +113,14 @@ fn associate_offline_savegame_players(
                 .map(|selected| selected.source_path().to_path_buf())
         })
         .collect::<Vec<_>>();
-    let (player_info, runtime_players, external_player_paths) =
+    let (player_info, runtime_players, external_player_paths, wild_takeovers) =
         associate_offline_savegame_player_info(
             startup.player_info.clone(),
             &configured_paths,
             restore,
         );
     startup.replace_player_info(player_info);
-    (runtime_players, external_player_paths)
+    (runtime_players, external_player_paths, wild_takeovers)
 }
 
 fn associate_offline_savegame_player_info(
@@ -113,6 +131,7 @@ fn associate_offline_savegame_player_info(
     clonk_engine::PlayerInfoControlData,
     Vec<RuntimeJoinPlayerSource>,
     HashMap<i32, PathBuf>,
+    Vec<OfflineWildTakeover>,
 ) {
     let restore_players = restore
         .clients
@@ -137,6 +156,7 @@ fn associate_offline_savegame_player_info(
         player_info.players.push(script);
     }
 
+    let mut wild_takeovers = Vec::new();
     for matching_level in 0..=3 {
         for player_index in 0..player_info.players.len() {
             if player_info.players[player_index].savegame_player != 0 {
@@ -157,6 +177,14 @@ fn associate_offline_savegame_player_info(
                 continue;
             };
             player_info.players[player_index].savegame_player = saved.id;
+            // Levels past PML_PlrName are "wild": C++ warns about each one
+            // (C4PlayerInfo.cpp:1384-1390).
+            if matching_level > 1 {
+                wild_takeovers.push(OfflineWildTakeover {
+                    participant: effective_player_name(&player_info.players[player_index]).to_vec(),
+                    savegame_player: effective_player_name(saved).to_vec(),
+                });
+            }
         }
     }
 
@@ -210,7 +238,12 @@ fn associate_offline_savegame_player_info(
                 })
         })
         .collect();
-    (player_info, runtime_players, external_player_paths)
+    (
+        player_info,
+        runtime_players,
+        external_player_paths,
+        wild_takeovers,
+    )
 }
 
 fn savegame_players_match(
@@ -255,6 +288,110 @@ mod tests {
 
     fn c4(value: &str) -> LegacyCString {
         LegacyCString::from_bytes(value.as_bytes().to_vec()).unwrap()
+    }
+
+    /// `RestoreSavegameInfos` runs four passes; any assignment made past
+    /// `PML_PlrName` is a "wild" match that C++ logs and warns about
+    /// (C4PlayerInfo.cpp:1373-1391). Exact filename and player-name matches
+    /// stay silent.
+    #[test]
+    fn offline_wild_takeover_reports_only_matches_past_player_name() {
+        let player_info = PlayerInfoControlData {
+            client_id: 0,
+            players: vec![
+                // Exact file + name: PML_PlrFileName, silent.
+                ControlPlayerInfoEntry {
+                    name: c4("Alice"),
+                    filename: c4("Players/Alice.c4p"),
+                    id: 41,
+                    original_color: 0x11,
+                    ..Default::default()
+                },
+                // Name-only: PML_PlrName, still silent.
+                ControlPlayerInfoEntry {
+                    name: c4("Bob"),
+                    filename: c4("Players/Renamed.c4p"),
+                    id: 42,
+                    original_color: 0x22,
+                    ..Default::default()
+                },
+                // Colour-only: PML_PrefColor, a wild match.
+                ControlPlayerInfoEntry {
+                    name: c4("Carol"),
+                    filename: c4("Players/Carol.c4p"),
+                    id: 43,
+                    original_color: 0x33,
+                    ..Default::default()
+                },
+                // Nothing in common: PML_Any, also wild.
+                ControlPlayerInfoEntry {
+                    name: c4("Dave"),
+                    filename: c4("Players/Dave.c4p"),
+                    id: 44,
+                    original_color: 0x99,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let saved = |name: &str, id: i32, color: u32| ControlPlayerInfoEntry {
+            name: c4(name),
+            flags: PLAYER_INFO_FLAG_JOINED,
+            id,
+            original_color: color,
+            ..Default::default()
+        };
+        let restore = PlayerInfoListSnapshot {
+            last_player_id: 40,
+            clients: vec![ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![
+                    ControlPlayerInfoEntry {
+                        filename: c4("Players/Alice.c4p"),
+                        ..saved("Alice", 1, 0x11)
+                    },
+                    saved("Bob", 2, 0x77),
+                    saved("Ghost", 3, 0x33),
+                    saved("Stranger", 4, 0x88),
+                ],
+            }],
+        };
+
+        let (player_info, _, _, wild) = associate_offline_savegame_player_info(
+            player_info,
+            &[
+                PathBuf::from("Players/Alice.c4p"),
+                PathBuf::from("Players/Renamed.c4p"),
+                PathBuf::from("Players/Carol.c4p"),
+                PathBuf::from("Players/Dave.c4p"),
+            ],
+            &restore,
+        );
+
+        // Every participant is still assigned; the warning changes nothing.
+        assert_eq!(
+            player_info
+                .players
+                .iter()
+                .map(|player| player.savegame_player)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        // Only the two weaker passes are reported, in assignment order.
+        assert_eq!(
+            wild,
+            vec![
+                OfflineWildTakeover {
+                    participant: b"Carol".to_vec(),
+                    savegame_player: b"Ghost".to_vec(),
+                },
+                OfflineWildTakeover {
+                    participant: b"Dave".to_vec(),
+                    savegame_player: b"Stranger".to_vec(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -305,7 +442,7 @@ mod tests {
             }],
         };
 
-        let (player_info, sources, paths) = associate_offline_savegame_player_info(
+        let (player_info, sources, paths, _) = associate_offline_savegame_player_info(
             player_info,
             &[
                 PathBuf::from("Players/Alice.c4p"),
