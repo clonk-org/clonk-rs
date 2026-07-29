@@ -1290,12 +1290,20 @@ fn verify_every_triple_is_covered(manifest: &manifest::Manifest) -> Result<()> {
     Ok(())
 }
 
-/// Offers each retired triple the archive of the triple that replaced it.
+/// Offers each aliased triple the archive of the triple that serves it.
 ///
 /// A second entry pointing at the *same* archive, rather than a second build:
-/// nothing is copied or re-hashed, so the release uploads one Windows engine
-/// archive and the manifest names it twice. See [`UPDATE_TRIPLE_ALIASES`].
-fn serve_retired_triples(
+/// nothing is copied or re-hashed, so the release uploads three engine archives
+/// and the manifest names them under six triples.
+///
+/// Not a migration mechanism, despite the Windows alias reading like one. Both
+/// macOS aliases are permanent: the release fuses one universal `.app`, but a
+/// client can only report the triple *cargo* compiled it for, so a Mac running
+/// the universal build still asks for `aarch64-apple-darwin` or
+/// `x86_64-apple-darwin` after updating. Those two keys never drain away and
+/// removing either one strands every install on that architecture. See
+/// [`UPDATE_TRIPLE_ALIASES`].
+fn serve_aliased_triples(
     scanned: &[(String, components::EmittedComponent)],
 ) -> Vec<(String, components::EmittedComponent)> {
     let aliased = scanned.iter().flat_map(|(built_for, component)| {
@@ -1306,7 +1314,7 @@ fn serve_retired_triples(
             .filter(move |(_, served_by)| {
                 !component.id.is_platform_independent() && served_by == built_for
             })
-            .map(move |(retired, _)| (retired.to_string(), component.clone()))
+            .map(move |(alias, _)| (alias.to_string(), component.clone()))
     });
     scanned.iter().cloned().chain(aliased).collect()
 }
@@ -1332,7 +1340,7 @@ fn referenced_content(options: &GenerateManifestOptions) -> manifest::Referenced
 
 fn generate_update_manifest(options: GenerateManifestOptions) -> Result<()> {
     let scanned = scan_emitted_components(&options.components_dir, &options.version)?;
-    let emitted = serve_retired_triples(&scanned);
+    let emitted = serve_aliased_triples(&scanned);
     let referenced = [referenced_content(&options)];
     let manifest = manifest::build_manifest(
         &options.version,
