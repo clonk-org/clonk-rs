@@ -1585,6 +1585,100 @@ fn retained_gpu_save_thumbnail_matches_cpp_title_extent() {
     assert_eq!(info.color_type, ColorType::Rgba);
 }
 
+/// `Screenshot` is registered `KEYSCOPE_Fullscreen | KEYSCOPE_Gui`, so bare F9
+/// captures the startup screens too; `ScreenshotEx` is Fullscreen-only and stays
+/// inert there (C4Game.cpp:3387-3388). The capture path, numbered slot and
+/// localized result log are the same as in running mode
+/// (C4GraphicsSystem.cpp:503-525).
+#[test]
+fn startup_f9_saves_the_presented_classic_gui_frame() {
+    let install = tempdir().expect("screenshot install root");
+    let user_data = tempdir().expect("screenshot user data");
+    fs::create_dir_all(install.path().join("planet/System.c4g")).expect("fixture System group");
+    fs::write(
+        install.path().join("planet/System.c4g/LanguageUS.txt"),
+        b"IDS_PRC_SCREENSHOT=Saved screenshot %s.\nIDS_PRC_SCREENSHOTERROR=Failure creating screenshot %s.\n",
+    )
+    .expect("fixture screenshot language resources");
+    let _guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(install.path())),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+    ]);
+    let paths = AppPaths::discover().expect("fixture app paths");
+    paths.ensure_user_dirs().expect("fixture user directories");
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+        .expect("fixture runtime language selection");
+
+    let mut app = new_menu_app(320, 200);
+    app.app_paths = Some(paths);
+    assert_eq!(app.mode, AppMode::Menu);
+    let presented = vec![
+        1, 2, 3, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170,
+        180, 190, 200, 210, 220, 230, 240, 250, 249, 248, 247,
+    ];
+
+    // Ctrl+F9 is Fullscreen-only, so it queues nothing in GUI scope.
+    app.keyboard_modifiers = ModifiersState::CTRL;
+    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
+        .expect("Ctrl+F9 stays inert on the startup screens");
+    app.handle_key(VirtualKeyCode::F9, ElementState::Released)
+        .expect("release Ctrl+F9");
+    assert!(app.pending_screenshots.is_empty());
+
+    // Bare F9 queues the presented-frame capture on every startup view.
+    app.keyboard_modifiers = ModifiersState::empty();
+    for view in [
+        StartupView::MainMenu,
+        StartupView::ScenarioBrowser,
+        StartupView::PlayerSelection,
+        StartupView::NetworkGame,
+        StartupView::Options,
+        StartupView::About,
+    ] {
+        app.startup_view = view;
+        app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
+            .expect("startup F9 queues a capture");
+        app.handle_key(VirtualKeyCode::F9, ElementState::Released)
+            .expect("release F9");
+        assert_eq!(
+            app.pending_screenshots.pop_back().map(|request| request.kind),
+            Some(ScreenshotKind::PresentedFrame),
+            "{view:?} must queue a presented-frame capture"
+        );
+    }
+
+    // The queued capture writes through the same numbered slot and log text.
+    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
+        .expect("startup F9 queues a capture");
+    let outcome = app
+        .save_next_screenshot(Some(&presented), 4, 2, 1.0)
+        .expect("screenshot request was pending");
+    assert!(
+        outcome.result.is_ok(),
+        "startup screenshot failed: {:?}",
+        outcome.result
+    );
+    let path = outcome.path.clone();
+    assert_eq!(
+        app.report_screenshot_result(Some(outcome)).as_deref(),
+        Some("Saved screenshot Screenshots/Screenshot001.png.")
+    );
+    assert_eq!(path, install.path().join("Screenshots/Screenshot001.png"));
+    let (width, height, _) = decode_rgb_screenshot(&path);
+    assert_eq!((width, height), (4, 2));
+
+    // A second capture reuses the next free slot, like the running path.
+    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
+        .expect("startup F9 queues a second capture");
+    let second = app
+        .save_next_screenshot(Some(&presented), 4, 2, 1.0)
+        .expect("second screenshot request was pending");
+    assert_eq!(
+        second.path,
+        install.path().join("Screenshots/Screenshot002.png")
+    );
+}
+
 #[test]
 fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     let install = tempdir().expect("screenshot install root");

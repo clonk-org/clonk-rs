@@ -2066,11 +2066,33 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if matches!(self.mode, AppMode::Running) || key != VirtualKeyCode::F3 {
+        if matches!(self.mode, AppMode::Running)
+            || !matches!(key, VirtualKeyCode::F3 | VirtualKeyCode::F9)
+        {
             return Ok(false);
         }
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if key == VirtualKeyCode::F9 {
+            // `Screenshot` is registered `KEYSCOPE_Fullscreen | KEYSCOPE_Gui`,
+            // so bare F9 also captures the startup screens; `ScreenshotEx` is
+            // Fullscreen-only and stays inert here (C4Game.cpp:3387-3388).
+            let screenshot =
+                self.runtime_keyboard_binding_matches("Screenshot", key, c4_modifiers.is_empty());
+            if !screenshot {
+                return Ok(false);
+            }
+            if state == ElementState::Pressed {
+                let gamma = self
+                    .graphics
+                    .active_gamma_ramp(&self.snapshot.environment.gamma);
+                self.pending_screenshots.push_back(ScreenshotRequest {
+                    kind: ScreenshotKind::PresentedFrame,
+                    gamma,
+                });
+            }
+            return Ok(true);
+        }
         if c4_modifiers.is_empty() {
             if state == ElementState::Pressed {
                 let enabled = self.toggle_frontend_music_option()?;
