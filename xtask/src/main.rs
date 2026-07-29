@@ -1638,6 +1638,21 @@ fn cargo_build_runtime(paths: &WorkspacePaths, target: Option<&str>) -> Result<(
 /// component, the disk image — then reads a single `release_dir`, so exactly
 /// one `.app` is assembled and signed.
 fn build_universal_macos_binaries(paths: &WorkspacePaths) -> Result<()> {
+    // Only reachable when the run was *asked* for a universal build, since the
+    // implicit path falls back to the host triple instead. That demand is never
+    // downgraded: a release that quietly fused one architecture into a file
+    // named `universal-apple-darwin` would be served to Macs it cannot run on,
+    // and nothing downstream re-checks the name against the bytes.
+    let missing = missing_macos_arches(&paths.workspace_dir);
+    if !missing.is_empty() {
+        bail!(
+            "a universal build needs every macOS architecture, and {} {} not installed; \
+             run `rustup target add {}`",
+            missing.join(", "),
+            if missing.len() == 1 { "is" } else { "are" },
+            missing.join(" ")
+        );
+    }
     for arch in MACOS_UNIVERSAL_ARCHES {
         cargo_build_runtime(paths, Some(arch))?;
     }
@@ -2616,14 +2631,59 @@ fn validate_linux_elf_output(binary: &Path, output: &str) -> Result<()> {
 /// target keeps the single-architecture behaviour: cargo can only be asked for
 /// one, and an artifact that claims to be fat when it is not would be served to
 /// Macs it cannot run on.
-fn packaging_triple(host_triple: &str, explicit_target: Option<&str>) -> String {
+///
+/// `universal_is_buildable` reports whether every architecture in
+/// [`MACOS_UNIVERSAL_ARCHES`] has a standard library installed, and is consulted
+/// only on the implicit macOS path. A stock toolchain carries the host
+/// architecture alone, so demanding both would make `cargo xtask package` — the
+/// command `README.md` gives contributors — fail on a default install. The
+/// fallback names the run after the *host* triple rather than
+/// `universal-apple-darwin`, so a thin build is never published under a name
+/// that promises both. An explicitly named target is a demand and is never
+/// downgraded: a release asks for `universal-apple-darwin` and must fail rather
+/// than ship half of it.
+fn packaging_triple(
+    host_triple: &str,
+    explicit_target: Option<&str>,
+    universal_is_buildable: bool,
+) -> String {
     explicit_target.map(str::to_string).unwrap_or_else(|| {
-        if host_triple.contains("apple-darwin") {
+        if host_triple.contains("apple-darwin") && universal_is_buildable {
             MACOS_UNIVERSAL_TRIPLE.to_string()
         } else {
             host_triple.to_string()
         }
     })
+}
+
+/// Whether a triple's standard library is present, so cargo could build for it.
+///
+/// `rustc --print target-libdir` answers for every triple rustc *knows*,
+/// installed or not, so the directory existing is the signal rather than the
+/// command succeeding. Probed through rustc rather than
+/// `rustup target list --installed` because a toolchain installed by something
+/// other than rustup has no `rustup` command at all, which would read as every
+/// architecture being absent. Rustc itself is known to be runnable by the time
+/// this is reached — `detect` has already taken the host triple from
+/// `rustc -vV`, and fails outright if that does not run.
+fn target_std_is_installed(workspace_dir: &Path, triple: &str) -> bool {
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    Command::new(&rustc)
+        .args(["--print", "target-libdir", "--target", triple])
+        .current_dir(workspace_dir)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|libdir| Path::new(libdir.trim()).is_dir())
+}
+
+/// The macOS architectures this toolchain could not build a slice for.
+fn missing_macos_arches(workspace_dir: &Path) -> Vec<&'static str> {
+    MACOS_UNIVERSAL_ARCHES
+        .into_iter()
+        .filter(|arch| !target_std_is_installed(workspace_dir, arch))
+        .collect()
 }
 
 struct WorkspacePaths {
@@ -2658,7 +2718,28 @@ impl WorkspacePaths {
         let explicit_target = env::var("CARGO_BUILD_TARGET")
             .ok()
             .filter(|target| !target.is_empty());
-        let target_triple = packaging_triple(&host_triple, explicit_target.as_deref());
+        // Probed, not assumed: a stock macOS toolchain carries only the host
+        // architecture, and `cargo xtask package` has to work on one. Skipped
+        // whenever a target was named, because that path never fuses anything.
+        let missing_arches = if explicit_target.is_none() && host_triple.contains("apple-darwin") {
+            missing_macos_arches(&workspace_dir)
+        } else {
+            Vec::new()
+        };
+        if !missing_arches.is_empty() {
+            tracing::warn!(
+                missing = %missing_arches.join(", "),
+                packaging_as = %host_triple,
+                "packaging a single-architecture build; run `rustup target add {}` \
+                 for the universal one a release ships",
+                missing_arches.join(" ")
+            );
+        }
+        let target_triple = packaging_triple(
+            &host_triple,
+            explicit_target.as_deref(),
+            missing_arches.is_empty(),
+        );
         if !target_triple
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -2900,8 +2981,53 @@ mod tests {
         // is derived from this triple, so naming the run `universal-apple-darwin`
         // is what collapses the two macOS passes into one.
         for host in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
-            assert_eq!(packaging_triple(host, None), "universal-apple-darwin");
+            assert_eq!(packaging_triple(host, None, true), "universal-apple-darwin");
         }
+    }
+
+    #[test]
+    fn the_architecture_probe_separates_installed_from_absent() {
+        // The fallback is only as good as this probe. Reporting everything
+        // installed would restore the failure it exists to avoid; reporting
+        // everything absent would silently package every macOS release thin.
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask manifest has a parent")
+            .to_path_buf();
+        let host = rustc_host_target(&workspace).expect("host triple");
+
+        assert!(
+            target_std_is_installed(&workspace, &host),
+            "the toolchain running this test has its own standard library"
+        );
+        assert!(
+            !target_std_is_installed(&workspace, "nonexistent-unknown-triple"),
+            "a triple rustc cannot even name has no standard library"
+        );
+    }
+
+    #[test]
+    fn a_macos_host_missing_an_architecture_packages_only_its_own() {
+        // `cargo xtask package` is the command README hands a contributor, and a
+        // stock macOS toolchain carries the host architecture alone. Failing
+        // there would make the documented build unrunnable, so the run falls
+        // back — under the *host* triple, never `universal-apple-darwin`, so no
+        // artifact claims to be fat when it is thin.
+        for host in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            assert_eq!(packaging_triple(host, None, false), host);
+        }
+    }
+
+    #[test]
+    fn a_named_universal_target_never_falls_back() {
+        // The release asks for `universal-apple-darwin` by name. That demand
+        // must survive a toolchain that cannot satisfy it, so the build fails
+        // loudly instead of quietly publishing a thin binary under a name that
+        // promises both architectures.
+        assert_eq!(
+            packaging_triple("aarch64-apple-darwin", Some(MACOS_UNIVERSAL_TRIPLE), false),
+            MACOS_UNIVERSAL_TRIPLE
+        );
     }
 
     #[test]
@@ -2909,11 +3035,15 @@ mod tests {
         // The escape hatch: `CARGO_BUILD_TARGET` names one real triple, and a
         // build that was asked for one architecture must not claim to be fat.
         assert_eq!(
-            packaging_triple("aarch64-apple-darwin", Some("x86_64-apple-darwin")),
+            packaging_triple("aarch64-apple-darwin", Some("x86_64-apple-darwin"), true),
             "x86_64-apple-darwin"
         );
         assert_eq!(
-            packaging_triple("x86_64-unknown-linux-gnu", Some("x86_64-pc-windows-msvc")),
+            packaging_triple(
+                "x86_64-unknown-linux-gnu",
+                Some("x86_64-pc-windows-msvc"),
+                true
+            ),
             "x86_64-pc-windows-msvc"
         );
     }
@@ -2923,11 +3053,11 @@ mod tests {
         // Only macOS has `lipo`; everywhere else the host triple is the whole
         // story and this must stay exactly what it was.
         assert_eq!(
-            packaging_triple("x86_64-unknown-linux-gnu", None),
+            packaging_triple("x86_64-unknown-linux-gnu", None, false),
             "x86_64-unknown-linux-gnu"
         );
         assert_eq!(
-            packaging_triple("x86_64-pc-windows-msvc", None),
+            packaging_triple("x86_64-pc-windows-msvc", None, false),
             "x86_64-pc-windows-msvc"
         );
     }

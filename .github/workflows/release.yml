@@ -415,6 +415,16 @@ jobs:
       # one `.dmg` and one `engine` component for both macOS triples.
       - name: Package macOS
         if: matrix.runner == 'macos-latest'
+        env:
+          # Named rather than inferred. On a toolchain missing an architecture
+          # `package` falls back to a single-architecture build — right for a
+          # contributor running the README's command, wrong for a release — and
+          # an explicitly named target is never downgraded. So a runner whose
+          # `rustup target add` silently failed stops here, instead of
+          # publishing a thin `.app` under a name promising both. Every cargo
+          # invocation this triggers passes `--target` itself, which overrides
+          # this variable; nothing builds *for* the pseudo-triple.
+          CARGO_BUILD_TARGET: universal-apple-darwin
         run: ./target/release/xtask-engine-tools package --components=engine
 
       # `lipo` invalidates the signature of the slices it fuses, so the bundle
