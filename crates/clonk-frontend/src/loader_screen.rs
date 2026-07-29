@@ -1662,6 +1662,24 @@ mod tests {
         })
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn jpeg_decoder_uses_ssse3() -> bool {
+        std::is_x86_feature_detected!("ssse3")
+    }
+
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    fn jpeg_decoder_uses_ssse3() -> bool {
+        false
+    }
+
+    fn loader_sky_regression_hashes() -> (u64, u64) {
+        if jpeg_decoder_uses_ssse3() {
+            (5_382_921_512_495_582_144, 10_130_694_106_439_574_915)
+        } else {
+            (12_602_292_018_454_220_685, 2_045_718_955_757_962_211)
+        }
+    }
+
     fn endeavour_bytes() -> Vec<u8> {
         let path = repo_root().join("planet/System.c4g/Endeavour.ttf");
         std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
@@ -2801,6 +2819,18 @@ mod tests {
     }
 
     #[test]
+    fn real_loader_jpeg_decode_hash_is_stable_for_decoder_backend() {
+        let image = real_image("LoaderSky1.jpg");
+        let (expected_jpeg, _) = loader_sky_regression_hashes();
+
+        // This pins the Rust asset input, not a C++ pixel oracle. The pinned
+        // C++ build selects WIC or system libjpeg (CMakeLists.txt:202-203,
+        // 353-359,529-533), while image's jpeg-decoder selects its SSSE3 IDCT
+        // and color conversion at runtime on capable x86 CPUs.
+        assert_eq!(fnv1a64(image.pixels()), expected_jpeg);
+    }
+
+    #[test]
     fn real_graphics_and_endeavour_frame_hash_is_stable() {
         let mut state = LoaderState::initial("Sky Islands");
         state.progress = 37;
@@ -2814,13 +2844,19 @@ mod tests {
         loader
             .render(&mut surface, Some(standard_gamma()))
             .expect("render real loader frame");
+        let (_, expected_frame) = loader_sky_regression_hashes();
 
         // Snapshot over LoaderSky1.jpg, GUIProgress.png and Endeavour.ttf.
+        // C4LoaderScreen::Draw supplies the layer order and geometry
+        // (C4LoaderScreen.cpp:126-175), but this is a Rust raster regression,
+        // not a C++ framebuffer oracle: C++'s decoder, FreeType and OpenGL
+        // backends do not define one portable hash. The paired decode test
+        // localizes the scalar/SSSE3 split before this renderer runs.
         // The title's 0xdd alpha uses C++ inverted-alpha blit addition rather
         // than multiplicative modulation, including on filtered edge texels.
         // Re-recorded 2026-07-24 when the trademark log line left the fixture;
         // the renderer is unchanged, only this fixture's line count.
-        assert_eq!(fnv1a64(surface.pixels()), 2_045_718_955_757_962_211);
+        assert_eq!(fnv1a64(surface.pixels()), expected_frame);
     }
 
     #[test]

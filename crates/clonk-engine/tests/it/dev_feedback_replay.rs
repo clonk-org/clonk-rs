@@ -1,6 +1,6 @@
 use crate::support::dev_feedback::{
-    run_replay_twice, snapshot_diff, ReplayCheckpointV1, ReplayInputV1, ReplayJoinV1,
-    ReplayRenderConfigV1, ScenarioReplayV1,
+    run_replay_twice, run_replay_twice_with_policy, snapshot_diff, ReplayCheckpointPolicy,
+    ReplayCheckpointV1, ReplayInputV1, ReplayJoinV1, ReplayRenderConfigV1, ScenarioReplayV1,
 };
 use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 use clonk_engine::{Definition, Engine, PlayerConfig, SpawnConfig, COM_RIGHT};
@@ -116,6 +116,10 @@ fn snapshot_diff_has_stable_structured_paths() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "recording-host material order; required macOS CI job"
+)]
 fn committed_real_scenario_replays_are_deterministic() -> Result<(), Box<dyn Error>> {
     let _guard = env_lock();
     for name in [
@@ -152,6 +156,66 @@ fn committed_real_scenario_replays_are_deterministic() -> Result<(), Box<dyn Err
             assert!(bundle.join("replay-metrics.json").is_file());
         }
     }
+    Ok(())
+}
+
+#[test]
+fn real_scenario_replays_repeat_with_native_group_order() -> Result<(), Box<dyn Error>> {
+    let _guard = env_lock();
+    for name in [
+        "tutorial01-idle.json",
+        "tutorial01-right-tap.json",
+        "tutorial01-held-right.json",
+    ] {
+        let path = replay_fixture(name);
+        let replay = ScenarioReplayV1::from_path(&path)?;
+        assert_eq!(
+            fs::read_to_string(&path)?,
+            replay.canonical_json()?,
+            "fixture {name} must remain byte-canonical"
+        );
+        let report = run_replay_twice_with_policy(&replay, name, ReplayCheckpointPolicy::SameHost)?;
+        assert_eq!(
+            report
+                .checkpoints
+                .iter()
+                .map(|checkpoint| checkpoint.frame)
+                .collect::<Vec<_>>(),
+            replay
+                .checkpoints
+                .iter()
+                .map(|checkpoint| checkpoint.frame)
+                .collect::<Vec<_>>(),
+            "fixture {name}"
+        );
+        let final_hash = &report.checkpoints.last().unwrap().snapshot_hash;
+        assert!(
+            report
+                .metrics
+                .runs
+                .iter()
+                .all(|metrics| &metrics.final_snapshot_hash == final_hash),
+            "fixture {name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "set LC_REPLAY_PATH to a replay artifact before running"]
+fn replay_artifact_from_env_repeats() -> Result<(), Box<dyn Error>> {
+    let path = PathBuf::from(std::env::var_os("LC_REPLAY_PATH").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "LC_REPLAY_PATH must name the artifact replay.json",
+        )
+    })?);
+    let replay = ScenarioReplayV1::from_path(&path)?;
+    let label = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("artifact-replay");
+    run_replay_twice(&replay, label)?;
     Ok(())
 }
 
@@ -201,9 +265,11 @@ fn passing_replay_is_retained_with_metrics_when_requested() -> Result<(), Box<dy
     let temp = tempfile::tempdir()?;
     let _artifact_root = EnvRestore::set("LC_TEST_ARTIFACT_DIR", temp.path());
     let _keep = EnvRestore::set("LC_KEEP_PASS_ARTIFACTS", "1");
-    let replay = ScenarioReplayV1::from_path(&replay_fixture("tutorial01-idle.json"))?;
+    let mut replay = ScenarioReplayV1::from_path(&replay_fixture("tutorial01-idle.json"))?;
+    replay.checkpoints[0].snapshot_hash = "0000000000000000".to_owned();
 
-    let report = run_replay_twice(&replay, "retained-pass")?;
+    let report =
+        run_replay_twice_with_policy(&replay, "retained-pass", ReplayCheckpointPolicy::SameHost)?;
     let bundle = report.artifact_dir.expect("passing bundle retained");
     for file in [
         "replay.json",
@@ -221,10 +287,23 @@ fn passing_replay_is_retained_with_metrics_when_requested() -> Result<(), Box<dy
     assert_eq!(metrics["schema_version"], 1);
     assert_eq!(metrics["runs"].as_array().unwrap().len(), 2);
     assert_eq!(metrics["runs"][0]["ticks"], replay.stop_frame);
+    let retained_replay = ScenarioReplayV1::from_path(&bundle.join("replay.json"))?;
+    assert_eq!(retained_replay.checkpoints, report.checkpoints);
+    assert_ne!(retained_replay.checkpoints, replay.checkpoints);
     assert_eq!(
         metrics["runs"][0]["final_snapshot_hash"],
-        replay.checkpoints.last().unwrap().snapshot_hash
+        report.checkpoints.last().unwrap().snapshot_hash
     );
+    let failure: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(bundle.join("failure.json"))?)?;
+    assert_eq!(failure["kind"], "same_host_passed");
+    let logs = fs::read_to_string(bundle.join("logs.ndjson"))?;
+    let log: serde_json::Value =
+        serde_json::from_str(logs.lines().next().expect("retained bundle log"))?;
+    assert_eq!(log["level"], "info");
+    let readme = fs::read_to_string(bundle.join("README.txt"))?;
+    assert!(readme.contains("LC_REPLAY_PATH=/path/to/artifact/replay.json"));
+    assert!(readme.contains("dev_feedback_replay::replay_artifact_from_env_repeats"));
     Ok(())
 }
 
@@ -234,6 +313,12 @@ fn stale_checkpoint_writes_before_failing_diff_and_metrics() -> Result<(), Box<d
     let temp = tempfile::tempdir()?;
     let _artifact_root = EnvRestore::set("LC_TEST_ARTIFACT_DIR", temp.path());
     let mut replay = ScenarioReplayV1::from_path(&replay_fixture("tutorial01-idle.json"))?;
+    replay.checkpoints = run_replay_twice_with_policy(
+        &replay,
+        "native-checkpoints",
+        ReplayCheckpointPolicy::SameHost,
+    )?
+    .checkpoints;
     let current_hash = std::mem::replace(
         &mut replay.checkpoints.first_mut().unwrap().snapshot_hash,
         "0000000000000000".to_owned(),

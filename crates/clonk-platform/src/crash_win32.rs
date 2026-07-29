@@ -333,7 +333,8 @@ mod windows_impl {
     }
 
     extern "C" {
-        fn write(fd: i32, buf: *const std::ffi::c_void, count: u32) -> i32;
+        #[link_name = "_write"]
+        fn crt_write(fd: i32, buf: *const std::ffi::c_void, count: u32) -> i32;
     }
 
     /// Installs the one-shot unhandled-exception filter
@@ -479,7 +480,7 @@ mod windows_impl {
         let artifacts = crash_artifacts_for(&user_path, None, &exception, Some(exception_pointers));
         let descriptor = LOG_DESCRIPTOR.load(Ordering::SeqCst);
         if descriptor >= 0 {
-            write(
+            crt_write(
                 descriptor,
                 artifacts.report.as_ptr().cast(),
                 artifacts.report.len() as u32,

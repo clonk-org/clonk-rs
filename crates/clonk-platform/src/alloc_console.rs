@@ -25,9 +25,7 @@ pub use windows_impl::{allocate_console, ConsoleError};
 
 #[cfg(windows)]
 mod windows_impl {
-    use windows_sys::Win32::Foundation::{
-        GetLastError, ERROR_ACCESS_DENIED, HANDLE, INVALID_HANDLE_VALUE,
-    };
+    use windows_sys::Win32::Foundation::{GetLastError, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileA, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -48,18 +46,13 @@ mod windows_impl {
 
     /// `AllocConsole` plus the three standard streams (`C4WinMain.cpp:84-92`).
     ///
-    /// A process that already owns a console makes `AllocConsole` fail with
-    /// `ERROR_ACCESS_DENIED`; the streams are still (re)attached, which is the
-    /// state C++'s `freopen` calls leave behind in that case.
+    /// Like C++, any `AllocConsole` failure returns before the standard streams
+    /// are attached (`C4WinMain.cpp:84-87`).
     pub fn allocate_console() -> Result<(), ConsoleError> {
-        // SAFETY: neither call takes caller-owned memory.
-        let allocated = unsafe { AllocConsole() } != 0;
-        if !allocated {
+        // SAFETY: `AllocConsole` takes no caller-owned memory.
+        if unsafe { AllocConsole() } == 0 {
             // SAFETY: reads this thread's last-error slot.
-            let code = unsafe { GetLastError() };
-            if code != ERROR_ACCESS_DENIED {
-                return Err(ConsoleError::Allocate(code));
-            }
+            return Err(ConsoleError::Allocate(unsafe { GetLastError() }));
         }
         attach_stream("CONIN$", STD_INPUT_HANDLE, "stdin")?;
         attach_stream("CONOUT$", STD_OUTPUT_HANDLE, "stdout")?;
@@ -130,57 +123,81 @@ mod tests {
         assert!(!console_is_required(false, &["clonk", "allocconsole"]));
     }
 
-    // C4WinMain.cpp:84-92 — a requested console leaves all three standard
-    // streams attached to the console devices. The test process already owns a
-    // console, so `AllocConsole` reports ERROR_ACCESS_DENIED and only the
-    // stream attachment is observable; that is the same end state.
+    // C4WinMain.cpp:84-92 — a successful request leaves all three standard
+    // streams attached to console devices, while a second request fails at
+    // `AllocConsole` instead of continuing into the `freopen` calls.
     #[cfg(windows)]
     #[test]
     fn windows_release_allocconsole_attaches_standard_streams() {
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_CHAR};
         use windows_sys::Win32::System::Console::{
-            GetConsoleMode, GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-            STD_OUTPUT_HANDLE,
+            GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
         };
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
         const STREAMS: [(u32, &str); 3] = [
             (STD_INPUT_HANDLE, "stdin"),
             (STD_OUTPUT_HANDLE, "stdout"),
             (STD_ERROR_HANDLE, "stderr"),
         ];
-        // The harness captures this binary's stdout through a pipe, so the
-        // standard handles are put back before returning.
-        // SAFETY: reads the three standard-handle slots.
-        let saved = STREAMS.map(|(id, _)| unsafe { GetStdHandle(id) });
-
-        assert!(console_is_required(false, &["clonk", "/allocconsole"]));
-        let attached = super::allocate_console();
-
-        let observed = STREAMS.map(|(id, _)| {
-            // SAFETY: both calls take a standard-handle id and a stack out-param.
-            unsafe {
-                let handle = GetStdHandle(id);
-                let mut mode = 0u32;
-                (handle, GetConsoleMode(handle, &mut mode) != 0)
-            }
-        });
-
-        // SAFETY: restoring handles this process owned on entry.
-        STREAMS
-            .iter()
-            .zip(saved)
-            .for_each(|((id, _), handle)| unsafe {
-                SetStdHandle(*id, handle);
+        const CHILD_MARKER: &str = "LC_ALLOC_CONSOLE_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            assert!(console_is_required(false, &["clonk", "/allocconsole"]));
+            // SAFETY: reads the three standard-handle slots inherited from the
+            // parent test process.
+            let saved = STREAMS.map(|(id, _)| unsafe { GetStdHandle(id) });
+            let attached = super::allocate_console();
+            let observed = attached.as_ref().ok().map(|_| {
+                STREAMS.map(|(id, _)| {
+                    // SAFETY: both calls only inspect handles owned by this
+                    // process.
+                    unsafe {
+                        let handle = GetStdHandle(id);
+                        (handle, GetFileType(handle))
+                    }
+                })
             });
+            let duplicate_allocation = attached.as_ref().ok().map(|_| super::allocate_console());
 
-        attached.expect("console bootstrap");
-        STREAMS
-            .iter()
-            .zip(observed)
-            .for_each(|((_, name), (handle, is_console))| {
-                assert!(handle != INVALID_HANDLE_VALUE, "{name} handle is invalid");
-                assert!(handle != 0, "{name} handle is null");
-                assert!(is_console, "{name} is not attached to a console device");
-            });
+            // SAFETY: restores the standard-handle slots inherited on entry so
+            // assertion failures remain visible to the parent test process.
+            STREAMS
+                .iter()
+                .zip(saved)
+                .for_each(|((id, _), handle)| unsafe {
+                    SetStdHandle(*id, handle);
+                });
+
+            attached.expect("console bootstrap");
+            assert!(
+                matches!(duplicate_allocation, Some(Err(ConsoleError::Allocate(_)))),
+                "a second AllocConsole call must return the C++ failure"
+            );
+            STREAMS
+                .iter()
+                .zip(observed.expect("attached console handles"))
+                .for_each(|((_, name), (handle, file_type))| {
+                    assert!(handle != INVALID_HANDLE_VALUE, "{name} handle is invalid");
+                    assert!(handle != 0, "{name} handle is null");
+                    assert_eq!(
+                        file_type, FILE_TYPE_CHAR,
+                        "{name} is not attached to a console device"
+                    );
+                });
+            return;
+        }
+
+        use std::os::windows::process::CommandExt;
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "windows_release_allocconsole_attaches_standard_streams",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .expect("launch console-less child");
+        assert!(status.success(), "console-less child failed with {status}");
     }
 }

@@ -46,10 +46,38 @@ const MACOS_UNIVERSAL_TRIPLE: &str = "universal-apple-darwin";
 /// executables.
 const MACOS_UNIVERSAL_ARCHES: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
+/// One executable shipped by every release layout.
+///
+/// The Cargo package and executable usually share a name. Keeping both here
+/// makes the exceptional `clonk-c4group` -> `c4group` mapping part of the same
+/// inventory used to build, audit, stage, bundle and test the release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeBinary {
+    package: &'static str,
+    executable: &'static str,
+    macos_bundle_main: bool,
+}
+
 /// The executables a release ships, in every layout. `c4group` is the classic
 /// standalone group tool, installed alongside the runtime as C++ does
 /// (`CMakeLists.txt:431-437,749-750`).
-const RUNTIME_BINARIES: [&str; 3] = ["clonk-game", "clonk-app", "c4group"];
+const RUNTIME_BINARIES: [RuntimeBinary; 3] = [
+    RuntimeBinary {
+        package: "clonk-game",
+        executable: "clonk-game",
+        macos_bundle_main: false,
+    },
+    RuntimeBinary {
+        package: "clonk-app",
+        executable: "clonk-app",
+        macos_bundle_main: true,
+    },
+    RuntimeBinary {
+        package: "clonk-c4group",
+        executable: "c4group",
+        macos_bundle_main: false,
+    },
+];
 
 fn main() -> Result<()> {
     clonk_logging::init();
@@ -1602,24 +1630,19 @@ fn build_runtime_binaries(paths: &WorkspacePaths) -> Result<()> {
     cargo_build_runtime(paths, None)
 }
 
-/// One `cargo build --release` of the two shipped executables.
+/// One `cargo build --release` of every shipped executable.
 ///
 /// `target` is passed on the command line rather than through the environment
 /// so a single run can build both macOS architectures; when it is `None` the
 /// inherited `CARGO_BUILD_TARGET` still decides, exactly as before.
 fn cargo_build_runtime(paths: &WorkspacePaths, target: Option<&str>) -> Result<()> {
-    tracing::info!(target, "building clonk-game and clonk-app (release)");
+    tracing::info!(target, "building release executables");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(&cargo);
-    command.args([
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "clonk-game",
-        "-p",
-        "clonk-app",
-    ]);
+    command.args(["build", "--release", "--locked"]);
+    for binary in RUNTIME_BINARIES {
+        command.args(["-p", binary.package]);
+    }
     if let Some(target) = target {
         command.args(["--target", target]);
     }
@@ -1661,10 +1684,10 @@ fn build_universal_macos_binaries(paths: &WorkspacePaths) -> Result<()> {
     }
     fs::create_dir_all(&paths.release_dir)
         .with_context(|| format!("failed to create {}", paths.release_dir.display()))?;
-    for binary_name in RUNTIME_BINARIES {
+    for binary in RUNTIME_BINARIES {
         lipo_create(
-            &macos_universal_slices(paths, binary_name),
-            &paths.release_dir.join(binary_name),
+            &macos_universal_slices(paths, binary.executable),
+            &paths.release_dir.join(binary.executable),
         )?;
     }
     Ok(())
@@ -1742,12 +1765,13 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
 
-    for binary_name in RUNTIME_BINARIES {
-        let exe_name = executable_name(binary_name, &paths.target_triple);
+    for binary in RUNTIME_BINARIES {
+        let exe_name = executable_name(binary.executable, &paths.target_triple);
         let built_binary = paths.release_dir.join(&exe_name);
         if !built_binary.exists() {
             bail!(
-                "expected {binary_name} binary at {}",
+                "expected {} binary at {}",
+                binary.executable,
                 built_binary.display()
             );
         }
@@ -1810,9 +1834,9 @@ fn assemble_macos_app_bundle(paths: &WorkspacePaths, package_dir: &Path) -> Resu
     }
 
     let bin_dir = package_dir.join("bin");
-    for binary_name in RUNTIME_BINARIES {
-        let staged = bin_dir.join(binary_name);
-        let bundled = macos_dir.join(binary_name);
+    for binary in RUNTIME_BINARIES {
+        let staged = bin_dir.join(binary.executable);
+        let bundled = macos_dir.join(binary.executable);
         fs::rename(&staged, &bundled).with_context(|| {
             format!(
                 "failed to move {} into {}",
@@ -1858,14 +1882,23 @@ fn assemble_macos_app_bundle(paths: &WorkspacePaths, package_dir: &Path) -> Resu
 /// This is not a substitute for Developer ID signing and notarization: the
 /// download still needs the quarantine flag cleared before it will launch.
 fn sign_macos_bundle(app_dir: &Path, macos_dir: &Path) -> Result<()> {
-    // The launcher is nested code and must be signed before the bundle that
-    // seals it; `clonk-app` is the bundle executable and is covered below.
-    codesign(&["--force", "--sign", "-"], &macos_dir.join("clonk-game"))?;
+    // Helpers are nested code and must be signed before the bundle that seals
+    // them; `clonk-app` is the bundle executable and is covered below.
+    for binary_name in macos_nested_binary_names() {
+        codesign(&["--force", "--sign", "-"], &macos_dir.join(binary_name))?;
+    }
     codesign(&["--force", "--sign", "-"], app_dir)?;
     // Packaging must fail loudly rather than ship an unopenable bundle.
     codesign(&["--verify", "--deep", "--strict"], app_dir)
         .context("the packaged application bundle does not carry a valid signature")?;
     Ok(())
+}
+
+fn macos_nested_binary_names() -> impl Iterator<Item = &'static str> {
+    RUNTIME_BINARIES
+        .iter()
+        .filter(|binary| !binary.macos_bundle_main)
+        .map(|binary| binary.executable)
 }
 
 fn codesign(arguments: &[&str], target: &Path) -> Result<()> {
@@ -2474,10 +2507,10 @@ fn rustc_host_target(workspace_dir: &Path) -> Result<String> {
 }
 
 fn audit_release_dependencies(paths: &WorkspacePaths) -> Result<()> {
-    for binary_name in RUNTIME_BINARIES {
+    for binary in RUNTIME_BINARIES {
         let binary = paths
             .release_dir
-            .join(executable_name(binary_name, &paths.target_triple));
+            .join(executable_name(binary.executable, &paths.target_triple));
         if paths.target_triple.contains("apple-darwin") {
             audit_macos_release_binary(&binary)?;
         } else if paths.target_triple.contains("linux") {
@@ -2818,18 +2851,14 @@ mod tests {
             &root.join("content/ClonkMars.c4f/Test.c4s/Scenario.txt"),
             b"mars scenario",
         );
-        write_fixture(
-            &root
-                .join("workspace-target/release")
-                .join(executable_name("clonk-game", FIXTURE_TARGET)),
-            b"launcher",
-        );
-        write_fixture(
-            &root
-                .join("workspace-target/release")
-                .join(executable_name("clonk-app", FIXTURE_TARGET)),
-            b"runtime",
-        );
+        for binary in RUNTIME_BINARIES {
+            write_fixture(
+                &root
+                    .join("workspace-target/release")
+                    .join(executable_name(binary.executable, FIXTURE_TARGET)),
+                binary.executable.as_bytes(),
+            );
+        }
 
         let paths = WorkspacePaths {
             workspace_dir: root.to_path_buf(),
@@ -2903,6 +2932,26 @@ mod tests {
     }
 
     #[test]
+    fn every_shipped_executable_names_the_cargo_package_that_builds_it() {
+        assert_eq!(
+            RUNTIME_BINARIES.map(|binary| (binary.package, binary.executable)),
+            [
+                ("clonk-game", "clonk-game"),
+                ("clonk-app", "clonk-app"),
+                ("clonk-c4group", "c4group"),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_macos_helper_is_signed_before_the_bundle_main() {
+        assert_eq!(
+            macos_nested_binary_names().collect::<Vec<_>>(),
+            ["clonk-game", "c4group"]
+        );
+    }
+
+    #[test]
     fn the_bundle_engine_component_excludes_data_and_the_stale_seal() {
         // `Contents/Resources` also holds the shared components, and
         // `_CodeSignature` seals whatever was present at packaging time — a
@@ -2917,8 +2966,14 @@ mod tests {
                 "{excluded} must not ride along in the engine component"
             );
         }
+        for binary in RUNTIME_BINARIES {
+            let included = format!("Contents/MacOS/{}", binary.executable);
+            assert!(
+                !bundle_path_belongs_to_another_component(Path::new(&included)),
+                "{included} belongs to the engine component"
+            );
+        }
         for included in [
-            "Contents/MacOS/clonk-app",
             "Contents/Info.plist",
             "Contents/PkgInfo",
             "Contents/Resources/ClonkRust.icns",
@@ -2933,14 +2988,19 @@ mod tests {
 
     #[test]
     fn executables_are_marked_in_both_the_flat_and_bundle_layouts() {
-        assert_eq!(
-            executable_bit_for_component(Path::new("bin/clonk-app")),
-            0o755
-        );
-        assert_eq!(
-            executable_bit_for_component(Path::new("Contents/MacOS/clonk-app")),
-            0o755
-        );
+        for binary in RUNTIME_BINARIES {
+            assert_eq!(
+                executable_bit_for_component(Path::new(&format!("bin/{}", binary.executable))),
+                0o755
+            );
+            assert_eq!(
+                executable_bit_for_component(Path::new(&format!(
+                    "Contents/MacOS/{}",
+                    binary.executable
+                ))),
+                0o755
+            );
+        }
         assert_eq!(executable_bit_for_component(Path::new("COPYING")), 0o644);
         assert_eq!(
             executable_bit_for_component(Path::new("Contents/Resources/ClonkRust.icns")),
@@ -3073,17 +3133,21 @@ mod tests {
         let (_temp, mut paths) = package_fixture();
         paths.target_triple = MACOS_UNIVERSAL_TRIPLE.to_string();
 
-        assert_eq!(
-            macos_universal_slices(&paths, "clonk-app"),
-            [
-                paths
-                    .target_dir
-                    .join("aarch64-apple-darwin/release/clonk-app"),
-                paths
-                    .target_dir
-                    .join("x86_64-apple-darwin/release/clonk-app"),
-            ]
-        );
+        for binary in RUNTIME_BINARIES {
+            assert_eq!(
+                macos_universal_slices(&paths, binary.executable),
+                [
+                    paths
+                        .target_dir
+                        .join("aarch64-apple-darwin/release")
+                        .join(binary.executable),
+                    paths
+                        .target_dir
+                        .join("x86_64-apple-darwin/release")
+                        .join(binary.executable),
+                ]
+            );
+        }
     }
 
     #[test]
@@ -3098,33 +3162,42 @@ mod tests {
 
     #[test]
     fn executable_name_follows_the_target_triple_not_the_host() {
-        assert_eq!(
-            executable_name("clonk-app", "x86_64-pc-windows-gnu"),
-            "clonk-app.exe"
-        );
-        assert_eq!(
-            executable_name("clonk-app", "x86_64-pc-windows-msvc"),
-            "clonk-app.exe"
-        );
-        assert_eq!(
-            executable_name("clonk-app", "x86_64-unknown-linux-gnu"),
-            "clonk-app"
-        );
-        assert_eq!(
-            executable_name("clonk-game", "aarch64-apple-darwin"),
-            "clonk-game"
-        );
+        for binary in RUNTIME_BINARIES {
+            assert_eq!(
+                executable_name(binary.executable, "x86_64-pc-windows-gnu"),
+                format!("{}.exe", binary.executable)
+            );
+            assert_eq!(
+                executable_name(binary.executable, "x86_64-pc-windows-msvc"),
+                format!("{}.exe", binary.executable)
+            );
+            assert_eq!(
+                executable_name(binary.executable, "x86_64-unknown-linux-gnu"),
+                binary.executable
+            );
+            assert_eq!(
+                executable_name(binary.executable, "aarch64-apple-darwin"),
+                binary.executable
+            );
+        }
     }
 
     #[test]
-    fn package_layout_contains_both_binaries_content_and_legal_files() {
+    fn package_layout_contains_every_binary_content_and_legal_files() {
         let (_temp, paths) = package_fixture();
 
         let package_dir = assemble_package_layout(&paths).expect("assemble package");
 
+        for binary in RUNTIME_BINARIES {
+            let relative =
+                PathBuf::from("bin").join(executable_name(binary.executable, FIXTURE_TARGET));
+            assert!(
+                package_dir.join(&relative).is_file(),
+                "package is missing {}",
+                relative.display()
+            );
+        }
         for relative in [
-            PathBuf::from("bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
-            PathBuf::from("bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
             PathBuf::from("COPYING"),
             PathBuf::from("README.md"),
             PathBuf::from("credits.txt"),
@@ -3219,17 +3292,22 @@ mod tests {
         let extracted = TempDir::new().expect("temporary extraction directory");
         zip.extract(extracted.path())
             .expect("extract package archive");
-        for relative in [
-            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
-            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
-            PathBuf::from("clonk-rust/content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
-        ] {
+        for binary in RUNTIME_BINARIES {
+            let relative = PathBuf::from("clonk-rust/bin")
+                .join(executable_name(binary.executable, FIXTURE_TARGET));
             assert!(
                 extracted.path().join(&relative).is_file(),
                 "extracted package is missing {}",
                 relative.display()
             );
         }
+        let scenario =
+            PathBuf::from("clonk-rust/content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt");
+        assert!(
+            extracted.path().join(&scenario).is_file(),
+            "extracted package is missing {}",
+            scenario.display()
+        );
         drop(zip);
 
         create_archive(&paths, &package_dir).expect("recreate archive");

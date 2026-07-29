@@ -2449,12 +2449,24 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     sandbox.path = None;
     app.open_definition_selector(sandbox)
         .expect("open definition selector");
-    app.process_gamepad_event_batch([
-        GamepadEvent::Direction {
-            slot: GamepadSlot::new(0),
-            button: ControlButton::Down,
-            state: ElementState::Pressed,
-        },
+    let optional_index = app
+        .definition_selector
+        .as_ref()
+        .expect("sandbox definition selector")
+        .rows()
+        .iter()
+        .position(|row| row.filename() == "Beta.C4D")
+        .expect("optional definition row");
+    // C4DefinitionSelDlg retains DirectoryIterator's native order
+    // (src/C4FileSelDlg.cpp:251-268), so APFS and ext4 may place the
+    // optional row on opposite sides of the fixed row. Drive to the named row
+    // before exercising its checkbox -> OK focus path.
+    let select_optional = (0..=optional_index).map(|_| GamepadEvent::Direction {
+        slot: GamepadSlot::new(0),
+        button: ControlButton::Down,
+        state: ElementState::Pressed,
+    });
+    app.process_gamepad_event_batch(select_optional.chain([
         GamepadEvent::Direction {
             slot: GamepadSlot::new(0),
             button: ControlButton::Right,
@@ -2480,7 +2492,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             action: GamepadActionType::MenuToggle,
             state: ElementState::Pressed,
         },
-    ])
+    ]))
     .expect("release-close captures duplicate gamepad aliases");
     assert!(matches!(app.mode, AppMode::Running));
     assert!(app.definition_selector.is_none());

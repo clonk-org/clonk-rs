@@ -4627,6 +4627,10 @@
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "recording-host material order; required macOS CI job"
+    )]
     fn app_virtual_keyboard_completes_real_tutorial02_route() {
         // The real window path maps keyboard-set-one X/X to Grab and S to Up.
         // While the Clonk pushes BALN, Jump'n'Run ControlUpdate follows held

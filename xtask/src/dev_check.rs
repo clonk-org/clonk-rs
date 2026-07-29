@@ -520,7 +520,16 @@ fn gameplay_path(path: &str) -> bool {
         || path.starts_with("testdata/dev-replays/")
 }
 
+fn replay_test_name(recording_host: bool) -> &'static str {
+    if recording_host {
+        "dev_feedback_replay::committed_real_scenario_replays_are_deterministic"
+    } else {
+        "dev_feedback_replay::real_scenario_replays_repeat_with_native_group_order"
+    }
+}
+
 fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
+    let replay_test = replay_test_name(cfg!(target_os = "macos"));
     plan.add(
         "deterministic-replay",
         CheckKind::Replay,
@@ -534,7 +543,7 @@ fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
             "--test",
             "engine_it",
             "--",
-            "dev_feedback_replay::committed_real_scenario_replays_are_deterministic",
+            replay_test,
             "--exact",
         ],
         reason,
@@ -1718,6 +1727,17 @@ mod tests {
             "nextest",
             "run",
             "-p",
+            "clonk-engine-integration-tests",
+            "--test",
+            "engine_it",
+            "--",
+            replay_test_name(cfg!(target_os = "macos")),
+            "--exact",
+        ]));
+        assert!(plan.has_args(&[
+            "nextest",
+            "run",
+            "-p",
             "clonk-engine-unit-tests",
             "--test",
             "engine_inline",
@@ -1739,6 +1759,18 @@ mod tests {
             "engine_it",
             "real_scenario_harness::",
         ]));
+    }
+
+    #[test]
+    fn recording_host_uses_committed_replay_oracles() {
+        assert_eq!(
+            replay_test_name(true),
+            "dev_feedback_replay::committed_real_scenario_replays_are_deterministic"
+        );
+        assert_eq!(
+            replay_test_name(false),
+            "dev_feedback_replay::real_scenario_replays_repeat_with_native_group_order"
+        );
     }
 
     #[test]

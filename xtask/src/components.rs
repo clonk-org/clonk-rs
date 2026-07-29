@@ -356,7 +356,13 @@ mod tests {
             fs::write(root.join(name), name.as_bytes()).expect("write document");
         }
         fs::create_dir_all(root.join("bin")).expect("create bin");
-        fs::write(root.join("bin").join("clonk-app"), b"runtime").expect("write runtime");
+        for binary in crate::RUNTIME_BINARIES {
+            fs::write(
+                root.join("bin").join(binary.executable),
+                binary.executable.as_bytes(),
+            )
+            .expect("write runtime executable");
+        }
         fs::create_dir_all(root.join("planet/System.c4g")).expect("create planet");
         fs::write(root.join("planet/System.c4g/C4.c"), b"system").expect("write system");
         fs::create_dir_all(root.join("content/Objects.c4d")).expect("create content");
@@ -651,7 +657,13 @@ mod tests {
         );
 
         let body = fs::read_to_string(&emitted.path).expect("read emitted");
-        assert!(body.contains("bin/clonk-app"), "engine ships the binaries");
+        for binary in crate::RUNTIME_BINARIES {
+            assert!(
+                body.contains(&format!("bin/{}", binary.executable)),
+                "engine ships {}",
+                binary.executable
+            );
+        }
         assert!(body.contains("COPYING"), "engine ships the documents");
         assert!(
             !body.contains("planet/"),

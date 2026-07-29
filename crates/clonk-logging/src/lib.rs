@@ -398,9 +398,9 @@ pub fn init_verbose_with_file(verbose: bool, log_path: &Path) -> io::Result<()> 
     init_verbose_with_file_and_capture(verbose, log_path, None, None)
 }
 
-/// Raw descriptor of the active session log, for signal-handler use only.
+/// Raw descriptor of the active session log, for crash-handler use only.
 /// `-1` means "no log yet", matching C++'s `GetLogFD` sentinel.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 static CRASH_LOG_DESCRIPTOR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 /// Duplicates the session log's descriptor so the crash handler keeps a stable
@@ -418,9 +418,34 @@ fn publish_crash_log_descriptor(file: &File) {
     }
 }
 
+/// Duplicates the session log's Win32 handle, then transfers ownership of that
+/// duplicate to the process CRT so the Windows crash handler can use `_write`
+/// with the same kind of descriptor C++ gets from `fileno(file)`.
+#[cfg(windows)]
+fn publish_crash_log_descriptor(file: &File) {
+    use std::os::windows::io::{FromRawHandle, IntoRawHandle};
+
+    let Ok(duplicate) = file.try_clone() else {
+        return;
+    };
+    let handle = duplicate.into_raw_handle();
+    // SAFETY: `handle` is a live duplicated file handle whose ownership is
+    // transferred to the CRT when `_open_osfhandle` succeeds. Binary mode
+    // mirrors C++ opening the log with `_fsopen(..., "wb", ...)`.
+    let descriptor =
+        unsafe { libc::open_osfhandle(handle as libc::intptr_t, libc::O_WRONLY | libc::O_BINARY) };
+    if descriptor >= 0 {
+        CRASH_LOG_DESCRIPTOR.store(descriptor, std::sync::atomic::Ordering::Release);
+    } else {
+        // SAFETY: conversion failed, so the CRT did not take ownership. Rebuild
+        // a File solely to close the duplicated handle exactly once.
+        drop(unsafe { File::from_raw_handle(handle) });
+    }
+}
+
 /// The active session log's descriptor, or `-1` when there is none. Only a
-/// signal handler should use this; everything else goes through `tracing`.
-#[cfg(unix)]
+/// crash handler should use this; everything else goes through `tracing`.
+#[cfg(any(unix, windows))]
 pub fn crash_log_descriptor() -> i32 {
     CRASH_LOG_DESCRIPTOR.load(std::sync::atomic::Ordering::Acquire)
 }
@@ -439,11 +464,12 @@ pub fn init_verbose_with_file_and_capture(
 
     match open_session_log(log_path) {
         Ok(file) => {
-            // The session log lives behind a buffered tracing writer, which a
-            // signal handler must not touch. Publish the raw descriptor so the
-            // crash banner can `write(2)` to it the way `GetLogFD` does
-            // (C4WinMain.cpp:199-209).
-            #[cfg(unix)]
+            // The session log lives behind a tracing writer, which a crash
+            // handler must not touch. Publish a stable raw descriptor so the
+            // crash report can use the platform's low-level write the way
+            // `GetLogFD` does (C4WinMain.cpp:199-209;
+            // C4CrashHandlerWin32.cpp:450-452).
+            #[cfg(any(unix, windows))]
             publish_crash_log_descriptor(&file);
             install(default_level, Some(file), capture, game_log).map_err(|err| {
                 io::Error::new(

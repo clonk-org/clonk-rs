@@ -7888,6 +7888,8 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
     persist_config_value(&paths, "Network", "PortUDP", "0")
         .expect("disable selected-host UDP listener");
+    persist_config_value(&paths, "Network", "PortDiscovery", "0")
+        .expect("disable selected-host multicast discovery");
     persist_config_value(&paths, "Network", "EnableUPnP", "0")
         .expect("disable selected-host UPnP probe");
     let reference_port = std::net::TcpListener::bind("[::1]:0")

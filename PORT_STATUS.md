@@ -1479,32 +1479,55 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   enablement, composition state, and rendering. Classic keyboard parity remains
   covered, but screen-reader and international text-entry completeness must not
   be claimed.
-- Open gap (found 2026-07-28, not closed): **material slots follow host
-  `readdir` order, so every landscape golden is host-specific and Linux CI
-  cannot pass them.** `C4Group`'s folder scan is unsorted — `DirectoryIterator`
+- Open content gap (found 2026-07-28, CI treatment added 2026-07-29):
+  **material slots follow host `readdir` order, so raw material-index and
+  landscape goldens are host-specific.** `C4Group`'s folder scan is unsorted —
+  `DirectoryIterator`
   wraps `DIR *`/`dirent` on Unix and `_finddata_t` on Windows (StdFile.h:102-126)
   — and `C4MaterialMap::Load` takes material slots straight from that scan
   (C4Material.cpp:263-299). `directory_entries` (`clonk-resources/src/group.rs`)
   mirrors this faithfully via `WalkDir` with no sort, and
   `MaterialLibrary::from_group` (`material.rs:204-219`) consumes that order. With
   `content/` checked out **unpacked**, material indices therefore depend on the
-  filesystem: on APFS `Material.c4g` happens to enumerate case-insensitively
-  sorted, on ext4 it does not. Frame 0 of `tutorial01-idle` diverges in 277
-  leaves, all under `landscape/` — `liquids/*/material` reads 1 on macOS and 10
-  on Linux, and the texmap material names rotate (`Ice`/`Ashes`/`Vehicle`/
-  `Tunnel`). Consequence: `dev_feedback_replay::committed_real_scenario_replays_are_deterministic`
-  fails on Linux CI on **every** revision, and it only surfaced once the
-  `cargo fmt` gate stopped short-circuiting the rest of the parity job.
+  filesystem: the APFS recording host and ext4 CI enumerate `Material.c4g`
+  differently. Frame 0 of `tutorial01-idle` diverges in 277 leaves, all under
+  `landscape/` — `liquids/*/material` reads 1 on macOS and 10 on Linux, and the
+  texmap material names rotate (`Ice`/`Ashes`/`Vehicle`/`Tunnel`). The mismatch
+  only surfaced once the `cargo fmt` gate stopped short-circuiting the rest of
+  the parity job.
   Sorting the folder listing was measured and **rejected**: it makes Rust
   disagree with the C++ oracle on the recording host, breaking
   `elevator_motion_oracle::tutorial07_seed_zero_landscape_matches_cpp_surface8`
   (a whole-plane Surface8 hash, i.e. per-pixel material indices),
   `real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence`, and three
   real-scenario routes. C++ is right, so the engine keeps the unsorted scan.
-  Closing this belongs at the content/harness layer, not in the engine: pack
-  `content/*.c4g` so archive order fixes the enumeration (how LegacyClonk
-  shipped, and what the goldens already encode), or re-derive the goldens and
-  the C++ oracle together under one pinned order.
+  Simply packing the current global group is not a compatible shortcut:
+  `c4group -p` applies the stock `C4FLS_Material` archive sort and changes the
+  committed replay checkpoints too. Reproducing the recording order in a
+  packed temporary group works, but the content tree contains 29 unpacked
+  `Material.c4g` directories that would each need an explicit pinned order.
+  CI therefore separates portable determinism from recording-host oracle
+  values: Ubuntu repeats real replays under its native order and synthetic
+  order tests use explicitly ordered packed groups; the raw real-content
+  oracles carry a named non-macOS ignore reason and run in the required
+  `Recording-host material-order oracles (macOS)` job. A repository script test
+  requires every such ignored oracle to appear in that job, so the platform
+  gate cannot become a silent skip. The underlying content gap remains open;
+  closing it means shipping pinned packed groups and re-recording Rust and C++
+  oracles together under that archive order.
+- Test portability note (2026-07-29): the full-frame value in
+  `loader_screen::tests::real_graphics_and_endeavour_frame_hash_is_stable` is a
+  **Rust raster regression, not a captured C++ framebuffer oracle**. Its
+  `LoaderSky1.jpg` input already differs before rendering: `jpeg-decoder`
+  0.3.2 selects SSSE3 IDCT/color conversion on capable x86 CPUs and its scalar
+  path elsewhere. The test therefore pins both decoder-specific input and
+  composed-frame hashes; treating the scalar value as a macOS oracle, or the
+  SSSE3 value as a Linux oracle, would be false because the split follows the
+  decoder backend rather than the OS. C++ is not a portable pixel authority
+  here either: the pinned build selects WIC or system libjpeg
+  (`CMakeLists.txt:202-203,353-359,529-533`), rasterizes through runtime
+  FreeType, and filters through OpenGL. Keep this test in the portable suite,
+  separate from the APFS material-order oracle job.
 - Open gap (found 2026-07-27, not closed): **scenario load is ~half the
   process cost and is unoptimized.** `ClonkMars/03_Chaos` takes 13.8-15.7 s to
   load on the reference machine — roughly two minutes on a Pi 4 — and 99% of

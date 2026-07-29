@@ -74,11 +74,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       # Nothing here reviews the code, so refuse to release a tree whose own
-      # CI is failing. Both workflows run on every push to main, so their
-      # latest conclusions are an accurate verdict on what is about to ship.
+      # CI is failing. Both workflows run on every push to main, so require
+      # their push verdicts for this exact commit rather than a nearby main tip.
       #
       # `Windows` is checked as well as `Clonk Rust CI` because the Windows
       # binaries are built on their own runner and nothing else covers them:
@@ -88,23 +89,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force }}
+          CI_SHA: ${{ github.sha }}
         run: |
           # Tolerate a failing lookup: `set -e` would otherwise kill the step
           # here, before the force branch below could override anything — which
-          # is precisely when an override is wanted. An unknown conclusion is
+          # is precisely when an override is wanted. An unknown verdict is
           # treated as not-green, so it still blocks unless forced.
-          conclusion=success
+          conclusion=completed:success
           for workflow in "Clonk Rust CI" "Windows"; do
             latest=$(gh run list --workflow "$workflow" --branch main \
-              --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"' \
+              --commit "$CI_SHA" --event push \
+              --limit 1 --json status,conclusion \
+              --jq '[.[0].status // "none", .[0].conclusion // "none"] | join(":")' \
               2>/dev/null || echo "unknown")
             [[ -n "$latest" ]] || latest="unknown"
-            echo "latest $workflow on main: $latest"
-            if [[ "$latest" != "success" ]]; then
+            echo "$workflow push verdict for $CI_SHA: $latest"
+            if [[ "$latest" != "completed:success" ]]; then
               conclusion="$latest"
             fi
           done
-          if [[ "$conclusion" == "success" ]]; then
+          if [[ "$conclusion" == "completed:success" ]]; then
             exit 0
           fi
           if [[ "$FORCE" == "true" ]]; then
@@ -185,8 +189,40 @@ jobs:
               echo "prepared=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "v${version} was prepared earlier but never tagged; releasing it"
-            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            release_candidates=$(
+              git log --first-parent --format='%H%x09%s' |
+                awk -F '\t' -v expected="chore: release ${version}" \
+                  '$2 == expected { print $1 }'
+            )
+            release_candidate_count=$(
+              printf '%s\n' "$release_candidates" |
+                awk 'NF { count += 1 } END { print count + 0 }'
+            )
+            if [[ "$release_candidate_count" -eq 0 ]]; then
+              echo "v${version} is untagged, but no reachable 'chore: release ${version}' commit exists" >&2
+              exit 1
+            fi
+            if [[ "$release_candidate_count" -ne 1 ]]; then
+              echo "v${version} is untagged, but multiple reachable 'chore: release ${version}' commits exist" >&2
+              exit 1
+            fi
+            release_sha=$release_candidates
+            release_version=$(
+              git show "${release_sha}:Cargo.toml" |
+                python3 -c '
+          import re
+          import sys
+          text = sys.stdin.read()
+          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
+          print(re.search(r"""^version = "([^"]+)"$""", section.group(1), re.M).group(1))
+          '
+            )
+            if [[ "$release_version" != "$version" ]]; then
+              echo "${release_sha} contains workspace version ${release_version}, not ${version}" >&2
+              exit 1
+            fi
+            echo "v${version} was prepared earlier but never tagged; releasing ${release_sha}"
+            echo "sha=${release_sha}" >> "$GITHUB_OUTPUT"
             echo "prepared=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -443,7 +479,7 @@ jobs:
           fi
           rm -rf target/dist/universal-check
           unzip -q "${engines[0]}" -d target/dist/universal-check
-          for binary in clonk-app clonk-game; do
+          for binary in clonk-app clonk-game c4group; do
             path="target/dist/universal-check/Contents/MacOS/$binary"
             info=$(lipo -info "$path")
             echo "$info"
