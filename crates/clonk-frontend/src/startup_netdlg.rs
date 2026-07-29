@@ -29,6 +29,8 @@ use clonk_gui::Rect as GuiRect;
 /// C4GUI_FullscreenCaptionFontClr / C4GUI_Caption2FontClr / C4GUI_ButtonFontClr.
 /// `C4GUI::TextWindow`'s constructor defaults, which `C4ChatControl::ChatSheet`
 /// takes verbatim (src/C4Gui.h:1309; src/C4ChatDlg.cpp:194).
+/// `C4GUI_ScrollArrowHgt` (src/C4Gui.h).
+const CHAT_SCROLL_ARROW_EXTENT: i32 = 16;
 const CHAT_TRANSCRIPT_MAX_LINES: usize = 100;
 const CHAT_TRANSCRIPT_MAX_TEXT: usize = 4096;
 
@@ -1327,6 +1329,8 @@ pub struct NetDlgController {
     list_scroll_y: i32,
     list_scroll_pin: i32,
     scrollbar_dragging: bool,
+    /// A held `C4GUI::ScrollBar` pin on the IRC transcript.
+    chat_transcript_scrollbar_dragging: bool,
     scrollbar_arrow_captured: bool,
     scrollbar_arrow: i8,
 }
@@ -1341,6 +1345,13 @@ enum NetDlgChatHit {
     TabClose(usize),
     Input,
     Transcript,
+    /// `C4GUI::ScrollBar`'s three pointer regions
+    /// (src/C4GuiContainers.cpp:477-623): the two arrow buttons step one line,
+    /// the pin is draggable, and pressing the bare track pages.
+    TranscriptScrollUp,
+    TranscriptScrollDown,
+    TranscriptScrollPin,
+    TranscriptScrollTrack,
     User(usize),
 }
 
@@ -1457,6 +1468,7 @@ impl NetDlgController {
             list_scroll_y: 0,
             list_scroll_pin: 0,
             scrollbar_dragging: false,
+            chat_transcript_scrollbar_dragging: false,
             scrollbar_arrow_captured: false,
             scrollbar_arrow: 0,
         }
@@ -2564,6 +2576,10 @@ impl NetDlgController {
                     .drag_pointer_selection(character, edit_rect, font);
             }
         }
+        if self.chat_transcript_scrollbar_dragging {
+            self.set_chat_transcript_scroll_from_pointer(position);
+            return Vec::new();
+        }
         if self.scrollbar_dragging {
             self.set_scroll_from_pointer(position, &layout);
         } else if self.scrollbar_arrow_captured {
@@ -2632,6 +2648,19 @@ impl NetDlgController {
                             .begin_pointer_selection(character, edit_rect, font);
                     }
                     NetDlgChatHit::Connect => self.chat_connect_focused = true,
+                    NetDlgChatHit::TranscriptScrollUp => {
+                        self.scroll_active_chat_by(-self.metrics.text_line_height.max(1));
+                    }
+                    NetDlgChatHit::TranscriptScrollDown => {
+                        self.scroll_active_chat_by(self.metrics.text_line_height.max(1));
+                    }
+                    NetDlgChatHit::TranscriptScrollPin => {
+                        self.chat_transcript_scrollbar_dragging = true;
+                    }
+                    NetDlgChatHit::TranscriptScrollTrack => {
+                        self.set_chat_transcript_scroll_from_pointer(position);
+                        self.chat_transcript_scrollbar_dragging = true;
+                    }
                     NetDlgChatHit::DialogClose
                     | NetDlgChatHit::DialogCaption
                     | NetDlgChatHit::Tab(_)
@@ -2711,10 +2740,19 @@ impl NetDlgController {
                         | NetDlgChatHit::DialogCaption
                         | NetDlgChatHit::Input
                         | NetDlgChatHit::Transcript
+                        | NetDlgChatHit::TranscriptScrollUp
+                        | NetDlgChatHit::TranscriptScrollDown
+                        | NetDlgChatHit::TranscriptScrollPin
+                        | NetDlgChatHit::TranscriptScrollTrack
                         | NetDlgChatHit::User(_) => Vec::new(),
                     };
                 }
             }
+        }
+        if self.chat_transcript_scrollbar_dragging {
+            self.set_chat_transcript_scroll_from_pointer(position);
+            self.chat_transcript_scrollbar_dragging = false;
+            return Vec::new();
         }
         if self.scrollbar_dragging {
             let layout = self.layout();
@@ -3592,6 +3630,82 @@ impl NetDlgController {
         }
     }
 
+    /// `C4GUI::ScrollBar`'s pointer regions: the two `C4GUI_ScrollArrowHgt`
+    /// arrow buttons and, between them, the draggable pin over a pageable
+    /// track (src/C4GuiContainers.cpp:477-623). The bar exists only while the
+    /// transcript overflows.
+    fn chat_transcript_scrollbar_hit(
+        &self,
+        layout: &NetDlgChatLayout,
+        point: GuiPoint,
+    ) -> Option<NetDlgChatHit> {
+        let bar = layout.transcript_scrollbar;
+        let max_scroll = self.chat_transcript_max_scroll_for(self.chat_active_sheet, layout);
+        if max_scroll <= 0 || !contains(bar, point) {
+            return None;
+        }
+        let arrow = CHAT_SCROLL_ARROW_EXTENT.min(bar.h / 2);
+        let y = point.y.floor() as i32;
+        if y < bar.y + arrow {
+            return Some(NetDlgChatHit::TranscriptScrollUp);
+        }
+        if y >= bar.y + bar.h - arrow {
+            return Some(NetDlgChatHit::TranscriptScrollDown);
+        }
+        let pin = self.chat_transcript_pin_rect(layout, max_scroll);
+        Some(if contains(pin, point) {
+            NetDlgChatHit::TranscriptScrollPin
+        } else {
+            NetDlgChatHit::TranscriptScrollTrack
+        })
+    }
+
+    fn chat_transcript_pin_rect(&self, layout: &NetDlgChatLayout, max_scroll: i32) -> IntRect {
+        let bar = layout.transcript_scrollbar;
+        let arrow = CHAT_SCROLL_ARROW_EXTENT.min(bar.h / 2);
+        let travel = (bar.h - 3 * arrow).max(0);
+        let scroll = self
+            .chat_sheets
+            .get(self.chat_active_sheet)
+            .map_or(0, |sheet| {
+                if sheet.transcript_follow_bottom {
+                    max_scroll
+                } else {
+                    sheet.transcript_scroll
+                }
+            });
+        let offset = if max_scroll > 0 && travel > 0 {
+            (i64::from(scroll) * i64::from(travel) / i64::from(max_scroll)) as i32
+        } else {
+            0
+        };
+        IntRect {
+            x: bar.x,
+            y: bar.y + arrow + offset,
+            w: bar.w,
+            h: arrow,
+        }
+    }
+
+    /// `ScrollBar::MouseInput`'s drag/page: centre the pin under the pointer
+    /// and map that back to a scroll offset.
+    fn set_chat_transcript_scroll_from_pointer(&mut self, point: GuiPoint) {
+        let layout = self.chat_layout();
+        let max_scroll = self.chat_transcript_max_scroll_for(self.chat_active_sheet, &layout);
+        let bar = layout.transcript_scrollbar;
+        let arrow = CHAT_SCROLL_ARROW_EXTENT.min(bar.h / 2);
+        let travel = (bar.h - 3 * arrow).max(0);
+        if max_scroll <= 0 || travel <= 0 {
+            return;
+        }
+        let position = (point.y.floor() as i32 - bar.y - arrow - arrow / 2).clamp(0, travel);
+        let scroll = (i64::from(position) * i64::from(max_scroll) / i64::from(travel)) as i32;
+        if let Some(sheet) = self.chat_sheets.get_mut(self.chat_active_sheet) {
+            sheet.transcript_scroll = scroll.clamp(0, max_scroll);
+            sheet.transcript_follow_bottom = sheet.transcript_scroll == max_scroll;
+        }
+    }
+
     fn scroll_active_chat_by(&mut self, delta: i32) {
         let layout = self.chat_layout();
         let max_scroll = self.chat_transcript_max_scroll_for(self.chat_active_sheet, &layout);
@@ -3652,6 +3766,7 @@ impl NetDlgController {
                         .map(NetDlgChatHit::Tab)
                 })
                 .or_else(|| contains(layout.input, point).then_some(NetDlgChatHit::Input))
+                .or_else(|| self.chat_transcript_scrollbar_hit(&layout, point))
                 .or_else(|| {
                     contains(layout.transcript_viewport, point).then_some(NetDlgChatHit::Transcript)
                 })
@@ -8170,6 +8285,67 @@ mod tests {
                 .text
                 .contains("039"),
             "the newest line always survives"
+        );
+
+        // The transcript bar's arrows step a line, its pin drags, and its bare
+        // track pages, exactly like C4GUI::ScrollBar.
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        let overflow = (0..90)
+            .map(|index| message(&format!("line {index}")))
+            .collect();
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            overflow,
+            0,
+        ));
+        let channel_index = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel tab");
+        controller.select_chat_sheet(channel_index);
+        controller.force_chat_mode_and_focus();
+        let layout = controller.chat_layout();
+        let bar = layout.transcript_scrollbar;
+        let max_scroll =
+            controller.chat_transcript_max_scroll_for(controller.chat_active_sheet, &layout);
+        assert!(max_scroll > 0, "90 lines overflow the transcript viewport");
+        assert_eq!(
+            controller.chat_sheets()[channel_index].transcript_scroll,
+            max_scroll,
+            "AddTextLine leaves the transcript pinned to the bottom"
+        );
+
+        let at = |y: i32| GuiPoint::new((bar.x + bar.w / 2) as f32, y as f32);
+        // The up arrow steps one line off the bottom.
+        controller.handle_pointer_down(at(bar.y + 2), text_font());
+        controller.handle_pointer_up(at(bar.y + 2), text_font());
+        let stepped = controller.chat_sheets()[channel_index].transcript_scroll;
+        assert_eq!(stepped, max_scroll - metrics().text_line_height.max(1));
+        assert!(!controller.chat_sheets()[channel_index].transcript_follow_bottom);
+
+        // The down arrow steps back and re-pins.
+        controller.handle_pointer_down(at(bar.y + bar.h - 2), text_font());
+        controller.handle_pointer_up(at(bar.y + bar.h - 2), text_font());
+        assert_eq!(
+            controller.chat_sheets()[channel_index].transcript_scroll,
+            max_scroll
+        );
+        assert!(controller.chat_sheets()[channel_index].transcript_follow_bottom);
+
+        // Pressing the bare track pages to that position, and dragging the pin
+        // tracks the pointer.
+        controller.handle_pointer_down(at(bar.y + bar.h / 2), text_font());
+        let paged = controller.chat_sheets()[channel_index].transcript_scroll;
+        assert!(paged > 0 && paged < max_scroll, "paged to {paged}");
+        controller.handle_pointer_move(at(bar.y + CHAT_SCROLL_ARROW_EXTENT), text_font());
+        assert_eq!(controller.chat_sheets()[channel_index].transcript_scroll, 0);
+        controller.handle_pointer_up(at(bar.y + bar.h), text_font());
+        assert_eq!(
+            controller.chat_sheets()[channel_index].transcript_scroll,
+            max_scroll,
+            "the release position is applied before the drag ends"
         );
 
         // The nick list retains a scroll offset instead of dropping rows.
