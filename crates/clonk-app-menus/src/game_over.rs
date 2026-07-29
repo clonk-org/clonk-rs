@@ -1,7 +1,5 @@
 use clonk_engine::RoundResultsNetworkResult;
-use clonk_frontend::classic_gui::{
-    draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect,
-};
+use clonk_frontend::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
 use clonk_frontend::{expand_hotkey_markup, ClonkFontSet, ImageData};
 use clonk_graphics::clonk_font::TextAlign;
 use clonk_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
@@ -16,7 +14,8 @@ const CLASSIC_TEAM_HEADER_ICON: i32 = 35;
 /// `C4GUI_ScrollBarWdt` (src/C4Gui.h) — the column `ScrollWindow` reserves and
 /// the width of every `GUIScroll.png` facet cell.
 use crate::scrollbar::{
-    pin_offset as scrollbar_pin_offset_for, SCROLLBAR_EXTENT as CLASSIC_SCROLLBAR_EXTENT,
+    draw_classic_scrollbar, pin_offset as scrollbar_pin_offset_for,
+    SCROLLBAR_EXTENT as CLASSIC_SCROLLBAR_EXTENT,
 };
 const CLASSIC_INDENT_Y: i32 = 6;
 const CLASSIC_GOAL_SIZE: i32 = 64;
@@ -2410,71 +2409,6 @@ fn grayscale_image(image: &ImageData, offset: i32) -> ImageData {
         pixel[..3].fill(gray);
     }
     ImageData::new(image.width(), image.height(), pixels)
-}
-
-/// `C4GUI::ScrollBar::DrawElement` (src/C4GuiContainers.cpp:309-470): the
-/// facet's three 16px cells are the up arrow, the tiled shaft and the down
-/// arrow, with the pin drawn from column 16 of the shaft row.
-fn draw_classic_scrollbar(
-    surface: &mut Surface,
-    rect: IntRect,
-    scroll: &ImageData,
-    pin: i32,
-    max_scroll: i32,
-    gamma: Option<&GammaRamp>,
-) {
-    if rect.h <= 0 {
-        return;
-    }
-    let extent = CLASSIC_SCROLLBAR_EXTENT as f32;
-    draw_facet_stretch(
-        surface,
-        scroll,
-        (0.0, 0.0, extent, extent),
-        (rect.x as f32, rect.y as f32, extent, extent),
-        gamma,
-    );
-    let mut y = CLASSIC_SCROLLBAR_EXTENT;
-    while y < rect.h - 5 {
-        let height = CLASSIC_SCROLLBAR_EXTENT.min(rect.h - 5 - y);
-        if height <= 0 {
-            break;
-        }
-        draw_facet_stretch(
-            surface,
-            scroll,
-            (0.0, extent, extent, height as f32),
-            (rect.x as f32, (rect.y + y) as f32, extent, height as f32),
-            gamma,
-        );
-        y += CLASSIC_SCROLLBAR_EXTENT;
-    }
-    draw_facet_stretch(
-        surface,
-        scroll,
-        (0.0, 2.0 * extent, extent, extent),
-        (
-            rect.x as f32,
-            (rect.y + rect.h - CLASSIC_SCROLLBAR_EXTENT) as f32,
-            extent,
-            extent,
-        ),
-        gamma,
-    );
-    if max_scroll > 0 && rect.h > 3 * CLASSIC_SCROLLBAR_EXTENT {
-        draw_facet_stretch(
-            surface,
-            scroll,
-            (extent, extent, extent, extent),
-            (
-                rect.x as f32,
-                (rect.y + CLASSIC_SCROLLBAR_EXTENT + pin) as f32,
-                extent,
-                extent,
-            ),
-            gamma,
-        );
-    }
 }
 
 /// `C4GUI::ScrollBar::Update` for a bar rectangle. The arithmetic lives in

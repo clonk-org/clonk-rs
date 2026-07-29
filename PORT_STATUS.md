@@ -436,8 +436,12 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   keeping its own copy, and all 123 menu tests still pass. Pinned by
   `overflow_menu_scrollbar_arrows_track_and_thumb_match_cpp`, which covers the
   arrow/shaft boundaries, out-of-range clamping, the pin/scroll round trip, and
-  a bar too short for two full arrows. **Still open:** wiring it into the
-  Normal, Context, Info, Dialog and engine object menus, which is what the
+  a bar too short for two full arrows. **Still open:** the menu draw paths do not yet *render* the bar —
+  `IngameMenuGraphics` and the object-menu graphics carry `menu_scroll_y` (a
+  position) but not the scroll facet itself, which today reaches only
+  `game_over`'s resources. Feeding that facet through is the remaining step, plus
+  criterion 4's `MENU_PARITY.md` rows. Rects and pointer routing are in place for
+  every surface that should have a bar. This replaces the earlier note about
   ticket's first criterion asks for — the **engine object menu is now wired**:
   its layout exposes the reserved column as a `scrollbar` rect (present only
   while the menu overflows, the same condition that reserves its width), and
@@ -447,7 +451,9 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   menu's bar is only two 16px rows tall, so the two arrows consume it entirely
   and the pin has no travel — `rect.h - 3 * extent` is negative — which is what
   C++ does for a bar that short; the shared model's own test covers a bar with
-  travel. **The in-game menu is wired too, and it was a parity fix, not just
+  travel. `draw_classic_scrollbar` moved into the shared module too, so the
+  drawing, hit-testing and pin arithmetic now have exactly one implementation
+  between them. **The in-game menu is wired too, and it was a parity fix, not just
   plumbing:** `C4Menu::InitSize` widens an overflowing menu by
   `C4GUI_ScrollBarWdt` (`C4Menu.cpp:776`), and the port's in-game menu did not —
   it was 16px too narrow whenever it overflowed, with no test covering that

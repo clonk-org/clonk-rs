@@ -11,7 +11,9 @@
 //! row. `:477-623` defines the pointer regions: the two arrow buttons, the
 //! draggable pin, and the pageable track between them.
 
-use clonk_frontend::classic_gui::IntRect;
+use clonk_frontend::classic_gui::{draw_facet_stretch, IntRect};
+use clonk_frontend::ImageData;
+use clonk_graphics::{GammaRamp, Surface};
 
 /// `C4GUI_ScrollArrowHgt` — the facet cell size, and the arrow button extent.
 pub const SCROLLBAR_EXTENT: i32 = 16;
@@ -109,6 +111,71 @@ pub fn scroll_from_pointer(bar: IntRect, pointer_y: i32, max_scroll: i32) -> i32
     let arrow = arrow_extent(bar.h);
     let offset = (pointer_y - bar.y - arrow - arrow / 2).clamp(0, travel);
     ((i64::from(offset) * i64::from(max_scroll)) / i64::from(travel)) as i32
+}
+
+/// `C4GUI::ScrollBar::DrawElement` (src/C4GuiContainers.cpp:309-470): the
+/// facet's three 16px cells are the up arrow, the tiled shaft and the down
+/// arrow, with the pin drawn from column 16 of the shaft row.
+pub fn draw_classic_scrollbar(
+    surface: &mut Surface,
+    rect: IntRect,
+    scroll: &ImageData,
+    pin: i32,
+    max_scroll: i32,
+    gamma: Option<&GammaRamp>,
+) {
+    if rect.h <= 0 {
+        return;
+    }
+    let extent = SCROLLBAR_EXTENT as f32;
+    draw_facet_stretch(
+        surface,
+        scroll,
+        (0.0, 0.0, extent, extent),
+        (rect.x as f32, rect.y as f32, extent, extent),
+        gamma,
+    );
+    let mut y = SCROLLBAR_EXTENT;
+    while y < rect.h - 5 {
+        let height = SCROLLBAR_EXTENT.min(rect.h - 5 - y);
+        if height <= 0 {
+            break;
+        }
+        draw_facet_stretch(
+            surface,
+            scroll,
+            (0.0, extent, extent, height as f32),
+            (rect.x as f32, (rect.y + y) as f32, extent, height as f32),
+            gamma,
+        );
+        y += SCROLLBAR_EXTENT;
+    }
+    draw_facet_stretch(
+        surface,
+        scroll,
+        (0.0, 2.0 * extent, extent, extent),
+        (
+            rect.x as f32,
+            (rect.y + rect.h - SCROLLBAR_EXTENT) as f32,
+            extent,
+            extent,
+        ),
+        gamma,
+    );
+    if max_scroll > 0 && rect.h > 3 * SCROLLBAR_EXTENT {
+        draw_facet_stretch(
+            surface,
+            scroll,
+            (extent, extent, extent, extent),
+            (
+                rect.x as f32,
+                (rect.y + SCROLLBAR_EXTENT + pin) as f32,
+                extent,
+                extent,
+            ),
+            gamma,
+        );
+    }
 }
 
 #[cfg(test)]
