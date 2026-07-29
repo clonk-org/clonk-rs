@@ -440,9 +440,12 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `IngameMenuGraphics` carries the `scroll` facet and the in-game and
   engine-script draws call the shared `draw_classic_scrollbar` after their client
   contents, leaving it undrawn when the facet is absent as a null `C4Facet` does.
-  The `MENU_PARITY.md` row is updated. **Still open:** arrow auto-repeat while
-  held, and paging the bare track on click — the hit regions report both, but
-  nothing acts on them yet. This replaces the earlier note about
+  The `MENU_PARITY.md` row is updated. Arrow auto-repeat and track clicks are wired: a held arrow steps one unit per
+  drawn frame exactly as `ScrollBar::DrawElement` does, and a track click
+  **jumps** the thumb to the pointer rather than paging — C++ has no paging
+  behaviour here at all (`C4GuiContainers.cpp:414-423`), which corrects an
+  earlier note on this work. **Still open:** the held arrow does not swap to its
+  pressed facet cell, and the `ArrowHit`/`Command` sounds are unwired. This replaces the earlier note about
   ticket's first criterion asks for — the **engine object menu is now wired**:
   its layout exposes the reserved column as a `scrollbar` rect (present only
   while the menu overflows, the same condition that reserves its width), and

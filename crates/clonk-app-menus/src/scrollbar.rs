@@ -100,6 +100,21 @@ pub fn hit(bar: IntRect, point: (i32, i32), scroll: i32, max_scroll: i32) -> Opt
     })
 }
 
+/// The per-frame scroll step a held arrow applies. `C4GUI::ScrollBar` does this
+/// in `DrawElement` — one unit per drawn frame, with no timer
+/// (`C4GuiContainers.cpp:446-457`, whose own comment notes "there's no OnIdle").
+///
+/// Clicking the bare track is **not** a page: C++ jumps the thumb to the
+/// pointer and begins dragging (`:414-423`), which is what
+/// [`scroll_from_pointer`] computes.
+pub fn arrow_repeat_step(held: Option<ScrollbarHit>) -> i32 {
+    match held {
+        Some(ScrollbarHit::ScrollUp) => -1,
+        Some(ScrollbarHit::ScrollDown) => 1,
+        _ => 0,
+    }
+}
+
 /// The scroll a pin drag to `pointer_y` selects, clamped to the range. The
 /// pointer is taken to hold the pin's centre, as `C4GUI::ScrollBar::MouseInput`
 /// does while captured.
@@ -244,6 +259,13 @@ mod tests {
                 "scroll {scroll} recovered as {recovered}"
             );
         }
+
+        // A held arrow steps one unit per drawn frame; anything else is still.
+        assert_eq!(arrow_repeat_step(Some(ScrollbarHit::ScrollUp)), -1);
+        assert_eq!(arrow_repeat_step(Some(ScrollbarHit::ScrollDown)), 1);
+        assert_eq!(arrow_repeat_step(Some(ScrollbarHit::Pin)), 0);
+        assert_eq!(arrow_repeat_step(Some(ScrollbarHit::Track)), 0);
+        assert_eq!(arrow_repeat_step(None), 0);
 
         // A bar too short for two full arrows splits evenly and never produces
         // a negative travel.

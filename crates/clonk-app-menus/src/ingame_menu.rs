@@ -723,6 +723,10 @@ pub struct IngameMenuState {
     /// Presentation-only `C4GUI::ScrollWindow::iScrollY`. Unlike the
     /// synchronized selection, this survives draws and wheel input locally.
     scroll_y: Cell<i32>,
+    /// Arrow currently held on the overflow scroll bar. `C4GUI::ScrollBar`
+    /// keeps `fTopDown`/`fBottomDown` and steps one unit per drawn frame
+    /// (C4GuiContainers.cpp:398-427,446-457).
+    scroll_arrow_held: Cell<Option<crate::scrollbar::ScrollbarHit>>,
     /// Selection for which `ScrollRangeInView` was last applied. Layout is
     /// computed from `&self`, so this marker lets it perform the native
     /// one-shot adjustment without undoing a later wheel scroll every frame.
@@ -773,6 +777,7 @@ impl IngameMenuState {
             close_action,
             time_on_selection: 0,
             scroll_y: Cell::new(0),
+            scroll_arrow_held: Cell::new(None),
             scroll_selection: Cell::new(None),
             location: Cell::new(None),
             last_area: Cell::new(None),
@@ -1556,6 +1561,50 @@ impl IngameMenuState {
             && rect_contains_point(self.layout(area, font, gfx).client_rect(), point)
     }
 
+    /// Presses the bar at `point`: a held arrow begins repeating, and a click
+    /// on the pin or the bare track jumps the thumb there and begins dragging
+    /// (`C4GuiContainers.cpp:403-423` — the track is a jump, never a page).
+    /// Reports whether the press landed on the bar.
+    pub fn press_scrollbar(
+        &self,
+        area: Rect,
+        font: &HudFont<'_>,
+        gfx: &IngameMenuGraphics,
+        point: GuiPoint,
+    ) -> bool {
+        let Some(hit) = self.scrollbar_hit(area, font, gfx, point) else {
+            self.scroll_arrow_held.set(None);
+            return false;
+        };
+        match hit {
+            crate::scrollbar::ScrollbarHit::ScrollUp
+            | crate::scrollbar::ScrollbarHit::ScrollDown => {
+                self.scroll_arrow_held.set(Some(hit));
+            }
+            crate::scrollbar::ScrollbarHit::Pin | crate::scrollbar::ScrollbarHit::Track => {
+                self.scroll_arrow_held.set(None);
+                if let Some(target) =
+                    self.scrollbar_scroll_from_pointer(area, font, gfx, point.y.floor() as i32)
+                {
+                    let current = self.scroll_y.get();
+                    self.scroll_by(target - current, area, font, gfx);
+                }
+            }
+        }
+        true
+    }
+
+    /// Releases a held arrow (`C4GuiContainers.cpp:443`).
+    pub fn release_scrollbar(&self) {
+        self.scroll_arrow_held.set(None);
+    }
+
+    /// Whether an arrow is currently held, which also selects the pressed
+    /// facet cell in C++ (`C4GuiContainers.cpp:459-461`).
+    pub fn scrollbar_arrow_held(&self) -> Option<crate::scrollbar::ScrollbarHit> {
+        self.scroll_arrow_held.get()
+    }
+
     /// Which part of the overflow scroll bar `point` hits, if any. Routes
     /// through the shared `C4GUI::ScrollBar` model so every menu agrees
     /// (`C4GuiContainers.cpp:477-623`). `None` while the menu fits, which is
@@ -1712,6 +1761,12 @@ impl IngameMenuState {
         gfx: &IngameMenuGraphics,
         gamma: Option<&GammaRamp>,
     ) {
+        // `ScrollBar::DrawElement` steps a held arrow once per drawn frame
+        // before drawing (C4GuiContainers.cpp:446-457).
+        let step = crate::scrollbar::arrow_repeat_step(self.scroll_arrow_held.get());
+        if step != 0 {
+            self.scroll_by(step, area, font, gfx);
+        }
         let layout = self.layout(area, font, gfx);
         let previous_clip = surface.clip();
         let viewport_clip = previous_clip
