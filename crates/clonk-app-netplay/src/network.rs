@@ -3115,6 +3115,18 @@ impl NetworkManager {
 
     /// Returns the most recently completed C++-cadence input/output samples,
     /// generating a due one-second edge from the live socket accounting first.
+    /// `C4Network2IO::getProtIRate/getProtORate/getProtBCRate` read the
+    /// cached interval values; only `GenerateStatistics` recomputes them. The
+    /// status overlay must therefore *read* the accumulator rather than
+    /// regenerate it, which would steal the interval the per-second chart
+    /// sampling owns (src/C4Network2.cpp:1171-1178).
+    pub fn protocol_rate_statistics(
+        &self,
+        protocol: clonk_network::NetworkProtocol,
+    ) -> clonk_network::ProtocolRateStatistics {
+        self.network_io_statistics.protocol_statistics(protocol)
+    }
+
     pub fn protocol_rate_samples(
         &self,
     ) -> (
@@ -3210,6 +3222,38 @@ impl NetworkManager {
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
+    /// Seed the shared per-protocol accumulator the way live traffic would,
+    /// so the status overlay and the chart can be exercised against the same
+    /// sample without a real transport.
+    pub fn record_test_protocol_traffic(
+        &self,
+        connection_id: u32,
+        protocol: clonk_network::NetworkProtocol,
+        input_bytes: usize,
+        output_bytes: usize,
+        broadcast_bytes: usize,
+    ) {
+        let recorder = self
+            .network_io_statistics
+            .open_connection(connection_id, protocol);
+        recorder.record_input(input_bytes);
+        recorder.record_output(output_bytes);
+        self.network_io_statistics
+            .record_broadcast_datagram(protocol, broadcast_bytes);
+    }
+
+    /// Seed the bound local addresses the status overlay reads to decide which
+    /// NetIO backs the message and data protocols.
+    pub fn set_test_local_addresses(&self, addresses: impl IntoIterator<Item = NetworkAddress>) {
+        self.netpuncher_state.lock().local_addresses = addresses.into_iter().collect();
+    }
+
+    /// `C4Network2IO::GenerateStatistics`'s interval boundary, exposed so a
+    /// test can close one sample deterministically.
+    pub fn generate_test_statistics(&self, now_ms: u64) {
+        self.network_io_statistics.generate_statistics(now_ms);
+    }
+
     pub fn set_test_runtime_client_states(
         &self,
         states: impl IntoIterator<Item = RuntimeNetworkClientState>,

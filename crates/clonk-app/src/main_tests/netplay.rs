@@ -18385,6 +18385,86 @@ fn running_chat_netgetscen_saves_client_scenario_resource_like_cpp() {
     );
 }
 
+// C4Network2::DrawStatus reads the live per-protocol accumulator through
+// getProtIRate/getProtORate/getProtBCRate, and coalesces the two protocol
+// lines into one "Msg/Data" entry when the message and data NetIO are the same
+// object (src/C4Network2.cpp:1148-1181).
+#[test]
+fn network_status_overlay_displays_live_protocol_rate_samples() {
+    let mut app = new_running_sandbox_app();
+    let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+    app.control_clients
+        .replace_snapshot([message_client(0, b"Host")]);
+    app.graphics
+        .set_debug_draw_flags(clonk_frontend::DebugDrawFlags {
+            show_net_status: true,
+            ..clonk_frontend::DebugDrawFlags::default()
+        });
+
+    // Both NetIO objects are bound, which is what makes the protocol line
+    // appear at all (src/C4Network2.cpp:1149-1150).
+    app.network
+        .as_ref()
+        .expect("network stub")
+        .set_test_local_addresses([
+            clonk_network::NetworkAddress::new(
+                clonk_network::NetworkProtocol::Tcp,
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            ),
+            clonk_network::NetworkAddress::new(
+                clonk_network::NetworkProtocol::Udp,
+                SocketAddr::from(([127, 0, 0, 1], 11_113)),
+            ),
+        ]);
+
+    // An unsampled accumulator reads zero, exactly like native startup.
+    app.update_network_status_overlay();
+    let text = app
+        .graphics
+        .network_status_text()
+        .expect("enabled network status text");
+    assert!(text.contains("i0 o0 bc0"), "{text}");
+
+    let network = app.network.as_ref().expect("network stub");
+    network.record_test_protocol_traffic(1, clonk_network::NetworkProtocol::Udp, 900, 300, 120);
+    network.record_test_protocol_traffic(2, clonk_network::NetworkProtocol::Tcp, 400, 100, 40);
+    // GenerateStatistics only consumes an edge strictly outside C++'s
+    // inclusive one-second window, so close the sample past it.
+    network.generate_test_statistics(2_000);
+
+    app.update_network_status_overlay();
+    let text = app
+        .graphics
+        .network_status_text()
+        .expect("sampled network status text");
+    let protocols = text
+        .split('|')
+        .find(|line| line.starts_with("Protocols:"))
+        .expect("protocol line");
+    assert!(
+        protocols.contains(" i") && protocols.contains(" o") && protocols.contains(" bc"),
+        "{protocols}"
+    );
+    assert!(
+        !protocols.contains("i0 o0 bc0"),
+        "the overlay must show the sampled rates, not zero: {protocols}"
+    );
+
+    // Reading the overlay must not consume the interval the per-second chart
+    // sampling owns: a second draw shows the same cached values.
+    let first = protocols.to_string();
+    app.update_network_status_overlay();
+    let second = app
+        .graphics
+        .network_status_text()
+        .expect("second network status text")
+        .split('|')
+        .find(|line| line.starts_with("Protocols:"))
+        .expect("protocol line")
+        .to_string();
+    assert_eq!(first, second);
+}
+
 #[test]
 fn runtime_client_list_maps_native_lifecycle_readiness_and_wait() {
     use clonk_frontend::runtime_client_list::RuntimeClientStatusIcon;

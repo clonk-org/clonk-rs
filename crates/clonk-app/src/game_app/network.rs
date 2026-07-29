@@ -1512,10 +1512,19 @@ impl GameApp {
         let message_io = udp.or(tcp);
         let data_io = tcp.or(udp);
         if let (Some(message_io), Some(data_io)) = (message_io, data_io) {
-            // L066 supplies the C++ rate accumulator; the current session
-            // transport does not yet publish its snapshot to the app, so an
-            // unsampled bucket has the same zero values as native startup.
-            let rates = |_protocol| (0_u64, 0_u64, 0_u64);
+            // `getProtIRate`/`getProtORate`/`getProtBCRate` read the same
+            // cached per-protocol accumulator the network chart samples;
+            // reading here must not regenerate it (src/C4Network2.cpp:1171-1178).
+            let rates = |protocol| {
+                self.network.as_ref().map_or((0, 0, 0), |network| {
+                    let statistics = network.protocol_rate_statistics(protocol);
+                    (
+                        statistics.input_rate,
+                        statistics.output_rate,
+                        statistics.broadcast_rate,
+                    )
+                })
+            };
             let (msg_in, msg_out, msg_broadcast) = rates(message_io.protocol);
             let message_label = if message_io.protocol == data_io.protocol {
                 "Msg/Data"
