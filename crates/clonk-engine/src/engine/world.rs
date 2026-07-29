@@ -733,6 +733,9 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_debug_mode(&mut self, debug_mode: bool) {
         self.debug_mode = debug_mode;
+        // `DebugLog` reaches the message board and developer console only while
+        // the round has debug mode on (C4Game.cpp:447-454).
+        clonk_core::log_target::set_debug_mode_presentation(debug_mode);
     }
 
     pub fn debug_mode(&self) -> bool {
@@ -748,6 +751,7 @@ impl Engine {
         }
         self.debug_mode = false;
         self.allow_debug = false;
+        clonk_core::log_target::set_debug_mode_presentation(false);
     }
 
     /// Install the live C4GameControl rate without disturbing ControlTick or

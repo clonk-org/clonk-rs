@@ -27,7 +27,7 @@ const PANIC_LOG_TARGET: &str = "panic";
 /// counterpart of the C++ logger whose output `C4LogSystem::GuiSink` shows
 /// in-game (`src/C4Log.cpp:226-240`). Re-exported from `clonk-core` so the
 /// engine crates that emit and this crate that routes share one definition.
-pub use clonk_core::log_target::SCRIPT_LOG_TARGET;
+pub use clonk_core::log_target::{SCRIPT_DEBUG_LOG_TARGET, SCRIPT_LOG_TARGET};
 
 /// Process-local copy of formatted log output consumed by the developer
 /// console. The capture is intentionally independent from the bounded GUI
@@ -116,7 +116,22 @@ where
 fn message_board_sink(
     game_log: Option<GameLogCapture>,
 ) -> impl for<'a> MakeWriter<'a> + Send + Sync + 'static {
-    Optional(game_log).with_filter(|meta: &Metadata<'_>| meta.target() == SCRIPT_LOG_TARGET)
+    Optional(game_log).with_filter(|meta: &Metadata<'_>| debug_log_reaches_gui(meta.target()))
+}
+
+/// Whether an event on `target` belongs in a GUI sink right now.
+///
+/// `Log()` output always does. `DebugLog()` output does only while the round has
+/// debug mode enabled, so a verbose or `RUST_LOG`-driven session cannot leak
+/// debug-only lines into the message board in rounds that disabled it. The file
+/// sink is deliberately not consulted here — it keeps these diagnostics
+/// unconditionally, which is the point of routing them separately.
+pub fn debug_log_reaches_gui(target: &str) -> bool {
+    match target {
+        SCRIPT_LOG_TARGET => true,
+        SCRIPT_DEBUG_LOG_TARGET => clonk_core::log_target::debug_mode_presentation(),
+        _ => false,
+    }
 }
 
 /// Install the process-wide subscriber. Every event fans out to stderr and the
@@ -134,7 +149,12 @@ fn install(
         .with(filter)
         .with(
             fmt::layer()
-                .with_writer(io::stderr)
+                // The registry admits `DebugLog` unconditionally for the file
+                // sink's sake; stderr still honours the requested verbosity.
+                .with_writer(io::stderr.with_filter(move |meta: &Metadata<'_>| {
+                    meta.target() != SCRIPT_DEBUG_LOG_TARGET
+                        || debug_log_reaches_stderr(default_level)
+                }))
                 // Colour helps a developer reading a terminal and corrupts
                 // every other consumer, so it follows the stream itself.
                 .with_ansi(io::stderr().is_terminal())
@@ -455,10 +475,21 @@ fn env_filter(default_level: &str) -> (EnvFilter, Vec<String>) {
         rust_log.as_deref().or(configured.as_deref()),
         default_level,
     );
+    // `DebugLog` diagnostics always reach the registry so the session log can
+    // keep them; the stderr layer re-applies the operator's verbosity below,
+    // and the GUI sink applies the round's debug mode.
     (
-        EnvFilter::new(format!("{DEFAULT_DEPENDENCY_FILTER},{requested}")),
+        EnvFilter::new(format!(
+            "{DEFAULT_DEPENDENCY_FILTER},{requested},{SCRIPT_DEBUG_LOG_TARGET}=debug"
+        )),
         rejected,
     )
+}
+
+/// Whether `default_level` is verbose enough that `DebugLog` output belongs on
+/// stderr. The session log keeps it either way.
+pub fn debug_log_reaches_stderr(default_level: &str) -> bool {
+    matches!(default_level, "debug" | "trace")
 }
 
 fn init_with_default_level(default_level: &'static str) {

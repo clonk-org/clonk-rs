@@ -1362,7 +1362,9 @@ fn log_internal(function: &str, args: &[Value], level: LogLevel) -> Result<Value
 
     match level {
         LogLevel::Info => info!(target: SCRIPT_LOG_TARGET, "{}", formatted),
-        LogLevel::Debug => debug!(target: SCRIPT_LOG_TARGET, "{}", formatted),
+        LogLevel::Debug => {
+            debug!(target: clonk_core::log_target::SCRIPT_DEBUG_LOG_TARGET, "{}", formatted)
+        }
     }
 
     Ok(Value::Bool(true))

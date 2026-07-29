@@ -794,6 +794,9 @@ impl Engine {
         }
         self.message_board_commands = state.message_board_commands.clone();
         self.debug_mode = false;
+        // Round setup and clear both start from debug output disabled
+        // (C4Game.cpp:640-652).
+        clonk_core::log_target::set_debug_mode_presentation(false);
         self.edit_cursor_target = None;
         self.time_go = false;
         let mut physics = state.physics;

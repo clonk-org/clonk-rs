@@ -425,6 +425,25 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **`DebugLog` routing.** `DebugLog` emitted an ordinary
+  `tracing::debug!` on the same target as `Log`, so the one process-start
+  `EnvFilter` discarded it everywhere at default verbosity — script diagnostics
+  never reached Clonk.log — while a verbose session pushed debug-only lines to
+  the message board in rounds where C++ suppresses them. `DebugLog` now has its
+  own target (`clonk-core::log_target::SCRIPT_DEBUG_LOG_TARGET`), the registry
+  filter admits it unconditionally so the session log always keeps it, stderr
+  re-applies the operator's verbosity, and the GUI sinks take it only while the
+  round has debug mode on. The engine publishes that gate from every site that
+  mutates `debug_mode` — `set_debug_mode` (round setup and Ctrl+F5),
+  `disable_debug` (synchronized DisableDebug) and the state reset (clear) — so
+  all four transitions are covered without rebuilding any sink. Pinned by
+  `debug_log_file_and_gui_routes_follow_runtime_debug_mode`. Per the standing
+  directive that `clonk-logging` is judged on best practice rather than
+  `C4Log.cpp` parity, this reproduces the *behaviour* with tracing's own layer
+  and writer filters instead of mirroring C++'s spdlog sink tree.
+  `debug_log_message_emits_debug_event_with_script_target` pinned the old shared
+  target and was renamed and updated as part of this behaviour change.
+
 - Closed 2026-07-29: **`Graphics.VerboseObjectLoading` diagnostics.** The level
   had an editor row but no runtime consumer. `clonk-engine`'s
   `scenario::verbose_loading` now carries it as a process global — the same

@@ -2359,7 +2359,7 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
-    fn debug_log_message_emits_debug_event_with_script_target() {
+    fn debug_log_message_emits_debug_event_with_its_own_target() {
         let records = Arc::new(Mutex::new(Vec::new()));
         let layer = RecordingLayer::new(Arc::clone(&records));
         let subscriber = Registry::default().with(layer);
@@ -2372,7 +2372,10 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(records.len(), 1);
         let record = &records[0];
         assert_eq!(record.level, Level::DEBUG);
-        assert_eq!(record.target, "clonk-script");
+        // `DebugLog` routes apart from `Log`: it always persists to the session
+        // log but only reaches a GUI sink while the round has debug mode on
+        // (C4Game.cpp:447-454).
+        assert_eq!(record.target, "clonk-script-debug");
         assert_eq!(record.message, "Debug 42");
     }
 
