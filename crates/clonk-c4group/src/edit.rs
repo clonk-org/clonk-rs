@@ -63,6 +63,75 @@ pub fn to_mutable(group: &Group, filename: &str) -> Result<MutableGroup, EditErr
     Ok(mutable)
 }
 
+/// `C4Group::SortRank` (`C4Group.cpp:2290-2303`): the first `|`-separated
+/// segment matching `name` gives rank `(segments) - index`; no match is 0.
+/// A higher rank sorts earlier.
+pub fn sort_rank(name: &str, sort_list: &str) -> usize {
+    let segments: Vec<&str> = sort_list.split('|').collect();
+    segments
+        .iter()
+        .position(|segment| crate::wildcard::matches(segment, name))
+        .map_or(0, |index| segments.len() - index)
+}
+
+/// `C4Group::Sort` (`C4Group.cpp:2306-2340`): primary key is the sort rank
+/// descending, secondary is the case-insensitive filename ascending. C++
+/// bubble-sorts with those comparisons; a stable sort on the same key matches.
+pub fn sorted_entry_order(names: &[String], sort_list: &str) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..names.len()).collect();
+    order.sort_by(|left, right| {
+        let ranks = sort_rank(&names[*right], sort_list).cmp(&sort_rank(&names[*left], sort_list));
+        ranks.then_with(|| {
+            names[*left]
+                .to_lowercase()
+                .cmp(&names[*right].to_lowercase())
+        })
+    });
+    order
+}
+
+/// Rebuilds `group` with its entries in `order`, preserving metadata exactly as
+/// [`to_mutable`] does.
+pub fn to_mutable_ordered(
+    group: &Group,
+    filename: &str,
+    order: &[usize],
+) -> Result<MutableGroup, EditError> {
+    let mut mutable = MutableGroup::new_bytes(filename.as_bytes().to_vec());
+    if let Some(maker) = group.maker_bytes() {
+        mutable.set_maker_bytes(maker);
+    }
+    let entries = group
+        .entries()
+        .map_err(|error| EditError::Read(error.to_string()))?;
+    for index in order {
+        let Some(entry) = entries.get(*index) else {
+            continue;
+        };
+        let data = group
+            .read_entry_bytes_exact(entry)
+            .map_err(|error| EditError::Read(error.to_string()))?;
+        let result = if entry.is_directory {
+            mutable.add_packed_child_bytes_with_metadata(
+                entry.name_bytes.clone(),
+                data,
+                entry.stored_crc,
+                entry.time,
+                entry.executable,
+            )
+        } else {
+            mutable.add_file_bytes_with_metadata(
+                entry.name_bytes.clone(),
+                data,
+                entry.time,
+                entry.executable,
+            )
+        };
+        result.map_err(|error| EditError::Write(error.to_string()))?;
+    }
+    Ok(mutable)
+}
+
 /// Repacks `mutable` over `path`.
 pub fn write_back(mutable: &MutableGroup, path: &std::path::Path) -> Result<(), EditError> {
     let packed = mutable
@@ -134,6 +203,28 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["Child.c4g".to_owned()]);
         assert_eq!(group.maker(), Some("Round Trip"));
+    }
+
+    // C4Group.cpp:2290-2340 — rank descending, then case-insensitive name.
+    #[test]
+    fn sort_ranks_and_orders_like_the_native_bubble_sort() {
+        // Earlier segments rank higher, so they sort first.
+        assert_eq!(sort_rank("Scenario.txt", "Scenario.txt|*.png"), 2);
+        assert_eq!(sort_rank("Title.png", "Scenario.txt|*.png"), 1);
+        assert_eq!(sort_rank("Other.dat", "Scenario.txt|*.png"), 0);
+
+        let names: Vec<String> = ["b.png", "Scenario.txt", "a.png", "zz.dat", "AA.dat"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let order = sorted_entry_order(&names, "Scenario.txt|*.png");
+        let sorted: Vec<&str> = order.iter().map(|index| names[*index].as_str()).collect();
+        assert_eq!(
+            sorted,
+            // rank 2 first, then the rank-1 pngs alphabetically, then the
+            // unranked rest alphabetically and case-insensitively.
+            vec!["Scenario.txt", "a.png", "b.png", "AA.dat", "zz.dat"]
+        );
     }
 
     // Renaming keeps the payload and leaves other entries alone.

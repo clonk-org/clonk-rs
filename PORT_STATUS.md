@@ -446,11 +446,17 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   reproduces the file byte for byte, without which every mutating command would
   silently rewrite unrelated entries. Pinned by six parser tests, three rebuild
   tests, and the end-to-end `c4group_cli_round_trips_native_command_matrix`.
-  **Still unimplemented, and each reports itself and exits non-zero rather than
-  silently succeeding:** `-s` (sort list), `-x` (explode), `-g`/`-y` (update
-  generation and application), `-z` (internal structures), `-w` (wait), the
-  `-i`/`-u` Windows shell registration, and the `-p`/`-x:` end-of-run
-  prompt/execute options.
+  Also implemented: `-s` (the sort list, ranked by first matching `|` segment
+  then case-insensitively by name, `C4Group.cpp:2290-2340`), `-x` (explode,
+  which unpacks and then explodes each child group), `-z`, `-w`, the
+  `-p`/`-x:` end-of-run prompt and detached execute (`c4group_ng.cpp:680-704`),
+  and `-i` shell registration on Windows, which reuses the registry table from
+  `clonk-platform::file_classes`.
+  **Still unimplemented, each reporting itself and exiting non-zero rather than
+  silently succeeding:** `-g`/`-y` (update generation and application) and `-u`
+  shell *un*registration. The update commands depend on the `C4UpdatePackage`
+  format in `C4Update.cpp`, which is a separate unported subsystem — not a CLI
+  concern — so they cannot be closed from this crate.
 
 - Closed 2026-07-29: **Live `UserPath` re-expansion.** `AppPaths` resolved
   `General.UserPath` once at discovery and cached everything derived from it,

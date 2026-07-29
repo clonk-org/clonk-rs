@@ -826,6 +826,7 @@ dependencies = [
 name = "clonk-c4group"
 version = "0.4.0"
 dependencies = [
+ "clonk-platform",
  "clonk-resources",
  "tempfile",
 ]

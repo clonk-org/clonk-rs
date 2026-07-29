@@ -135,6 +135,21 @@ fn c4group_cli_round_trips_native_command_matrix() {
     assert!(listed.contains("Alpha.txt"), "after repack: {listed:?}");
     assert!(listed.contains("Epsilon.txt"), "after repack: {listed:?}");
 
+    // `-s` reorders entries: the sort list ranks earlier segments first, then
+    // case-insensitive filename (:240-256).
+    assert!(c4group(&[group, "-s", "Beta.png|*.txt"]).status.success());
+    let sorted = String::from_utf8_lossy(&c4group(&[group]).stdout).into_owned();
+    let order: Vec<&str> = sorted.lines().collect();
+    assert_eq!(order.first(), Some(&"Beta.png"), "sorted: {order:?}");
+
+    // `-z` reports the entry table, `-w` waits.
+    let internals = c4group(&[group, "-z"]);
+    assert!(internals.status.success());
+    assert!(String::from_utf8_lossy(&internals.stdout).contains("entries"));
+    assert!(c4group(&[group, "-w", "1"]).status.success());
+    let bad_wait = c4group(&[group, "-w", "soon"]);
+    assert!(!bad_wait.status.success());
+
     // An unimplemented command says so and fails rather than silently passing.
     let unsupported = c4group(&[group, "-g", "a", "b", "Title"]);
     assert!(!unsupported.status.success());

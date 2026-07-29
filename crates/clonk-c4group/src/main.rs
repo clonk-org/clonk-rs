@@ -9,6 +9,7 @@
 
 mod cli;
 mod edit;
+mod wildcard;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -33,8 +34,32 @@ fn main() -> ExitCode {
         print_usage();
         return ExitCode::FAILURE;
     }
+    // `-i`/`-u` register or unregister the shell integration and run without a
+    // group (`c4group_ng.cpp:561-568`).
+    if line.options.register_shell || line.options.unregister_shell {
+        failed |= !apply_shell_registration(&line);
+    }
     for group in &line.groups {
         if !run_group(group, &line) {
+            failed = true;
+        }
+    }
+    // "Done. Press any key to continue." (:680-684).
+    if line.options.prompt_at_end {
+        println!("\nDone. Press any key to continue.");
+        let mut discard = String::new();
+        let _ = std::io::stdin().read_line(&mut discard);
+    }
+    // Execute when done (:686-704).
+    if let Some(command) = line
+        .options
+        .execute_at_end
+        .as_deref()
+        .filter(|c| !c.is_empty())
+    {
+        println!("Executing: {command}");
+        if let Err(error) = spawn_detached(command) {
+            eprintln!("Error: {command}: {error}");
             failed = true;
         }
     }
@@ -43,6 +68,43 @@ fn main() -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// `-i` / `-u`: install or remove the classic file associations. C++ only has
+/// these on Windows (`c4group_ng.cpp:470-540`); elsewhere they are reported as
+/// unsupported rather than silently ignored.
+fn apply_shell_registration(line: &CommandLine) -> bool {
+    #[cfg(windows)]
+    {
+        if line.options.unregister_shell {
+            eprintln!("c4group: shell unregistration is not implemented yet");
+            return false;
+        }
+        let Ok(module) = std::env::current_exe() else {
+            eprintln!("c4group: could not resolve the executable path");
+            return false;
+        };
+        return clonk_platform::file_classes::register_file_classes(&module.to_string_lossy());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = line;
+        eprintln!("c4group: shell registration is a Windows-only command");
+        false
+    }
+}
+
+/// Starts `command` without waiting, as C++ does with `CreateProcess`/`fork`
+/// (`c4group_ng.cpp:690-704`).
+fn spawn_detached(command: &str) -> std::io::Result<()> {
+    let mut parts = command.split_whitespace();
+    let Some(program) = parts.next() else {
+        return Ok(());
+    };
+    std::process::Command::new(program)
+        .args(parts)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Runs every command against one group, reporting whether all succeeded.
@@ -95,6 +157,10 @@ fn run_command(group: &mut Option<clonk_resources::Group>, path: &str, command: 
         Command::ExtractTo { file, target } => extract_entry(open, file, Path::new(target)),
         Command::Unpack => unpack(group, path),
         Command::Pack => pack(group, path),
+        Command::Explode => explode(group, path),
+        Command::Sort { list } => sort_entries(group, path, list),
+        Command::PrintInternals => print_internals(open, path),
+        Command::Wait { milliseconds } => wait(milliseconds),
         Command::Add { .. }
         | Command::AddAs { .. }
         | Command::Move { .. }
@@ -132,7 +198,7 @@ fn list_entries(group: &clonk_resources::Group, path: &str, wildcards: &[String]
         if wildcards.is_empty()
             || wildcards
                 .iter()
-                .any(|pattern| matches_wildcard(pattern, &name))
+                .any(|pattern| wildcard::matches(pattern, &name))
         {
             println!("{name}");
         }
@@ -154,41 +220,6 @@ fn extract_entry(group: &clonk_resources::Group, entry: &str, target: &Path) -> 
             false
         }
     }
-}
-
-/// `WildcardMatch`-style matching for the listing filter: `*` spans any run and
-/// `?` one character.
-fn matches_wildcard(pattern: &str, name: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let name: Vec<char> = name.chars().collect();
-    let (mut p, mut n) = (0usize, 0usize);
-    let (mut star, mut resume) = (None, 0usize);
-    while n < name.len() {
-        match pattern.get(p) {
-            Some('*') => {
-                star = Some(p);
-                resume = n;
-                p += 1;
-            }
-            Some('?') => {
-                p += 1;
-                n += 1;
-            }
-            Some(character) if character.eq_ignore_ascii_case(&name[n]) => {
-                p += 1;
-                n += 1;
-            }
-            _ => match star {
-                Some(index) => {
-                    p = index + 1;
-                    resume += 1;
-                    n = resume;
-                }
-                None => return false,
-            },
-        }
-    }
-    pattern[p..].iter().all(|character| *character == '*')
 }
 
 /// Applies a mutating command by rebuilding the group and repacking it
@@ -302,6 +333,115 @@ fn add_files(
         })
         .collect();
     results.into_iter().all(|added| added)
+}
+
+/// `-s <list>` — reorder the entries and save (`c4group_ng.cpp:240-256`).
+fn sort_entries(group: &mut Option<clonk_resources::Group>, path: &str, list: &str) -> bool {
+    let Some(open) = group.as_ref() else {
+        return false;
+    };
+    let names: Vec<String> = match open.entries() {
+        Ok(entries) => entries
+            .iter()
+            .map(|entry| String::from_utf8_lossy(&entry.name_bytes).into_owned())
+            .collect(),
+        Err(error) => {
+            eprintln!("Error: {path}: {error}");
+            return false;
+        }
+    };
+    let order = edit::sorted_entry_order(&names, list);
+    let filename = Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned());
+    let mutable = match edit::to_mutable_ordered(open, &filename, &order) {
+        Ok(mutable) => mutable,
+        Err(error) => {
+            eprintln!("Error: {path}: {error}");
+            return false;
+        }
+    };
+    *group = None;
+    if let Err(error) = edit::write_back(&mutable, Path::new(path)) {
+        eprintln!("Error: {path}: {error}");
+        return false;
+    }
+    reopen(group, path);
+    true
+}
+
+/// `-x` — unpack, then unpack every child group in turn
+/// (`c4group_ng.cpp:327-345`).
+fn explode(group: &mut Option<clonk_resources::Group>, path: &str) -> bool {
+    if !unpack(group, path) {
+        return false;
+    }
+    // After unpacking, `path` is a directory; explode each packed child in it.
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("Error: {path}: {error}");
+            return false;
+        }
+    };
+    let mut all = true;
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if !child.is_file() {
+            continue;
+        }
+        // Only a readable group explodes further; anything else is a plain file.
+        let Ok(opened) = clonk_resources::Group::open(&child) else {
+            continue;
+        };
+        let mut opened = Some(opened);
+        let Some(child_path) = child.to_str() else {
+            continue;
+        };
+        if !explode(&mut opened, child_path) {
+            all = false;
+        }
+    }
+    all
+}
+
+/// `-z` — the entry table C++ prints from `PrintInternals`
+/// (`c4group_ng.cpp:390-396`).
+fn print_internals(group: &clonk_resources::Group, path: &str) -> bool {
+    let entries = match group.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("Error: {path}: {error}");
+            return false;
+        }
+    };
+    println!("{path}: {} entries", entries.len());
+    for entry in entries {
+        println!(
+            "  {} size {} time {} crc {:08x}{}",
+            String::from_utf8_lossy(&entry.name_bytes),
+            entry.size,
+            entry.time,
+            entry.stored_crc,
+            if entry.is_directory { " (group)" } else { "" }
+        );
+    }
+    true
+}
+
+/// `-w <milliseconds>` (`c4group_ng.cpp:397-400`).
+fn wait(milliseconds: &str) -> bool {
+    match milliseconds.parse::<u64>() {
+        Ok(delay) => {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            true
+        }
+        Err(error) => {
+            eprintln!("Error: {milliseconds}: {error}");
+            false
+        }
+    }
 }
 
 /// `-p` — pack an unpacked group in place (`c4group_ng.cpp:289-307`). The
