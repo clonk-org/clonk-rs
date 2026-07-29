@@ -7055,3 +7055,69 @@
         assert!(console(RENDER_INACTIVE_CONSOLE));
     
 }
+
+    /// `C4ConfigLogging` (C4Config.cpp:699-718) carries a stdout level plus one
+    /// nested section per component, each with its own `LogLevel`. The port
+    /// projects them onto tracing filter directives so a shared config tunes
+    /// verbosity; `LC_LOG` keeps priority over it.
+    #[test]
+    fn logging_section_sets_stdout_level_and_per_component_overrides() {
+        let directive = |body: Option<&str>| {
+            let root = tempdir().expect("logging config root");
+            let user_data = tempdir().expect("logging user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            if let Some(body) = body {
+                fs::write(paths.config_file(), body).expect("write fixture config");
+            }
+            load_logging_config_directive(Some(&paths))
+        };
+
+        // Nothing configured leaves the caller's default in force.
+        assert_eq!(directive(None), None);
+        assert_eq!(directive(Some("[General]\nName=Tester\n")), None);
+        assert_eq!(directive(Some("[Logging]\nLogLevelStdout=nonsense\n")), None);
+
+        // LogLevelStdout raises the global level.
+        assert_eq!(
+            directive(Some("[Logging]\nLogLevelStdout=debug\n")),
+            Some("debug".to_string())
+        );
+        // spdlog spellings the port accepts.
+        assert_eq!(
+            directive(Some("[Logging]\nLogLevelStdout=warning\n")),
+            Some("warn".to_string())
+        );
+        assert_eq!(
+            directive(Some("[Logging]\nLogLevelStdout=off\n")),
+            Some("off".to_string())
+        );
+
+        // A per-component override changes only that component.
+        assert_eq!(
+            directive(Some("[Network]\nLogLevel=trace\n")),
+            Some("clonk_network=trace".to_string())
+        );
+        // With both, the global level leads and the component follows.
+        assert_eq!(
+            directive(Some(
+                "[Logging]\nLogLevelStdout=info\n[Network]\nLogLevel=trace\n"
+            )),
+            Some("info,clonk_network=trace".to_string())
+        );
+        // An unknown component name is ignored rather than pinning a target
+        // that does not exist.
+        assert_eq!(directive(Some("[Nonsense]\nLogLevel=trace\n")), None);
+
+        // Every component C++ compiles maps to a target.
+        assert_eq!(clonk_logging::LOGGING_COMPONENTS.len(), 11);
+        for (component, target) in clonk_logging::LOGGING_COMPONENTS {
+            assert!(!target.is_empty(), "{component} has no target");
+        }
+    
+}

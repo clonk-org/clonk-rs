@@ -428,11 +428,33 @@ fn open_session_log(log_path: &Path) -> io::Result<File> {
     File::create(log_path)
 }
 
+/// The `[Logging]` directive published by [`set_logging_config_directive`],
+/// applied when neither `LC_LOG` nor `RUST_LOG` is set.
+static LOGGING_CONFIG_DIRECTIVE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Publishes the directive built from the shared config's `[Logging]` section.
+/// Must be called before logging is initialized; later calls are ignored, so a
+/// second shell cannot silently retune an installed subscriber.
+pub fn set_logging_config_directive(directive: Option<String>) {
+    let _ = LOGGING_CONFIG_DIRECTIVE.set(directive);
+}
+
+fn configured_logging_directive() -> Option<String> {
+    LOGGING_CONFIG_DIRECTIVE.get().cloned().flatten()
+}
+
 fn env_filter(default_level: &str) -> (EnvFilter, Vec<String>) {
     let lc_log = std::env::var("LC_LOG").ok();
     let rust_log = std::env::var("RUST_LOG").ok();
-    let (requested, rejected) =
-        resolve_filter_directive(lc_log.as_deref(), rust_log.as_deref(), default_level);
+    // `[Logging]` sits below the explicit environment filters and above the
+    // bare `--verbose` default, so a shared config tunes verbosity without
+    // overriding an operator's `LC_LOG`.
+    let configured = configured_logging_directive();
+    let (requested, rejected) = resolve_filter_directive(
+        lc_log.as_deref(),
+        rust_log.as_deref().or(configured.as_deref()),
+        default_level,
+    );
     (
         EnvFilter::new(format!("{DEFAULT_DEPENDENCY_FILTER},{requested}")),
         rejected,
@@ -443,6 +465,76 @@ fn init_with_default_level(default_level: &'static str) {
     if claim_initialization().is_ok() {
         let _ = install(default_level, None, None, None);
     }
+}
+
+/// `C4ConfigLogging`'s components, in `CompileFunc` order
+/// (C4Config.cpp:703-714). Each is an INI section under `[Logging]` holding a
+/// `LogLevel` key, and maps onto the tracing target the port's equivalent
+/// subsystem emits under.
+///
+/// Logging is judged on best practice rather than C4Log parity, so this is a
+/// name mapping for the *shared configuration file*, not a claim that the two
+/// log streams match line for line.
+pub const LOGGING_COMPONENTS: &[(&str, &str)] = &[
+    ("AudioSystem", "clonk_audio"),
+    ("AulExec", clonk_core::log_target::SCRIPT_LOG_TARGET),
+    (
+        "AulProfiler",
+        clonk_core::log_target::SCRIPT_PROFILER_TARGET,
+    ),
+    ("DDraw", "clonk_graphics"),
+    ("GameControl", "clonk_engine"),
+    ("Network", "clonk_network"),
+    ("Network2IO", "clonk_network::session"),
+    ("Network2HTTPClient", "clonk_network::league"),
+    ("Network2UPnP", "clonk_network::upnp"),
+    ("Playback", "clonk_engine::record"),
+    ("PNGFile", "clonk_resources"),
+];
+
+/// `spdlog` level names as `C4ConfigLogging` writes them, mapped onto the
+/// tracing levels `EnvFilter` accepts. `off` and spdlog's `critical` have
+/// direct equivalents; anything else is refused so a typo cannot silently
+/// change verbosity.
+pub fn tracing_level_for_spdlog_name(name: &str) -> Option<&'static str> {
+    Some(match name.trim().to_ascii_lowercase().as_str() {
+        "trace" => "trace",
+        "debug" => "debug",
+        "info" => "info",
+        "warn" | "warning" => "warn",
+        "err" | "error" => "error",
+        // spdlog's most severe level has no tracing counterpart above error.
+        "critical" => "error",
+        "off" => "off",
+        _ => return None,
+    })
+}
+
+/// Builds an `EnvFilter` directive from `[Logging]`: the global stdout level
+/// followed by one `target=level` directive per configured component. Returns
+/// `None` when the section configures nothing, so the caller keeps its existing
+/// default rather than pinning a level the user did not ask for.
+pub fn logging_config_directive(
+    stdout_level: Option<&str>,
+    component_levels: &[(&str, &str)],
+) -> Option<String> {
+    let mut directives = Vec::new();
+    if let Some(level) = stdout_level.and_then(tracing_level_for_spdlog_name) {
+        directives.push(level.to_string());
+    }
+    for (component, level) in component_levels {
+        let Some(target) = LOGGING_COMPONENTS
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(component))
+            .map(|(_, target)| *target)
+        else {
+            continue;
+        };
+        if let Some(level) = tracing_level_for_spdlog_name(level) {
+            directives.push(format!("{target}={level}"));
+        }
+    }
+    (!directives.is_empty()).then(|| directives.join(","))
 }
 
 /// Resolve `LC_LOG`/`RUST_LOG` into the directive to install, along with any

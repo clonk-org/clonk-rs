@@ -344,6 +344,10 @@ fn main() -> Result<()> {
         .as_deref()
         .or(cli.config_file.as_deref());
     let app_paths = discover_validated_startup_paths(explicit_config)?;
+    // `[Logging]` must reach the subscriber before it is installed below.
+    clonk_logging::set_logging_config_directive(load_logging_config_directive(
+        app_paths.as_deref(),
+    ));
     // `C4Application::DoInit` sizes the global asynchronous pool from
     // `General.ThreadPoolThreadCount` on every non-Windows target
     // (C4Application.cpp:152-159). Must precede any worker thread.

@@ -3824,6 +3824,29 @@ pub(crate) fn render_inactive_allows_drawing(
     mask & bit != 0
 }
 
+/// `C4ConfigLogging` (C4Config.cpp:699-718): the `[Logging]` stdout level plus
+/// one nested section per component, each holding a `LogLevel`. Returns the
+/// `EnvFilter` directive they describe, or `None` when nothing is configured.
+pub(crate) fn load_logging_config_directive(paths: Option<&AppPaths>) -> Option<String> {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok())?;
+    let stdout_level = config
+        .get_in(Some("Logging"), "LogLevelStdout")
+        .map(str::to_string);
+    let component_levels = clonk_logging::LOGGING_COMPONENTS
+        .iter()
+        .filter_map(|(component, _)| {
+            config
+                .get_in(Some(component), "LogLevel")
+                .map(|level| (*component, level.to_string()))
+        })
+        .collect::<Vec<_>>();
+    let borrowed = component_levels
+        .iter()
+        .map(|(component, level)| (*component, level.as_str()))
+        .collect::<Vec<_>>();
+    clonk_logging::logging_config_directive(stdout_level.as_deref(), &borrowed)
+}
+
 pub(crate) fn load_network_ports(paths: Option<&AppPaths>) -> NetworkPorts {
     sanitized_network_ports(&load_native_config_bytes(paths))
 }
