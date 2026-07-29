@@ -8816,6 +8816,10 @@ pub(crate) fn startup_window_builder(
 ) -> WindowBuilder {
     let mut window_builder = WindowBuilder::new()
         .with_title(native_window_title(false))
+        // Both shells share this builder, matching C++ assigning one icon
+        // resource to the fullscreen and console window classes alike
+        // (C4FullScreen.cpp:196-211; C4Console.cpp:297-310).
+        .with_window_icon(crate::window_icon::window_icon())
         .with_inner_size(initial_size);
     if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
         if let Some((x, y)) = display_options.position {

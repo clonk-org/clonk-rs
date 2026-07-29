@@ -425,6 +425,22 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Window application icon.** Both shells built iconless
+  windows. `startup_window_builder` now attaches a decoded product icon, which
+  covers the game window and the developer console alike — the port routes both
+  through one builder, matching C++ assigning one resource to both window
+  classes (`C4FullScreen.cpp:196-211`; `C4Console.cpp:297-310`). **Deliberate
+  source divergence:** C++ uses `src/res/lc.ico`, which carries LegacyClonk's
+  branding; this port ships as a separate product whose release bundle icon is
+  already derived from `planet/Graphics.c4g/Logo.png` (`xtask/src/main.rs:31-32`),
+  so the window icon comes from that same file and the bundle and window chrome
+  keep one identity. The logo is embedded rather than read from the data root so
+  the window still has an icon when content is missing, and it is centred on a
+  transparent square before scaling to preserve its aspect ratio — the same fit
+  the bundle icon uses. A decode failure leaves the platform default, as C++
+  does with a null `HICON`. Pinned by
+  `classic_window_icon_decodes_and_is_attached_to_both_shells`.
+
 - **Windows taskbar loading progress is wired but has no COM backend.**
   `clonk-platform::taskbar_progress` now carries C++'s logic: `LoaderTaskbarProgress`
   applies `C4Game::SetInitProgress`'s strictly-increasing gate

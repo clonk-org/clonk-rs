@@ -47,6 +47,7 @@ mod settings;
 mod startup_player_files;
 mod system_fonts;
 mod update_check;
+mod window_icon;
 
 // Step 6a of the decomposition campaign (rust/REFACTOR_PLAN.md): per-area
 // extension files of the `impl GameApp` block. Each file holds
