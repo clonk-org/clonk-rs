@@ -425,6 +425,26 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Developer landscape-tool read model.**
+  `clonk-engine::developer_landscape` exposes the material/texture catalog and
+  tool picker the native `C4ToolsDlg` reads, without the console reconstructing
+  engine internals. The material list is `Sky` then the material map in its own
+  order (`C4ToolsDlg.cpp:486-489`); the texture list puts invalid
+  material/texture pairs at the bottom and valid ones above, and Exact mode
+  contributes no invalid section because every texture is selectable there
+  (:517-548). `corrected_tool_texture` mirrors `AssertValidTexture` — Static
+  mode only, sky exempt, first valid texture wins (:965-983).
+  `Engine::developer_landscape_tool_state` supplies mode, `MapZoom` and map
+  availability, and `Engine::developer_tool_pick` mirrors
+  `C4EditCursor::ApplyToolPicker` (`C4EditCursor.cpp:698-731`): Static divides
+  by `MapZoom` and decodes the retained map byte into tex-map index (`& 0x7F`)
+  and IFT bit (`& 0x80`), Exact reads the live material and IFT, and an empty
+  byte, unresolved slot, off-map coordinate or invalid material all resolve to
+  sky. Pinned by `developer_landscape_tool_catalog_partitions_valid_pairs` and
+  `developer_landscape_picker_reads_static_mapzoom_and_exact_ift`. Dialog state,
+  rendering, shortcuts and `EMDrawTool` emission remain out of scope by design
+  (M10-P4-L044); the parity row flips when that lands.
+
 - Closed 2026-07-29: **Windows file associations and the `clonk:` protocol.**
   The runtime accepted classic launch arguments but nothing registered the
   shell entries that deliver them. `clonk-platform::file_classes` now carries

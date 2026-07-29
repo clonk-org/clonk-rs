@@ -24,6 +24,7 @@ pub mod compat;
 mod control;
 mod control_execution;
 mod definition;
+pub mod developer_landscape;
 mod direct_com;
 #[doc(hidden)]
 pub mod effect;
