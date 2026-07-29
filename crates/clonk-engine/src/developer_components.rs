@@ -185,4 +185,72 @@ mod tests {
         assert!(!EditableComponent::Title.relinks_scripts());
         assert!(!EditableComponent::Info.relinks_scripts());
     }
+
+    // C4Console.cpp:1335-1342 — accepting Script replaces the scenario body and
+    // relinks the whole tree, without re-running Initialize.
+    #[test]
+    fn console_component_editors_commit_bytes_and_relink_script_through_the_engine() {
+        use crate::{
+            Engine, LegacyCString, ScriptControlData, ScriptControlPolicy, ScriptStrictness,
+            SCRIPT_SCOPE_CONSOLE,
+        };
+        use clonk_script::Value;
+
+        let call = |source: &str| ScriptControlData {
+            target_object: SCRIPT_SCOPE_CONSOLE,
+            strictness: ScriptStrictness::Strict3,
+            script: LegacyCString::from_bytes(source.as_bytes().to_vec())
+                .expect("fixture script contains no NUL"),
+            by_client: 0,
+        };
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .install_scenario_script("Scenario", "#strict 3\nfunc Answer() { return 41; }")
+            .expect("scenario script installs");
+        assert_eq!(
+            engine
+                .execute_script_control(&call("Answer()"), ScriptControlPolicy::live(false))
+                .expect("console scope executes"),
+            Some(Value::Int(41))
+        );
+
+        // Accepting the editor swaps the body in place; the console sees the
+        // new definition immediately.
+        engine
+            .apply_scenario_script_edit("Scenario", "#strict 3\nfunc Answer() { return 42; }")
+            .expect("edited scenario script installs and relinks");
+        assert_eq!(
+            engine
+                .execute_script_control(&call("Answer()"), ScriptControlPolicy::live(false))
+                .expect("console scope executes"),
+            Some(Value::Int(42)),
+            "the edited body replaces the running scenario script"
+        );
+
+        // A function the edit dropped is gone rather than lingering from the
+        // previous link.
+        engine
+            .apply_scenario_script_edit("Scenario", "#strict 3\nfunc Other() { return 1; }")
+            .expect("second edit installs");
+        assert_eq!(
+            engine
+                .execute_script_control(&call("Answer()"), ScriptControlPolicy::live(false))
+                .expect("a removed function is fail-safe, not an error"),
+            Some(Value::Nil)
+        );
+
+        // Cancelling still relinks — `ReLink` sits outside the `#ifdef _WIN32`
+        // in C++, so it runs even when the dialog changed nothing.
+        engine
+            .relink_after_component_edit()
+            .expect("an unchanged editor still relinks");
+        assert_eq!(
+            engine
+                .execute_script_control(&call("Other()"), ScriptControlPolicy::live(false))
+                .expect("console scope executes"),
+            Some(Value::Int(1)),
+            "a bare relink preserves the installed body"
+        );
+    }
 }
