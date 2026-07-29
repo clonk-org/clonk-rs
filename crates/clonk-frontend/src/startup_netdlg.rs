@@ -27,6 +27,11 @@ use clonk_gui::Rect as GuiRect;
 // (0xff = opaque); box/line colors are engine AARRGGBB with INVERTED alpha
 // (0x00 = opaque).
 /// C4GUI_FullscreenCaptionFontClr / C4GUI_Caption2FontClr / C4GUI_ButtonFontClr.
+/// `C4GUI::TextWindow`'s constructor defaults, which `C4ChatControl::ChatSheet`
+/// takes verbatim (src/C4Gui.h:1309; src/C4ChatDlg.cpp:194).
+const CHAT_TRANSCRIPT_MAX_LINES: usize = 100;
+const CHAT_TRANSCRIPT_MAX_TEXT: usize = 4096;
+
 const CLR_YELLOW: [u8; 4] = [0xff, 0xff, 0x00, 0xff];
 /// C4GUI_CaptionFontClr / C4GUI_MessageFontClr.
 const CLR_WHITE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
@@ -818,6 +823,10 @@ pub struct NetDlgChatSheet {
     pub transcript_scroll: i32,
     /// True while incoming lines keep the transcript pinned to its bottom.
     pub transcript_follow_bottom: bool,
+    /// Retained `C4GUI::ScrollWindow` offset of the channel nick pane, which
+    /// C++ builds as a scrollable `ListBox` (src/C4ChatDlg.cpp:226-238).
+    /// Rows below the fold are reachable rather than dropped.
+    pub user_scroll: i32,
 }
 
 /// Commands parsed from the classic slash-command language. These mirror the
@@ -1428,6 +1437,7 @@ impl NetDlgController {
                 unread: false,
                 transcript_scroll: 0,
                 transcript_follow_bottom: true,
+                user_scroll: 0,
             }],
             chat_active_sheet: 0,
             chat_edit: NetDlgEditState::default(),
@@ -2798,6 +2808,10 @@ impl NetDlgController {
                 self.scroll_active_chat_by(delta.saturating_neg());
                 return Vec::new();
             }
+            if chat.users.is_some_and(|users| contains(users, position)) {
+                self.scroll_active_chat_users_by(delta.saturating_neg());
+                return Vec::new();
+            }
         }
         let layout = self.layout();
         if self.mode == NetDlgMode::GameList && contains(layout.list_viewport, position) {
@@ -3093,6 +3107,7 @@ impl NetDlgController {
             unread: false,
             transcript_scroll: 0,
             transcript_follow_bottom: true,
+            user_scroll: 0,
         }
     }
 
@@ -3131,9 +3146,34 @@ impl NetDlgController {
             .collect()
     }
 
+    /// `C4ChatControl::ChatSheet` builds its transcript as a plain
+    /// `C4GUI::TextWindow(rcDefault)` (src/C4ChatDlg.cpp:194), which takes the
+    /// constructor's `iMaxLines = 100` / `iMaxTextLen = 4096` defaults
+    /// (src/C4Gui.h:1309). Those reach a `C4LogBuffer` that evicts from the
+    /// front - `DiscardFirstLine` on reaching the line cap, and again until an
+    /// oversized message fits the character ring
+    /// (src/C4LogBuf.cpp:96-148), so an IRC session cannot retain unbounded
+    /// scrollback.
+    fn bound_chat_transcript(sheet: &mut NetDlgChatSheet) {
+        while sheet.lines.len() > CHAT_TRANSCRIPT_MAX_LINES {
+            sheet.lines.remove(0);
+        }
+        // The native buffer counts the trailing NUL of every stored line.
+        let mut budget = sheet
+            .lines
+            .iter()
+            .map(|line| line.text.len() + 1)
+            .sum::<usize>();
+        while budget > CHAT_TRANSCRIPT_MAX_TEXT && !sheet.lines.is_empty() {
+            budget -= sheet.lines[0].text.len() + 1;
+            sheet.lines.remove(0);
+        }
+    }
+
     fn append_chat_line(sheet: &mut NetDlgChatSheet, mut line: NetDlgChatLine, active: bool) {
         line.text = Self::sanitize_chat_line(&line.text);
         sheet.lines.push(line);
+        Self::bound_chat_transcript(sheet);
         // TextWindow::AddTextLine always ScrollToBottom, even on an inactive
         // tab. The inactive caption is then marked unread.
         sheet.transcript_follow_bottom = true;
@@ -3526,6 +3566,29 @@ impl NetDlgController {
                 sheet.transcript_scroll = sheet.transcript_scroll.clamp(0, max_scroll);
                 sheet.transcript_follow_bottom = sheet.transcript_scroll == max_scroll;
             }
+        }
+    }
+
+    /// Maximum `ScrollWindow` offset of the nick `ListBox`: the rows that do
+    /// not fit its viewport (src/C4GuiContainers.cpp:477-623).
+    pub(crate) fn chat_users_max_scroll(&self, line_height: i32) -> i32 {
+        let Some(users) = self.chat_layout().users else {
+            return 0;
+        };
+        let Some(sheet) = self.chat_sheets.get(self.chat_active_sheet) else {
+            return 0;
+        };
+        let content = i32::try_from(sheet.users.len())
+            .unwrap_or(i32::MAX)
+            .saturating_mul(line_height.max(1));
+        (content - users.h).max(0)
+    }
+
+    fn scroll_active_chat_users_by(&mut self, delta: i32) {
+        let line_height = self.metrics.text_line_height.max(1);
+        let max_scroll = self.chat_users_max_scroll(line_height);
+        if let Some(sheet) = self.chat_sheets.get_mut(self.chat_active_sheet) {
+            sheet.user_scroll = sheet.user_scroll.saturating_add(delta).clamp(0, max_scroll);
         }
     }
 
@@ -5687,10 +5750,17 @@ impl NetDlgScreen {
                     CLR_DARK_BG,
                     gamma,
                 );
+                // ScrollWindow shows the rows under its retained offset; a
+                // partially scrolled row exposes one more at the bottom.
+                let first_row = usize::try_from(sheet.user_scroll / line_h).unwrap_or(0);
+                let visible_rows = usize::try_from((users.h / line_h).max(0)).unwrap_or(0)
+                    + usize::from(sheet.user_scroll % line_h != 0);
+                let row_offset = sheet.user_scroll % line_h;
                 for (row, user) in sheet
                     .users
                     .iter()
-                    .take(usize::try_from((users.h / line_h).max(0)).unwrap_or(0))
+                    .skip(first_row)
+                    .take(visible_rows)
                     .enumerate()
                 {
                     let icon = match user.prefix.as_bytes().first().copied() {
@@ -5700,7 +5770,8 @@ impl NetDlgScreen {
                         Some(b'+') => 20,
                         _ => 9,
                     };
-                    let row_y = users.y + i32::try_from(row).unwrap_or(i32::MAX) * line_h;
+                    let row_y =
+                        users.y + i32::try_from(row).unwrap_or(i32::MAX) * line_h - row_offset;
                     Self::draw_icon_phase(
                         surface,
                         &assets.gui_icons,
@@ -8025,6 +8096,122 @@ mod tests {
             )]
         );
         assert_eq!(controller.chat_login_field(), NetDlgChatLoginField::Nick);
+    }
+
+    // `C4ChatControl::ChatSheet`'s transcript is a plain
+    // `C4GUI::TextWindow(rcDefault)`, so it takes the constructor's
+    // `iMaxLines = 100` / `iMaxTextLen = 4096` defaults, and its `C4LogBuffer`
+    // evicts from the front on both bounds. The channel nick pane is a real
+    // scrollable `ListBox`, so rows below the fold stay reachable
+    // (src/C4ChatDlg.cpp:194,226-238; src/C4Gui.h:1309;
+    // src/C4LogBuf.cpp:96-148; src/C4GuiContainers.cpp:477-623).
+    #[test]
+    fn irc_chat_scroll_windows_match_cpp_pointer_overflow_and_limits() {
+        let message = |text: &str| NetDlgChatMessage {
+            kind: NetDlgChatMessageKind::Message,
+            source: "Keeper!ident@example".into(),
+            target: "#clonken".into(),
+            text: text.into(),
+            is_channel: true,
+        };
+
+        // Far more than the native line cap, each line short enough that the
+        // character budget is not what evicts.
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let many = (0..250)
+            .map(|index| message(&format!("m{index}")))
+            .collect();
+        controller.sync_chat_snapshot(chat_snapshot(NetDlgChatConnectionState::Connected, many, 0));
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .find(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel tab");
+        assert_eq!(
+            channel.lines.len(),
+            CHAT_TRANSCRIPT_MAX_LINES,
+            "the transcript is bounded by iMaxLines"
+        );
+        assert_eq!(
+            channel.lines.last().expect("newest line"),
+            &"<Keeper> m249",
+            "eviction is from the front"
+        );
+
+        // Long lines hit the character budget before the line cap.
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let long = (0..40)
+            .map(|index| message(&format!("{index:03}{}", "x".repeat(200))))
+            .collect();
+        controller.sync_chat_snapshot(chat_snapshot(NetDlgChatConnectionState::Connected, long, 0));
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .find(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel tab");
+        assert!(
+            channel.lines.len() < CHAT_TRANSCRIPT_MAX_LINES,
+            "the character budget evicts before the line cap"
+        );
+        let retained = channel
+            .lines
+            .iter()
+            .map(|line| line.text.len() + 1)
+            .sum::<usize>();
+        assert!(
+            retained <= CHAT_TRANSCRIPT_MAX_TEXT,
+            "retained {retained} bytes exceeds iMaxTextLen"
+        );
+        assert!(
+            channel
+                .lines
+                .last()
+                .expect("newest line")
+                .text
+                .contains("039"),
+            "the newest line always survives"
+        );
+
+        // The nick list retains a scroll offset instead of dropping rows.
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
+        snapshot.channels[0].users = (0..500)
+            .map(|index| NetDlgChatUser {
+                prefix: String::new(),
+                name: format!("User{index:02}"),
+            })
+            .collect();
+        controller.sync_chat_snapshot(snapshot);
+        let channel_index = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel tab");
+        controller.select_chat_sheet(channel_index);
+        controller.force_chat_mode_and_focus();
+        let line_height = metrics().text_line_height.max(1);
+        let max_scroll = controller.chat_users_max_scroll(line_height);
+        assert!(max_scroll > 0, "500 users overflow the nick pane");
+
+        let users = controller.chat_layout().users.expect("channel nick pane");
+        let inside = GuiPoint::new(
+            (users.x + users.w / 2) as f32,
+            (users.y + users.h / 2) as f32,
+        );
+        controller.handle_wheel(inside, -60);
+        let scrolled = controller.chat_sheets()[channel_index].user_scroll;
+        assert!(scrolled > 0, "the wheel moves the nick ListBox");
+        controller.handle_wheel(inside, 60);
+        assert_eq!(controller.chat_sheets()[channel_index].user_scroll, 0);
+        for _ in 0..200 {
+            controller.handle_wheel(inside, -60);
+        }
+        assert_eq!(
+            controller.chat_sheets()[channel_index].user_scroll,
+            max_scroll,
+            "the offset is bounded by the overflow"
+        );
     }
 
     #[test]
