@@ -425,6 +425,26 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **Developer draw-tool state machine landed; dialog and control queue open.**
+  `clonk-engine::developer_tools` carries `C4ToolsDlg`'s retained state and
+  `C4EditCursor`'s gesture cadence. `ToggleTool` is `(Tool + 1) % 4`
+  (`C4ToolsDlg.h:148`), which never lands on Picker — including from Picker
+  itself, where it goes to Line. Grade clamps to 1..50 with five-unit key steps
+  (`C4ToolsDlg.cpp:732-737`). The per-tool cadence matches
+  `C4EditCursor.cpp:74,159,234,301-304` exactly: Brush emits on click *and*
+  every drag step, Line/Rect record an anchor and emit once on release with both
+  coordinate pairs, and Fill emits nothing on the click — it arms `Hold` and
+  repeats from `Execute` every frame while the game runs, refusing while halted
+  or when the console is not editing. Alt selects the Picker temporarily in Draw
+  mode only and restores the previous tool on release
+  (`C4EditCursor.cpp:773-792`). Pinned by
+  `console_draw_mode_routes_pointer_gestures_through_tools_state`. The material
+  and texture catalogue and the picker itself already exist in
+  `developer_landscape` (M10-P4-L084). **Still open:** the dialog chrome and its
+  window host (gated on M10-P4-L081), and routing `EMDT_SetMode` through the
+  control queue so landscape-mode changes only mutate local state once the
+  control executes (`fThroughControl`, `C4ToolsDlg.cpp:865-896`).
+
 - Closed 2026-07-29: **Options control sheets draw the classic facets.**
   `C4StartupOptionsDlg` draws the Keyboard/Gamepad pages from facets, not text
   buttons (`C4StartupOptionsDlg.cpp:215-345`). Two of the three pieces are in:
