@@ -160,11 +160,19 @@ fn c4group_cli_round_trips_native_command_matrix() {
         "unexpected -g error: {missing_source_error}"
     );
 
-    // A command that genuinely is not implemented says so and fails rather
-    // than silently passing.
-    let unsupported = c4group(&[group, "-y"]);
-    assert!(!unsupported.status.success());
-    assert!(String::from_utf8_lossy(&unsupported.stderr).contains("not implemented"));
+    // `-y` on a group that is not an update package fails with an error rather
+    // than a panic or a silent pass.
+    let not_a_package = c4group(&[group, "-y"]);
+    assert!(!not_a_package.status.success());
+    let not_a_package_error = String::from_utf8_lossy(&not_a_package.stderr);
+    assert!(
+        not_a_package_error.contains("AutoUpdate.txt"),
+        "unexpected -y error: {not_a_package_error}"
+    );
+
+    // Every command the parser accepts is now implemented, so there is no
+    // "not implemented" path left to assert; the checks above cover a command
+    // failing loudly rather than silently passing.
 
     // An unreadable group is an error, not a panic.
     let missing = c4group(&[directory

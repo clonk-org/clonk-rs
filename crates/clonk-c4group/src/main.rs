@@ -7,6 +7,7 @@
 //! themselves on stderr and set a failing exit status rather than being
 //! silently ignored — see the `c4group` row in `PORT_STATUS.md`.
 
+mod apply_update;
 mod cli;
 mod edit;
 mod make_update;
@@ -137,6 +138,24 @@ fn run_group(path: &str, line: &CommandLine) -> bool {
             }
             Err(error) => {
                 eprintln!("Error: {error}");
+                false
+            }
+        };
+    }
+    if let [Command::ApplyUpdate] = line.commands.as_slice() {
+        println!("Applying update...");
+        return match apply_update::apply_update(path) {
+            Ok(apply_update::ApplyOutcome::Applied) => {
+                println!("Ok");
+                true
+            }
+            Ok(apply_update::ApplyOutcome::AlreadyUpdated) => {
+                println!("Already up to date.");
+                true
+            }
+            Err(error) => {
+                eprintln!("Error: {error}");
+                println!("Update failed.");
                 false
             }
         };

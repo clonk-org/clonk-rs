@@ -790,7 +790,17 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `GrpContentsCRC2=3949291798` is exactly that XOR over the fixture's three
   entries.
   With those written, the oracle's own `c4group -y` reports **`Ok`** on a
-  Rust-generated package, where its own package fails. Caveat: reproduced on one
+  Rust-generated package, where its own package fails.
+  `-y` is implemented too (`clonk-c4group::apply_update`), reproducing
+  `Execute`'s ladder rather than tidying it: already-updated is a *success*, not
+  a refusal; the source check consults `GrpContentsCRC1[i]` first — guarded by
+  `GrpContentsCRC1[i] &&`, which is the only thing stopping C++'s garbage
+  matching by accident — and falls back to `GrpChks1[i]`, which is what makes
+  real packages work.
+  Verified in **both** directions against the reference tool: Rust `-g` then
+  C++ `-y` is `Ok`, and Rust `-y` applies a **C++-generated** package correctly
+  — the very package C++ itself cannot apply, because the tolerant manifest
+  parse recovers the entry names from its corrupted records. Caveat: reproduced on one
   toolchain; `std::format` over `char[N]` may differ elsewhere.
 
 - **Actionable ready-check toasts: the concurrency core landed, backends open.**
