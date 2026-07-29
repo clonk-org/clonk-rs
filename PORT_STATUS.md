@@ -657,6 +657,34 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   many `main_tests` callers are fixture set-up that must keep writing
   immediately.
 
+- **A proven C++ defect: `c4group -g` produces update packages `c4group -y`
+  cannot apply.** Reproduced end-to-end against the pinned oracle build
+  (`build-arm64-native/c4group`, arm64 macOS). `C4UpdatePackage::MkUp` builds
+  each `GRPUP_Entries.txt` record with
+  `std::format("{}={}", strItemName, ...)` where `strItemName` is a
+  `char[_MAX_PATH]` whose only initialised byte is `[0]`; the format writes the
+  **whole array**, so every record carries about a kilobyte of uninitialised
+  stack memory between the name and its `=`. `DoGrpUpdate` then matches those
+  names against real entries with `SEqual`, matches nothing, and **deletes every
+  entry of the target group**, so the update fails. The same omission is in
+  `C4UpdatePackageCore`'s constructor, which initialises `GrpChks1` but not
+  `GrpContentsCRC1`/`GrpContentsCRC2`, leaving fifty uninitialised words in
+  `AutoUpdate.txt`; `Check` compares against them and only works by falling
+  through to its `GrpChks1` comparison.
+  Two consequences for M10-P4-L087, both of which overturn an earlier note in
+  that ticket. **Byte-identical output cannot be the acceptance criterion** —
+  three runs of C++ `-g` over identical inputs produce three different files,
+  because the garbage differs per run. And writing a correct manifest is a
+  **fix**, not a divergence needing justification: an update package is not
+  simulation state, so it cannot affect determinism.
+  `clonk-c4group::update_entries` writes the manifest `MkUp` intends and reads
+  the corrupted form tolerantly, since C++-produced packages exist in the wild.
+  Pinned by
+  `update_entry_manifest_round_trips_and_tolerates_cpp_uninitialised_names`,
+  which also asserts that parsing those records *literally* would delete the
+  whole group — the observed C++ behaviour. Caveat: reproduced on one
+  toolchain; `std::format` over `char[N]` may differ elsewhere.
+
 - **Actionable ready-check toasts: the concurrency core landed, backends open.**
   The lobby ready check already runs as an in-window Yes/No dialog with a
   countdown; making the desktop notification beside it *actionable* means an
