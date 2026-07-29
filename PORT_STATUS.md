@@ -425,7 +425,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
-- **Options control sheets: model and labels landed, facet drawing open.**
+- Closed 2026-07-29: **Options control sheets draw the classic facets.**
   `C4StartupOptionsDlg` draws the Keyboard/Gamepad pages from facets, not text
   buttons (`C4StartupOptionsDlg.cpp:215-345`). Two of the three pieces are in:
   `startup_options_controls::key_button_facets` ports
@@ -442,9 +442,10 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   with an 80px phase width) per `C4GraphicsResource.cpp:200-203,229`, and
   `draw_control_sheet` blits `fctKey` then the inset `fctCommand`. Both assets
   are optional, so a headless run or missing data keeps the text buttons rather
-  than failing the dialog. **Still open:** the device set selectors still draw
-  text buttons rather than `fctKeyboard`/`fctGamepad` phases, and the
-  `MENU_PARITY.md` rows.
+  than failing the dialog. The device set selectors blit `fctKeyboard`/`fctGamepad`
+  phases too — `fctCtrlPic = fGamepad ? fctGamepad : fctKeyboard` with the set
+  index as phase (`C4StartupOptionsDlg.cpp:271`) — and the `Keyboard` and
+  `Gamepad` `MENU_PARITY.md` rows record the change.
 
 - Closed 2026-07-29: **Overflow menu scrollbars.**
   `C4GUI::ScrollBar` had two independent implementations — the drawing half in

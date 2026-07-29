@@ -459,6 +459,22 @@ mod tests {
         assert_eq!(CONTROL_KEY_LABEL_KEYS.len(), CONTROL_KEY_LABELS.len());
         assert_eq!(CONTROL_KEY_LABEL_KEYS[11], "IDS_CTL_SPECIAL2");
 
+        // A selector's phase steps one cell per control set, and the gamepad
+        // facet is a separate image whose phase width is 80
+        // (C4StartupOptionsDlg.cpp:271; C4GraphicsResource.cpp:229).
+        let gamepad_cell = IntRect {
+            x: 0,
+            y: 0,
+            w: control_facets::GAMEPAD_PHASE_WIDTH,
+            h: 36,
+        };
+        assert_eq!(control_facets::phase_rect(gamepad_cell, 2).x, 160);
+        assert_eq!(
+            control_facets::phase_rect(control_facets::KEYBOARD, 2).x,
+            160,
+            "both selectors advance by their own phase width"
+        );
+
         // The facet source rects come from one Control.png, except the gamepad
         // selector which is its own image (C4GraphicsResource.cpp:200-203,229).
         use control_facets::{phase_rect, COMMAND, GAMEPAD_PHASE_WIDTH, KEY, KEYBOARD};

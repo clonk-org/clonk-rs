@@ -5004,6 +5004,42 @@ impl OptionsDlgScreen {
                 ControlDevice::Keyboard => format!("Keyboard {}", set + 1),
                 ControlDevice::Gamepad => format!("Gamepad {}", set + 1),
             };
+            // `fctCtrlPic = fGamepad ? fctGamepad : fctKeyboard`, drawn with
+            // the set index as its phase (C4StartupOptionsDlg.cpp:271).
+            let selector = match device {
+                ControlDevice::Keyboard => assets
+                    .control
+                    .as_ref()
+                    .map(|image| (image, control_facets::KEYBOARD)),
+                ControlDevice::Gamepad => assets.gamepad.as_ref().map(|image| {
+                    (
+                        image,
+                        IntRect {
+                            x: 0,
+                            y: 0,
+                            w: control_facets::GAMEPAD_PHASE_WIDTH,
+                            h: image.height() as i32,
+                        },
+                    )
+                }),
+            };
+            if let Some((image, cell)) = selector {
+                let rect = layout.set_buttons[set];
+                let source = control_facets::phase_rect(cell, set);
+                crate::classic_gui::draw_facet_stretch(
+                    surface,
+                    image,
+                    (
+                        source.x as f32,
+                        source.y as f32,
+                        source.w as f32,
+                        source.h as f32,
+                    ),
+                    (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+                    gamma,
+                );
+                continue;
+            }
             Self::draw_small_button(
                 surface,
                 assets,
