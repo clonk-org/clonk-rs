@@ -322,6 +322,11 @@ fn main() -> Result<()> {
     // MacAppTranslocation.cpp:27-63). It must precede path discovery.
     #[cfg(target_os = "macos")]
     clonk_platform::establish_macos_bundle_working_directory();
+    // `C4WinMain` installs the fatal-signal handlers before application
+    // initialization (C4WinMain.cpp:256-265). The session log does not exist
+    // yet, so the banner starts stderr-only and gains the log descriptor below.
+    #[cfg(unix)]
+    clonk_platform::crash::install(-1);
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
@@ -347,10 +352,16 @@ fn main() -> Result<()> {
             console_log_capture.clone(),
             Some(game_log_capture.clone()),
         ) {
-            Ok(()) => tracing::info!(
-                path = %log_path.display(),
-                "engine session log initialized"
-            ),
+            Ok(()) => {
+                // The crash banner now has a log to write to, like `GetLogFD`
+                // once the session log exists (C4WinMain.cpp:199-209).
+                #[cfg(unix)]
+                clonk_platform::crash::set_log_descriptor(clonk_logging::crash_log_descriptor());
+                tracing::info!(
+                    path = %log_path.display(),
+                    "engine session log initialized"
+                );
+            }
             Err(err) => tracing::warn!(
                 error = %err,
                 path = %log_path.display(),

@@ -265,6 +265,33 @@ pub fn init_verbose_with_file(verbose: bool, log_path: &Path) -> io::Result<()> 
     init_verbose_with_file_and_capture(verbose, log_path, None, None)
 }
 
+/// Raw descriptor of the active session log, for signal-handler use only.
+/// `-1` means "no log yet", matching C++'s `GetLogFD` sentinel.
+#[cfg(unix)]
+static CRASH_LOG_DESCRIPTOR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// Duplicates the session log's descriptor so the crash handler keeps a stable
+/// one even if the tracing writer is later dropped.
+#[cfg(unix)]
+fn publish_crash_log_descriptor(file: &File) {
+    use std::os::fd::AsRawFd;
+    extern "C" {
+        fn dup(fildes: i32) -> i32;
+    }
+    // SAFETY: `file` is a live, open descriptor for the duration of this call.
+    let duplicated = unsafe { dup(file.as_raw_fd()) };
+    if duplicated >= 0 {
+        CRASH_LOG_DESCRIPTOR.store(duplicated, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// The active session log's descriptor, or `-1` when there is none. Only a
+/// signal handler should use this; everything else goes through `tracing`.
+#[cfg(unix)]
+pub fn crash_log_descriptor() -> i32 {
+    CRASH_LOG_DESCRIPTOR.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Initialise session logging, mirror the formatted stream into the
 /// developer-console log pane when one is open, and always feed the C4Script
 /// log stream to the in-game message board.
@@ -278,12 +305,20 @@ pub fn init_verbose_with_file_and_capture(
     let default_level = if verbose { "debug" } else { "info" };
 
     match open_session_log(log_path) {
-        Ok(file) => install(default_level, Some(file), capture, game_log).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("failed to install the session-log subscriber: {err}"),
-            )
-        }),
+        Ok(file) => {
+            // The session log lives behind a buffered tracing writer, which a
+            // signal handler must not touch. Publish the raw descriptor so the
+            // crash banner can `write(2)` to it the way `GetLogFD` does
+            // (C4WinMain.cpp:199-209).
+            #[cfg(unix)]
+            publish_crash_log_descriptor(&file);
+            install(default_level, Some(file), capture, game_log).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("failed to install the session-log subscriber: {err}"),
+                )
+            })
+        }
         Err(err) => {
             let _ = install(default_level, None, capture, game_log);
             Err(err)

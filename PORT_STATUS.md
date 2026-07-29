@@ -425,6 +425,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-29: **Unix fatal-signal diagnostics.** `clonk-platform::crash`
+  installs the classic handler set — SIGBUS, SIGILL, SIGSEGV, SIGABRT, SIGINT,
+  SIGQUIT, SIGFPE, SIGTERM, in `C4WinMain.cpp:257-264` order — before
+  application initialization. A handled signal writes `<product>: Caught signal
+  <NAME>` and up to 100 `backtrace_symbols_fd` frames to stderr and to the
+  session log's raw descriptor, then restores `SIG_DFL` and reraises so the
+  process keeps its original signal exit status and core-dump behaviour
+  (`C4WinMain.cpp:179-213`). The handler uses only async-signal-safe calls;
+  `clonk-logging` `dup(2)`s the log descriptor out from behind the buffered
+  tracing writer so the banner never touches it. Because the log does not exist
+  when the handlers are installed, an early crash is stderr-only, exactly as
+  C++'s `GetLogFD` sentinel yields. Pinned by the subprocess test
+  `unix_fatal_signal_writes_diagnostics_then_reraises`, which asserts the child
+  dies *from* SIGABRT rather than exiting.
+
 - Closed 2026-07-29: **macOS app translocation.** A quarantined bundle runs from
   a read-only `AppTranslocation` mount whose siblings are absent, so resource
   discovery saw a copy with no `Contents/Resources`. `clonk-platform` now

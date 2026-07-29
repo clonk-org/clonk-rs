@@ -1,4 +1,6 @@
 mod console;
+#[cfg(unix)]
+pub mod crash;
 mod paths;
 
 pub use console::attach_parent_console;
