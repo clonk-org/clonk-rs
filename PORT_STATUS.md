@@ -1148,6 +1148,22 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   one. Until it is decided the builtin returns `false`, which is what C++
   returns for every name it *cannot* reload — so the divergence is confined to
   a script-driven reload that would have succeeded.
+  A concrete proposal, modelled on how the port already solves the identical
+  problem for `CreateObject`: that builtin must return a *reference* to an
+  object the engine has not created yet, and it can because the host context is
+  seeded with `next_object_id` before the call — it answers from pre-computed
+  state and stages the real work. The same shape fits here. Seed the context
+  with the particle names that *could* reload (those carrying a `source_path`,
+  and only when the game is not networked), answer synchronously from that, and
+  stage the reload in `EffectContextOutcome` for the engine to apply. Every
+  `false` C++ produces — network game, null name, unknown def, no filename — is
+  then answered exactly, and the only divergence left is an I/O failure between
+  the check and the staged reload: a far narrower window than today's
+  unconditional `false`.
+  Not attempted here on purpose. `EffectContextOutcome` sits in the script
+  execution path, which is determinism-critical, and this repo's own rule is to
+  freeze current behaviour with a differential test *before* changing such a
+  subsystem. That is a session's opening move, not its closing one.
 
 - **Live-reload path matching landed; the reload itself is open.**
   `clonk-engine::developer_reload` ports `C4DefList::GetByPath`
