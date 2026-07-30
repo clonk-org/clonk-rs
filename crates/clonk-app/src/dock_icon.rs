@@ -1,0 +1,100 @@
+//! The macOS Dock icon.
+//!
+//! A packaged `.app` gets its Dock tile from `CFBundleIconFile`, but an
+//! unbundled binary — `cargo run`, or `Contents/MacOS/clonk-app` invoked
+//! directly — has no bundle to read it from, and the window icon cannot stand
+//! in: winit accepts one and discards it on macOS. Its platform impl is an
+//! empty body explaining the refusal
+//! (`winit-0.28.7/src/platform_impl/macos/window.rs:1152-1162`), and the macOS
+//! window builder never reads the attribute at all, so
+//! `WindowBuilder::with_window_icon` is silently dropped. AppKit's
+//! `-[NSApplication setApplicationIconImage:]` is the only route.
+//!
+//! This has no C++ counterpart to match: `C4FullScreen.cpp:196-211` sets
+//! `WM_SETICON`, which is Windows-only, and the SDL build relies on the bundle.
+//! It is a port-only addition, not a parity gap.
+
+/// Attaches the product icon to the running application's Dock tile.
+///
+/// Must be called *after* the event loop exists. winit installs its own
+/// `NSApplication` subclass by being the first sender of `sharedApplication`,
+/// and an earlier call would leave the wrong class installed and mark the wrong
+/// thread as main.
+#[cfg(target_os = "macos")]
+pub(crate) fn set_dock_icon() {
+    macos::set_dock_icon();
+}
+
+/// Every other platform draws the icon the window itself carries, which
+/// `startup_window_builder` already attaches.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn set_dock_icon() {}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    /// Side length of the Dock image.
+    ///
+    /// The mark is cut from a 170x176 region of the logo, so every larger size
+    /// is an upscale. 512 covers a retina Dock tile and the Cmd-Tab switcher
+    /// without asking Lanczos for more than three times the source.
+    const DOCK_ICON_SIDE: u32 = 512;
+
+    pub(super) fn set_dock_icon() {
+        // `alloc` comes from this trait, not from the class.
+        use objc2::AnyThread;
+
+        // AppKit is not thread-safe and `sharedApplication` requires the main
+        // thread; off it, there is nothing to decorate anyway.
+        let Some(main_thread) = objc2::MainThreadMarker::new() else {
+            return;
+        };
+        let Some(png) = dock_icon_png() else {
+            return;
+        };
+        // `with_bytes` copies rather than handing AppKit the Vec's deallocator,
+        // which would need the `block2` feature for a copy this small.
+        let data = objc2_foundation::NSData::with_bytes(&png);
+        let Some(image) =
+            objc2_app_kit::NSImage::initWithData(objc2_app_kit::NSImage::alloc(), &data)
+        else {
+            // A tile AppKit cannot decode is not worth failing startup over;
+            // the platform default stands, as it does for a null `HICON`.
+            return;
+        };
+
+        // SAFETY: `image` is a live `NSImage` this call does not take ownership
+        // of, and `main_thread` proves we are on the thread AppKit requires.
+        unsafe {
+            objc2_app_kit::NSApplication::sharedApplication(main_thread)
+                .setApplicationIconImage(Some(&image));
+        }
+    }
+
+    /// The encoded tile handed to AppKit.
+    fn dock_icon_png() -> Option<Vec<u8>> {
+        let square = clonk_icon::square_source(clonk_icon::LOGO_PNG)?;
+        clonk_icon::png_bytes(&clonk_icon::resize_square(&square, DOCK_ICON_SIDE))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // The Dock tile is the whole point of this module, and an AppKit
+        // `NSImage` that fails to decode falls back to the generic icon
+        // silently. Pin the bytes instead, which needs no window server.
+        #[test]
+        fn the_dock_tile_is_a_decodable_square_at_the_requested_side() {
+            let png = dock_icon_png().expect("the product icon encodes");
+
+            let image = image::load_from_memory(&png)
+                .expect("AppKit is handed something it can decode")
+                .to_rgba8();
+            assert_eq!(image.dimensions(), (DOCK_ICON_SIDE, DOCK_ICON_SIDE));
+            assert!(
+                image.pixels().any(|pixel| pixel.0[3] != 0),
+                "a fully transparent tile would render as no icon at all"
+            );
+        }
+    }
+}

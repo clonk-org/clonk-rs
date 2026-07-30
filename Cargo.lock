@@ -725,6 +725,8 @@ dependencies = [
  "gilrs",
  "image",
  "mimalloc",
+ "objc2 0.6.4",
+ "objc2-app-kit",
  "objc2-foundation",
  "parking_lot",
  "pixels",

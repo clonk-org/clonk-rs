@@ -31,6 +31,7 @@ mod developer_toolbox;
 mod developer_tools_page;
 mod developer_windows;
 mod display_sleep_inhibitor;
+mod dock_icon;
 use clonk_app_render::draw_commands;
 mod game_message;
 mod gamepad;
@@ -618,6 +619,10 @@ fn run() -> Result<()> {
     // Past this point a failure is no longer a startup failure, so it is
     // reported by the running application rather than a native dialog.
     clonk_platform::startup_dialog::note_window_created();
+    // Only now: winit installs its own `NSApplication` subclass by being the
+    // first sender of `sharedApplication`, so nothing may reach AppKit before
+    // the window is built.
+    dock_icon::set_dock_icon();
     // `C4Application::DoInit` registers the file classes in the graphical
     // Windows build only, best-effort — C++ notes it "will only work if we have
     // administrator rights" and ignores the result (C4Application.cpp:219-223).

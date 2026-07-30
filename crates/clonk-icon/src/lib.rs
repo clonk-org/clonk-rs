@@ -80,6 +80,25 @@ pub fn resize_square(square: &image::RgbaImage, side: u32) -> image::RgbaImage {
     scaled
 }
 
+/// Encodes an icon as a PNG.
+///
+/// AppKit's `NSImage` and the Windows `.ico` container both take an encoded
+/// image rather than a raw buffer, and PNG is the only format both accept.
+pub fn png_bytes(icon: &image::RgbaImage) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            icon.as_raw(),
+            icon.width(),
+            icon.height(),
+            image::ColorType::Rgba8,
+        )
+        .ok()?;
+    Some(bytes)
+}
+
 /// Scales each colour channel by its own alpha, so a filter that averages
 /// channels independently cannot pull colour out of transparent pixels.
 fn premultiplied(icon: &image::RgbaImage) -> image::RgbaImage {
@@ -150,6 +169,21 @@ mod tests {
             coverage >= 50,
             "the 16px icon is only {coverage}% solid, which reads as no icon at all"
         );
+    }
+
+    // AppKit and the icon containers take an encoded image, not a raw buffer.
+    #[test]
+    fn an_icon_encodes_to_a_png_that_decodes_back_unchanged() {
+        let square = square_source(LOGO_PNG).expect("the embedded product logo decodes");
+        let icon = resize_square(&square, 32);
+
+        let bytes = png_bytes(&icon).expect("a 32px icon encodes");
+
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
+        let decoded = image::load_from_memory(&bytes)
+            .expect("the encoded icon decodes")
+            .to_rgba8();
+        assert_eq!(decoded, icon, "the encode lost pixels");
     }
 
     // `APP_MARK` is tied to one specific image. If the logo is ever redrawn or
