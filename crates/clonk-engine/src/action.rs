@@ -341,6 +341,12 @@ pub struct ActionSpec {
     /// directions (C4Object.cpp:4230).
     #[serde(default)]
     pub directions: Option<i32>,
+    /// `FlipDir` (C4ActionDef, default 0 = never mirror): directions at or
+    /// above it are drawn by mirroring the rows below it, which
+    /// C4Object::UpdateFlipDir folds into the object's draw transform
+    /// (C4Object.cpp:410-442).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip_dir: Option<i32>,
     /// `TurnAction`: fired by SetDir on a direction change
     /// (C4Object.cpp:4233-4237).
     #[serde(default)]
@@ -372,6 +378,7 @@ impl ActionSpec {
             abort_call: None,
             in_liquid_action: None,
             directions: None,
+            flip_dir: None,
             turn_action: None,
             no_other_action: false,
             disabled: false,
@@ -462,6 +469,11 @@ impl ActionSpec {
 
     pub fn with_directions(mut self, directions: i32) -> Self {
         self.directions = Some(directions);
+        self
+    }
+
+    pub fn with_flip_dir(mut self, flip_dir: i32) -> Self {
+        self.flip_dir = Some(flip_dir);
         self
     }
 
