@@ -10424,6 +10424,18 @@ impl EditCursorHitTest {
     pub fn object_at(&self, x: i32, y: i32, after: Option<ObjectId>) -> Option<ObjectId> {
         crate::compat::objects::edit_cursor_object_at(&self.world, x, y, after)
     }
+
+    /// One object's live `C4Shape` rectangle, relative to its position.
+    ///
+    /// `DrawSelectMark` frames `cobj->x + cobj->Shape.x` by `Shape.Wdt`
+    /// (`C4EditCursor.cpp`), which is the *live* shape — stretched by `Con`,
+    /// rotated by `r` — not the definition's. `ObjectSnapshot::current_shape`
+    /// carries it only when it is not reconstructible, so resolving it through
+    /// the same world view the hit test uses is what makes the two agree.
+    pub fn shape_rect(&self, object: ObjectId) -> Option<DefinitionRect> {
+        let live = self.world.get(object)?;
+        Some(self.world.object_live_shape_rect(&live))
+    }
 }
 
 fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldContext {

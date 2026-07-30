@@ -5040,6 +5040,18 @@
         );
         assert!(app.edit_cursor_hold, "a press always holds");
 
+        // The mark frames the object's *live* shape, which
+        // `ObjectSnapshot::current_shape` carries only when it is not
+        // reconstructible. Resolving it through the same world view the hit
+        // test uses is what makes the two agree about what was clicked.
+        let shape = clonk_engine::EditCursorHitTest::new(&app.snapshot)
+            .shape_rect(id)
+            .expect("the selected object has a live shape");
+        assert!(
+            shape.width > 0 && shape.height > 0,
+            "a clickable object has a shape to frame"
+        );
+
         // Clicking the same object again changes nothing, which is what keeps
         // a selection draggable rather than collapsing it.
         assert!(app

@@ -2681,13 +2681,84 @@ impl GameApp {
         } = self;
         let inputs =
             collect_viewport_inputs_from_physical_state(snapshot, physical_viewports).ok()?;
-        let frame =
+        let mut frame =
             graphics.render_detached_viewport(snapshot, &inputs, identity, width, height)?;
+        // `C4Viewport::Draw` calls `Console.EditCursor.Draw(cgo)` after the
+        // foreground objects and before the per-player HUD, gated on
+        // `!Application.isFullScreen` (`C4Viewport.cpp:1102-1108`). It draws
+        // through the engine's own rasterizer, so it lands on this surface.
+        Self::draw_console_overlay(
+            &mut frame.surface,
+            snapshot,
+            frame.projection,
+            self.developer_selection.objects(),
+            self.edit_cursor_drag_frame,
+        );
         // The frame a window drew is what its pointer input must be converted
         // through; nothing else records this viewport's own ViewX/ViewY.
         self.console_viewport_projections
             .insert(identity, frame.projection);
         Some(frame.surface)
+    }
+
+    /// Paint `C4EditCursor::Draw`'s command list onto a finished viewport
+    /// frame (`clonk_engine::developer_overlay`).
+    ///
+    /// Selection marks are twelve individual pixels per corner, not a
+    /// rectangle outline, and nothing at all when the shape is under a pixel
+    /// wide or tall — `select_mark_pixels` owns that rule. Coordinates are
+    /// viewport-space: `cobj->x + cobj->Shape.x - ViewX`.
+    fn draw_console_overlay(
+        surface: &mut clonk_graphics::Surface,
+        snapshot: &SimulationSnapshot,
+        projection: clonk_frontend::ActiveViewportProjection,
+        selection: &[clonk_engine::ObjectId],
+        drag_frame: Option<(i32, i32)>,
+    ) {
+        use clonk_engine::developer_overlay::{
+            console_overlay_commands, ConsoleOverlayCommand, OverlaySelection,
+        };
+
+        // The same world view the hit test uses, so the mark frames exactly
+        // the shape a click resolves against.
+        let shapes = clonk_engine::EditCursorHitTest::new(snapshot);
+        let entries = selection
+            .iter()
+            .filter_map(|id| {
+                let object = snapshot.object(*id)?;
+                let shape = shapes.shape_rect(*id)?;
+                Some(OverlaySelection {
+                    object: *id,
+                    x: object.position.x + shape.x - projection.target_x,
+                    y: object.position.y + shape.y - projection.target_y,
+                    width: shape.width,
+                    height: shape.height,
+                })
+            })
+            .collect::<Vec<_>>();
+        // The rubber band is anchored in world coordinates and follows the
+        // pointer; without a live pointer the band is not drawn at all.
+        let band = drag_frame.map(|(x, y)| {
+            (
+                (x - projection.target_x, y - projection.target_y),
+                (x - projection.target_x, y - projection.target_y),
+            )
+        });
+        let commands = console_overlay_commands(false, false, &entries, band, None, None);
+
+        let white = clonk_graphics::Color::opaque(255, 255, 255);
+        for command in commands {
+            // Only the select mark is drawn: the remaining commands need the
+            // drag gestures that are not wired yet, and drawing half a rubber
+            // band would be worse than drawing none.
+            if let ConsoleOverlayCommand::SelectMark { pixels, .. } = command {
+                for (x, y) in pixels {
+                    if x >= 0 && y >= 0 {
+                        let _ = surface.set_pixel(x as u32, y as u32, white);
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn render_running(

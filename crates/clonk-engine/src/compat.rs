@@ -68,7 +68,7 @@ mod players;
 mod registration;
 mod sounds;
 mod values;
-mod world;
+pub(crate) mod world;
 
 pub(crate) use commands::*;
 pub use contexts::*;
