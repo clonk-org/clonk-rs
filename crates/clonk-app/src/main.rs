@@ -281,7 +281,7 @@ use clonk_resources::{
     MutableGroupChildMut, MutableGroupEntryKind, ParticleDefinition as ResourceParticleDefinition,
     ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData,
 };
-use control_options::{binding_display_name, format_key_label};
+use control_options::format_key_label;
 use desktop_notification::{DesktopNotification, DesktopNotifier};
 use display_sleep_inhibitor::DisplaySleepInhibitor;
 use gamepad::{
