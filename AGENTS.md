@@ -103,15 +103,34 @@ gh pr merge --repo clonk-org/clonk-rs --auto "$(git branch --show-current)"
 legacyclonk:master and clonk-org:<branch>`). Do **not** use `gh repo
 set-default` — it writes into the *shared* `.git/config` every worktree session
 reads. With more than one commit `--fill` titles the pull request from the
-branch slug; retitle it to a Conventional Commit subject via `gh pr edit`.
+branch slug; **retitle it to a Conventional Commit subject via `gh pr edit`.**
+That title is not cosmetic: the queue squashes, so it becomes the commit subject
+on `main` verbatim, and it is the only subject `git-cliff` ever reads. Because
+`cliff.toml` sets `filter_unconventional = true`, a branch-slug title is dropped
+*silently* — the change ships with no changelog entry and earns no version bump.
+The `Pull request title` job checks this on every pull request.
 
-`--auto` is the point: the queue rebases your branch onto `main` plus every
+`--auto` is the point: the queue squashes your branch onto `main` plus every
 entry ahead of you, runs the long gates against that result, and fast-forwards
-only if they pass. Because it rebases, your commits land individually — the
-structural / behavioural split survives, so keep making it. Branches are **not**
-required to be up to date, so never merge `main` into your branch or rebase to
-catch up; that is what pushed the 2026-07-29 fix away. Hand-rebase only when the
-queue evicts you for a conflict, which it cannot resolve itself.
+only if they pass. Branches are **not** required to be up to date, so never
+merge `main` into your branch or rebase to catch up; that is what pushed the
+2026-07-29 fix away. Hand-rebase only when the queue evicts you for a conflict,
+which it cannot resolve itself.
+
+The queue merges with **squash**, deliberately: it is the only method that
+leaves `main` verified while keeping history linear. GitHub cannot sign a commit
+it rewrites — it does not hold your key — so the previous `REBASE` method
+stripped the signature off every commit it landed, and `main` accumulated 234
+`Unverified` commits. Squashed commits are created and signed by GitHub's
+`web-flow` key instead. Do not switch the `main merge queue` ruleset back to
+`REBASE` to recover per-commit history on `main`; that trade was made knowingly
+on 2026-07-30.
+
+Keep making the structural / behavioural split anyway. It no longer survives as
+separate commits on `main` — that is what was traded for verification — but
+`squash_merge_commit_message` is `COMMIT_MESSAGES`, so every subject you wrote
+is preserved in the body of the squashed commit, and the split is still how the
+pull request is reviewed.
 
 | | Jobs | When |
 |---|---|---|
