@@ -1169,10 +1169,25 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   backup's destructor resets every graphic to default, and `Clear` deliberately
   keeps the filename, which is what lets the reload re-open the group it came
   from. Pinned by `definition_reload_relinks_before_restoring_graphics`.
-  **Still open:** the reload's body — retaining source provenance through
-  production loading and rebuilding DefCore, ActMap, scripts, graphics,
-  portraits, ranks and localised components in place — and the file watcher that
-  feeds it.
+  **Source provenance is retained now (M10-P4-L086's step 1).** `Definition`
+  carries a `source_path`, set at the install site from the
+  `ScenarioDefinition::resource_group` the loader already held — the group's
+  own root, which is what `C4Def::Load` stores as `Filename` (`C4Def.cpp:550`).
+  That one field is what `C4DefList::Reload` re-opens, what `C4Def::Clear`
+  deliberately preserves ("Assume filename is being kept"), and what
+  `AddDirectoryForMonitoring` watches — so it unblocks the watcher's
+  registration as well as the reload. A definition built from script alone
+  carries none, which is the case a reload must refuse rather than attempt.
+  Pinned by `definitions_carry_the_group_they_were_loaded_from`, which covers
+  the accessor contract; **end-to-end coverage that a definition loaded from a
+  real shipped group carries a usable path is still owed** — the existing
+  scenario fixtures are JSON-backed and have no group behind them.
+  **Still open:** the reload body itself — rebuilding DefCore, ActMap, scripts,
+  graphics, portraits, ranks and localised components in place, refreshing
+  matching live objects as `UpdateFace(true)` requires, and the definition
+  removal path the failure arm needs (`Engine::remove_definition` does not
+  exist). And the watcher's registration, which is now a short step rather than
+  a blocked one.
 
 - **Deferred runtime config save: mechanism landed, most callers still write
   through.** C++ mutates its process-wide `Config` for ordinary runtime toggles
