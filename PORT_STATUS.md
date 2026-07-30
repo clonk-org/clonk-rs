@@ -425,6 +425,27 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **The Options Gamepad sheet prints `invalid` where the oracle prints nothing.**
+  With no `[Gamepad1]` section in the config, `C4ConfigGamepad::CompileFunc`
+  defaults every `Button[i]` to `-1` (`C4Config.cpp:591-602`), and
+  `KeySelButton::DrawElement` displays
+  `C4KeyCodeEx::KeyCode2String(key, true, false)`
+  (`C4StartupOptionsDlg.cpp:249`). Reading that function, `-1` is not a gamepad
+  code (`Key_IsGamepad` wants `0x42` in bits 16-23, `C4KeyboardInput.h:85-88`),
+  so it falls into the `USE_SDL_MAINLOOP` branch, where
+  `SDL_GetKeyName(SDL_GetKeyFromScancode(-1))` is empty and the function returns
+  the literal `"invalid"` (`C4KeyboardInput.cpp:377-393`). Rust reproduces that
+  reading (`legacy_gamepad_key_label`, `crates/clonk-app/src/input.rs:1006-1013`).
+  **A live 1280x720 F9 capture of the oracle's Gamepad sheet nevertheless draws
+  the key-name line empty for all twelve controls.** The mechanism is
+  unexplained: probes against both the linked `sdl2-compat` build and Homebrew
+  SDL2 confirm `SDL_GetKeyName` returns `""` for that scancode, which by the
+  source must yield `"invalid"`. Left as-is rather than guessed at — changing it
+  would make Rust looser than a C++ path that has not been explained. The
+  Keyboard sheet is unaffected (every control is bound there). Closing this
+  needs an instrumented oracle run that prints the string the engine actually
+  builds.
+
 - **`C4PlayerList::Join`'s max-player rejection is not ported.**
   C++ refuses a join outright when `GetCount() + 1 > Game.Parameters.MaxPlayers`,
   logs `IDS_PRC_TOOMANYPLRS` and returns no `C4Player`
