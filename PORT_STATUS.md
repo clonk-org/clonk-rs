@@ -1202,12 +1202,25 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   id **alone**, not on `Status` (`C4Game.cpp:2352-2360`), unlike
   `C4ObjectList::UpdateFaces` which does check it — so `object_ids_of_definition`
   deliberately does not.
-  **Still open: the success sweep.** `UpdateFace(true)` over every object of
-  that id has no primitive to call — the operation exists only inlined at each
-  of its current call sites, and porting it as one reusable engine operation
-  (re-seeding `shape_template`, the solid mask, the action facet, and
-  `C4DefGraphicsPtrBackup::AssignUpdate`'s **name-based** graphics
-  re-resolution) is the remaining piece of M10-P4-L086. Until then a successful
+  **Still open: the success sweep**, and where to start it is now known.
+  `UpdateFace(true)` has no callable primitive — but its pieces are not
+  scattered: they sit inside the **ChangeDef** path in
+  `engine/economy.rs` (around the `object.shape_template = template` assignment),
+  which already does the definition-derived refresh for a *different* reason —
+  new `shape_template`, `solid_mask_override` reset, the non-rotateable
+  rotation reset, and `refresh_shape_after_state_change(..., false)` whose
+  `false` is `UpdateFace`'s own `fRestoreAttachedObjects`. Extracting that
+  block as one operation both call sites share is the piece of work, and it is
+  a **refactor of a determinism-adjacent path** — `refresh_shape_after_state_change`
+  feeds movement and contact — so it wants a session with room to run the full
+  gates, not a tail-end increment. Left undone deliberately rather than
+  attempted badly.
+  What must come with it: `C4DefGraphicsPtrBackup::AssignUpdate`'s graphics
+  re-resolution is **name-based**, not pointer patching
+  (`C4DefGraphics.cpp:355-400`) — a live object whose `graphics_name` is gone
+  from the reloaded sprite variants falls back to its own definition, and is
+  removed if that also fails. Silently leaving a dangling name is the
+  divergence. Until then a successful
   reload replaces the definition and leaves live objects on their old graphics
   and shape. Also still open: the watcher's registration, now a short step
   rather than a blocked one.
