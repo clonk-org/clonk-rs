@@ -42,7 +42,46 @@ pub fn square_source(png: &[u8]) -> Option<image::RgbaImage> {
 /// Split from [`square_source`] because the packaging tool asks for ten sizes
 /// from one decode, and decoding the logo per size is the expensive half.
 pub fn resize_square(square: &image::RgbaImage, side: u32) -> image::RgbaImage {
-    image::imageops::resize(square, side, side, image::imageops::FilterType::Lanczos3)
+    // `image` filters each channel independently, so scaling straight alpha
+    // averages the transparent margin's RGB — black, in the source PNG — into
+    // every antialiased edge and leaves a dark fringe at the small sizes.
+    let mut scaled = image::imageops::resize(
+        &premultiplied(square),
+        side,
+        side,
+        image::imageops::FilterType::Lanczos3,
+    );
+    straighten(&mut scaled);
+    scaled
+}
+
+/// Scales each colour channel by its own alpha, so a filter that averages
+/// channels independently cannot pull colour out of transparent pixels.
+fn premultiplied(icon: &image::RgbaImage) -> image::RgbaImage {
+    let mut premultiplied = icon.clone();
+    premultiplied.pixels_mut().for_each(|pixel| {
+        let alpha = u32::from(pixel.0[3]);
+        pixel.0[..3]
+            .iter_mut()
+            .for_each(|channel| *channel = ((u32::from(*channel) * alpha + 127) / 255) as u8);
+    });
+    premultiplied
+}
+
+/// Undoes [`premultiplied`]. Lanczos undershoots around a hard edge, so a
+/// channel can land above its own alpha; clamping keeps the result a valid
+/// straight-alpha image, which is what every icon container stores.
+fn straighten(icon: &mut image::RgbaImage) {
+    icon.pixels_mut().for_each(|pixel| {
+        let alpha = u32::from(pixel.0[3]);
+        if alpha == 0 {
+            pixel.0 = [0, 0, 0, 0];
+            return;
+        }
+        pixel.0[..3].iter_mut().for_each(|channel| {
+            *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+        });
+    });
 }
 
 #[cfg(test)]
@@ -55,6 +94,34 @@ mod tests {
             .write_to(&mut bytes, image::ImageOutputFormat::Png)
             .expect("an in-memory PNG encode cannot fail");
         bytes.into_inner()
+    }
+
+    /// The darkest colour channel over every pixel the viewer can actually see.
+    fn darkest_visible_channel(icon: &image::RgbaImage) -> u8 {
+        icon.pixels()
+            .filter(|pixel| pixel.0[3] >= 8)
+            .filter_map(|pixel| pixel.0[..3].iter().copied().min())
+            .min()
+            .expect("the scaled icon has visible pixels")
+    }
+
+    // A hard edge between opaque white and transparent black. Filtering straight
+    // alpha ignores the alpha channel, so the margin's RGB — black, as it is in
+    // the source PNG — is averaged into the antialiased edge and shows up as a
+    // dark fringe at exactly the sizes a Dock or taskbar draws.
+    #[test]
+    fn downscaling_does_not_bleed_the_transparent_margin_into_the_edge() {
+        let mut source = image::RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 0]));
+        (0..64).for_each(|y| {
+            (0..32).for_each(|x| source.put_pixel(x, y, image::Rgba([255, 255, 255, 255])));
+        });
+
+        let darkest = darkest_visible_channel(&resize_square(&source, 16));
+
+        assert!(
+            darkest >= 250,
+            "the transparent margin darkened a visible edge pixel to {darkest}"
+        );
     }
 
     #[test]
