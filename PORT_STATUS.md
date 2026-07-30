@@ -2777,8 +2777,10 @@ an ordered-map model gap.
   `bird_heading_turns_continuously_instead_of_snapping_to_an_axis`,
   `bird_velocity_stays_inside_the_float_physical_clamp`,
   `bird_flight_controller_adds_no_draw_site_and_leaves_scenario_init_untouched`,
-  `bird_flight_is_reproducible_from_a_fixed_seed` and
-  `contact_right_reflects_away_from_the_wall_instead_of_back_into_it`.
+  `bird_flight_is_reproducible_from_a_fixed_seed`,
+  `contact_right_reflects_away_from_the_wall_instead_of_back_into_it`,
+  `birds_startle_and_flee_when_a_clonk_comes_close` and
+  `birds_separate_from_neighbours_that_start_on_top_of_each_other`.
 
 ## Preserve
 

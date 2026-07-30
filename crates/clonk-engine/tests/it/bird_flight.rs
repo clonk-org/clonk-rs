@@ -3,8 +3,8 @@
 //! `Objects.c4d/Animals.c4d/Bird.c4d/Script.c` steering policy, so no oracle
 //! differential covers it and these are the only tests that pin it.
 
-use crate::support::real_scenario::prepare_installed_scenario;
-use clonk_engine::{CommandDirection, Engine, ObjectId};
+use crate::support::real_scenario::{join_local_player, prepare_installed_scenario};
+use clonk_engine::{CommandDirection, Engine, ObjectId, ObjectUpdate, SpawnConfig, Vector2};
 use clonk_script::Value;
 
 /// Wipfrace declares `Animal=BIRD=10;` (Scenario.txt:56), so InitAnimals
@@ -303,4 +303,129 @@ fn contact_right_reflects_away_from_the_wall_instead_of_back_into_it() {
              away from the wall, got {heading}"
         );
     }
+}
+
+/// Startle: the shipped bird has no notion of a player at all — it never
+/// searches for a Clonk and never reacts to one. A bird that scatters when you
+/// walk under it is most of what makes a flock read as alive, so this pins
+/// that the flee arm actually fires and actually moves the bird away.
+#[test]
+fn birds_startle_and_flee_when_a_clonk_comes_close() {
+    let mut engine = prepare_installed_scenario(BIRD_SCENARIO, 0).instantiate();
+    let owner = join_local_player(&mut engine, "Bird startle");
+    let clonk = engine
+        .crew_cursor(owner)
+        .expect("Wipfrace joins with a crew");
+
+    // Pick a bird that is airborne and settled, then put the crew right under
+    // it. `Placement=2` spawns birds in open air, so this stays clear of the
+    // terrain arm, which would otherwise win the priority order.
+    let bird = *birds(&engine).first().expect("Wipfrace places a bird");
+    tick(&mut engine, 40);
+    let perch = engine
+        .object_snapshot(bird)
+        .expect("the bird remains live")
+        .position;
+
+    assert_eq!(
+        local_int(&engine, bird, "flight_alarm").unwrap_or(0),
+        0,
+        "an undisturbed bird carries no alarm"
+    );
+
+    // Hold the Clonk under the bird for a few think intervals; it is in free
+    // fall, so it has to be re-placed each frame to stay inside the radius.
+    let mut alarmed = 0;
+    for _ in 0..24 {
+        engine
+            .apply_object_update(
+                clonk,
+                ObjectUpdate::new().with_position(Vector2::new(perch.x, perch.y + 20)),
+            )
+            .expect("the crew stays under the bird");
+        tick(&mut engine, 1);
+        alarmed = alarmed.max(local_int(&engine, bird, "flight_alarm").unwrap_or(0));
+    }
+
+    assert!(
+        alarmed > 0,
+        "the bird never noticed a Clonk inside its startle radius"
+    );
+
+    // Alarm raises cruise to 190 and agility to 6, so a startled bird should
+    // put real distance between itself and where the Clonk was.
+    let before = engine
+        .object_snapshot(bird)
+        .expect("the bird remains live")
+        .position;
+    tick(&mut engine, 60);
+    let after = engine
+        .object_snapshot(bird)
+        .expect("the bird remains live")
+        .position;
+    let near = (before.x - perch.x).pow(2) + (before.y - perch.y).pow(2);
+    let far = (after.x - perch.x).pow(2) + (after.y - perch.y).pow(2);
+    assert!(
+        far > near,
+        "a startled bird should leave: {near} -> {far} squared pixels from the \
+         Clonk"
+    );
+}
+
+/// Flocking: the shipped bird never looks for another bird, so N birds are N
+/// independent random walks that routinely overlap pixel for pixel. The
+/// controller adds separation with weak alignment (and deliberately no
+/// cohesion, which is the term that collapses a flock).
+#[test]
+fn birds_separate_from_neighbours_that_start_on_top_of_each_other() {
+    let mut engine = prepare_installed_scenario(BIRD_SCENARIO, 0).instantiate();
+    let seed_bird = *birds(&engine).first().expect("Wipfrace places a bird");
+    tick(&mut engine, 40);
+    let origin = engine
+        .object_snapshot(seed_bird)
+        .expect("the bird remains live")
+        .position;
+
+    // Stack three fresh birds within a couple of pixels of each other, well
+    // inside the 90px separation radius.
+    let stacked: Vec<ObjectId> = (0..3)
+        .map(|offset| {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("BIRD")
+                        .with_position(Vector2::new(origin.x + offset, origin.y + offset)),
+                )
+                .expect("a bird spawns in open air")
+        })
+        .collect();
+
+    let spread = |engine: &Engine| -> i32 {
+        let points: Vec<Vector2> = stacked
+            .iter()
+            .filter_map(|&bird| engine.object_snapshot(bird).map(|object| object.position))
+            .collect();
+        let mut worst = 0;
+        for (index, left) in points.iter().enumerate() {
+            for right in &points[index + 1..] {
+                worst = worst.max((left.x - right.x).pow(2) + (left.y - right.y).pow(2));
+            }
+        }
+        worst
+    };
+
+    assert!(spread(&engine) <= 32, "the birds start stacked");
+    tick(&mut engine, 120);
+    assert_eq!(
+        stacked
+            .iter()
+            .filter(|&&bird| engine.object_snapshot(bird).is_some())
+            .count(),
+        3,
+        "all three birds survive the separation window"
+    );
+    assert!(
+        spread(&engine) > 32,
+        "stacked birds should push apart, widest separation stayed at {}",
+        spread(&engine)
+    );
 }
