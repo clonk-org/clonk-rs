@@ -240,7 +240,7 @@ mod tests {
             triple.to_string(),
             EmittedComponent {
                 id: ComponentId::Engine,
-                path: PathBuf::from(format!("clonk-rust-0.4.0-engine-{triple}.zip")),
+                path: PathBuf::from(format!("update-engine-0.4.0-{triple}.zip")),
                 sha256: digest_byte.repeat(32),
                 size,
             },
@@ -279,7 +279,12 @@ mod tests {
             engine("x86_64-unknown-linux-gnu", "aa", 24_000_000),
             engine("x86_64-pc-windows-msvc", "dd", 26_000_000),
             engine(crate::MACOS_UNIVERSAL_TRIPLE, "cc", 34_000_000),
-            shared(ComponentId::Planet, "planet-ee.zip", "ee", 49_000_000),
+            shared(
+                ComponentId::Planet,
+                "update-planet-ee.zip",
+                "ee",
+                49_000_000,
+            ),
         ])
     }
 
@@ -404,15 +409,15 @@ mod tests {
         for (triple, archive) in [
             (
                 "x86_64-unknown-linux-gnu",
-                "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+                "update-engine-0.4.0-x86_64-unknown-linux-gnu.zip",
             ),
             (
                 "x86_64-pc-windows-msvc",
-                "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+                "update-engine-0.4.0-x86_64-pc-windows-msvc.zip",
             ),
             (
                 "universal-apple-darwin",
-                "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+                "update-engine-0.4.0-universal-apple-darwin.zip",
             ),
         ] {
             assert_eq!(engine.targets[triple].archive, archive);

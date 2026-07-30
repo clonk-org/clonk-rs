@@ -1132,7 +1132,7 @@ fn archive_identity(
 }
 
 /// The triple an engine archive was built for, read out of
-/// `clonk-rust-<version>-engine-<triple>.zip`.
+/// `update-engine-<version>-<triple>.zip`.
 ///
 /// The version is matched rather than skipped, so an archive left over from an
 /// earlier release cannot enter this manifest: it would name an asset this
@@ -1143,7 +1143,10 @@ fn engine_archive_triple(name: &str, version: &str) -> Result<String> {
         .filter(|triple| !triple.is_empty())
         .map(str::to_string)
         .ok_or_else(|| {
-            if name.contains("-engine-") {
+            // Any version but this one: the prefix without the version still
+            // matches, which is what separates a stale artifact from a name
+            // that was never an engine archive at all.
+            if name.starts_with(&format!("{}engine-", components::UPDATE_ARCHIVE_PREFIX)) {
                 anyhow!("`{name}` is an engine archive from another release, not {version}")
             } else {
                 anyhow!(
@@ -3649,19 +3652,19 @@ mod tests {
     /// `shasum -a 256` over these exact strings, not from the code under test.
     const RELEASE_COMPONENTS_FIXTURE: [(&str, &str); 4] = [
         (
-            "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+            "update-engine-0.4.0-x86_64-unknown-linux-gnu.zip",
             "linux engine",
         ),
         (
-            "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+            "update-engine-0.4.0-x86_64-pc-windows-msvc.zip",
             "windows engine",
         ),
         (
-            "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+            "update-engine-0.4.0-universal-apple-darwin.zip",
             "universal macos engine",
         ),
         (
-            "planet-ffeeddccbbaa99887766554433221100.zip",
+            "update-planet-ffeeddccbbaa99887766554433221100.zip",
             "shared planet",
         ),
     ];
@@ -3723,21 +3726,21 @@ mod tests {
             (
                 "x86_64-unknown-linux-gnu",
                 (
-                    "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+                    "update-engine-0.4.0-x86_64-unknown-linux-gnu.zip",
                     "58779b29d498bd1ff0b984a31c41072c1dadb69af13f75fe9360f6c17d7c0b4e",
                 ),
             ),
             (
                 "x86_64-pc-windows-msvc",
                 (
-                    "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+                    "update-engine-0.4.0-x86_64-pc-windows-msvc.zip",
                     "4f5e971ed560a857e53dfa16525c9a7aeb58d02a61a18b75c403f1eae333b7dd",
                 ),
             ),
             (
                 "universal-apple-darwin",
                 (
-                    "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+                    "update-engine-0.4.0-universal-apple-darwin.zip",
                     "6da2dcb44809e63fda53cf66b9cd958585a9b6453b7b06e283c38cee2eed014a",
                 ),
             ),
@@ -3795,7 +3798,7 @@ mod tests {
                 .get(triple)
                 .unwrap_or_else(|| panic!("engine has no archive for {triple}"));
             assert_eq!(
-                target.archive, "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+                target.archive, "update-engine-0.4.0-universal-apple-darwin.zip",
                 "{triple} must be offered the universal build"
             );
             // The whole target, not just the name: a client verifies the digest
@@ -3827,7 +3830,7 @@ mod tests {
 
         assert_eq!(
             engine.targets["x86_64-pc-windows-gnu"].archive,
-            "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+            "update-engine-0.4.0-x86_64-pc-windows-msvc.zip",
             "a gnu client must be offered the archive that replaced its build"
         );
         // The whole target, not just the name: a client verifies the digest it
@@ -4017,14 +4020,14 @@ mod tests {
         write_fixture(
             &components
                 .path()
-                .join("clonk-rust-0.3.9-engine-x86_64-unknown-linux-gnu.zip"),
+                .join("update-engine-0.3.9-x86_64-unknown-linux-gnu.zip"),
             b"stale engine",
         );
 
         let error = scan_emitted_components(components.path(), "0.4.0")
             .expect_err("an archive from another release must fail the manifest");
         assert!(
-            error.to_string().contains("clonk-rust-0.3.9-engine"),
+            error.to_string().contains("update-engine-0.3.9"),
             "error names the stale archive: {error}"
         );
     }
@@ -4037,7 +4040,7 @@ mod tests {
         write_fixture(
             &components
                 .path()
-                .join("clonk-rust-0.4.0-engine-riscv64gc-unknown-linux-gnu.zip"),
+                .join("update-engine-0.4.0-riscv64gc-unknown-linux-gnu.zip"),
             b"unshipped engine",
         );
         let out = TempDir::new().expect("temporary output directory");

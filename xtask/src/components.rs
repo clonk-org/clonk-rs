@@ -258,6 +258,20 @@ pub struct EmittedComponent {
     pub size: u64,
 }
 
+/// The prefix every update component archive carries.
+///
+/// A GitHub release is a flat namespace — asset names may not contain a
+/// separator, so there are no folders — listed in case-insensitive name order.
+/// The prefix is therefore the only device that groups the four archives only
+/// the in-app updater ever fetches into one block *below* the three installers
+/// a person actually downloads (`clonk-rust-…`) and the manifest.
+///
+/// Renaming these is safe for shipped clients precisely because they never
+/// guess a name: `clonk_update_net::urls` builds every component URL from the
+/// `archive` field of the manifest it just fetched. `manifest.json` itself is
+/// the one name that must never move, because that one *is* hardcoded.
+pub const UPDATE_ARCHIVE_PREFIX: &str = "update-";
+
 /// The filename prefix an `engine` archive of `version` carries.
 ///
 /// Engine is the only platform-dependent component, so no [`ComponentId`] is
@@ -266,7 +280,7 @@ pub struct EmittedComponent {
 /// nothing but the version in hand. Construction and parsing therefore have to
 /// agree on this string forever, and sharing it is what stops them drifting.
 pub fn engine_archive_prefix(version: &str) -> String {
-    format!("clonk-rust-{version}-engine-")
+    format!("{UPDATE_ARCHIVE_PREFIX}engine-{version}-")
 }
 
 /// The filename prefix a platform-independent component's archives carry.
@@ -274,7 +288,7 @@ pub fn engine_archive_prefix(version: &str) -> String {
 /// The digest follows it, so this is also what identifies the component once
 /// the archives arrive in the publishing job as a flat directory.
 pub fn shared_archive_prefix(component: ComponentId) -> String {
-    format!("{}-", component.name())
+    format!("{UPDATE_ARCHIVE_PREFIX}{}-", component.name())
 }
 
 /// The archive filename for a component.
@@ -606,8 +620,43 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        assert_eq!(name, format!("planet-{}.zip", &emitted.sha256[..32]));
+        assert_eq!(name, format!("update-planet-{}.zip", &emitted.sha256[..32]));
         assert!(emitted.path.exists(), "the digest-named archive exists");
+    }
+
+    #[test]
+    fn every_update_component_archive_carries_the_grouping_prefix() {
+        // A GitHub release is one flat namespace sorted case-insensitively;
+        // there are no folders. The shared prefix is the only thing keeping the
+        // updater's archives in a single block *below* the three installers a
+        // person actually downloads, which all begin `clonk-rust-`, and below
+        // `manifest.json`.
+        let staged = staged_layout();
+        let out = TempDir::new().expect("output");
+        for component in BuiltComponent::ALL {
+            let emitted = emit(
+                component,
+                staged.path(),
+                out.path(),
+                "x86_64-unknown-linux-gnu",
+            );
+            let name = emitted
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_lowercase();
+            assert!(
+                name.starts_with(UPDATE_ARCHIVE_PREFIX),
+                "{name} must carry the `{UPDATE_ARCHIVE_PREFIX}` prefix"
+            );
+            for sorts_above in ["clonk-rust-", "manifest.json"] {
+                assert!(
+                    name.as_str() > sorts_above,
+                    "{name} must sort below {sorts_above}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -657,7 +706,7 @@ mod tests {
 
         assert_eq!(
             linux.path.file_name().unwrap().to_string_lossy(),
-            "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"
+            "update-engine-0.4.0-x86_64-unknown-linux-gnu.zip"
         );
         assert_ne!(
             linux.path, windows.path,

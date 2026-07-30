@@ -162,13 +162,13 @@ mod tests {
           "name": "engine",
           "targets": {
             "aarch64-apple-darwin": {
-              "archive": "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip",
+              "archive": "update-engine-0.4.0-aarch64-apple-darwin.zip",
               "sha256": "cc00112233445566778899aabbccddeeff00112233445566778899aabbccddee",
               "size": 18000000,
               "install": ""
             },
             "x86_64-unknown-linux-gnu": {
-              "archive": "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+              "archive": "update-engine-0.4.0-x86_64-unknown-linux-gnu.zip",
               "sha256": "aa00112233445566778899aabbccddeeff00112233445566778899aabbccddee",
               "size": 24000000,
               "install": ""
@@ -226,7 +226,7 @@ mod tests {
             .expect("macos target");
         assert_eq!(
             linux.archive,
-            "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"
+            "update-engine-0.4.0-x86_64-unknown-linux-gnu.zip"
         );
         assert_ne!(linux.sha256, macos.sha256);
         // Its archive already carries `bin/…` or `Contents/…`.
