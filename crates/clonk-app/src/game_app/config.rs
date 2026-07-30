@@ -1036,8 +1036,10 @@ impl GameApp {
                     self.open_options_control_capture(target)?;
                 }
                 OptionsDlgAction::ResetControlBindings(device) => {
+                    // `OnResetKeysBtn` is silent (C4StartupOptionsDlg.cpp:416-427);
+                    // the button's own `ArrowHit`/`Click` pair is the whole
+                    // sequence, and arrives as its own action.
                     self.reset_options_control_bindings(device);
-                    self.play_ui_sound("Command");
                 }
                 OptionsDlgAction::GamepadDeviceSelected(set) => {
                     let valid_selection = self.mode == AppMode::Menu
