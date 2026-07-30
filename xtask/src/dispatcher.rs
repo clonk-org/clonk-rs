@@ -6,8 +6,10 @@ use anyhow::{bail, Context, Result};
 
 fn main() -> Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
-    if args.first().is_some_and(|arg| arg == "dev-check") {
-        return xtask::dev_check::command(&args[1..]);
+    match args.first().map(String::as_str) {
+        Some("dev-check") => return xtask::dev_check::command(&args[1..]),
+        Some("parity") => return xtask::parity::command(&args[1..]),
+        _ => {}
     }
 
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
