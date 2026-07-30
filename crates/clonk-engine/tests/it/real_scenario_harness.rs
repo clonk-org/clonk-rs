@@ -3463,6 +3463,10 @@ fn drachenfels_real_scenario_subcases_batch_1() {
             "scroll_transfer_zone_callbacks_persist_cpp_names",
             dragon_rock_scroll_transfer_zone_callbacks_persist_cpp_names,
         ),
+        (
+            "setdir_folds_the_flipdir_mirror_into_the_draw_transform",
+            dragon_rock_setdir_folds_the_flipdir_mirror_into_the_draw_transform,
+        ),
     ]);
 }
 
@@ -3825,6 +3829,63 @@ fn dragon_rock_objects_keep_their_multidirectional_action_rows(
         assert_eq!(graphics.directions, directions);
         assert_eq!(graphics.flip_dir, flip_dir);
     }
+}
+
+fn dragon_rock_setdir_folds_the_flipdir_mirror_into_the_draw_transform(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let dragon = ObjectId::new(202);
+
+    // Objects.txt ships DRGN #202 as Action=Sleep / Dir=1 /
+    // DrawTransform=-1,0,0,0,1,0,-1, and Sleep declares FlipDir=1
+    // (Dragon.c4d/ActMap.txt). C4DrawTransform folds the mirror into mat[0]
+    // (C4Facet.h:79-88), and the post-load sweep re-runs UpdateFlipDir
+    // (C4GameObjects.cpp:670-673): Dir 1 >= FlipDir 1 keeps SetFlipDir(-1),
+    // so the saved mirror survives the load unchanged.
+    let loaded = engine.object_snapshot(dragon).expect("dragon loads");
+    assert_eq!(loaded.direction.to_script_value(), 1);
+    let transform = loaded
+        .draw_transform
+        .expect("the saved FlipDir mirror survives loading");
+    assert_eq!(transform.flip_dir(), -1);
+    assert_eq!(transform.matrix()[0], -1.0);
+
+    // ReverseDir (Dragon.c4d/Script.c) is exactly `SetDir(1-GetDir())`.
+    // C4Object::SetDir runs UpdateFlipDir because Sleep's FlipDir is
+    // non-zero (C4Object.cpp:4276-4279); Dir 0 < FlipDir 1 then takes the
+    // "no flipdir necessary" branch, so SetFlipDir(1) unfolds mat[0] and the
+    // now-identity transform is deleted (C4Object.cpp:431-442).
+    let index = engine.find_object_index(dragon).expect("dragon index");
+    engine
+        .call_object_function(index, "ReverseDir", Vec::new())
+        .expect("ReverseDir is callable");
+
+    let turned = engine.object_snapshot(dragon).expect("dragon stays live");
+    assert_eq!(turned.direction.to_script_value(), 0);
+    assert_eq!(
+        turned.draw_transform, None,
+        "UpdateFlipDir resets FlipDir to +1, which leaves an identity matrix, \
+         and C++ deletes it (C4Object.cpp:436-442)"
+    );
+
+    // Turning back re-enters the mirrored range with no transform to fold
+    // into, which is C++'s `pDrawTransform = new C4DrawTransform(-1)`: FlipDir
+    // -1 applied through C4DrawTransform::Set leaves mat[0] = -1
+    // (C4Object.cpp:425-427, C4Facet.h:63-70,79-81). The renderer consumes
+    // that matrix directly, so the mirror has to survive here or a
+    // right-facing dragon silently draws unmirrored.
+    engine
+        .call_object_function(index, "ReverseDir", Vec::new())
+        .expect("ReverseDir is callable");
+
+    let returned = engine.object_snapshot(dragon).expect("dragon stays live");
+    assert_eq!(returned.direction.to_script_value(), 1);
+    let transform = returned
+        .draw_transform
+        .expect("re-entering the mirrored range re-creates the draw transform");
+    assert_eq!(transform.flip_dir(), -1);
+    assert_eq!(transform.matrix()[0], -1.0);
 }
 
 fn dragon_rock_objects_restore_serialized_c4id_named_locals(prepared: &PreparedInstalledScenario) {

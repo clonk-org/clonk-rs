@@ -6453,9 +6453,9 @@ impl GraphicsSystem {
         // (src/C4Object.cpp:404-430,2639-2668).
         let action_graphics =
             Self::live_action_graphics(&definition_sprite.actions, &object.action);
-        let (draw_dir, flipped) = action_graphics
+        let draw_dir = action_graphics
             .map(|graphics| Self::resolve_draw_direction(graphics, object.direction))
-            .unwrap_or((object.direction.to_script_value(), false));
+            .unwrap_or(object.direction.to_script_value());
 
         let mut source_x = top_face.x;
         let mut source_y = top_face.y;
@@ -6512,7 +6512,6 @@ impl GraphicsSystem {
                 cox as f32 + shape.width as f32 / 2.0,
                 coy as f32 + shape.height as f32 / 2.0,
             ),
-            flipped,
             Some(object_color_by_owner_tint(object)),
             self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
             0.0,
@@ -7079,7 +7078,6 @@ impl GraphicsSystem {
                 inst_shape,
                 0,
                 0,
-                false,
                 owner_color,
                 zoom,
                 rotation_degrees,
@@ -7089,7 +7087,7 @@ impl GraphicsSystem {
             );
             return;
         };
-        let (draw_dir, flipped) = Self::resolve_draw_direction(graphics, object.direction);
+        let draw_dir = Self::resolve_draw_direction(graphics, object.direction);
         // FacetBase face underneath, phase (0, DrawDir)
         // (src/C4Object.cpp:2397-2399).
         if graphics.facet_base {
@@ -7101,7 +7099,6 @@ impl GraphicsSystem {
                 inst_shape,
                 0,
                 draw_dir,
-                flipped,
                 owner_color,
                 zoom,
                 rotation_degrees,
@@ -7155,7 +7152,6 @@ impl GraphicsSystem {
                     cox + inst_shape.width as f32 / 2.0,
                     coy + inst_shape.height as f32 / 2.0,
                 ),
-                false,
                 owner_color,
                 zoom,
                 0.0,
@@ -7197,7 +7193,6 @@ impl GraphicsSystem {
                 cox + inst_shape.width as f32 / 2.0,
                 coy + inst_shape.height as f32 / 2.0,
             ),
-            flipped,
             owner_color,
             zoom,
             rotation_degrees,
@@ -7222,7 +7217,6 @@ impl GraphicsSystem {
         inst_shape: DefinitionRect,
         phase_x: i32,
         phase_y: i32,
-        flipped: bool,
         owner_color: Option<u32>,
         zoom: f32,
         rotation_degrees: f32,
@@ -7262,7 +7256,6 @@ impl GraphicsSystem {
                 cox as f32 + inst_shape.width as f32 / 2.0,
                 coy as f32 + inst_shape.height as f32 / 2.0,
             ),
-            flipped,
             owner_color,
             zoom,
             rotation_degrees,
@@ -7274,12 +7267,13 @@ impl GraphicsSystem {
 
     /// Blit one object face: clamps the source to the sheet (ActMap
     /// facets may nominally exceed it — Tree1 Still is 73x73 on a
-    /// 71px-tall Graphics.png; GL clamps), mirrors flipped faces around
-    /// the shape center (C4DrawTransform flipdir, C4Object::UpdateFlipDir
-    /// src/C4Object.cpp:415-418, applied at src/C4Object.cpp:2458),
-    /// applies the script draw transform at the shape center
-    /// (SetTransformAt, src/C4Object.cpp:2431) and rotates around it
-    /// (src/C4Object.cpp:483-488, 2428-2435).
+    /// 71px-tall Graphics.png; GL clamps), applies the draw transform at the
+    /// shape center (SetTransformAt, src/C4Object.cpp:2431) and rotates
+    /// around it (src/C4Object.cpp:483-488, 2428-2435). The transform already
+    /// carries the FlipDir mirror folded into mat[0] by
+    /// C4Object::UpdateFlipDir (src/C4Object.cpp:415-428) — C4Object::Draw
+    /// hands `pDrawTransform` straight to DrawT (src/C4Object.cpp:2506-2515)
+    /// and mirrors nothing itself — so no facing is re-derived here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn blit_face(
         &mut self,
@@ -7287,7 +7281,6 @@ impl GraphicsSystem {
         source: SourceRect,
         dest: (f32, f32, f32, f32),
         shape_center: (f32, f32),
-        flipped: bool,
         owner_color: Option<u32>,
         zoom: f32,
         rotation_degrees: f32,
@@ -7307,7 +7300,7 @@ impl GraphicsSystem {
         if !source.is_valid() {
             return;
         }
-        let transformed = transform.is_some() || flipped || rotation_degrees.abs() > f32::EPSILON;
+        let transformed = transform.is_some() || rotation_degrees.abs() > f32::EPSILON;
         let (mut source, sampling) =
             self.runtime_sprite_blit(source, (dest_w * zoom, dest_h * zoom), transformed);
         let image_w = sprite.image.width() as f32;
@@ -7348,15 +7341,9 @@ impl GraphicsSystem {
                 fog.as_ref(),
             );
         } else {
-            let mut matrix = transform
+            let matrix = transform
                 .map(|transform| transform.matrix())
                 .unwrap_or(GraphicsTransform::identity().mat);
-            // C4DrawTransform::SetFlipDir changes only matrix a. Direction
-            // mirroring must therefore happen before SetTransformAt, not as a
-            // second texture flip after the script matrix.
-            if flipped {
-                matrix[0] = -matrix[0];
-            }
             let mut matrix = draw_transform_at(matrix, shape_center.0, shape_center.1);
             if rotation_degrees.abs() > f32::EPSILON {
                 matrix = matrix.multiply(&GraphicsTransform::set_rotate(
@@ -7440,7 +7427,8 @@ impl GraphicsSystem {
             phase.rem_euclid(frame_count_i32)
         };
 
-        let (draw_dir, flipped) = Self::resolve_draw_direction(graphics, direction);
+        let draw_dir = Self::resolve_draw_direction(graphics, direction);
+        let flipped = Self::resolve_overlay_action_flip(graphics, direction);
 
         let source_rect = SourceRect::new(
             facet.x + facet.width.saturating_mul(frame_index),
@@ -8208,23 +8196,38 @@ impl GraphicsSystem {
         }
     }
 
+    /// `Action.DrawDir`, the facet row C4Object::Draw passes as iPhaseY
+    /// (C4Object.cpp:2506,2514). UpdateFlipDir derives it as
+    /// `FlipDir - 1 - (Dir - FlipDir)` for the mirrored half
+    /// (C4Object.cpp:421). The mirror itself is NOT applied here: C++ keeps it
+    /// in `pDrawTransform` and `C4Object::Draw` passes that matrix through
+    /// untouched, so re-deriving it at blit time would apply it twice.
     pub(crate) fn resolve_draw_direction(
         graphics: &DefinitionActionGraphics,
         direction: Direction,
-    ) -> (i32, bool) {
+    ) -> i32 {
         let direction = direction.to_script_value();
-        if let Some(flip_dir) = graphics.flip_dir {
-            if flip_dir != 0 && direction >= flip_dir {
-                return (
-                    flip_dir
-                        .saturating_mul(2)
-                        .saturating_sub(1)
-                        .saturating_sub(direction),
-                    true,
-                );
-            }
+        match graphics.flip_dir {
+            Some(flip_dir) if flip_dir != 0 && direction >= flip_dir => flip_dir
+                .saturating_mul(2)
+                .saturating_sub(1)
+                .saturating_sub(direction),
+            _ => direction,
         }
-        (direction, false)
+    }
+
+    /// Whether a MODE_Action/MODE_Base graphics overlay mirrors with the host
+    /// object's facing. C++ does not: C4GraphicsOverlay::Draw blits with
+    /// `iPhaseY = 0` and the overlay's own transform, never the host's
+    /// `pDrawTransform` (C4DefGraphics.cpp:825). This preserves the port's
+    /// pre-existing overlay behaviour unchanged; see PORT_STATUS.md.
+    pub(crate) fn resolve_overlay_action_flip(
+        graphics: &DefinitionActionGraphics,
+        direction: Direction,
+    ) -> bool {
+        graphics
+            .flip_dir
+            .is_some_and(|flip_dir| flip_dir != 0 && direction.to_script_value() >= flip_dir)
     }
 
     fn source_within_image(image: &ImageData, rect: &SourceRect) -> bool {

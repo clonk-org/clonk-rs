@@ -793,6 +793,21 @@ impl DrawTransform {
         self.flip_dir
     }
 
+    /// The transform half of `C4Object::UpdateFlipDir` (C4Object.cpp:410-442):
+    /// a direction at or above the action's FlipDir folds the mirror into
+    /// mat[0] — creating `new C4DrawTransform(-1)` when there is no transform
+    /// yet — and anything else unfolds it and drops a transform that has
+    /// become the identity. `is_identity` requires FlipDir == 1, so a mirror
+    /// set by script survives (C4Facet.h:93-101).
+    pub fn updated_flip_dir(current: Option<Self>, direction: i32, flip_dir: i32) -> Option<Self> {
+        if flip_dir != 0 && direction >= flip_dir {
+            return Some(current.unwrap_or_else(Self::identity).with_flip_dir(-1));
+        }
+        current
+            .map(|transform| transform.with_flip_dir(1))
+            .filter(|transform| !transform.is_identity())
+    }
+
     /// C4DrawTransform::SetFlipDir: changing the logical flip also toggles
     /// the x-axis matrix component already consumed by the renderer.
     pub fn with_flip_dir(mut self, flip_dir: i32) -> Self {

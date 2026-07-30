@@ -1191,6 +1191,19 @@ impl ActionLibrary {
             .unwrap_or(1)
     }
 
+    /// `C4ActionDef::FlipDir` for the entry SetDir acts on, defaulting to the
+    /// C++ zero that never mirrors. Idle objects answer zero because
+    /// `UpdateFlipDir` only consults the ActMap above `ActIdle`
+    /// (C4Object.cpp:412-415).
+    pub(crate) fn flip_dir_for_entry(&self, action: &str, physical_index: Option<u32>) -> i32 {
+        if self.is_idle_entry(action, physical_index) {
+            return 0;
+        }
+        self.spec_for_entry(action, physical_index)
+            .and_then(|spec| spec.flip_dir)
+            .unwrap_or(0)
+    }
+
     pub fn turn_action_for(&self, action: &str) -> Option<&str> {
         self.specs
             .get(action)

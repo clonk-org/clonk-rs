@@ -2442,7 +2442,13 @@ impl Engine {
                 FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
         if applied {
+            let previous_flip_dir = object.state.action_flip_dir(&library);
             object.record_action_event(previous, ActionTransitionKind::Forced);
+            // SetAction's FlipDir refresh, guarded on the value changing and
+            // ordered before SetOCF (C4Object.cpp:4182-4192).
+            if previous_flip_dir != self.object_action_flip_dir(idx) {
+                self.update_object_flip_dir(idx);
+            }
             // SetAction calls SetOCF before StartCall/AbortCall
             // (C4Object.cpp:4141,4173).
             self.refresh_object_ocf(idx);
@@ -2506,11 +2512,14 @@ impl Engine {
                     }
                     // Tumble also turns the object (SetDir, C4ObjectCom.cpp:77)
                     if action == "Tumble" {
-                        object.state.direction = if txdir < C4Fixed::ZERO {
+                        let direction = if txdir < C4Fixed::ZERO {
                             Direction::Right
                         } else {
                             Direction::Left
                         };
+                        object
+                            .state
+                            .write_direction(direction, object.state.action_flip_dir(&library));
                     } else {
                         // ObjectActionJump mobilizes (C4ObjectCom.cpp:56);
                         // ObjectActionTumble does NOT (:74-79 — its
@@ -3167,6 +3176,15 @@ impl Engine {
         }
         self.rebuild_sectors();
         self.fix_exec_list_order();
+        // C4GameObjects::Load's misc-updates loop runs after FixObjectOrder
+        // and calls UpdateFlipDir once per loaded object — "for old
+        // objects.txt with no flipdir defined" (C4GameObjects.cpp:665-674).
+        // Runtime CreateObject deliberately never gets this pass.
+        for index in 0..self.objects.len() {
+            if self.objects[index].state.status.is_active() {
+                self.update_object_flip_dir(index);
+            }
+        }
     }
 
     /// Execute the body of `C4ControlSynchronize` in C++ order: synchronize
