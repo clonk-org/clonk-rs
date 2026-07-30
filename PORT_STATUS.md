@@ -650,6 +650,29 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   window host M10-P4-L081), and wiring the engine's live function tables into
   `completion_functions`.
 
+- **The watcher itself landed.** `clonk-platform::file_monitor::DirectoryMonitor`
+  is the reference backend's behaviour, not a richer one. `C4FileMonitor`'s
+  macOS backend is FSEvents with **latency 1.0 s and flags 0**
+  (`C4FileMonitor.cpp:287`) — flags 0 is `kFSEventStreamCreateFlagNone`, *not*
+  `kFileEvents`, so events are **directory-granular**: the path handed to the
+  callback is always a directory, never the file that changed. Linux inotify is
+  the same, pushing `watchDescriptors[event->wd]` and ignoring `event->name`
+  (`:80-126`); only Windows reports a child file path. A one-second poll
+  therefore reproduces it exactly, and no file-watching dependency was added —
+  which also keeps `clonk-engine`'s dependency mirroring in
+  `clonk-engine-unit-tests` untouched.
+  Two behaviours it keeps deliberately: **a directory registered after the
+  monitor starts is silently dropped** (`if (!started) paths.emplace_back(...)`,
+  `:299-305`), which is safe only because the lifecycle is create in
+  `InitGame`, register while definitions load, start in `InitGameFinal`
+  (`C4Game.cpp:2413-2424,2738,4445`); and **dropped events are not recovered** —
+  the callback skips the `UserDropped|KernelDropped` flags and does nothing
+  else (`:256-273`), so adding a rescan would be stricter than C++. Pinned by
+  `file_monitor_reports_directories_and_refuses_late_registration`.
+  **Still open:** its app-thread delivery and registration. Nothing calls
+  `add_directory` from definition loading yet, and no poll is wired into the
+  event loop, so the monitor watches nothing in a running game.
+
 - **File-monitor arming and the external reload trigger landed; the watcher is
   open.** `clonk-engine::developer_file_monitor` ports the two gates.
   A monitor starts only when `Developer.AutoFileReload` is set, the app is
