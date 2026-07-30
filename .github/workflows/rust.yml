@@ -11,6 +11,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Required checks must report on the merge group, or a queued pull request
+  # waits forever for a status that never runs.
+  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -188,6 +191,12 @@ jobs:
 
   coverage:
     name: Rust code coverage
+    # Queue-time, not pull-request time. At ~150 commits a day a 21-minute job
+    # per open pull request saturates the 20 concurrent jobs a public
+    # repository gets, and the merge queue validates a whole batch at once.
+    # Skipped jobs report as skipped, which satisfies the required check on the
+    # pull request; the merge group then runs it for real.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -325,6 +334,10 @@ jobs:
 
   full-parity:
     name: Full Rust parity gate
+    # Queue-time, not pull-request time: see `coverage`. The determinism
+    # guarantee this gate exists for is a property of what actually lands on
+    # main, which is exactly what the merge group is.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # Was 60, which a cold-cache run exceeded: the first run after the gate was
     # re-enabled was killed at 60m31s during `Run workspace tests`. The
