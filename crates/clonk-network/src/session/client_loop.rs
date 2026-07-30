@@ -1692,9 +1692,18 @@ pub(crate) async fn run_client_loop_with_routes(
                             // its own ticks and, through lockstep, everybody
                             // else's. Narrow the window now that there is
                             // control to protect.
+                            // The backend's catalog is the one that schedules
+                            // whenever there is a backend, so narrowing only the
+                            // bare fallback would leave the lobby window in
+                            // force for the entire runtime join.
                             resource_state.catalog.set_max_loads_per_peer(
                                 crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME,
                             );
+                            if let Some(backend) = resource_state.backend.as_mut() {
+                                backend.set_max_loads_per_peer(
+                                    crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME,
+                                );
+                            }
                             let current_tick = Tick::try_from(status.target_tick).unwrap_or_else(
                                 |_| resource_state.control.coordinator.current_tick(),
                             );
