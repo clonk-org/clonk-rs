@@ -959,14 +959,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   lockstep. The offset is the delta from the previous pointer message, and a
   motion that moved nothing emits nothing: the zero-offset re-issue is
   `Execute`'s per-tick path (`edit_tick_move`), not this one.
-  **Still open:** `PutContents`/`EMMO_Enter` and the per-tick zero-offset
-  re-issue. `drop_target` and `edit_tick_move` are ported and tested but
-  uncalled, so a Ctrl-drag onto a container does not put the selection into it,
-  and a stationary held selection produces no control traffic where C++ emits
-  one every tick.
+  **The edit cursor's input side is complete.** `UpdateDropTarget` recomputes
+  on every motion, before the drag arms decide anything
+  (`C4EditCursor.cpp:653-670`), and the release emits `PutContents`'
+  `EMMO_Enter` after `FrameSelection`, both optional and in that order
+  (`:674-677`). `edit_tick_move`'s zero-offset re-issue is wired too, with one
+  port-specific guard: `C4Console::Execute` runs `EditCursor.Execute()` once
+  per application tick, while the port's event loop wakes far more often, so
+  the emit is keyed to the engine frame. Without that it would flood the
+  control queue — the kind of divergence that looks like a performance bug
+  rather than a parity one.
+  So every `developer_cursor` entry point now has a production caller:
+  `edit_press`, `edit_target`, `edit_move`, `edit_tick_move`, `edit_release`,
+  `drop_target` and `frame_selection`, plus `developer_selection`'s mutators
+  and `developer_overlay`'s mark. `EMMO_Move` and `EMMO_Enter` both reach the
+  control queue through the path `EMMO_Script` already used.
 
-- **Most of the edit-cursor interaction layer still has no production caller.**
-  Worth
+- **The edit-cursor interaction layer is wired (this entry is kept for the
+  history of how it read before).** Worth
   stating on its own, because every card above reads as "landed" and the
   editor still cannot edit. `grep` for the modules outside their own files
   returned one hit before the click path above landed. `edit_target`,

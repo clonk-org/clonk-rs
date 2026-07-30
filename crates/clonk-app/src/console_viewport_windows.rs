@@ -222,8 +222,8 @@ pub(crate) fn handle_console_viewport_event(
             };
             viewport.last_pointer = (position.x as i32, position.y as i32);
             let (identity, local) = (viewport.identity, viewport.last_pointer);
-            let shift = app.keyboard_modifiers.shift();
-            app.console_viewport_motion(identity, local, 1.0, shift);
+            let modifiers = app.keyboard_modifiers;
+            app.console_viewport_motion(identity, local, 1.0, modifiers.ctrl(), modifiers.shift());
         }
         Event::WindowEvent {
             event:

@@ -915,6 +915,7 @@ fn run() -> Result<()> {
                 if close_console_commands {
                     console_commands = None;
                 }
+                app.console_edit_cursor_tick();
                 app.drain_console_log_capture();
                 app.drain_game_log_capture();
                 if app.sync_developer_console_view() {
@@ -2008,6 +2009,8 @@ impl GameApp {
             developer_console_edit_mode: ConsoleEditMode::Play,
             developer_selection: Default::default(),
             console_viewport_projections: Default::default(),
+            edit_cursor_drop_target: None,
+            edit_cursor_tick_frame: None,
             edit_cursor_hold: false,
             edit_cursor_last_world: None,
             edit_cursor_drag_frame: None,

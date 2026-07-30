@@ -343,6 +343,14 @@ pub(crate) struct GameApp {
     /// send `MoveSelection` the *delta* C++ computes from the previous
     /// message's coordinates (`C4EditCursor.cpp:131-137`).
     pub(crate) edit_cursor_last_world: Option<(i32, i32)>,
+    /// `C4EditCursor::DropTarget` — the container a Ctrl-drag would put the
+    /// selection into, recomputed on every motion (`UpdateDropTarget`).
+    pub(crate) edit_cursor_drop_target: Option<clonk_engine::ObjectId>,
+    /// The engine frame the held-move control was last issued for.
+    /// `C4Console::Execute` runs `EditCursor.Execute()` once per
+    /// application tick; the port's event loop wakes far more often than
+    /// that, and emitting per wake would flood the control queue.
+    pub(crate) edit_cursor_tick_frame: Option<u64>,
     /// `C4EditCursor::Hold` — set by a press, cleared by the release.
     pub(crate) edit_cursor_hold: bool,
     /// `C4EditCursor::DragFrame` with its `(X, Y)` press anchor and live

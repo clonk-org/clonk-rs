@@ -2664,6 +2664,7 @@ impl GameApp {
         identity: u64,
         local: (i32, i32),
         scale: f32,
+        control: bool,
         shift: bool,
     ) {
         use clonk_engine::developer_cursor::edit_target;
@@ -2678,6 +2679,9 @@ impl GameApp {
             .pointer_projection(scale)
             .world_position(local.0, local.1);
 
+        // `UpdateDropTarget` runs on every move, before the drag arms decide
+        // anything (`C4EditCursor.cpp:653-670`).
+        self.edit_cursor_drop_target = self.console_drop_target(control, (x, y));
         if let Some((_, corner)) = self.edit_cursor_drag_frame.as_mut() {
             *corner = (x, y);
             return;
@@ -2718,6 +2722,7 @@ impl GameApp {
         use clonk_engine::developer_selection::SelectionWriter;
 
         let band = self.edit_cursor_drag_frame.take();
+        let drop_target = self.edit_cursor_drop_target.take();
         self.edit_cursor_hold = false;
         self.edit_cursor_last_world = None;
         if self.developer_console_edit_mode != ConsoleEditMode::Edit {
@@ -2725,7 +2730,7 @@ impl GameApp {
         }
 
         let mut result = None;
-        for action in edit_release(band.is_some(), None) {
+        for action in edit_release(band.is_some(), drop_target) {
             match action {
                 EditRelease::FrameSelection => {
                     let (anchor, corner) = band?;
@@ -2752,9 +2757,9 @@ impl GameApp {
                         .developer_selection
                         .select_frame(SelectionWriter::EditCursor, framed);
                 }
-                // `PutContents` needs the drop target, which arrives with the
-                // Ctrl-drag gesture that is not wired yet.
-                EditRelease::Enter { .. } => {}
+                // `PutContents` — `EMMoveObject(EMMO_Enter, 0, 0, DropTarget,
+                // &Selection)` (`C4EditCursor.cpp:674-677`).
+                EditRelease::Enter { target } => self.submit_editor_enter(target),
             }
         }
         result
@@ -2792,6 +2797,109 @@ impl GameApp {
             })
         {
             tracing::error!(%error, "failed to submit an editor move");
+        }
+    }
+
+    /// `C4EditCursor::UpdateDropTarget` (`C4EditCursor.cpp:653-670`).
+    fn console_drop_target(
+        &self,
+        control: bool,
+        cursor: (i32, i32),
+    ) -> Option<clonk_engine::ObjectId> {
+        use clonk_engine::developer_cursor::{drop_target, DropCandidate};
+
+        let selection = self.developer_selection.objects();
+        if !control || selection.is_empty() {
+            return None;
+        }
+        let shapes = clonk_engine::EditCursorHitTest::new(&self.snapshot);
+        // `Game.Objects` master order, the reverse of the draw order.
+        let candidates = self
+            .snapshot
+            .render_order
+            .iter()
+            .rev()
+            .filter_map(|id| {
+                let object = self.snapshot.object(*id)?;
+                let shape = shapes.shape_rect(*id)?;
+                Some(DropCandidate {
+                    id: *id,
+                    deleted: false,
+                    contained: object.container.is_some(),
+                    // `object_live_shape_rect` is already
+                    // `cobj->x + cobj->Shape.x`.
+                    shape_x: shape.x,
+                    shape_y: shape.y,
+                    shape_width: shape.width,
+                    shape_height: shape.height,
+                })
+            })
+            .collect::<Vec<_>>();
+        drop_target(control, selection, cursor, &candidates)
+    }
+
+    /// `C4EditCursor::PutContents` — `EMMoveObject(EMMO_Enter, 0, 0,
+    /// DropTarget, &Selection)`.
+    fn submit_editor_enter(&mut self, target: clonk_engine::ObjectId) {
+        let objects = self
+            .developer_selection
+            .objects()
+            .iter()
+            .map(|id| id.as_u64() as i32)
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_selection_script(clonk_engine::EmMoveObjectControlData {
+                action: clonk_engine::EMMO_ENTER,
+                target_object: target.as_u64() as i32,
+                objects,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor enter");
+        }
+    }
+
+    /// `C4EditCursor::Execute`'s Edit arm (`C4EditCursor.cpp:65-69`) — while
+    /// `Hold` is set it re-issues a **zero-offset** `EMMO_Move` every tick, so
+    /// a stationary held selection still produces control traffic.
+    pub(crate) fn console_edit_cursor_tick(&mut self) {
+        use clonk_engine::developer_cursor::{edit_tick_move, CursorMode};
+
+        let mode = match self.developer_console_edit_mode {
+            ConsoleEditMode::Play => CursorMode::Play,
+            ConsoleEditMode::Edit => CursorMode::Edit,
+            ConsoleEditMode::Draw => CursorMode::Draw,
+        };
+        if edit_tick_move(mode, self.edit_cursor_hold).is_none() {
+            self.edit_cursor_tick_frame = None;
+            return;
+        }
+        // Once per engine tick, not once per event-loop wake.
+        let frame = self.engine.frame();
+        if self.edit_cursor_tick_frame == Some(frame) {
+            return;
+        }
+        self.edit_cursor_tick_frame = Some(frame);
+        let objects = self
+            .developer_selection
+            .objects()
+            .iter()
+            .map(|id| id.as_u64() as i32)
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_selection_script(clonk_engine::EmMoveObjectControlData {
+                action: clonk_engine::EMMO_MOVE,
+                objects,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit the held editor move");
         }
     }
 

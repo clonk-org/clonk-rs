@@ -5047,14 +5047,14 @@
         // Offline the control is applied straight away, so the object itself
         // is the observable: it moves by the pointer delta.
         let before = app.engine.snapshot().object(id).expect("the object is live").position;
-        app.console_viewport_motion(identity, (local.0 + 7, local.1 - 3), 1.0, false);
+        app.console_viewport_motion(identity, (local.0 + 7, local.1 - 3), 1.0, false, false);
         let after = app.engine.snapshot().object(id).expect("the object is live").position;
         assert_ne!(before, after, "a held drag moves the selection");
 
         // A motion that does not move the pointer emits nothing: the
         // zero-offset re-issue is `Execute`'s per-tick path, not this one.
         let settled = app.engine.snapshot().object(id).expect("the object is live").position;
-        app.console_viewport_motion(identity, (local.0 + 7, local.1 - 3), 1.0, false);
+        app.console_viewport_motion(identity, (local.0 + 7, local.1 - 3), 1.0, false, false);
         assert_eq!(
             app.engine.snapshot().object(id).map(|object| object.position),
             Some(settled),
@@ -5129,11 +5129,25 @@
             Some((world_empty, world_empty))
         );
 
+        // `C4EditCursor::Execute` re-issues a zero-offset EMMO_Move every
+        // tick while Hold is set (C4EditCursor.cpp:65-69), so a stationary
+        // held selection still produces control traffic — but once per engine
+        // tick, not once per event-loop wake.
+        assert!(app.edit_cursor_hold);
+        app.console_edit_cursor_tick();
+        let ticked = app.edit_cursor_tick_frame;
+        assert!(ticked.is_some(), "a held selection ticks");
+        app.console_edit_cursor_tick();
+        assert_eq!(
+            app.edit_cursor_tick_frame, ticked,
+            "a second wake in the same tick emits nothing further"
+        );
+
         // A rubber band drawn over the object frames it on release.
         // C4EditCursor::LeftButtonUp runs FrameSelection() then clears Hold and
         // DragFrame regardless (C4EditCursor.cpp:287-341).
         let corner = (local.0 + 40, local.1 + 40);
-        app.console_viewport_motion(identity, corner, 1.0, false);
+        app.console_viewport_motion(identity, corner, 1.0, false, false);
         let (anchor, live) = app
             .edit_cursor_drag_frame
             .expect("the band is still armed while the button is down");
@@ -5148,7 +5162,7 @@
         assert_ne!(anchor, live, "the anchor stays at the press");
 
         // Drag the band back so it spans the object, then release.
-        app.console_viewport_motion(identity, (local.0 - 40, local.1 - 40), 1.0, false);
+        app.console_viewport_motion(identity, (local.0 - 40, local.1 - 40), 1.0, false, false);
         let framed = app
             .console_viewport_release()
             .expect("the frame changed the selection");
