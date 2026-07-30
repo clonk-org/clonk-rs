@@ -7,12 +7,19 @@ use crate::error::TransportError;
 use clonk_update::{ArchiveSource, Manifest, TargetArchive};
 
 /// The manifest endpoint: the only URL that may use the `latest` redirect.
+///
+/// The repository moved from `syb0rg` to the `clonk-org` organization, so
+/// every build already in the field asks GitHub for the old path and arrives
+/// here through an owner redirect. That redirect exists only while nothing
+/// occupies `syb0rg/clonk-rs`: creating anything there again would strand
+/// every shipped updater, with no version of this constant able to fix it.
 pub const DEFAULT_UPDATE_BASE_URL: &str =
-    "https://github.com/syb0rg/clonk-rs/releases/latest/download";
+    "https://github.com/clonk-org/clonk-rs/releases/latest/download";
 
 /// Release-tag download root. Component archives resolve under this, against
 /// the tag of the release that actually published them.
-pub const RELEASES_DOWNLOAD_BASE_URL: &str = "https://github.com/syb0rg/clonk-rs/releases/download";
+pub const RELEASES_DOWNLOAD_BASE_URL: &str =
+    "https://github.com/clonk-org/clonk-rs/releases/download";
 
 pub const MANIFEST_FILE_NAME: &str = "manifest.json";
 
@@ -138,7 +145,7 @@ mod tests {
     fn the_manifest_is_fetched_through_the_latest_release_redirect() {
         assert_eq!(
             default_manifest_url(),
-            "https://github.com/syb0rg/clonk-rs/releases/latest/download/manifest.json"
+            "https://github.com/clonk-org/clonk-rs/releases/latest/download/manifest.json"
         );
     }
 
@@ -149,7 +156,7 @@ mod tests {
         // archive lives in an older release and is unreachable that way.
         assert_eq!(
             component_archive_url("0.4.0", "content-0123456789abcdef.zip").expect("plain name"),
-            "https://github.com/syb0rg/clonk-rs/releases/download/v0.4.0/\
+            "https://github.com/clonk-org/clonk-rs/releases/download/v0.4.0/\
              content-0123456789abcdef.zip"
         );
     }
@@ -236,7 +243,7 @@ mod tests {
     fn a_version_that_already_carries_its_tag_prefix_is_not_doubled() {
         assert_eq!(
             component_archive_url("v0.4.0", "planet.zip").expect("plain name"),
-            "https://github.com/syb0rg/clonk-rs/releases/download/v0.4.0/planet.zip"
+            "https://github.com/clonk-org/clonk-rs/releases/download/v0.4.0/planet.zip"
         );
     }
 
@@ -285,7 +292,7 @@ mod tests {
 
         assert_eq!(
             archive_url_for(&manifest, target).expect("plain name"),
-            "https://github.com/syb0rg/clonk-rs/releases/download/v0.4.0/\
+            "https://github.com/clonk-org/clonk-rs/releases/download/v0.4.0/\
              clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"
         );
     }
