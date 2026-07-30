@@ -132,9 +132,9 @@ mod tests {
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
         use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_CHAR};
         use windows_sys::Win32::System::Console::{
-            GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            FreeConsole, GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+            STD_OUTPUT_HANDLE,
         };
-        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
         const STREAMS: [(u32, &str); 3] = [
             (STD_INPUT_HANDLE, "stdin"),
@@ -147,6 +147,11 @@ mod tests {
             // SAFETY: reads the three standard-handle slots inherited from the
             // parent test process.
             let saved = STREAMS.map(|(id, _)| unsafe { GetStdHandle(id) });
+            // The test harness is a console-subsystem binary and may inherit
+            // the runner's console, unlike the shipped GUI executable.
+            // SAFETY: the child owns only its association with the console;
+            // after this call it is unattached whether or not it had one.
+            unsafe { FreeConsole() };
             let attached = super::allocate_console();
             let observed = attached.as_ref().ok().map(|_| {
                 STREAMS.map(|(id, _)| {
@@ -188,14 +193,12 @@ mod tests {
             return;
         }
 
-        use std::os::windows::process::CommandExt;
         let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
             .args([
                 "windows_release_allocconsole_attaches_standard_streams",
                 "--nocapture",
             ])
             .env(CHILD_MARKER, "1")
-            .creation_flags(CREATE_NO_WINDOW)
             .status()
             .expect("launch console-less child");
         assert!(status.success(), "console-less child failed with {status}");
