@@ -4534,59 +4534,12 @@ impl GraphicsSystem {
             let liquid_slots = std::array::from_fn::<_, 128, _>(|index| {
                 (25..50).contains(&grid.density_of_byte(index as u8))
             });
-            // Per texmap slot: C4TexMapEntry's primary pattern plus the
-            // material's secondary pattern.
-            enum Slot<'a> {
-                Empty,
-                Patterns {
-                    material: &'a MaterialRenderInfo,
-                    texture: &'a MaterialTextureSurface,
-                    overlay: Option<&'a MaterialTextureSurface>,
-                },
-            }
-            let slots: Vec<Slot> = (0..128usize)
-                .map(|index| {
-                    let Some(material) = materials
-                        .get(index)
-                        .and_then(|name| name.as_deref())
-                        .and_then(|name| {
-                            material_render_info.get(&clonk_resources::material::c4_name_key(name))
-                        })
-                    else {
-                        return Slot::Empty;
-                    };
-                    let resolve_texture = |name: &str| {
-                        let name = if (25..50).contains(&material.density)
-                            && clonk_resources::material::c4_names_equal(name, "Smooth")
-                        {
-                            clonk_resources::material::c4_name_key("Liquid")
-                        } else {
-                            clonk_resources::material::c4_name_key(name)
-                        };
-                        material_textures.get(&name)
-                    };
-                    let Some(texture) = textures
-                        .get(index)
-                        .and_then(|name| name.as_deref())
-                        .and_then(resolve_texture)
-                    else {
-                        return Slot::Empty;
-                    };
-                    let overlay_name = material
-                        .texture_overlay
-                        .as_deref()
-                        .filter(|name| {
-                            material_textures
-                                .contains_key(&clonk_resources::material::c4_name_key(name))
-                        })
-                        .unwrap_or("Smooth");
-                    Slot::Patterns {
-                        material,
-                        texture,
-                        overlay: resolve_texture(overlay_name),
-                    }
-                })
-                .collect();
+            let slots = resolve_material_slots(
+                materials,
+                textures,
+                &material_render_info,
+                &material_textures,
+            );
             // C4Landscape::GetPix/GetPlacement are inline array lookups in
             // the native relight loop. Keep the same border rules local to
             // this hot composition pass instead of crossing the crate
@@ -4671,8 +4624,8 @@ impl GraphicsSystem {
                         }
                         let index = (byte & 0x7f) as usize;
                         match &slots[index] {
-                            Slot::Empty => {}
-                            Slot::Patterns {
+                            MaterialSlot::Empty => {}
+                            MaterialSlot::Patterns {
                                 material,
                                 texture,
                                 overlay,

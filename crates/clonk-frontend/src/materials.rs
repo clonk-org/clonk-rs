@@ -655,6 +655,74 @@ pub(crate) fn compose_material_gpu_slot(
 /// Lays every registered pattern out in one vertical strip. A strip needs no
 /// packing heuristic and keeps each rect's origin independent of its
 /// neighbours, which is all the per-slot modulo tiling requires.
+/// One texmap slot's composition inputs: `C4TexMapEntry`'s primary pattern
+/// plus the material's secondary pattern.
+pub(crate) enum MaterialSlot<'a> {
+    Empty,
+    Patterns {
+        material: &'a MaterialRenderInfo,
+        texture: &'a MaterialTextureSurface,
+        overlay: Option<&'a MaterialTextureSurface>,
+    },
+}
+
+/// Resolve all 128 texmap slots to their composition inputs.
+///
+/// Extracted from the retained CPU composer so the shader composer can build
+/// its slot table from exactly the same resolution — the liquid-`Smooth`
+/// substitution and the `Smooth` overlay fallback below are easy to restate
+/// slightly differently, and a divergence there would silently compose a
+/// different landscape on the two paths.
+pub(crate) fn resolve_material_slots<'a>(
+    materials: &[Option<String>],
+    textures: &[Option<String>],
+    material_render_info: &'a HashMap<String, MaterialRenderInfo>,
+    material_textures: &'a HashMap<String, MaterialTextureSurface>,
+) -> Vec<MaterialSlot<'a>> {
+    (0..128usize)
+        .map(|index| {
+            let Some(material) = materials
+                .get(index)
+                .and_then(|name| name.as_deref())
+                .and_then(|name| {
+                    material_render_info.get(&clonk_resources::material::c4_name_key(name))
+                })
+            else {
+                return MaterialSlot::Empty;
+            };
+            let resolve_texture = |name: &str| {
+                let name = if (25..50).contains(&material.density)
+                    && clonk_resources::material::c4_names_equal(name, "Smooth")
+                {
+                    clonk_resources::material::c4_name_key("Liquid")
+                } else {
+                    clonk_resources::material::c4_name_key(name)
+                };
+                material_textures.get(&name)
+            };
+            let Some(texture) = textures
+                .get(index)
+                .and_then(|name| name.as_deref())
+                .and_then(resolve_texture)
+            else {
+                return MaterialSlot::Empty;
+            };
+            let overlay_name = material
+                .texture_overlay
+                .as_deref()
+                .filter(|name| {
+                    material_textures.contains_key(&clonk_resources::material::c4_name_key(name))
+                })
+                .unwrap_or("Smooth");
+            MaterialSlot::Patterns {
+                material,
+                texture,
+                overlay: resolve_texture(overlay_name),
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn build_material_atlas(
     patterns: &[MaterialPatternRef<'_>],
 ) -> (u32, u32, Vec<u8>, Vec<MaterialAtlasRect>) {
