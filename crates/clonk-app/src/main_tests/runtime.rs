@@ -890,6 +890,50 @@
             b"[Graphics]\nRemaster=1\nSkyDither=0\n"
         ));
         assert!(configured_mipmaps(b"[Graphics]\nRemaster=0\nMipmaps=1\n"));
+
+        // ShaderLandscape joins the same set. It deliberately has no advanced
+        // settings row, so `Graphics.Remaster` keeps reaching it after a config
+        // repair writes every editor row back out.
+        assert!(!configured_shader_landscape(b""));
+        assert!(configured_shader_landscape(remastered));
+        assert!(!configured_shader_landscape(
+            b"[Graphics]\nRemaster=1\nShaderLandscape=0\n"
+        ));
+        assert!(configured_shader_landscape(
+            b"[Graphics]\nRemaster=0\nShaderLandscape=1\n"
+        ));
+    }
+
+    #[test]
+    fn landscape_detail_defaults_to_the_cpp_exact_level_and_clamps_hand_edits() {
+        // Detail 1 is byte-identical to the CPU composer, so an absent key must
+        // leave the composition C++-exact. Everything else is clamped HERE
+        // rather than only in the editor: a hand-edited config reaches this
+        // reader directly, and the composer rejects 0 outright.
+        assert_eq!(configured_landscape_detail(b""), 1);
+        assert_eq!(configured_landscape_detail(b"[Graphics]\nRemaster=1\n"), 1);
+        assert_eq!(
+            configured_landscape_detail(b"[Graphics]\nLandscapeDetail=3\n"),
+            3
+        );
+        for (written, clamped) in [("0", 1), ("-2", 1), ("9", 4), ("400", 4)] {
+            let config = format!("[Graphics]\nLandscapeDetail={written}\n");
+            assert_eq!(
+                configured_landscape_detail(config.as_bytes()),
+                clamped,
+                "LandscapeDetail={written} must clamp to {clamped}"
+            );
+        }
+        // The reader is the C++ strtol mirror, so hex and trailing junk parse
+        // the way StdCompilerINIRead::ReadNum does.
+        assert_eq!(
+            configured_landscape_detail(b"[Graphics]\nLandscapeDetail=0x2\n"),
+            2
+        );
+        assert_eq!(
+            configured_landscape_detail(b"[Graphics]\nLandscapeDetail=2junk\n"),
+            2
+        );
     }
 
     #[test]
