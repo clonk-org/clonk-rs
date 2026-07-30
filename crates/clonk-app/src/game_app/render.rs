@@ -2594,6 +2594,64 @@ impl GameApp {
         Ok(RetainedGpuFrame { layers })
     }
 
+    /// A left-button press inside a console viewport window.
+    ///
+    /// This is `C4EditCursor::LeftButtonDown`'s Edit arm reached from a real
+    /// window: `C4Viewport`'s handler converts the window-local pointer through
+    /// *that viewport's* `ViewX`/`ViewY` and scale (`C4Viewport.cpp:181`),
+    /// `Move` picks the target with `Game.FindObject(..., OCF_NotContained,
+    /// ..., Target)` (`C4EditCursor.cpp:150`), and the press then edits the
+    /// selection (`:201-229`).
+    ///
+    /// Returns the new selection when it actually changed, so a caller
+    /// forwards at most one notification per click and a no-op stays silent.
+    pub(crate) fn console_viewport_press(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+        scale: f32,
+        control: bool,
+        shift: bool,
+    ) -> Option<clonk_engine::developer_selection::SelectionSnapshot> {
+        use clonk_engine::developer_cursor::{edit_press, edit_target, SelectionEdit};
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        // Edit-mode only. Play routes to ordinary mouse control and Draw to the
+        // tools, both of which are their own paths
+        // (`developer_viewport::route_viewport_event`).
+        if self.developer_console_edit_mode != ConsoleEditMode::Edit {
+            return None;
+        }
+        let projection = *self.console_viewport_projections.get(&identity)?;
+        let (x, y) = projection
+            .pointer_projection(scale)
+            .world_position(local.0, local.1);
+
+        // One world view per gesture: `edit_target` calls the hit test
+        // repeatedly to walk a shift-click stack.
+        let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
+        let selection = self.developer_selection.objects().to_vec();
+        let target = edit_target(shift, &selection, |after| hit_test.object_at(x, y, after));
+
+        let press = edit_press(control, target, &selection);
+        self.edit_cursor_hold = press.hold;
+        match press.selection {
+            Some(SelectionEdit::Replace(object)) => self
+                .developer_selection
+                .replace(SelectionWriter::EditCursor, object),
+            Some(SelectionEdit::Remove(object)) | Some(SelectionEdit::Add(object)) => self
+                .developer_selection
+                .toggle(SelectionWriter::EditCursor, object),
+            Some(SelectionEdit::ClearAndDragFrame) => {
+                // `DragFrame = true; X2 = X; Y2 = Y` — the band is anchored at
+                // the press, in world coordinates.
+                self.edit_cursor_drag_frame = Some((x, y));
+                self.developer_selection.clear(SelectionWriter::EditCursor)
+            }
+            None => None,
+        }
+    }
+
     /// Draw one console viewport window's frame.
     ///
     /// This is `C4Viewport::Execute` (`C4Viewport.cpp:1126-1155`) for a
@@ -2623,9 +2681,13 @@ impl GameApp {
         } = self;
         let inputs =
             collect_viewport_inputs_from_physical_state(snapshot, physical_viewports).ok()?;
-        graphics
-            .render_detached_viewport(snapshot, &inputs, identity, width, height)
-            .map(|frame| frame.surface)
+        let frame =
+            graphics.render_detached_viewport(snapshot, &inputs, identity, width, height)?;
+        // The frame a window drew is what its pointer input must be converted
+        // through; nothing else records this viewport's own ViewX/ViewY.
+        self.console_viewport_projections
+            .insert(identity, frame.projection);
+        Some(frame.surface)
     }
 
     pub(crate) fn render_running(

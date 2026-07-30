@@ -5003,6 +5003,72 @@
         assert!(app.render_console_viewport(u64::MAX, 320, 200).is_none());
     }
 
+    // The editor's first end-to-end gesture: a window-local click reaches the
+    // selection. C4Viewport converts the pointer through that viewport's own
+    // ViewX/ViewY (C4Viewport.cpp:181), C4EditCursor::Move picks the target
+    // with Game.FindObject (C4EditCursor.cpp:150), and LeftButtonDown edits
+    // the selection (:201-229).
+    #[test]
+    fn console_viewport_click_selects_the_object_under_the_cursor() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        // Drawing is what publishes this window's own projection.
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        let projection = app.console_viewport_projections[&identity];
+
+        let subject = app.snapshot.objects.first().expect("a live object");
+        let (id, position) = (subject.id, subject.position);
+        let local = (
+            position.x - projection.target_x,
+            position.y - projection.target_y,
+        );
+
+        assert_eq!(
+            app.console_viewport_press(identity, local, 1.0, false, false)
+                .expect("the click changed the selection")
+                .objects,
+            vec![id],
+            "a plain click selects the object under the cursor"
+        );
+        assert!(app.edit_cursor_hold, "a press always holds");
+
+        // Clicking the same object again changes nothing, which is what keeps
+        // a selection draggable rather than collapsing it.
+        assert!(app
+            .console_viewport_press(identity, local, 1.0, false, false)
+            .is_none());
+
+        // A plain click on empty space clears and arms the rubber band, and
+        // the anchor is in world coordinates.
+        let empty = (local.0 + 100_000, local.1 + 100_000);
+        assert!(app
+            .console_viewport_press(identity, empty, 1.0, false, false)
+            .expect("clearing the selection is a change")
+            .objects
+            .is_empty());
+        assert_eq!(
+            app.edit_cursor_drag_frame,
+            Some((
+                projection.target_x + empty.0,
+                projection.target_y + empty.1
+            ))
+        );
+
+        // Play mode is ordinary mouse control, not the editor sink.
+        app.developer_console_edit_mode = ConsoleEditMode::Play;
+        assert!(app
+            .console_viewport_press(identity, local, 1.0, false, false)
+            .is_none());
+    }
+
     #[test]
     fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
         // FinishDerive returns on the main thread before its forwarded

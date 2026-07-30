@@ -209,6 +209,36 @@ pub(crate) fn handle_console_viewport_event(
             );
             windows.request_redraw(key);
         }
+        // `C4Viewport`'s pointer handlers convert the coordinates carried by
+        // each message through this viewport's own ViewX/ViewY and scale
+        // (`C4Viewport.cpp:181`). winit splits motion from button state, so
+        // the position is remembered between the two.
+        Event::WindowEvent {
+            event: WindowEvent::CursorMoved { position, .. },
+            ..
+        } => {
+            if let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) {
+                viewport.last_pointer = (position.x as i32, position.y as i32);
+            }
+        }
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Pressed,
+                    button: winit::event::MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
+            let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) else {
+                return;
+            };
+            let (identity, local) = (viewport.identity, viewport.last_pointer);
+            // `LeftButtonDown(fControl)` and `Move`'s Shift arm read the
+            // live modifier state (`C4EditCursor.cpp:143,206`).
+            let modifiers = app.keyboard_modifiers;
+            app.console_viewport_press(identity, local, 1.0, modifiers.ctrl(), modifiers.shift());
+        }
         Event::RedrawRequested(_) => {
             if let Some(host) = windows.host_mut(key) {
                 if let Err(error) = host.present(app) {

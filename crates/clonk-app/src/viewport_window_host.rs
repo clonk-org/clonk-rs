@@ -28,6 +28,11 @@ pub struct ViewportWindowHost {
     /// The logical view extent, `ceilf(drawable / scale)` (`C4Viewport.cpp:798`).
     buffer_width: u32,
     buffer_height: u32,
+    /// The last window-local pointer position. winit reports motion and
+    /// button state in separate events; `C4Viewport`'s handlers read the
+    /// coordinates carried by each message, so the port has to remember
+    /// them between the two.
+    pub(crate) last_pointer: (i32, i32),
     visible: bool,
 }
 
@@ -81,6 +86,7 @@ impl ViewportWindowHost {
             scale,
             buffer_width,
             buffer_height,
+            last_pointer: (0, 0),
             visible: true,
         }
     }
