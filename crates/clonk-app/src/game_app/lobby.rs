@@ -6391,9 +6391,10 @@ impl GameApp {
                     self.abort_network_lobby_countdown();
                 }
                 // Joined countdown, attention and log state flow in through
-                // network packets rather than controller input, and the
-                // joined Options sheet is a typed ClassicGameLobbyChild
-                // boundary, so routed input cannot produce these here.
+                // network packets rather than controller input, and every row
+                // the joined Options sheet projects is a read-only ComboBox
+                // that raises no selection (src/C4GameOptions.cpp:80,126,154,
+                // 186,211,234), so routed input cannot produce these here.
                 ClassicLobbyAction::OptionSelectionRequested { .. }
                 | ClassicLobbyAction::CountdownChanged(_)
                 | ClassicLobbyAction::NotifyUserIfInactive
