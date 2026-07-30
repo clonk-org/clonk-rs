@@ -425,6 +425,33 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **`C4PlayerList::Join`'s max-player rejection is not ported.**
+  C++ refuses a join outright when `GetCount() + 1 > Game.Parameters.MaxPlayers`,
+  logs `IDS_PRC_TOOMANYPLRS` and returns no `C4Player`
+  (`C4PlayerList.cpp:288-294`). The Rust execution chain
+  (`apply_join_player_control` -> `join_player_at_client_with_semantics` ->
+  `register_joining_player`) never consults `max_players`, so it is strictly
+  more permissive. This is reachable in shipped content, not theoretical:
+  HarpoonRace's `Script1` calls parameterless `SetMaxPlayer()`
+  (`content/EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s/Script.c:14-18`),
+  which both engines resolve to `MaxPlayers = 0`, closing later admission in
+  C++ only. Initial joins are unaffected — they are issued at the Go tick,
+  before `Initialize()` and long before the Tick10-gated `Script1` — so this
+  can only diverge on a **runtime** join into such a round, where C++ drops the
+  player and Rust seats them. Closing it means adding the count gate to the
+  synchronized join path, with an audit of the fixtures that currently join
+  past a scenario's declared `MaxPlayer`.
+
+- **`C4Player::Eliminate`'s early client deactivation is missing.**
+  When the control host eliminates a player belonging to a *non-host* client
+  and no unbeaten player is left at that client, C++ submits
+  `CID_ClientUpdate`/`CUT_Activate(false)` for it
+  (`C4Player.cpp:2075-2088`). `player.rs::eliminate` has no equivalent, so a
+  fully eliminated remote client keeps its activated slot. The branch is gated
+  on `AtClient > C4ClientIDHost`, so an eliminated host is unaffected either
+  way; the visible effect is confined to lobby/roster activation state and
+  control-tick participation of wiped-out clients.
+
 - **Property-panel composition landed; the surfaces open.**
   `clonk-engine::developer_property_text` ports `C4PropertyDlg::Update`'s body
   (`C4PropertyDlg.cpp:169-256`): the 0/1/many switch, the fixed section order
