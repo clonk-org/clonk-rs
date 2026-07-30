@@ -58,6 +58,51 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
+  # The queue squashes, so the pull request title becomes the commit subject on
+  # `main` verbatim, and it is the only subject git-cliff ever reads. With
+  # `filter_unconventional = true` in `cliff.toml` a title that does not parse
+  # is dropped in silence: no changelog entry, and no contribution to the
+  # release bump. `--fill` titles a multi-commit pull request from the branch
+  # slug, which is exactly that case, so this is a slip waiting to happen.
+  #
+  # Scopes are tolerated even though hand-written subjects take none: Renovate
+  # opens `chore(deps): ...` and `cliff.toml` groups that by name. Rejecting
+  # scopes here would block every dependency update.
+  #
+  # Deliberately its own job rather than a step on `formatting`, and it reports
+  # on the merge group too. There is nothing to check there — a merge group
+  # carries no pull request title — but a required check that never runs on the
+  # queue leaves an entry waiting forever, so this stays safe to promote into
+  # the required contexts.
+  pull-request-title:
+    name: Pull request title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the title is a Conventional Commit subject
+        if: github.event_name == 'pull_request'
+        # Through the environment, never interpolated into the script: a title
+        # is untrusted text and `${{ }}` would paste it into the shell.
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|style|test)(\([a-z0-9._/-]+\))?!?: .+'
+          if [[ ! "$TITLE" =~ $pattern ]]; then
+            echo "::error::Pull request title is not a Conventional Commit subject: ${TITLE}"
+            echo "The merge queue squashes, so this title becomes the commit subject" >&2
+            echo "on main verbatim. cliff.toml sets filter_unconventional = true, so a" >&2
+            echo "title that does not parse is dropped from the changelog and earns no" >&2
+            echo "version bump." >&2
+            echo "" >&2
+            echo "Retitle it, keeping the subject line only:" >&2
+            echo "  gh pr edit --repo clonk-org/clonk-rs --title 'fix: ...'" >&2
+            exit 1
+          fi
+          echo "Title is a Conventional Commit subject: ${TITLE}"
+
   focused-feedback:
     name: Focused developer feedback
     runs-on: ubuntu-latest
