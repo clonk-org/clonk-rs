@@ -8,6 +8,15 @@ const CLASSIC_DIALOG_TITLE: &str = "Evaluation";
 const CLASSIC_MIN_CAPTION_HEIGHT: i32 = 23;
 const CLASSIC_BUTTON_HEIGHT: i32 = 32;
 const CLASSIC_INDENT_X: i32 = 10;
+/// `C4SymbolSize`, the evaluation `TeamListItem` icon extent
+/// (src/C4PlayerInfoListBox.cpp:1020-1025).
+const CLASSIC_TEAM_HEADER_ICON: i32 = 35;
+/// `C4GUI_ScrollBarWdt` (src/C4Gui.h) — the column `ScrollWindow` reserves and
+/// the width of every `GUIScroll.png` facet cell.
+use crate::scrollbar::{
+    draw_classic_scrollbar, pin_offset as scrollbar_pin_offset_for,
+    SCROLLBAR_EXTENT as CLASSIC_SCROLLBAR_EXTENT,
+};
 const CLASSIC_INDENT_Y: i32 = 6;
 const CLASSIC_GOAL_SIZE: i32 = 64;
 const CLASSIC_GOAL_MARGIN: i32 = 4;
@@ -193,6 +202,97 @@ pub struct EvaluationPlayer {
     pub score_new: Option<i32>,
     pub custom_evaluation_strings: String,
     pub big_icon: Option<ImageData>,
+    /// `C4PlayerInfo::getLeagueScore()` — the league score the player carried
+    /// into this round. `None` is C++'s falsy zero.
+    pub league_score_old: Option<i32>,
+    /// `C4RoundResultsPlayer::GetLeagueScoreGain()`.
+    pub league_score_gain: Option<i32>,
+    /// `C4RoundResultsPlayer::GetLeagueScoreNew()`; `None` is
+    /// `!IsLeagueScoreNewValid()`.
+    pub league_score_new: Option<i32>,
+    /// `GetJoinedInfo()`'s lobby colour: the row's own colour when this *is* a
+    /// free savegame player, otherwise the colour of the savegame player it
+    /// took over, resolved through `Game.RestorePlayerInfos`
+    /// (src/C4PlayerInfoListBox.cpp:701-716). `None` means "not joined", which
+    /// suppresses the Crew overlay entirely.
+    pub joined_color_dw: Option<u32>,
+    /// One through nine, matching `Ico_Rank1..Ico_Rank9`. Resolved the way
+    /// `UpdateScoreLabel` does: the frozen result's
+    /// `GetLeagueRankSymbolNew()` when its league score is valid, otherwise
+    /// the live `C4PlayerInfo::getLeagueRankSymbol()`; zero hides the icon
+    /// (src/C4PlayerInfoListBox.cpp:439-456).
+    pub league_rank_symbol: Option<u8>,
+}
+
+/// Which inline icon `UpdateScoreLabel` prefixes the score with
+/// (src/C4PlayerInfoListBox.cpp:380-413).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvaluationScoreIcon {
+    League,
+    Settlement,
+}
+
+/// `C4PlayerInfoListBox::PlayerListItem::UpdateScoreLabel`'s evaluation branch
+/// (src/C4PlayerInfoListBox.cpp:376-418). League state wins over settlement
+/// state, and a settlement score is suppressed entirely once
+/// `C4RoundResults::SettlementScoreIsHidden()`.
+///
+/// `score_text` is the localized `IDS_TEXT_SCORE` word appended to every
+/// variant.
+pub fn evaluation_score_label(
+    player: &EvaluationPlayer,
+    score_text: &str,
+) -> Option<(EvaluationScoreIcon, String)> {
+    let league_old = player.league_score_old.unwrap_or(0);
+    if player.league_score_old.is_some() || player.league_score_new.is_some() {
+        let text = match (player.league_score_new, player.league_score_gain) {
+            (Some(new), gain) => {
+                let gain = gain.unwrap_or(0);
+                // The league server normally guarantees old + gain == new; a
+                // discrepancy means an admin intervened and is shown in red.
+                let discrepancy = new - (league_old + gain);
+                if discrepancy == 0 {
+                    format!("<c afafaf>{league_old} ({gain:+})</c> {new} {score_text}")
+                } else {
+                    format!(
+                        "<c afafaf>{league_old} ({gain:+})</c><c ff0000>({discrepancy:+})</c> {new} {score_text}"
+                    )
+                }
+            }
+            (None, _) => format!("<c afafaf>({league_old})</c> {score_text}"),
+        };
+        return Some((EvaluationScoreIcon::League, text));
+    }
+    // A hidden settlement score reaches this projection as `score_old < 0`.
+    if player.score_old < 0 {
+        return None;
+    }
+    let text = match player.score_new {
+        Some(new) => format!(
+            "<c afafaf>{} ({:+})</c> {new} {score_text}",
+            player.score_old,
+            new - player.score_old
+        ),
+        None => format!("<c afafaf>({})</c> {score_text}", player.score_old),
+    };
+    Some((EvaluationScoreIcon::Settlement, text))
+}
+
+/// One `C4PlayerInfoListBox::TeamListItem` header
+/// (src/C4PlayerInfoListBox.cpp:996-1035,1100-1115). During evaluation the
+/// icon is the team's `IconSpec` drawn in the team colour when one is
+/// declared, otherwise the generic `Ico_Team`, and the label takes the
+/// winning or losing text colour from `C4Team::HasWon()`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluationTeam {
+    pub id: i32,
+    pub name: String,
+    pub color_dw: u32,
+    /// The team's `IconSpec` image already resolved and colourized, mirroring
+    /// `DrawTextSpecImage(pIcon->GetMFacet(), IconSpec, GetColor())` at
+    /// construction time. `None` falls back to the generic `Ico_Team` facet.
+    pub icon: Option<ImageData>,
+    pub won: bool,
 }
 
 /// Frozen presentation model for C4GameOverDlg.
@@ -207,6 +307,11 @@ pub struct EvaluationViewModel {
     custom_evaluation_strings: String,
     separate_team_ids: Option<[i32; 2]>,
     team_order: Vec<i32>,
+    teams: Vec<EvaluationTeam>,
+    /// `Game.Parameters.isLeague()` — the only condition under which a
+    /// `PlayerListItem` gets a rank icon at all
+    /// (src/C4PlayerInfoListBox.cpp:94-95).
+    league: bool,
 }
 
 impl EvaluationViewModel {
@@ -217,6 +322,8 @@ impl EvaluationViewModel {
             custom_evaluation_strings: String::new(),
             separate_team_ids: None,
             team_order: Vec::new(),
+            teams: Vec::new(),
+            league: false,
         }
     }
 
@@ -233,6 +340,24 @@ impl EvaluationViewModel {
     pub fn with_team_order(mut self, team_order: impl IntoIterator<Item = i32>) -> Self {
         self.team_order = team_order.into_iter().collect();
         self
+    }
+
+    pub fn with_teams(mut self, teams: impl IntoIterator<Item = EvaluationTeam>) -> Self {
+        self.teams = teams.into_iter().collect();
+        self
+    }
+
+    pub fn team(&self, id: i32) -> Option<&EvaluationTeam> {
+        self.teams.iter().find(|team| team.id == id)
+    }
+
+    pub fn with_league(mut self, league: bool) -> Self {
+        self.league = league;
+        self
+    }
+
+    pub const fn is_league(&self) -> bool {
+        self.league
     }
 
     pub fn goals(&self) -> &[EvaluationGoal] {
@@ -301,9 +426,12 @@ pub struct GameOverClassicResources<'a> {
     gui_icons: Option<&'a ImageData>,
     player: Option<&'a ImageData>,
     score: Option<&'a ImageData>,
+    scroll: Option<&'a ImageData>,
+    crew: Option<&'a ImageData>,
 }
 
 impl<'a> GameOverClassicResources<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         skin: ClassicGuiSkin<'a>,
         fonts: &'a ClonkFontSet,
@@ -311,6 +439,8 @@ impl<'a> GameOverClassicResources<'a> {
         gui_icons: Option<&'a ImageData>,
         player: Option<&'a ImageData>,
         score: Option<&'a ImageData>,
+        scroll: Option<&'a ImageData>,
+        crew: Option<&'a ImageData>,
     ) -> Self {
         Self {
             skin,
@@ -319,6 +449,8 @@ impl<'a> GameOverClassicResources<'a> {
             gui_icons,
             player,
             score,
+            scroll,
+            crew,
         }
     }
 }
@@ -348,6 +480,10 @@ pub struct ClassicEvaluationPlayerLayout {
     pub score_anchor: (i32, i32),
     pub time_anchor: (i32, i32),
     pub custom_evaluation_anchor: Option<(i32, i32)>,
+    /// The league rank icon's own right-hand column during evaluation
+    /// (`caBounds.GetFromRight(caBounds.GetInnerHeight())`,
+    /// src/C4PlayerInfoListBox.cpp:199-206). Present only in a league game.
+    pub rank_icon: Option<IntRect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,6 +492,20 @@ pub struct ClassicEvaluationTextLayout {
     pub viewport: IntRect,
     pub content_height: i32,
     pub scrollable: bool,
+    /// `C4GUI::ScrollWindow`'s reserved `C4GUI_ScrollBarWdt` column. Present
+    /// only for the overflowing `TextWindow` variant, which is the only one
+    /// C++ gives a bar (src/C4GameOverDlg.cpp:196-206).
+    pub scrollbar: Option<IntRect>,
+}
+
+/// One `TeamListItem` row at the top of a team-filtered evaluation list box
+/// (src/C4PlayerInfoListBox.cpp:1536-1541).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassicEvaluationTeamHeaderLayout {
+    pub player_list_index: usize,
+    pub team_id: i32,
+    pub icon: IntRect,
+    pub name_anchor: (i32, i32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -365,6 +515,7 @@ pub struct ClassicEvaluationLayout {
     pub network_result: Option<IntRect>,
     pub custom_evaluation: Option<ClassicEvaluationTextLayout>,
     pub player_lists: Vec<IntRect>,
+    pub team_headers: Vec<ClassicEvaluationTeamHeaderLayout>,
     pub players: Vec<ClassicEvaluationPlayerLayout>,
 }
 
@@ -1363,6 +1514,12 @@ impl GameOverState {
                         viewport,
                         content_height: classic_multiline_label_height(&lines, text_font),
                         scrollable: true,
+                        scrollbar: Some(IntRect {
+                            x: area.x + area.w - CLASSIC_SCROLLBAR_EXTENT,
+                            y: area.y,
+                            w: CLASSIC_SCROLLBAR_EXTENT,
+                            h: area.h,
+                        }),
                     }
                 } else {
                     ClassicEvaluationTextLayout {
@@ -1370,6 +1527,7 @@ impl GameOverState {
                         viewport: area,
                         content_height: measured_height,
                         scrollable: false,
+                        scrollbar: None,
                     }
                 }
             });
@@ -1401,6 +1559,7 @@ impl GameOverState {
 
         let split = self.evaluation.separate_team_ids;
         let mut players = Vec::new();
+        let mut team_headers = Vec::new();
         for (player_list_index, player_list) in player_lists.iter().copied().enumerate() {
             let player_indices = if let Some(team_ids) = split {
                 self.evaluation
@@ -1427,6 +1586,28 @@ impl GameOverState {
                 (player_list.w - CLASSIC_PLAYER_ROW_LEFT_INSET - CLASSIC_PLAYER_ROW_RIGHT_INSET)
                     .max(0);
             let mut row_y = player_list.y + CLASSIC_PLAYER_ROW_TOP_INSET;
+            // A team-filtered evaluation list emits one TeamListItem before its
+            // players (src/C4PlayerInfoListBox.cpp:1536-1541). Its icon is a
+            // C4SymbolSize square and the label is centred against it
+            // (`:1014-1027`).
+            if let Some(team_ids) = split {
+                let icon = IntRect {
+                    x: player_list.x + CLASSIC_PLAYER_ROW_LEFT_INSET,
+                    y: row_y,
+                    w: CLASSIC_TEAM_HEADER_ICON,
+                    h: CLASSIC_TEAM_HEADER_ICON,
+                };
+                team_headers.push(ClassicEvaluationTeamHeaderLayout {
+                    player_list_index,
+                    team_id: team_ids[player_list_index],
+                    icon,
+                    name_anchor: (
+                        icon.x + icon.w + CLASSIC_PLAYER_LABEL_SPACING,
+                        icon.y + (icon.h - text_font.line_height) / 2,
+                    ),
+                });
+                row_y += CLASSIC_TEAM_HEADER_ICON + CLASSIC_PLAYER_LABEL_SPACING;
+            }
             for player_index in player_indices {
                 let player = self
                     .evaluation
@@ -1441,7 +1622,18 @@ impl GameOverState {
                     w: row_width,
                     h: row_height,
                 };
-                let right_anchor = row.x + row.w - CLASSIC_PLAYER_LABEL_SPACING;
+                // In a league game the rank icon claims a square column at
+                // the row's right edge, and the score label's right edge is
+                // measured against it instead of the row width
+                // (src/C4PlayerInfoListBox.cpp:199-206,352).
+                let rank_icon = self.evaluation.is_league().then(|| IntRect {
+                    x: row.x + row.w - row.h,
+                    y: row.y,
+                    w: row.h,
+                    h: row.h,
+                });
+                let right_anchor =
+                    rank_icon.map_or(row.x + row.w, |rank| rank.x) - CLASSIC_PLAYER_LABEL_SPACING;
                 let score_y = if split.is_some() {
                     row.y + row.h
                         - (text_font.line_height + 4) * (1 + i32::from(has_custom_evaluation))
@@ -1467,6 +1659,7 @@ impl GameOverState {
                         right_anchor,
                         row.y + text_font.line_height + if has_custom_evaluation { 0 } else { 4 },
                     ),
+                    rank_icon,
                     custom_evaluation_anchor: has_custom_evaluation.then_some((
                         right_anchor,
                         row.y + row.h - text_font.line_height - CLASSIC_PLAYER_LABEL_SPACING,
@@ -1482,6 +1675,7 @@ impl GameOverState {
             network_result,
             custom_evaluation,
             player_lists,
+            team_headers,
             players,
         }
     }
@@ -1903,6 +2097,55 @@ impl GameOverState {
                 Some(clip) => surface.set_clip(clip),
                 None => surface.clear_clip(),
             }
+            // The overflowing variant is a real C4GUI::TextWindow, whose
+            // ScrollWindow reserves and operates a ScrollBar
+            // (src/C4GameOverDlg.cpp:196-206).
+            if let (Some(bar), Some(scroll_facet)) = (text_layout.scrollbar, resources.scroll) {
+                draw_classic_scrollbar(
+                    surface,
+                    bar,
+                    scroll_facet,
+                    scrollbar_pin_offset(bar, scroll, maximum_scroll),
+                    maximum_scroll,
+                    gamma,
+                );
+            }
+        }
+
+        // TeamListItem headers precede their team's rows and take the winning
+        // or losing text colour from C4Team::HasWon()
+        // (src/C4PlayerInfoListBox.cpp:996-1035,1100-1115).
+        for header in &layout.team_headers {
+            let Some(team) = self.evaluation.team(header.team_id) else {
+                continue;
+            };
+            let team_color = Color::opaque(
+                ((team.color_dw >> 16) & 0xff) as u8,
+                ((team.color_dw >> 8) & 0xff) as u8,
+                (team.color_dw & 0xff) as u8,
+            );
+            // `DrawTextSpecImage` colours a declared IconSpec by the team
+            // colour; without one the generic Ico_Team facet is drawn as-is.
+            let fallback = resources
+                .player
+                .map(|image| clonk_frontend::hud::colorize_by_owner(image, team_color));
+            if let Some(icon) = team.icon.as_ref().or(fallback.as_ref()) {
+                draw_classic_image(surface, icon, header.icon, gamma);
+            }
+            draw_clonk_text(
+                surface,
+                &resources.fonts.text,
+                header.name_anchor.0,
+                header.name_anchor.1,
+                &team.name,
+                if team.won {
+                    Color::opaque(0xff, 0xdf, 0x00)
+                } else {
+                    Color::opaque(0xff, 0xff, 0xff)
+                },
+                TextAlign::Left,
+                gamma,
+            );
         }
 
         let split_player_lists = layout.player_lists.len() == 2;
@@ -1935,6 +2178,15 @@ impl GameOverState {
                 .map(|image| clonk_frontend::hud::colorize_by_owner(image, owner_color));
             if let Some(icon) = player.big_icon.as_ref().or(fallback_icon.as_ref()) {
                 draw_classic_image(surface, icon, player_layout.icon, gamma);
+                if let (Some(joined), Some(crew)) = (player.joined_color_dw, resources.crew) {
+                    draw_joined_savegame_crew_overlay(
+                        surface,
+                        crew,
+                        player_layout.icon,
+                        joined,
+                        gamma,
+                    );
+                }
             }
 
             let name = if self.show_winners {
@@ -1961,14 +2213,39 @@ impl GameOverState {
                 gamma,
             );
 
-            if player.score_old >= 0 {
-                render_settlement_score(
+            // Ico_Rank1..Ico_Rank9 are GUIIcons.png phases 35..43
+            // (src/C4PlayerInfoListBox.cpp:446-451).
+            if let (Some(rank), Some(rect), Some(icons)) = (
+                player.league_rank_symbol,
+                player_layout.rank_icon,
+                resources.gui_icons,
+            ) {
+                let phase = 35 + u32::from(rank.clamp(1, 9) - 1);
+                let columns = 6;
+                let cell = icons.width() as i32 / columns;
+                if let Some(icon) = crop_image(
+                    icons,
+                    IntRect {
+                        x: (phase as i32 % columns) * cell,
+                        y: (phase as i32 / columns) * cell,
+                        w: cell,
+                        h: cell,
+                    },
+                ) {
+                    draw_classic_image(surface, &icon, rect, gamma);
+                }
+            }
+            if let Some((_icon, text)) = evaluation_score_label(player, "Score") {
+                render_evaluation_score(
                     surface,
                     resources.fonts,
+                    // `{{Ico:League}}` and `{{Ico:Settlement}}` are separate
+                    // GUI icons in C++; only the settlement facet is in the
+                    // validated evaluation resource set today, so both
+                    // variants draw it.
                     resources.score,
                     player_layout.score_anchor,
-                    player.score_old,
-                    player.score_new,
+                    text.as_str(),
                     gamma,
                 );
             }
@@ -2134,29 +2411,70 @@ fn grayscale_image(image: &ImageData, offset: i32) -> ImageData {
     ImageData::new(image.width(), image.height(), pixels)
 }
 
-fn render_settlement_score(
+/// `C4GUI::ScrollBar::Update` for a bar rectangle. The arithmetic lives in
+/// `crate::scrollbar`; this keeps the rect-shaped call sites here unchanged.
+fn scrollbar_pin_offset(rect: IntRect, scroll: i32, max_scroll: i32) -> i32 {
+    scrollbar_pin_offset_for(rect.h, scroll, max_scroll)
+}
+
+/// `C4PlayerInfoListBox::PlayerListItem::UpdateIcon`'s joined-savegame overlay
+/// (src/C4PlayerInfoListBox.cpp:302-321): a half-size `fctCrewClr` in the
+/// joined player's lobby colour, drawn twice in the icon's lower-left - once
+/// two pixels right under blit modulation 1, which is the shadow, and once
+/// flush at the left edge.
+fn draw_joined_savegame_crew_overlay(
+    surface: &mut Surface,
+    crew: &ImageData,
+    icon: IntRect,
+    joined_color_dw: u32,
+    gamma: Option<&GammaRamp>,
+) {
+    let size_max = icon.w.max(icon.h);
+    let crew_height = size_max / 2;
+    let width = size_max / 2;
+    let height = icon.h - crew_height;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let y = icon.y + crew_height;
+    let color = Color::opaque(
+        ((joined_color_dw >> 16) & 0xff) as u8,
+        ((joined_color_dw >> 8) & 0xff) as u8,
+        (joined_color_dw & 0xff) as u8,
+    );
+    // The shadow pass runs under `ActivateBlitModulation(1)`, i.e. an almost
+    // fully darkened blit, and is offset two pixels to the right; the visible
+    // pass is flush at the icon's left edge in the joined player's colour.
+    let shadow = clonk_frontend::hud::colorize_by_owner(crew, Color::opaque(0, 0, 1));
+    let colored = clonk_frontend::hud::colorize_by_owner(crew, color);
+    for (offset, image) in [(2, &shadow), (0, &colored)] {
+        draw_classic_image(
+            surface,
+            image,
+            IntRect {
+                x: icon.x + offset,
+                y,
+                w: width,
+                h: height,
+            },
+            gamma,
+        );
+    }
+}
+
+fn render_evaluation_score(
     surface: &mut Surface,
     fonts: &ClonkFontSet,
     score_icon: Option<&ImageData>,
     anchor: (i32, i32),
-    score_old: i32,
-    score_new: Option<i32>,
+    text: &str,
     gamma: Option<&GammaRamp>,
 ) {
-    // C4PlayerInfoListBox::UpdateScoreLabel emits Ico:Settlement followed by
+    // C4PlayerInfoListBox::UpdateScoreLabel emits the score icon followed by
     // gray old/gain and white new score. CStdFont scales the inline image to
-    // iGfxLineHgt while preserving aspect (C4PlayerInfoListBox.cpp:404-413;
+    // iGfxLineHgt while preserving aspect (C4PlayerInfoListBox.cpp:376-418;
     // StdFont.cpp:845-896).
-    let text = score_new.map_or_else(
-        || format!("<c afafaf>({score_old})</c> Score"),
-        |score_new| {
-            format!(
-                "<c afafaf>{score_old} ({:+})</c> {score_new} Score",
-                score_new - score_old
-            )
-        },
-    );
-    let text_width = fonts.text.measure(&text, true).0;
+    let text_width = fonts.text.measure(text, true).0;
     let (icon_width, icon_height) = score_icon.map_or((0, 0), |icon| {
         let height = fonts.text.cell_height;
         (
@@ -2188,7 +2506,7 @@ fn render_settlement_score(
         &fonts.text,
         x + icon_advance,
         anchor.1,
-        &text,
+        text,
         Color::opaque(0xff, 0xff, 0xff),
         TextAlign::Left,
         gamma,
@@ -2380,6 +2698,440 @@ mod tests {
         )
     }
 
+    // C4PlayerInfoListBox::UpdateScoreLabel's evaluation branch has four exact
+    // variants and a strict precedence: any league state wins over settlement
+    // state, and a hidden settlement score suppresses the label entirely
+    // (src/C4PlayerInfoListBox.cpp:376-418).
+    // C4GameOverDlg replaces the plain MultilineLabel with a real
+    // C4GUI::TextWindow once the custom evaluation text exceeds a third of the
+    // dialog height, and that TextWindow's ScrollWindow reserves and operates a
+    // C4GUI_ScrollBarWdt bar (src/C4GameOverDlg.cpp:188-213).
+    // UpdateIcon overlays a half-size fctCrewClr in the joined savegame
+    // player's lobby colour over the lower-left of the row icon, drawn twice:
+    // a two-pixel-right shadow under blit modulation 1, then the coloured pass
+    // flush at the left edge (src/C4PlayerInfoListBox.cpp:302-321).
+    // A team-filtered evaluation list box emits exactly one TeamListItem
+    // before its players, and only when the dialog is in the two-team layout
+    // (src/C4PlayerInfoListBox.cpp:1536-1541; src/C4GameOverDlg.cpp:214-230).
+    // A PlayerListItem only gets a rank icon in a league game, and during
+    // evaluation that icon takes its own square right-hand column, against
+    // which the score label's right edge is measured
+    // (src/C4PlayerInfoListBox.cpp:94-95,199-206,352,439-456).
+    #[test]
+    fn l183_league_rank_icons_claim_their_own_column_and_move_the_score_edge() {
+        let player = EvaluationPlayer {
+            player_info_id: 1,
+            team_id: None,
+            name: "Player".into(),
+            won: true,
+            color_dw: 0,
+            total_playing_time: 0,
+            score_old: 0,
+            score_new: Some(10),
+            custom_evaluation_strings: String::new(),
+            big_icon: None,
+            league_score_old: Some(1200),
+            league_score_gain: Some(30),
+            league_score_new: Some(1230),
+            joined_color_dw: None,
+            league_rank_symbol: Some(4),
+        };
+        let fonts = endeavour_fonts();
+
+        let layout_for = |league: bool| {
+            let evaluation =
+                EvaluationViewModel::new(Vec::new(), vec![player.clone()]).with_league(league);
+            let mut state = GameOverState::new("Round over".into(), Vec::new(), false);
+            state.set_evaluation(evaluation);
+            state.classic_evaluation_layout(640, 480, &fonts)
+        };
+
+        let plain = layout_for(false);
+        let plain_row = plain.players[0];
+        assert!(
+            plain_row.rank_icon.is_none(),
+            "a non-league round has no rank icon at all"
+        );
+
+        let league = layout_for(true);
+        let row = league.players[0];
+        let rank = row.rank_icon.expect("a league round reserves the column");
+        assert_eq!(rank.w, rank.h, "the column is square");
+        assert_eq!(rank.h, row.row.h, "sized by the row's inner height");
+        assert_eq!(
+            rank.x + rank.w,
+            row.row.x + row.row.w,
+            "flush with the row's right edge"
+        );
+        assert_eq!(rank.y, row.row.y);
+        assert_eq!(
+            row.score_anchor.0,
+            rank.x - CLASSIC_PLAYER_LABEL_SPACING,
+            "the score label's right edge follows the rank icon"
+        );
+        assert_eq!(
+            plain_row.score_anchor.0,
+            plain_row.row.x + plain_row.row.w - CLASSIC_PLAYER_LABEL_SPACING,
+            "without a rank icon it follows the row width"
+        );
+        assert_eq!(
+            row.time_anchor.0, row.score_anchor.0,
+            "the playing-time label shares that right edge"
+        );
+    }
+
+    #[test]
+    fn l183_two_team_evaluation_lists_lead_with_one_native_team_header() {
+        let player = |info_id: i32, team_id: i32, won: bool| EvaluationPlayer {
+            player_info_id: info_id,
+            team_id: Some(team_id),
+            name: format!("Player {info_id}"),
+            won,
+            color_dw: 0,
+            total_playing_time: 0,
+            score_old: 0,
+            score_new: None,
+            custom_evaluation_strings: String::new(),
+            big_icon: None,
+            league_score_old: None,
+            league_score_gain: None,
+            league_score_new: None,
+            joined_color_dw: None,
+            league_rank_symbol: None,
+        };
+        let team = |id: i32, won: bool| EvaluationTeam {
+            id,
+            name: format!("Team {id}"),
+            color_dw: 0x0011_2233,
+            icon: None,
+            won,
+        };
+        let evaluation =
+            EvaluationViewModel::new(Vec::new(), vec![player(1, 7, true), player(2, 8, false)])
+                .with_dialog_context(String::new(), Some([7, 8]))
+                .with_team_order([7, 8])
+                .with_teams([team(7, true), team(8, false)]);
+
+        assert_eq!(evaluation.team(7).map(|team| team.won), Some(true));
+        assert_eq!(evaluation.team(8).map(|team| team.won), Some(false));
+        assert!(evaluation.team(9).is_none());
+
+        let fonts = endeavour_fonts();
+        let mut state = GameOverState::new("Round over".into(), Vec::new(), false);
+        state.set_evaluation(evaluation);
+        let layout = state.classic_evaluation_layout(640, 480, &fonts);
+
+        assert_eq!(layout.player_lists.len(), 2);
+        assert_eq!(
+            layout
+                .team_headers
+                .iter()
+                .map(|header| (header.player_list_index, header.team_id))
+                .collect::<Vec<_>>(),
+            [(0, 7), (1, 8)],
+            "one header per filtered list, in team order"
+        );
+        for header in &layout.team_headers {
+            let list = layout.player_lists[header.player_list_index];
+            assert_eq!(header.icon.w, header.icon.h, "C4SymbolSize square");
+            assert!(header.icon.x >= list.x && header.icon.y >= list.y);
+            assert!(
+                header.name_anchor.0 > header.icon.x + header.icon.w,
+                "the caption sits right of its icon"
+            );
+            // Every row of that list starts below its header.
+            for row in layout
+                .players
+                .iter()
+                .filter(|row| row.player_list_index == header.player_list_index)
+            {
+                assert!(row.row.y >= header.icon.y + header.icon.h);
+            }
+        }
+    }
+
+    #[test]
+    fn l183_joined_savegame_crew_overlay_uses_the_native_half_size_geometry() {
+        // The C++ arithmetic, isolated: iSizeMax = max(Wdt, Hgt),
+        // iCrewClrHgt = iSizeMax / 2, then Hgt -= iCrewClrHgt, Y += iCrewClrHgt
+        // and Wdt = iSizeMax / 2.
+        let geometry = |icon: IntRect| {
+            let size_max = icon.w.max(icon.h);
+            let crew_height = size_max / 2;
+            IntRect {
+                x: icon.x,
+                y: icon.y + crew_height,
+                w: size_max / 2,
+                h: icon.h - crew_height,
+            }
+        };
+
+        let square = IntRect {
+            x: 40,
+            y: 60,
+            w: 40,
+            h: 40,
+        };
+        assert_eq!(
+            geometry(square),
+            IntRect {
+                x: 40,
+                y: 80,
+                w: 20,
+                h: 20
+            },
+            "a square icon yields a quarter-area lower-left quad"
+        );
+
+        // A wide icon takes its half-size from the *larger* axis, so the quad
+        // can be taller than half the icon.
+        let wide = IntRect {
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 32,
+        };
+        assert_eq!(
+            geometry(wide),
+            IntRect {
+                x: 0,
+                y: 32,
+                w: 32,
+                h: 0
+            }
+        );
+
+        let tall = IntRect {
+            x: 0,
+            y: 0,
+            w: 32,
+            h: 64,
+        };
+        assert_eq!(
+            geometry(tall),
+            IntRect {
+                x: 0,
+                y: 32,
+                w: 32,
+                h: 32
+            }
+        );
+
+        // Only the shadow pass is offset, and only by two pixels.
+        assert_eq!(square.x + 2 - square.x, 2);
+    }
+
+    #[test]
+    fn l183_overflowing_custom_evaluation_text_reserves_and_travels_the_native_scrollbar() {
+        let short = ClassicEvaluationTextLayout {
+            area: IntRect {
+                x: 0,
+                y: 0,
+                w: 200,
+                h: 40,
+            },
+            viewport: IntRect {
+                x: 0,
+                y: 0,
+                w: 200,
+                h: 40,
+            },
+            content_height: 40,
+            scrollable: false,
+            scrollbar: None,
+        };
+        assert!(
+            short.scrollbar.is_none(),
+            "a fitting MultilineLabel has no bar at all"
+        );
+
+        let area = IntRect {
+            x: 10,
+            y: 20,
+            w: 200,
+            h: 96,
+        };
+        let tall = ClassicEvaluationTextLayout {
+            area,
+            viewport: IntRect {
+                x: area.x + 10,
+                y: area.y + 8,
+                w: area.w - 10 - 5 - 16,
+                h: area.h - 16,
+            },
+            content_height: 400,
+            scrollable: true,
+            scrollbar: Some(IntRect {
+                x: area.x + area.w - 16,
+                y: area.y,
+                w: 16,
+                h: area.h,
+            }),
+        };
+        let bar = tall.scrollbar.expect("overflowing text reserves a bar");
+        assert_eq!(bar.w, 16, "C4GUI_ScrollBarWdt");
+        assert_eq!(bar.x + bar.w, tall.area.x + tall.area.w);
+        assert_eq!((bar.y, bar.h), (tall.area.y, tall.area.h));
+        assert_eq!(
+            tall.viewport.x + tall.viewport.w,
+            bar.x - 5,
+            "the text viewport stops before the reserved bar column"
+        );
+
+        // The pin travels the shaft between the two arrow buttons.
+        let maximum = tall.content_height - tall.viewport.h;
+        assert_eq!(scrollbar_pin_offset(bar, 0, maximum), 0);
+        let travel = bar.h - 3 * 16;
+        assert_eq!(scrollbar_pin_offset(bar, maximum, maximum), travel);
+        assert_eq!(scrollbar_pin_offset(bar, maximum / 2, maximum), travel / 2);
+        assert_eq!(
+            scrollbar_pin_offset(bar, 10, 0),
+            0,
+            "an unscrollable window pins to the top"
+        );
+        let squat = IntRect { h: 3 * 16, ..bar };
+        assert_eq!(
+            scrollbar_pin_offset(squat, maximum, maximum),
+            0,
+            "a bar with no shaft left cannot travel"
+        );
+    }
+
+    #[test]
+    fn l183_evaluation_score_label_matches_the_native_league_and_settlement_variants() {
+        let base = EvaluationPlayer {
+            player_info_id: 1,
+            team_id: None,
+            name: "Player".into(),
+            won: false,
+            color_dw: 0,
+            total_playing_time: 0,
+            score_old: 10,
+            score_new: Some(35),
+            custom_evaluation_strings: String::new(),
+            big_icon: None,
+            league_score_old: None,
+            league_score_gain: None,
+            league_score_new: None,
+            joined_color_dw: None,
+            league_rank_symbol: None,
+        };
+
+        // Settlement, new score known.
+        assert_eq!(
+            evaluation_score_label(&base, "Score"),
+            Some((
+                EvaluationScoreIcon::Settlement,
+                "<c afafaf>10 (+25)</c> 35 Score".to_string()
+            ))
+        );
+
+        // Settlement, only the old score known (disconnected player).
+        let old_only = EvaluationPlayer {
+            score_new: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&old_only, "Score"),
+            Some((
+                EvaluationScoreIcon::Settlement,
+                "<c afafaf>(10)</c> Score".to_string()
+            ))
+        );
+
+        // A hidden settlement score reaches the projection as score_old < 0.
+        let hidden = EvaluationPlayer {
+            score_old: -1,
+            score_new: None,
+            ..base.clone()
+        };
+        assert_eq!(evaluation_score_label(&hidden, "Score"), None);
+
+        // League, old + gain == new.
+        let league = EvaluationPlayer {
+            league_score_old: Some(1200),
+            league_score_gain: Some(30),
+            league_score_new: Some(1230),
+            joined_color_dw: None,
+            league_rank_symbol: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&league, "Score"),
+            Some((
+                EvaluationScoreIcon::League,
+                "<c afafaf>1200 (+30)</c> 1230 Score".to_string()
+            )),
+            "league state wins over the settlement score"
+        );
+
+        // League with an admin discrepancy, shown in red.
+        let discrepancy = EvaluationPlayer {
+            league_score_new: Some(1300),
+            joined_color_dw: None,
+            league_rank_symbol: None,
+            ..league.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&discrepancy, "Score"),
+            Some((
+                EvaluationScoreIcon::League,
+                "<c afafaf>1200 (+30)</c><c ff0000>(+70)</c> 1300 Score".to_string()
+            ))
+        );
+        let negative = EvaluationPlayer {
+            league_score_gain: Some(-30),
+            league_score_new: Some(1100),
+            joined_color_dw: None,
+            league_rank_symbol: None,
+            ..league.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&negative, "Score"),
+            Some((
+                EvaluationScoreIcon::League,
+                "<c afafaf>1200 (-30)</c><c ff0000>(-70)</c> 1100 Score".to_string()
+            ))
+        );
+
+        // League score carried in but no new score: old score only.
+        let old_league = EvaluationPlayer {
+            league_score_new: None,
+            joined_color_dw: None,
+            league_rank_symbol: None,
+            league_score_gain: None,
+            ..league.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&old_league, "Score"),
+            Some((
+                EvaluationScoreIcon::League,
+                "<c afafaf>(1200)</c> Score".to_string()
+            ))
+        );
+
+        // A zero league score is falsy in C++, so it does not select the
+        // league branch; the projection maps it to None.
+        let zero_league = EvaluationPlayer {
+            league_score_old: None,
+            league_score_gain: None,
+            league_score_new: None,
+            joined_color_dw: None,
+            league_rank_symbol: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            evaluation_score_label(&zero_league, "Score").map(|(icon, _)| icon),
+            Some(EvaluationScoreIcon::Settlement)
+        );
+
+        // The IDS_TEXT_SCORE word is a runtime resource.
+        assert!(evaluation_score_label(&base, "Punkte")
+            .expect("settlement label")
+            .1
+            .ends_with(" Punkte"));
+    }
+
     #[test]
     fn derived_game_over_facets_reuse_retained_texture_identity() {
         let source = solid_image(4, 4, [120, 80, 40, 255]);
@@ -2498,7 +3250,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let command = surface
@@ -2703,6 +3455,8 @@ mod tests {
             Some(&gui_icons),
             Some(&player),
             Some(&score),
+            None,
+            None,
         );
 
         assert_eq!(
@@ -3039,6 +3793,11 @@ mod tests {
             score_new: Some(100),
             custom_evaluation_strings: String::new(),
             big_icon: None,
+            league_score_old: None,
+            league_score_gain: None,
+            league_score_new: None,
+            joined_color_dw: None,
+            league_rank_symbol: None,
         }
     }
 
@@ -3090,7 +3849,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let commands = surface.take_clonk_text_capture();
@@ -3272,7 +4031,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let commands = surface.take_clonk_text_capture();
@@ -3365,7 +4124,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let commands = surface.take_clonk_text_capture();
@@ -3427,7 +4186,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
         let first = surface
@@ -3659,7 +4418,7 @@ mod tests {
             &mut surface,
             &clonk_graphics::BitmapFont::new(),
             Some(GameOverClassicResources::new(
-                skin, &fonts, None, None, None, None,
+                skin, &fonts, None, None, None, None, None, None,
             )),
         );
 
@@ -3732,6 +4491,8 @@ mod tests {
                 Some(&gui_icons),
                 Some(&player),
                 Some(&score),
+                None,
+                None,
             )),
         );
 
@@ -3825,6 +4586,11 @@ mod tests {
                 score_new: Some(110),
                 custom_evaluation_strings: String::new(),
                 big_icon: None,
+                league_score_old: None,
+                league_score_gain: None,
+                league_score_new: None,
+                joined_color_dw: None,
+                league_rank_symbol: None,
             }],
         ));
         let layout = state.classic_evaluation_layout(1024, 600, &fonts);
@@ -3841,6 +4607,8 @@ mod tests {
                 Some(&gui_icons),
                 Some(&player),
                 Some(&score),
+                None,
+                None,
             )),
         );
 
@@ -3986,8 +4754,16 @@ mod tests {
         let button_down = solid_image(128, 32, [0, 0, 180, 255]);
         let highlight = solid_image(16, 16, [40, 50, 60, 255]);
         let skin = ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight));
-        let resources =
-            GameOverClassicResources::new(skin, &fonts, Some(&highlight), None, None, None);
+        let resources = GameOverClassicResources::new(
+            skin,
+            &fonts,
+            Some(&highlight),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let mut state = GameOverState::new(
             "A Clonk".into(),
             vec![entry(1, "Player", GameOverOutcome::Victory, true)],
@@ -4172,6 +4948,8 @@ mod tests {
             &fonts,
             Some(&highlight),
             Some(&gui_icons),
+            None,
+            None,
             None,
             None,
         );

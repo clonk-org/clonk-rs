@@ -22,9 +22,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod advanced_config;
 mod classic_record_stream;
+mod console_window_position;
 mod control_options;
+mod deferred_config;
 mod desktop_notification;
 mod developer_console_save;
+mod developer_toolbox;
+mod developer_tools_page;
+mod developer_windows;
 mod display_sleep_inhibitor;
 use clonk_app_render::draw_commands;
 mod game_message;
@@ -32,6 +37,7 @@ mod gamepad;
 use clonk_app_menus::ingame_menu;
 use clonk_app_netplay::host_game_resource_sources;
 use clonk_app_render::gpu_renderer;
+use raw_window_handle::HasRawWindowHandle;
 mod input;
 mod local_control;
 use clonk_app_netplay::network;
@@ -39,14 +45,18 @@ mod network_team_assignment;
 use clonk_app_menus::object_menu;
 mod offline_savegame;
 mod offline_startup;
+mod output_folders;
+mod ready_check_notification;
 use clonk_app_netplay::prepared_host_bootstrap;
 use clonk_app_netplay::resource_path_identity;
 mod runtime_join_save;
 mod save_browser;
 mod settings;
+mod shell_window_host;
 mod startup_player_files;
 mod system_fonts;
 mod update_check;
+mod window_icon;
 
 // Step 6a of the decomposition campaign (rust/REFACTOR_PLAN.md): per-area
 // extension files of the `impl GameApp` block. Each file holds
@@ -124,8 +134,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use clonk_app_core::pictures::{
     apply_definition_owner_color, definition_menu_picture, inventory_object_picture_layers,
-    object_menu_item_picture_with_renderer_modes, resolve_portrait_text_spec,
-    resolve_script_font_image, ScriptTextSpecResources,
+    resolve_portrait_text_spec, resolve_script_font_image, ScriptTextSpecResources,
 };
 use clonk_app_core::{
     AppMode, ClassicGameLobbyBoundary, ClassicGameLobbyChild, ClassicGuiBootstrapIssue,
@@ -138,9 +147,9 @@ use clonk_app_menus::game_over::{
 };
 use clonk_app_menus::ingame_menu::{
     DisplayFlags, DisplayToggle, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry,
-    IngameMenuGraphics, IngameMenuPointerTarget, IngameMenuState, MainMenuConditions, MenuAction,
-    MenuOutcome, NewPlayerEntry, ObserverPlayerEntry, ObserverTarget, OptionFlags, SaveSlotState,
-    TeamSelectionEntry, UpperBoardMode,
+    IngameMenuGraphics, IngameMenuLabels, IngameMenuPointerTarget, IngameMenuState,
+    MainMenuConditions, MenuAction, MenuOutcome, NewPlayerEntry, ObserverPlayerEntry,
+    ObserverTarget, OptionFlags, SaveSlotState, TeamSelectionEntry, UpperBoardMode,
 };
 use clonk_app_menus::menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
 use clonk_app_menus::object_menu::{
@@ -318,6 +327,87 @@ use winit::event_loop::{ControlFlow, EventLoopBuilder};
 use winit::window::{Fullscreen, UserAttentionType, Window, WindowBuilder};
 
 fn main() -> Result<()> {
+    let result = run();
+    // `C4WinMain` reports a failure raised before the window exists through a
+    // native dialog, in addition to the diagnostic it already wrote, and still
+    // returns C4XRV_Failure (C4WinMain.cpp:97-117,274-289). Whether a dialog is
+    // actually shown depends on the platform sink, so a target without one —
+    // like C++'s Unix build without WITH_DEVELOPER_MODE — stays stderr-only.
+    if let Err(error) = &result {
+        if !clonk_platform::startup_dialog::window_was_created() {
+            let mut sink = native_startup_dialog_sink();
+            clonk_platform::startup_dialog::report_startup_failure(
+                &mut sink,
+                false,
+                &format!("{error:#}"),
+            );
+        }
+    }
+    result
+}
+
+/// The dialog backend for this target. Only Windows has one, matching C++,
+/// where the Unix path shows a dialog solely in developer builds.
+#[cfg(windows)]
+fn native_startup_dialog_sink() -> clonk_platform::startup_dialog::NativeStartupDialog {
+    clonk_platform::startup_dialog::NativeStartupDialog
+}
+
+#[cfg(not(windows))]
+fn native_startup_dialog_sink() -> clonk_platform::startup_dialog::NoStartupDialog {
+    clonk_platform::startup_dialog::NoStartupDialog
+}
+
+/// The active monitor's refresh period in whole milliseconds (120 Hz -> 8 ms),
+/// when winit can report it. Kept to a thin adapter because a `Window` cannot
+/// be constructed in a unit test; the policy it feeds is tested separately in
+/// `effective_max_refresh_delay_ms`.
+fn display_refresh_period_ms(window: &Window) -> Option<u64> {
+    window
+        .current_monitor()
+        .and_then(|monitor| monitor.refresh_rate_millihertz())
+        .filter(|millihertz| *millihertz > 0)
+        .map(|millihertz| (1_000_000 / u64::from(millihertz)).max(1))
+}
+
+fn run() -> Result<()> {
+    // C++ recovers a translocated bundle path and chdirs to the directory
+    // holding the .app before anything else (C4WinMain.cpp:233-238;
+    // MacAppTranslocation.cpp:27-63). It must precede path discovery.
+    #[cfg(target_os = "macos")]
+    clonk_platform::establish_macos_bundle_working_directory();
+    // Root is refused before the debug facilities and any initialization
+    // (C4WinMain.cpp:251-255), so this precedes the handlers installed below.
+    #[cfg(unix)]
+    if let Some(refusal) = clonk_platform::privileges::root_startup_refusal_for_current_process(
+        std::env::args().next().as_deref(),
+    ) {
+        println!("{refusal}");
+        std::process::exit(clonk_platform::privileges::STARTUP_FAILURE_EXIT_CODE);
+    }
+    // `C4WinMain` installs the fatal-signal handlers before application
+    // initialization (C4WinMain.cpp:256-265). The session log does not exist
+    // yet, so the banner starts stderr-only and gains the log descriptor below.
+    #[cfg(unix)]
+    clonk_platform::crash::install(-1);
+    // `C4WinMain.cpp:68-70` installs the unhandled-exception filter before
+    // application initialization; it reads the user path and log descriptor
+    // lazily, so both are published below once they exist.
+    #[cfg(windows)]
+    clonk_platform::crash_win32::install();
+    // The classic GUI-build console policy runs before normal initialization:
+    // debug builds always allocate, release builds only for `/allocconsole`,
+    // and a failure aborts startup (C4WinMain.cpp:72-93).
+    #[cfg(windows)]
+    {
+        let arguments: Vec<String> = std::env::args().collect();
+        if clonk_platform::alloc_console::console_is_required(
+            cfg!(debug_assertions),
+            &arguments[..],
+        ) {
+            clonk_platform::alloc_console::allocate_console()?;
+        }
+    }
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
@@ -335,6 +425,28 @@ fn main() -> Result<()> {
         .as_deref()
         .or(cli.config_file.as_deref());
     let app_paths = discover_validated_startup_paths(explicit_config)?;
+    // The crash filter writes its dump under `Config.General.UserPath`
+    // (C4CrashHandlerWin32.cpp:374-375).
+    #[cfg(windows)]
+    if let Some(paths) = app_paths.as_ref() {
+        clonk_platform::crash_win32::set_user_path(&paths.user_data_dir().to_string_lossy());
+    }
+    // The definition loader reads this the way C++ reads the global `Config`
+    // (C4Config.cpp:453; C4Def.cpp:555,1051).
+    clonk_engine::scenario::verbose_loading::set_verbose_object_loading(
+        load_verbose_object_loading(app_paths.as_deref()),
+    );
+    // `[Logging]` must reach the subscriber before it is installed below.
+    clonk_logging::set_logging_config_directive(load_logging_config_directive(
+        app_paths.as_deref(),
+    ));
+    // `C4Application::DoInit` sizes the global asynchronous pool from
+    // `General.ThreadPoolThreadCount` on every non-Windows target
+    // (C4Application.cpp:152-159). Must precede any worker thread.
+    #[cfg(not(windows))]
+    clonk_app_netplay::network::set_network_runtime_worker_threads(load_thread_pool_thread_count(
+        app_paths.as_deref(),
+    ));
     if let Some(paths) = app_paths.as_ref() {
         let log_path = paths.logs_dir().join("Clonk.log");
         match clonk_logging::init_verbose_with_file_and_capture(
@@ -343,10 +455,20 @@ fn main() -> Result<()> {
             console_log_capture.clone(),
             Some(game_log_capture.clone()),
         ) {
-            Ok(()) => tracing::info!(
-                path = %log_path.display(),
-                "engine session log initialized"
-            ),
+            Ok(()) => {
+                // The crash banner now has a log to write to, like `GetLogFD`
+                // once the session log exists (C4WinMain.cpp:199-209).
+                #[cfg(unix)]
+                clonk_platform::crash::set_log_descriptor(clonk_logging::crash_log_descriptor());
+                #[cfg(windows)]
+                clonk_platform::crash_win32::set_log_descriptor(
+                    clonk_logging::crash_log_descriptor(),
+                );
+                tracing::info!(
+                    path = %log_path.display(),
+                    "engine session log initialized"
+                );
+            }
             Err(err) => tracing::warn!(
                 error = %err,
                 path = %log_path.display(),
@@ -360,6 +482,11 @@ fn main() -> Result<()> {
             Some(game_log_capture.clone()),
         );
     }
+    clonk_logging::install_panic_hook();
+    clonk_logging::log_startup_banner(
+        clonk_core::version::PORT_VERSION,
+        clonk_core::version::ENGINE_VERSION_COMPACT,
+    );
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
             tracing::warn!(
@@ -442,7 +569,24 @@ fn main() -> Result<()> {
         // inherits the fullscreen game window configuration.
         display_options.mode = DisplayMode::Window;
         display_options.maximized = false;
-        display_options.position = None;
+        // `C4Console::RestorePosition` applies the console's own `Console/Main`
+        // slot right after the window is created (C4Console.cpp:296-305). It
+        // carries a position only — the 320x320 default size stands, and the
+        // game window's geometry is neither read nor written.
+        display_options.position =
+            load_console_window_position(app_paths.as_deref()).and_then(|placement| {
+                use crate::console_window_position::ConsoleWindowPlacement;
+                if matches!(
+                    placement,
+                    ConsoleWindowPlacement::Maximized | ConsoleWindowPlacement::Minimized
+                ) {
+                    // C++ shows the window zoomed or iconic rather than moving
+                    // it (StdRegistry.cpp:310-313); the port has no console
+                    // equivalent, so it falls back to platform placement.
+                    tracing::debug!("ignoring a non-positional console window placement");
+                }
+                placement.position()
+            });
         (320, 320)
     } else {
         display_options
@@ -471,8 +615,26 @@ fn main() -> Result<()> {
     )
     .build(&event_loop)
     .context("failed to create application window")?;
+    // Past this point a failure is no longer a startup failure, so it is
+    // reported by the running application rather than a native dialog.
+    clonk_platform::startup_dialog::note_window_created();
+    // `C4Application::DoInit` registers the file classes in the graphical
+    // Windows build only, best-effort — C++ notes it "will only work if we have
+    // administrator rights" and ignores the result (C4Application.cpp:219-223).
+    #[cfg(windows)]
+    if !classic.console {
+        let registered = std::env::current_exe()
+            .ok()
+            .map(|module| {
+                clonk_platform::file_classes::register_file_classes(&module.to_string_lossy())
+            })
+            .unwrap_or(false);
+        if !registered {
+            tracing::debug!("could not register the Clonk file classes");
+        }
+    }
     if classic.console {
-        window.set_title("Clonk Rust Console");
+        window.set_title(native_window_title(true));
     }
     let mut display_sleep_inhibitor = DisplaySleepInhibitor::acquire();
     if display_options.maximized && matches!(display_options.mode, DisplayMode::Window) {
@@ -480,7 +642,7 @@ fn main() -> Result<()> {
     }
 
     let size = enforce_min_size(window.inner_size());
-    let mut pixels = build_framebuffer(&window, size)?;
+    let pixels = build_framebuffer(&window, size)?;
     let mut retained_gpu_renderer = gpu_renderer::RetainedGpuRenderer::new(
         pixels.device(),
         pixels.queue(),
@@ -493,7 +655,7 @@ fn main() -> Result<()> {
     // The app lays out and renders at the GUI resolution; the presenter
     // scales the finished frame to the window like the C++ engine scales
     // its GUI output (C4Gui.cpp:461).
-    let mut presenter = clonk_scaling::FramePresenter::new(
+    let presenter = clonk_scaling::FramePresenter::new(
         if classic.console {
             1.0
         } else {
@@ -519,6 +681,43 @@ fn main() -> Result<()> {
         arm_configured_engine_debug_mode(&mut app.engine, app_paths.as_deref(), true);
     }
     app.window_active = window.has_focus();
+    // C++ only has an `ITaskbarList3` once `CStdWindow` owns a handle, so the
+    // real sink replaces the no-op one here rather than in `GameApp::new`
+    // (M10-P4-L079). Everything but Windows keeps the no-op, matching the SDL
+    // and X11 `CStdWindow` implementations, which are no-ops there too.
+    //
+    // The handle is extracted unconditionally so this compiles and is checked
+    // on every host: `RawWindowHandle::Win32` exists on all platforms, and only
+    // the sink construction is target-gated. `clonk-app` cannot be
+    // cross-checked for Windows (stacker's C build needs an MSVC toolchain), so
+    // keeping the untestable part to two lines is deliberate.
+    let taskbar_window = match window.raw_window_handle() {
+        raw_window_handle::RawWindowHandle::Win32(handle) => Some(handle.hwnd as isize),
+        _ => None,
+    };
+    #[cfg(windows)]
+    if let Some(handle) = taskbar_window {
+        // SAFETY: winit initialised COM on this thread and owns the window for
+        // the rest of the process.
+        if let Some(sink) =
+            unsafe { clonk_platform::taskbar_progress::Win32TaskbarProgress::new(handle) }
+        {
+            app.taskbar_progress.replace_sink(Box::new(sink));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = taskbar_window;
+
+    // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
+    let render_inactive_mask = load_render_inactive_mask(app.app_paths.as_ref());
+    // `GameApp::new` resolves the refresh ceiling before any window exists, so
+    // the panel period can only be substituted here (opt-in; see
+    // `configured_smooth_presentation`).
+    app.display_refresh_period_ms = display_refresh_period_ms(&window);
+    app.startup_refresh_delay_ms = effective_max_refresh_delay_ms(
+        &load_native_config_bytes(app.app_paths.as_ref()),
+        app.display_refresh_period_ms,
+    );
     app.set_display_mode(display_options.mode);
     app.graphics
         .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
@@ -550,7 +749,7 @@ fn main() -> Result<()> {
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.refresh_ceilings(),
     );
     let mut next_graphics_deadline = previous_instant + frame_schedule.refresh_interval;
     let mut automatic_frame_skip = AutomaticFrameSkip::default();
@@ -560,20 +759,41 @@ fn main() -> Result<()> {
     let presentation_benchmark_asserts_native_tick = presentation_benchmark_asserts_native_tick();
     let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
 
+    // The shell is a registry record like every other developer window, so a
+    // WindowId arriving from winit resolves to a purpose before it is routed
+    // (M10-P4-L081). It is the only record until the console opens its own.
+    let mut developer_windows: developer_windows::DeveloperWindows<
+        shell_window_host::ShellWindowHost,
+    > = developer_windows::DeveloperWindows::new();
+    developer_windows.insert(
+        developer_windows::SHELL_WINDOW,
+        developer_windows::HostPurpose::Shell,
+        shell_window_host::ShellWindowHost::new(window, pixels, presenter, retained_gpu_renderer),
+    );
+
     event_loop.run(move |event, _, control_flow| {
+        let shell_window_host::ShellWindowHost {
+            window,
+            pixels,
+            presenter,
+            renderer: retained_gpu_renderer,
+            ..
+        } = developer_windows
+            .shell_mut()
+            .expect("the console shell record lives for the whole process");
         match event {
             Event::Resumed => {
-                if reconcile_deferred_fullscreen(&window, display_options.mode) {
+                if reconcile_deferred_fullscreen(window, display_options.mode) {
                     deferred_fullscreen_retry_at =
                         Some(Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
                 }
             }
             Event::WindowEvent { window_id, event } if window_id == window.id() => {
                 if let Err(err) = handle_window_event(
-                    &window,
+                    window,
                     &mut app,
-                    &mut pixels,
-                    &mut presenter,
+                    pixels,
+                    presenter,
                     &mut display_options,
                     event,
                     control_flow,
@@ -631,9 +851,9 @@ fn main() -> Result<()> {
                     return;
                 }
                 if let Err(err) = apply_options_display_requests(
-                    &window,
+                    window,
                     &mut app,
-                    &mut presenter,
+                    presenter,
                     &mut display_options,
                     app_paths.as_deref(),
                 ) {
@@ -646,7 +866,7 @@ fn main() -> Result<()> {
                 // state to windowed on failure, so retry the configured mode.
                 if deferred_fullscreen_retry_at.is_some_and(|retry_at| Instant::now() >= retry_at) {
                     deferred_fullscreen_retry_at =
-                        reconcile_deferred_fullscreen(&window, display_options.mode)
+                        reconcile_deferred_fullscreen(window, display_options.mode)
                             .then(|| Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
                 }
                 if app.take_exit_request() {
@@ -674,7 +894,7 @@ fn main() -> Result<()> {
                     app.mode,
                     app.engine.game_tick_delay_ms(),
                     app.engine.game_tick_delay_revision(),
-                    app.max_refresh_delay_ms,
+                    app.refresh_ceilings(),
                     &mut frame_schedule,
                     &mut accumulator,
                     frame_time,
@@ -782,6 +1002,17 @@ fn main() -> Result<()> {
                         ControlFlow::WaitUntil(next_graphics_deadline.min(simulation_deadline));
                 }
             }
+            // `C4GraphicsSystem::StartDrawing` refuses to draw while the
+            // application is inactive unless `Graphics.RenderInactive` carries
+            // the active shell's bit (C4GraphicsSystem.cpp:96-106). Placed
+            // ahead of the frame-skip arm so a suppressed frame costs nothing.
+            Event::RedrawRequested(id)
+                if id == window.id()
+                    && !render_inactive_allows_drawing(
+                        render_inactive_mask,
+                        app.window_active,
+                        app.console_mode,
+                    ) => {}
             Event::RedrawRequested(id)
                 if id == window.id()
                     && automatic_frame_skip.begin_graphics_pass(
@@ -812,9 +1043,9 @@ fn main() -> Result<()> {
                     }
                     match present_retained_gpu_frame(
                         &mut app,
-                        &pixels,
-                        &presenter,
-                        &mut retained_gpu_renderer,
+                        pixels,
+                        presenter,
+                        retained_gpu_renderer,
                     ) {
                         Ok(()) => {
                             if app.mode == AppMode::Running && !app.console_mode {
@@ -875,9 +1106,9 @@ fn main() -> Result<()> {
                                     "retained GPU device or surface requires recreation"
                                 );
                                 match rebuild_retained_gpu_device(
-                                    &window,
-                                    &mut pixels,
-                                    &mut retained_gpu_renderer,
+                                    window,
+                                    pixels,
+                                    retained_gpu_renderer,
                                 ) {
                                     Ok(()) => window.request_redraw(),
                                     Err(rebuild_error) => {
@@ -1084,6 +1315,17 @@ fn main() -> Result<()> {
                 if app.console_mode {
                     app.finish_console_shutdown();
                 }
+                // `~C4Application` spawns the editor only after subsystem
+                // cleanup (C4Application.cpp:58-74).
+                if let Some(editor) = app.pending_editor_launch.take() {
+                    if let Err(error) = std::process::Command::new(&editor).spawn() {
+                        tracing::warn!(
+                            %error,
+                            path = %editor.display(),
+                            "failed to launch the classic editor"
+                        );
+                    }
+                }
                 if let Some(inhibitor) = display_sleep_inhibitor.take() {
                     inhibitor.release();
                 }
@@ -1115,6 +1357,49 @@ fn main() -> Result<()> {
                 && !app.console_mode
         }) {
             display_options.persist_if_dirty(paths.as_ref());
+        }
+        // `C4Console::StorePosition` on window destruction (C4Console.cpp:154-159)
+        // writes the console's own slot and nothing else, so this is deliberately
+        // separate from the game window's `persist_if_dirty` above.
+        // `C4Application::Clear` writes the accumulated config once on a clean
+        // quit; an aborted run discards it (C4Application.cpp:351-367).
+        if matches!(
+            *control_flow,
+            ControlFlow::Exit | ControlFlow::ExitWithCode(_)
+        ) && !app.configuration_reset_requested
+        {
+            if let Some(paths) = app_paths.as_ref() {
+                for (section, entries) in app.deferred_config.take_by_section() {
+                    let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                key.as_str(),
+                                clonk_app_netplay::NativeConfigValue::RawAscii(value.as_str()),
+                            )
+                        })
+                        .collect();
+                    if let Err(error) =
+                        persist_native_config_values(paths.as_ref(), &section, &updates)
+                    {
+                        tracing::warn!(%error, section, "could not save deferred config values");
+                    }
+                }
+            }
+        }
+        let console_shutdown = matches!(
+            *control_flow,
+            ControlFlow::Exit | ControlFlow::ExitWithCode(_)
+        ) && app.console_mode
+            && !app.configuration_reset_requested;
+        if let (true, Some(paths), Some((x, y))) = (
+            console_shutdown,
+            app_paths.as_ref(),
+            display_options.position,
+        ) {
+            if let Err(error) = store_console_window_position(paths.as_ref(), x, y) {
+                tracing::warn!(%error, "could not store the console window position");
+            }
         }
     });
 }
@@ -1468,13 +1753,12 @@ impl GameApp {
         if let Some(names) = default_rank_names.as_ref() {
             engine.set_default_rank_names(names.clone());
         }
+        // Left empty so the lazy accessor can build it once the live
+        // KeyConfig is loadable; a language failure still surfaces there.
         let runtime_help_text_cache = OnceLock::new();
-        let _ = runtime_help_text_cache.set(match &runtime_language_table {
-            Ok(table) => {
-                build_runtime_help_columns(&table.entries).map_err(|error| format!("{error:#}"))
-            }
-            Err(error) => Err(format!("{error:#}")),
-        });
+        if let Err(error) = &runtime_language_table {
+            let _ = runtime_help_text_cache.set(Err(format!("{error:#}")));
+        }
         let runtime_flash_resources_cache = OnceLock::new();
         let _ = runtime_flash_resources_cache.set(match &runtime_language_table {
             Ok(table) => Ok(build_runtime_flash_resources(table)),
@@ -1484,6 +1768,10 @@ impl GameApp {
         let mut app = Self {
             engine,
             graphics,
+            taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress::new(
+                Box::new(clonk_platform::taskbar_progress::NoTaskbarProgress),
+            ),
+            deferred_config: crate::deferred_config::DeferredConfig::default(),
             sky: None,
             material_texture_images: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
@@ -1538,6 +1826,7 @@ impl GameApp {
             startup_tooltip: ClassicTooltipTracker::new(),
             startup_network_dialog: None,
             startup_irc_client: None,
+            pending_editor_launch: None,
             startup_irc_server: String::new(),
             external_irc_dialog_visible: false,
             external_irc_dialog: None,
@@ -1690,6 +1979,8 @@ impl GameApp {
             auto_frame_skip: configured_auto_frame_skip(&native_config),
             presentation_detail: PresentationDetail::default(),
             max_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
+            startup_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
+            display_refresh_period_ms: None,
             network_stats: None,
             network_stats_clients: HashSet::new(),
             network_stats_players: HashSet::new(),
@@ -1701,6 +1992,7 @@ impl GameApp {
             restart_restore_infos: RestartRestoreInfos::default(),
             abort_restart_pending: false,
             restart_restore_roster_items: HashSet::new(),
+            pending_host_rejoin: None,
             host_local_alternate_colors_by_resource,
             host_local_player_info_ids,
             deferred_network_savegame_recreation: Vec::new(),
@@ -1879,10 +2171,7 @@ impl GameApp {
         self.update_check_requested = classic.update_requested;
 
         if let Some(screen) = classic.startup_screen.as_deref() {
-            tracing::warn!(
-                screen,
-                "classic /startup screen selection is not implemented in clonk-app"
-            );
+            self.apply_classic_startup_screen(screen);
         }
         Ok(())
     }
@@ -2308,6 +2597,12 @@ impl GameApp {
         );
         self.engine
             .set_object_no_dig_resource_string(self.object_no_dig.clone());
+        // `FnSetNextMission` substitutes these for omitted arguments
+        // (C4Script.cpp:6250,6258).
+        self.engine.set_next_mission_defaults(
+            self.runtime_resource_text("IDS_BTN_NEXTSCENARIO", "&Next scenario"),
+            self.runtime_resource_text("IDS_DESC_NEXTSCENARIO", "Continue with the next scenario."),
+        );
         {
             let [undefined, no_construction, no_room, no_level, no_other] =
                 self.construction_check_feedback.clone();
@@ -2669,8 +2964,14 @@ impl GameApp {
     fn runtime_help_columns(&self) -> Result<&RuntimeHelpColumns> {
         self.runtime_help_text_cache
             .get_or_init(|| {
-                build_runtime_help_columns(&self.startup_tooltip_resources)
-                    .map_err(|error| format!("{error:#}"))
+                // `GetKeyboardInputName` reads the live registration, so the
+                // displayed chord follows a KeyConfig override
+                // (C4GraphicsSystem.cpp:692-724).
+                build_runtime_help_columns_with_keys(
+                    &self.startup_tooltip_resources,
+                    self.runtime_key_config().ok(),
+                )
+                .map_err(|error| format!("{error:#}"))
             })
             .as_ref()
             .map_err(|detail| anyhow!(detail.clone()))
@@ -3017,12 +3318,14 @@ impl GameApp {
         self.ingame_menu_close_pointer_capture = None;
         self.script_menu_close_pointer_capture = None;
         self.menu_title_drag = None;
-        // No key-up events are guaranteed after the window loses focus.
-        // Release synchronized controls and forget the physical repeat state
-        // so the first press after refocus is not discarded.
-        if matches!(self.mode, AppMode::Running) {
-            self.clear_local_controls()?;
-        }
+        // No native backend clears player controls on focus loss: Win32
+        // deactivation only minimizes a fullscreen window
+        // (C4FullScreen.cpp:139-145), X11 FocusOut/Unmap only clears
+        // `Application.Active` (:310-315), and the SDL branch does not handle
+        // focus at all (:432-447). Synchronized `ClearPressed` belongs to the
+        // explicit modal flows (C4PlayerList.cpp:588-595). Only the physical
+        // repeat state is forgotten below, so the first press after refocus is
+        // not discarded as a repeat.
         self.close_context_menu_silently();
         self.context_menu_pointer_capture = None;
         for dialog in &mut self.message_dialogs {
@@ -3071,6 +3374,15 @@ impl GameApp {
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         Ok(())
+    }
+
+    /// The refresh ceiling for each application timer. Only the startup one is
+    /// ever subdivided below the oracle default; see `RefreshCeilings`.
+    pub(crate) fn refresh_ceilings(&self) -> RefreshCeilings {
+        RefreshCeilings {
+            running_ms: self.max_refresh_delay_ms,
+            startup_ms: self.startup_refresh_delay_ms,
+        }
     }
 
     fn handle_focus_gained(&mut self) -> Result<(), EngineError> {
@@ -3425,7 +3737,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn prepare_runtime_debug_flash(
+    fn prepare_runtime_resource_flash(
         &self,
         message: impl Fn(&RuntimeFlashResources) -> String,
     ) -> Option<RuntimeFlashMessage> {
@@ -5067,10 +5379,9 @@ impl GameApp {
             );
         }
 
+        // Dropping the cache is enough; the accessor rebuilds it against the
+        // new table and the live KeyConfig.
         self.runtime_help_text_cache = OnceLock::new();
-        let _ = self
-            .runtime_help_text_cache
-            .set(build_runtime_help_columns(&table.entries).map_err(|error| format!("{error:#}")));
         self.runtime_flash_resources_cache = OnceLock::new();
         let _ = self
             .runtime_flash_resources_cache
@@ -5079,7 +5390,14 @@ impl GameApp {
     }
 
     fn refresh_participants_label(&mut self) {
-        let label = load_participants_label(self.app_paths.as_ref());
+        // An unflushed `General.Participants` wins over the file, so a
+        // concurrent writer cannot change what the label shows — C++ reads its
+        // in-memory Config (C4StartupMainDlg.cpp:174-200).
+        let pending = self
+            .deferred_config
+            .get("General", "Participants")
+            .map(str::to_owned);
+        let label = participants_label_with_pending(self.app_paths.as_ref(), pending.as_deref());
         self.main_menu_state.update_participants_label(label);
     }
 
@@ -6304,6 +6622,13 @@ impl GameApp {
                         .as_mut()
                         .expect("loading state exists while draining its receiver");
                     state.finished = true;
+                    // The loading screen is done; release its log buffer the
+                    // way C4MessageBoard drops the startup buffer once the
+                    // round is up (src/C4MessageBoard.cpp:223-251).
+                    clonk_logging::deactivate_loader_log();
+                    // Entering startup removes the taskbar indicator
+                    // (C4Application.cpp:422-426).
+                    self.taskbar_progress.enter_startup();
                     completion =
                         Some((state.scenario.clone(), result, state.prepared_go.is_some()));
                     break;

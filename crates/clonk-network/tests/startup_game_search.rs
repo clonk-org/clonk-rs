@@ -752,6 +752,7 @@ Title="Euro ~"
         &ReferenceQueryConfig {
             language_charset: "ANSI".to_string(),
             language_sequence: "US,DE".to_string(),
+            http_backend: Default::default(),
         },
     )
     .await
@@ -807,6 +808,7 @@ Title="Visible ~ Game"
         ReferenceQueryConfig {
             language_charset: "RUSSIAN".to_string(),
             language_sequence: "RU,US".to_string(),
+            http_backend: Default::default(),
         },
     )
     .unwrap();

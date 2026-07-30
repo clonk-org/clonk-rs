@@ -587,8 +587,167 @@ impl GameApp {
     fn activate_hostility_menu_for_player(&mut self, player: i32) {
         let menu = self
             .hostility_entries_for_player(player)
-            .map(|entries| IngameMenuState::hostility_menu(&entries));
+            .map(|entries| IngameMenuState::hostility_menu(&entries, &self.ingame_menu_labels()));
         self.ingame_menu.replace(player, menu);
+    }
+
+    /// Resolve every in-game menu string through the active language table,
+    /// the way `C4MainMenu`'s `LoadResStr` calls do at page-construction time
+    /// (C4MainMenu.cpp:59-732; C4Player.cpp:1801). A key missing from the
+    /// table falls back to its shipped `LanguageUS.txt` value, matching
+    /// C4ResStrTable.
+    pub(crate) fn ingame_menu_labels(&self) -> IngameMenuLabels {
+        let defaults = IngameMenuLabels::default();
+        IngameMenuLabels {
+            main_caption: self.runtime_resource_text("IDS_MENU_CPMAIN", &defaults.main_caption),
+            observer_caption: self
+                .runtime_resource_text("IDS_MENU_OBSERVER", &defaults.observer_caption),
+            goals: self.runtime_resource_text("IDS_MENU_CPGOALS", &defaults.goals),
+            goals_info: self.runtime_resource_text("IDS_MENU_CPGOALSINFO", &defaults.goals_info),
+            rules: self.runtime_resource_text("IDS_MENU_CPRULES", &defaults.rules),
+            rules_info: self.runtime_resource_text("IDS_MENU_CPRULESINFO", &defaults.rules_info),
+            view: self.runtime_resource_text("IDS_TEXT_VIEW", &defaults.view),
+            view_info: self
+                .runtime_resource_text("IDS_TEXT_DETERMINEPLAYERVIEWTOFOLL", &defaults.view_info),
+            attack_page: self.runtime_resource_text("IDS_MENU_CPATTACK", &defaults.attack_page),
+            attack_page_info: self
+                .runtime_resource_text("IDS_MENU_CPATTACKINFO", &defaults.attack_page_info),
+            select_team: self.runtime_resource_text("IDS_MSG_SELTEAM", &defaults.select_team),
+            select_team_info: self.runtime_resource_text(
+                "IDS_MSG_ALLOWSYOUTOJOINADIFFERENT",
+                &defaults.select_team_info,
+            ),
+            join_team: self.runtime_resource_text("IDS_MSG_JOINTEAM", &defaults.join_team),
+            new_player: self.runtime_resource_text("IDS_MENU_CPNEWPLAYER", &defaults.new_player),
+            new_player_info: self
+                .runtime_resource_text("IDS_MENU_CPNEWPLAYERINFO", &defaults.new_player_info),
+            new_player_item: self
+                .runtime_resource_text("IDS_MENU_NEWPLAYER", &defaults.new_player_item),
+            no_player_files: self
+                .runtime_resource_text("IDS_MENU_NOPLRFILES", &defaults.no_player_files),
+            savegame: self.runtime_resource_text("IDS_MENU_CPSAVEGAME", &defaults.savegame),
+            savegame_info: self
+                .runtime_resource_text("IDS_MENU_CPSAVEGAMEINFO", &defaults.savegame_info),
+            options: self.runtime_resource_text("IDS_MNU_OPTIONS", &defaults.options),
+            options_info: self.runtime_resource_text("IDS_MNU_OPTIONSINFO", &defaults.options_info),
+            disconnect: self.runtime_resource_text("IDS_MENU_DISCONNECT", &defaults.disconnect),
+            disconnect_host_info: self.runtime_resource_text(
+                "IDS_TEXT_KICKCERTAINCLIENTSFROMTHE",
+                &defaults.disconnect_host_info,
+            ),
+            disconnect_client_info: self.runtime_resource_text(
+                "IDS_TEXT_DISCONNECTTHEGAMEFROMTHES",
+                &defaults.disconnect_client_info,
+            ),
+            disconnect_client_caption: self.runtime_resource_text(
+                "IDS_MENU_DISCONNECTCLIENT",
+                &defaults.disconnect_client_caption,
+            ),
+            disconnect_server_caption: self.runtime_resource_text(
+                "IDS_MENU_DISCONNECTFROMSERVER",
+                &defaults.disconnect_server_caption,
+            ),
+            surrender: self.runtime_resource_text("IDS_MENU_CPSURRENDER", &defaults.surrender),
+            surrender_info: self
+                .runtime_resource_text("IDS_MENU_CPSURRENDERINFO", &defaults.surrender_info),
+            surrender_caption: self
+                .runtime_resource_text("IDS_MENU_SURRENDER", &defaults.surrender_caption),
+            abort: self.runtime_resource_text("IDS_MENU_ABORT", &defaults.abort),
+            abort_info: self.runtime_resource_text("IDS_MENU_ABORT_DESC", &defaults.abort_info),
+            attack: self.runtime_resource_text("IDS_MENU_ATTACK", &defaults.attack),
+            no_attack: self.runtime_resource_text("IDS_MENU_NOATTACK", &defaults.no_attack),
+            attack_hostile: self
+                .runtime_resource_text("IDS_MENU_ATTACKHOSTILE", &defaults.attack_hostile),
+            attack_friendly: self
+                .runtime_resource_text("IDS_MENU_ATTACKFRIENDLY", &defaults.attack_friendly),
+            attack_not: self.runtime_resource_text("IDS_MENU_ATTACKNOT", &defaults.attack_not),
+            attack_info: self.runtime_resource_text("IDS_MENU_ATTACKINFO", &defaults.attack_info),
+            free_view: self.runtime_resource_text("IDS_MSG_FREEVIEW", &defaults.free_view),
+            free_view_info: self.runtime_resource_text(
+                "IDS_MSG_FREELYSCROLLAROUNDTHEMAP",
+                &defaults.free_view_info,
+            ),
+            follow_view: self
+                .runtime_resource_text("IDS_TEXT_FOLLOWVIEWOFPLAYER", &defaults.follow_view),
+            sound: self.runtime_resource_text("IDS_DLG_SOUND", &defaults.sound),
+            music: self.runtime_resource_text("IDS_MNU_MUSIC", &defaults.music),
+            mouse_control: self
+                .runtime_resource_text("IDS_MNU_MOUSECONTROL", &defaults.mouse_control),
+            display: self.runtime_resource_text("IDS_MENU_DISPLAY", &defaults.display),
+            player_names: self.runtime_resource_text("IDS_MNU_PLAYERNAMES", &defaults.player_names),
+            player_names_info: self
+                .runtime_resource_text("IDS_MENU_PLAYERNAMES_DESC", &defaults.player_names_info),
+            clonk_names: self.runtime_resource_text("IDS_MNU_CLONKNAMES", &defaults.clonk_names),
+            clonk_names_info: self
+                .runtime_resource_text("IDS_MENU_CLONKNAMES_DESC", &defaults.clonk_names_info),
+            portraits: self.runtime_resource_text("IDS_MNU_PORTRAITS", &defaults.portraits),
+            show_commands: self
+                .runtime_resource_text("IDS_MENU_SHOWCOMMANDS", &defaults.show_commands),
+            show_command_keys: self
+                .runtime_resource_text("IDS_MENU_SHOWCOMMANDKEYS", &defaults.show_command_keys),
+            upper_board: self.runtime_resource_text("IDS_MNU_UPPERBOARD", &defaults.upper_board),
+            upper_board_off: self
+                .runtime_resource_text("IDS_MNU_UPPERBOARD_OFF", &defaults.upper_board_off),
+            upper_board_normal: self
+                .runtime_resource_text("IDS_MNU_UPPERBOARD_NORMAL", &defaults.upper_board_normal),
+            upper_board_small: self
+                .runtime_resource_text("IDS_MNU_UPPERBOARD_SMALL", &defaults.upper_board_small),
+            upper_board_mini: self
+                .runtime_resource_text("IDS_MNU_UPPERBOARD_MINI", &defaults.upper_board_mini),
+            fps: self.runtime_resource_text("IDS_MNU_FPS", &defaults.fps),
+            clock: self.runtime_resource_text("IDS_MNU_CLOCK", &defaults.clock),
+            white_chat: self.runtime_resource_text("IDS_MNU_WHITECHAT", &defaults.white_chat),
+            white_chat_info: self
+                .runtime_resource_text("IDS_DESC_WHITECHAT_INGAME", &defaults.white_chat_info),
+            yes: self.runtime_resource_text("IDS_BTN_YES", &defaults.yes),
+            no: self.runtime_resource_text("IDS_BTN_NO", &defaults.no),
+        }
+    }
+
+    /// `C4Menu::Lines` as last written by `C4Menu::SetSize`.
+    ///
+    /// `SetMenuSize` writes `Lines` and reruns only `InitSize`, leaving
+    /// `LocationSet` alone (C4Menu.cpp:635-640), so an explicit row count
+    /// issued while the menu is already on screen survives. A row count set
+    /// before the first draw is discarded by that draw's `InitLocation`,
+    /// which recomputes `Lines` from the item count (C4Menu.cpp:713-721,
+    /// 796-797) - the freshly created presentation state reproduces that by
+    /// starting without one.
+    pub(crate) fn script_menu_explicit_lines(
+        &self,
+        owner: i32,
+        target: ObjectId,
+        menu: &clonk_engine::ObjectMenuState,
+    ) -> Option<i32> {
+        self.script_menu_presentations
+            .get(&owner)
+            .filter(|state| same_script_menu_presentation(state, target, menu))
+            .and_then(|state| state.explicit_lines)
+    }
+
+    /// `C4Menu::Execute` refills *every* active menu when `Game.iTick35`
+    /// wraps, not just the hostility page (C4Menu.cpp:990-1000), so an open
+    /// team page follows live joins, switches and the generated-team row.
+    pub(crate) fn refresh_team_menus(&mut self) {
+        let players = self
+            .ingame_menu
+            .iter()
+            .filter_map(|(player, menu)| {
+                (menu.page() == ingame_menu::MenuPage::TeamSelection)
+                    .then_some((player, menu.is_team_switch()))
+            })
+            .collect::<Vec<_>>();
+        if players.is_empty() {
+            return;
+        }
+        let entries = self.team_selection_entries();
+        self.cache_team_selection_icons(&entries);
+        let labels = self.ingame_menu_labels();
+        for (player, switching) in players {
+            if let Some(menu) = self.ingame_menu.get_mut(player) {
+                menu.refill_team(&entries, switching, &labels);
+            }
+        }
     }
 
     pub(crate) fn refresh_hostility_menus(&mut self) {
@@ -599,13 +758,14 @@ impl GameApp {
                 (menu.page() == ingame_menu::MenuPage::Hostility).then_some(player)
             })
             .collect::<Vec<_>>();
+        let labels = self.ingame_menu_labels();
         for player in players {
             let Some(entries) = self.hostility_entries_for_player(player) else {
                 self.close_ingame_menu_for_player(player);
                 continue;
             };
             if let Some(menu) = self.ingame_menu.get_mut(player) {
-                menu.refill_hostility(&entries);
+                menu.refill_hostility(&entries, &labels);
             }
         }
     }
@@ -1106,7 +1266,10 @@ impl GameApp {
             MenuAction::ActivateMain => {
                 self.ingame_menu.replace(
                     player,
-                    IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
+                    IngameMenuState::main_menu(
+                        &self.main_menu_conditions_for(player),
+                        &self.ingame_menu_labels(),
+                    ),
                 );
             }
             MenuAction::ActivateGoals => {
@@ -1141,8 +1304,13 @@ impl GameApp {
             MenuAction::ActivateRules => {
                 let rules = self.goal_rule_entries(C4D_RULE);
                 self.cache_definition_icons(&rules)?;
-                self.ingame_menu
-                    .replace(player, Some(IngameMenuState::rules_menu(&rules)));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::rules_menu(
+                        &rules,
+                        &self.ingame_menu_labels(),
+                    )),
+                );
             }
             MenuAction::ActivateNewPlayer => {
                 let conditions = self.main_menu_conditions_for(player);
@@ -1150,19 +1318,32 @@ impl GameApp {
                     return Ok(());
                 }
                 let players = self.available_runtime_player_files();
-                self.ingame_menu
-                    .replace(player, Some(IngameMenuState::new_player_menu(&players)));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::new_player_menu(
+                        &players,
+                        &self.ingame_menu_labels(),
+                    )),
+                );
             }
             MenuAction::ActivateOptions => {
                 self.ingame_menu.replace(
                     player,
-                    Some(IngameMenuState::options_menu(&self.option_flags(player), 0)),
+                    Some(IngameMenuState::options_menu(
+                        &self.option_flags(player),
+                        0,
+                        &self.ingame_menu_labels(),
+                    )),
                 );
             }
             MenuAction::ActivateDisplay => {
                 self.ingame_menu.replace(
                     player,
-                    Some(IngameMenuState::display_menu(&self.display_flags, 0)),
+                    Some(IngameMenuState::display_menu(
+                        &self.display_flags,
+                        0,
+                        &self.ingame_menu_labels(),
+                    )),
                 );
             }
             MenuAction::ActivateSavegame => {
@@ -1170,17 +1351,28 @@ impl GameApp {
                 // (C4Game.cpp:2205-2223) — the menu simply stays closed.
                 if self.can_quick_save() {
                     let slots = self.savegame_slots();
-                    self.ingame_menu
-                        .replace(player, Some(IngameMenuState::savegame_menu(&slots)));
+                    self.ingame_menu.replace(
+                        player,
+                        Some(IngameMenuState::savegame_menu(
+                            &slots,
+                            &self.ingame_menu_labels(),
+                        )),
+                    );
                 }
             }
             MenuAction::ActivateSurrender => {
-                self.ingame_menu
-                    .replace(player, Some(IngameMenuState::surrender_menu()));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::surrender_menu(&self.ingame_menu_labels())),
+                );
             }
             MenuAction::ActivateClientDisconnect => {
-                self.ingame_menu
-                    .replace(player, Some(IngameMenuState::client_disconnect_menu()));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::client_disconnect_menu(
+                        &self.ingame_menu_labels(),
+                    )),
+                );
             }
             MenuAction::ActivateHostility => {
                 self.activate_hostility_menu_for_player(player);
@@ -1234,7 +1426,10 @@ impl GameApp {
                     .collect::<Vec<_>>();
                 self.ingame_menu.replace(
                     player,
-                    Some(IngameMenuState::host_disconnect_menu(&clients)),
+                    Some(IngameMenuState::host_disconnect_menu(
+                        &clients,
+                        &self.ingame_menu_labels(),
+                    )),
                 );
             }
             MenuAction::KickClient(client_id) => {
@@ -1252,6 +1447,7 @@ impl GameApp {
                     } else {
                         ObserverTarget::Player(current_player)
                     },
+                    &self.ingame_menu_labels(),
                 );
                 let selected = menu
                     .selected_observer_target()
@@ -1264,9 +1460,12 @@ impl GameApp {
                     let entries = self.team_selection_entries();
                     self.cache_team_selection_icons(&entries);
                     let menu = if status == clonk_engine::PlayerStatus::TeamSelection {
-                        IngameMenuState::team_selection_menu_from_main(&entries)
+                        IngameMenuState::team_selection_menu_from_main(
+                            &entries,
+                            &self.ingame_menu_labels(),
+                        )
                     } else {
-                        IngameMenuState::team_switch_menu(&entries)
+                        IngameMenuState::team_switch_menu(&entries, &self.ingame_menu_labels())
                     };
                     self.ingame_menu.replace(player, Some(menu));
                 }
@@ -1351,8 +1550,13 @@ impl GameApp {
                 self.save_to_slot(slot);
                 if self.ingame_menu.contains(player) {
                     let slots = self.savegame_slots();
-                    self.ingame_menu
-                        .replace(player, Some(IngameMenuState::savegame_menu(&slots)));
+                    self.ingame_menu.replace(
+                        player,
+                        Some(IngameMenuState::savegame_menu(
+                            &slots,
+                            &self.ingame_menu_labels(),
+                        )),
+                    );
                 }
             }
             MenuAction::ToggleSound => {
@@ -1365,6 +1569,7 @@ impl GameApp {
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
                         selection,
+                        &self.ingame_menu_labels(),
                     )),
                 );
             }
@@ -1376,6 +1581,7 @@ impl GameApp {
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
                         selection,
+                        &self.ingame_menu_labels(),
                     )),
                 );
             }
@@ -1396,6 +1602,7 @@ impl GameApp {
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
                         selection,
+                        &self.ingame_menu_labels(),
                     )),
                 );
             }
@@ -1416,6 +1623,7 @@ impl GameApp {
                     Some(IngameMenuState::display_menu(
                         &self.display_flags,
                         selection,
+                        &self.ingame_menu_labels(),
                     )),
                 );
             }
@@ -1550,8 +1758,13 @@ impl GameApp {
                 })
                 .collect::<Vec<_>>();
             self.cache_definition_icons(&entries)?;
-            self.ingame_menu
-                .replace(request.player, Some(IngameMenuState::goals_menu(&entries)));
+            self.ingame_menu.replace(
+                request.player,
+                Some(IngameMenuState::goals_menu(
+                    &entries,
+                    &self.ingame_menu_labels(),
+                )),
+            );
         }
         Ok(())
     }
@@ -2048,7 +2261,7 @@ impl GameApp {
             selection: menu.selection,
             location: menu.location,
         };
-        let next = match self.script_menu_presentations.remove(&owner) {
+        let mut next = match self.script_menu_presentations.remove(&owner) {
             Some(state) if state.key == key => state,
             Some(mut state) if same_script_menu_presentation(&state, target, &menu) => {
                 state.key = key;
@@ -2070,8 +2283,19 @@ impl GameApp {
                 scroll_y: 0,
                 scroll_selection: menu.selection,
                 selection_needs_adjustment: true,
+                // A row count set before the first draw is discarded by that
+                // draw's InitLocation (C4Menu.cpp:713-721,796-797).
+                explicit_lines: None,
+                applied_menu_lines: menu.lines,
             },
         };
+        // C4Menu::SetSize assigns Lines without clearing LocationSet, so a
+        // SetMenuSize on an already-displayed menu keeps its explicit row
+        // count (C4Menu.cpp:635-640).
+        if next.applied_menu_lines != menu.lines {
+            next.explicit_lines = (menu.lines > 0).then_some(menu.lines);
+            next.applied_menu_lines = menu.lines;
+        }
         self.script_menu_presentations.insert(owner, next);
         true
     }
@@ -2125,6 +2349,7 @@ impl GameApp {
         let use_free_anchor = presentation.map_or(location.is_some(), |state| {
             state.location_needs_initialization
         });
+        let explicit_lines = presentation.and_then(|state| state.explicit_lines);
         let layout = if use_free_anchor {
             engine_script_menu_layout_with_free_anchor(
                 area,
@@ -2135,6 +2360,7 @@ impl GameApp {
                 location.expect("free anchor has a location"),
                 scroll_y,
                 adjust_selection,
+                explicit_lines,
             )
         } else {
             engine_script_menu_layout_with_presentation(
@@ -2146,6 +2372,7 @@ impl GameApp {
                 location,
                 scroll_y,
                 adjust_selection,
+                explicit_lines,
             )
         };
         Ok(Some((target, layout)))
@@ -2190,6 +2417,7 @@ impl GameApp {
             .and_then(|state| state.location)
             .or_else(|| self.script_menu_free_location(owner, menu));
         let scroll_y = presentation.map_or(0, |state| state.scroll_y);
+        let explicit_lines = presentation.and_then(|state| state.explicit_lines);
         if presentation.map_or(location.is_some(), |state| {
             state.location_needs_initialization
         }) {
@@ -2202,6 +2430,7 @@ impl GameApp {
                 location.expect("free anchor has a location"),
                 scroll_y,
                 false,
+                explicit_lines,
             );
             return Ok(geometry.map(|geometry| (target, geometry)));
         }
@@ -2213,6 +2442,7 @@ impl GameApp {
             &font_images,
             location,
             scroll_y,
+            explicit_lines,
         )
         .map(|geometry| (target, geometry)))
     }
@@ -2694,30 +2924,20 @@ impl GameApp {
                     } else {
                         self.startup_masterserver_next_query_at = None;
                     }
-                    if let Some(paths) = self.app_paths.as_ref() {
-                        if let Err(error) = persist_config_value(
-                            paths,
-                            "Network",
-                            "MasterServerSignUp",
-                            i32::from(enabled).to_string(),
-                        ) {
-                            self.status_text = format!("Unable to save network setting: {error}");
-                        }
-                    }
+                    // `OnBtnInternet` flips the flag in memory only; the file
+                    // is written once at shutdown (C4StartupNetDlg.cpp:840-845).
+                    self.deferred_config.set(
+                        "Network",
+                        "MasterServerSignUp",
+                        i32::from(enabled).to_string(),
+                    );
                 }
                 NetDlgAction::RecordingChanged(record) => {
                     self.startup_view_flags.record = record;
                     self.recording_enabled = record && self.recordings_dir.is_some();
-                    if let Some(paths) = self.app_paths.as_ref() {
-                        if let Err(error) = persist_config_value(
-                            paths,
-                            "General",
-                            "Record",
-                            i32::from(record).to_string(),
-                        ) {
-                            self.status_text = format!("Unable to save recording setting: {error}");
-                        }
-                    }
+                    // `OnBtnRecord` likewise mutates memory only (:847-850).
+                    self.deferred_config
+                        .set("General", "Record", i32::from(record).to_string());
                 }
             }
         }
@@ -3259,6 +3479,60 @@ impl GameApp {
         self.process_about_dialog_actions_with_sound(actions, true)
     }
 
+    /// `C4Startup::SetStartScreen` (C4Startup.cpp:389-408) maps the seven
+    /// case-insensitive `/startup:` names onto the dialog it opens first.
+    /// `netscen` is the scenario selector in network-host mode, distinct from
+    /// both `scen` and the `net` game browser. An unknown name leaves the
+    /// remembered/default view alone — C++ returns false and changes nothing.
+    pub(crate) fn apply_classic_startup_screen(&mut self, screen: &str) {
+        let screen = screen.trim();
+        if screen.eq_ignore_ascii_case("main") {
+            self.show_main_menu();
+        } else if screen.eq_ignore_ascii_case("scen") {
+            self.open_scenario_browser();
+        } else if screen.eq_ignore_ascii_case("netscen") {
+            self.open_network_host_scenario_browser();
+        } else if screen.eq_ignore_ascii_case("net") {
+            self.open_network_game_dialog();
+        } else if screen.eq_ignore_ascii_case("options") {
+            self.open_options_menu();
+        } else if screen.eq_ignore_ascii_case("plrsel") {
+            self.open_player_selection_dialog();
+        } else if screen.eq_ignore_ascii_case("about") {
+            self.open_about_dialog();
+        } else {
+            tracing::warn!(
+                screen,
+                "unknown classic /startup screen; keeping the default view"
+            );
+        }
+    }
+
+    /// `C4StartupMainDlg::SwitchToEditor` (C4StartupMainDlg.cpp:313-325). On
+    /// Windows it refuses when the configured editor is absent — returning
+    /// false so the key is not consumed — and otherwise flags the launch and
+    /// exits startup; `~C4Application` spawns it after teardown
+    /// (C4Application.cpp:58-74). The `#ifdef _WIN32` body is skipped
+    /// elsewhere, so every other platform consumes the key and does nothing.
+    pub(crate) fn switch_to_editor(&mut self) -> bool {
+        if !cfg!(windows) {
+            return true;
+        }
+        let Some(editor) = self.classic_editor_executable() else {
+            return false;
+        };
+        self.pending_editor_launch = Some(editor);
+        self.request_exit();
+        true
+    }
+
+    /// `Config.AtExePath(C4CFN_Editor)` — "Editor.exe" beside the engine
+    /// (C4Components.h:23; C4StartupMainDlg.cpp:317).
+    pub(crate) fn classic_editor_executable(&self) -> Option<PathBuf> {
+        let editor = self.app_paths.as_ref()?.install_root().join("Editor.exe");
+        editor.is_file().then_some(editor)
+    }
+
     pub(crate) fn open_network_game_dialog(&mut self) {
         self.external_irc_dialog_visible = false;
         self.external_irc_dialog = None;
@@ -3400,6 +3674,15 @@ impl GameApp {
     pub(crate) fn open_about_dialog(&mut self) {
         self.close_context_menu_silently();
         let mut dialog = clonk_frontend::startup_about_dlg::AboutDlgState::new();
+        // C4StartupAboutDlg's constructor resolves its bottom-line captions
+        // through LoadResStr (C4StartupAboutDlg.cpp:279-284).
+        dialog.set_labels(clonk_frontend::startup_about_dlg::AboutLabels {
+            buttons: [
+                self.runtime_resource_text("IDS_BTN_BACK", "Back"),
+                self.runtime_resource_text("IDS_BTN_CHECKFORUPDATES", "Check for &updates"),
+                self.runtime_resource_text("IDS_BTN_LICENSES", "&Licenses"),
+            ],
+        });
         if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
             dialog.resize(
                 self.graphics.surface().width() as i32,
@@ -3715,6 +3998,11 @@ impl GameApp {
                     MessageDialogContinuation::StartupIrcConnectWarning { .. } => {
                         ("HideMsgIRCDangerous", "IRC disclaimer preference", true)
                     }
+                    MessageDialogContinuation::SavegamePlayerTakeoverWarning => (
+                        "HideMsgPlrTakeOver",
+                        "savegame player-takeover warning preference",
+                        false,
+                    ),
                     _ => return None,
                 };
                 Some((
@@ -3727,17 +4015,22 @@ impl GameApp {
         else {
             return;
         };
-        let Some(paths) = self.app_paths.as_ref() else {
-            return;
-        };
         for checked in changes {
-            let persisted = if native_irc_preference {
-                persist_irc_warning_preference(paths, checked)
+            // `ShowMessageModal` takes the `Config.Startup.HideMsg*` flag by
+            // pointer and writes it in memory; no call site saves, and neither
+            // `C4Gui.cpp`, `C4GuiDialogs.cpp` nor `C4ChatDlg.cpp` contains a
+            // `Config.Save()` (e.g. C4ChatDlg.cpp:624). The file is written at
+            // the next save surface.
+            if native_irc_preference {
+                let Some(paths) = self.app_paths.as_ref() else {
+                    continue;
+                };
+                if let Err(error) = persist_irc_warning_preference(paths, checked) {
+                    tracing::warn!(%error, preference = description, "failed to persist warning preference");
+                }
             } else {
-                persist_config_value(paths, "Startup", key, i32::from(checked).to_string())
-            };
-            if let Err(error) = persisted {
-                tracing::warn!(%error, preference = description, "failed to persist warning preference");
+                self.deferred_config
+                    .set("Startup", key, i32::from(checked).to_string());
             }
         }
     }
@@ -3862,6 +4155,9 @@ impl GameApp {
                     self.show_developer_console_message(message, None)?;
                 }
             }
+            // The warning is informational: `RestoreSavegameInfos` has already
+            // made the assignment before showing it (C4PlayerInfo.cpp:1383-1390).
+            MessageDialogContinuation::SavegamePlayerTakeoverWarning => {}
             MessageDialogContinuation::StartupNetworkConnectProgress => {
                 if self
                     .startup_network_connection
@@ -3875,6 +4171,11 @@ impl GameApp {
                     let connection = self.startup_network_connection.take();
                     drop(connection);
                     self.pending_network_join = None;
+                    // Cancelling a reconnect to a restarting host abandons the
+                    // whole rejoin. Without this the retry loop would reopen
+                    // this very dialog on the next frame and Cancel would do
+                    // nothing until the window expired.
+                    self.pending_host_rejoin = None;
                     self.status_text.clear();
                     self.resume_startup_music_after_failed_open_game();
                 }
@@ -4419,6 +4720,10 @@ impl GameApp {
         self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         self.restart_restore_roster_items.clear();
+        // Leaving the round abandons any host restart this client was going to
+        // follow. `begin_pending_host_rejoin` re-arms it across this teardown
+        // precisely because the default is to drop it.
+        self.pending_host_rejoin = None;
         // C4Game::Clear starts the fade before tearing down game state.
         self.fade_out_game_music();
         if let Some(audio) = self.audio.as_mut() {

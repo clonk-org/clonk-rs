@@ -662,12 +662,6 @@ impl GameApp {
             .ingame_menu
             .get(owner)
             .filter(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection);
-        let selected_team = existing
-            .and_then(|menu| menu.items().get(menu.selection()))
-            .and_then(|item| match &item.action {
-                MenuAction::SelectTeam(team) => Some(*team),
-                _ => None,
-            });
         let unchanged = existing.is_some_and(|menu| {
             menu.items().len() == entries.len()
                 && menu.items().iter().zip(&entries).all(|(item, entry)| {
@@ -676,20 +670,32 @@ impl GameApp {
                         && item.action == MenuAction::SelectTeam(entry.id)
                 })
         });
+        let already_open = existing.is_some();
         if unchanged {
             return;
         }
         self.cache_team_selection_icons(&entries);
+        // An already-open page is refilled in place. C4Menu keeps the menu
+        // instance across `ClearItems(false)`, so its dragged position,
+        // scroll, tooltip age and numeric selection survive; only
+        // `AdjustSelection` clamps an out-of-range row (C4Menu.cpp:947-973).
+        if already_open {
+            let labels = self.ingame_menu_labels();
+            if let Some(menu) = self.ingame_menu.get_mut(owner) {
+                menu.refill_team(&entries, false, &labels);
+            }
+            return;
+        }
         if owner == self.local_owner {
             self.close_object_menu();
         }
-        let mut menu = IngameMenuState::team_selection_menu(&entries);
-        if let Some(selection) =
-            selected_team.and_then(|team| entries.iter().position(|entry| entry.id == team))
-        {
-            menu.set_selection(selection);
-        }
-        self.ingame_menu.replace(owner, Some(menu));
+        self.ingame_menu.replace(
+            owner,
+            Some(IngameMenuState::team_selection_menu(
+                &entries,
+                &self.ingame_menu_labels(),
+            )),
+        );
     }
 
     /// `C4Player::Execute`'s PS_TeamSelection branch: a sole joinable team
@@ -813,6 +819,27 @@ impl GameApp {
         self.hydrate_runtime_player_big_icons_unconditionally();
     }
 
+    /// `C4RoundResultsPlayer::EvaluatePlayer` copies `C4Player::BigIcon` into
+    /// the frozen round result while the player is still alive
+    /// (src/C4RoundResults.cpp:52-73,338-344), so an eliminated, retired or
+    /// disconnected player's icon outlives its removal and its player
+    /// resource. Freeze on that same event instead of only when the
+    /// evaluation dialog is constructed.
+    pub(crate) fn freeze_evaluated_player_big_icons(&mut self) {
+        let pending = self
+            .engine
+            .round_results
+            .players
+            .iter()
+            .map(|result| result.player_info_id)
+            .filter(|info_id| {
+                !self.runtime_player_big_icons.contains_key(info_id)
+                    && !self.runtime_player_big_icon_misses.contains(info_id)
+            })
+            .collect::<HashSet<_>>();
+        self.hydrate_player_big_icons(pending);
+    }
+
     fn hydrate_runtime_player_big_icons_unconditionally(&mut self) {
         let pending = self
             .engine
@@ -823,7 +850,10 @@ impl GameApp {
                     && !self.runtime_player_big_icon_misses.contains(info_id)
             })
             .collect::<HashSet<_>>();
+        self.hydrate_player_big_icons(pending);
+    }
 
+    fn hydrate_player_big_icons(&mut self, pending: HashSet<i32>) {
         for info_id in pending {
             let Some(info) = self.control_player_infos.get(info_id).cloned() else {
                 continue;

@@ -430,6 +430,7 @@ fn optional_initial_network_game_source_distinguishes_missing_and_unreadable_ent
 fn l068_context_command_coordinates_include_letterbox_and_ignore_camera_zoom() {
     let viewport = ActiveViewportProjection {
         index: 0,
+        identity: None,
         owner: 1,
         is_no_owner_viewport: false,
         rect: Rect::new(10, 20, 160, 100),
@@ -2073,6 +2074,9 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
 
     app.message_dialogs[0].state.handle_hotkey('D');
     app.persist_top_message_dialog_checkbox_changes();
+    // Memory-only until a save surface, as `ShowMessageModal`'s by-pointer flag
+    // is (C4ChatDlg.cpp:624); flushed here because the subject is the value.
+    app.flush_deferred_config();
     assert_eq!(
         Config::load(paths.config_file())
             .unwrap()
@@ -2445,12 +2449,24 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     sandbox.path = None;
     app.open_definition_selector(sandbox)
         .expect("open definition selector");
-    app.process_gamepad_event_batch([
-        GamepadEvent::Direction {
-            slot: GamepadSlot::new(0),
-            button: ControlButton::Down,
-            state: ElementState::Pressed,
-        },
+    let optional_index = app
+        .definition_selector
+        .as_ref()
+        .expect("sandbox definition selector")
+        .rows()
+        .iter()
+        .position(|row| row.filename() == "Beta.C4D")
+        .expect("optional definition row");
+    // C4DefinitionSelDlg retains DirectoryIterator's native order
+    // (src/C4FileSelDlg.cpp:251-268), so APFS and ext4 may place the
+    // optional row on opposite sides of the fixed row. Drive to the named row
+    // before exercising its checkbox -> OK focus path.
+    let select_optional = (0..=optional_index).map(|_| GamepadEvent::Direction {
+        slot: GamepadSlot::new(0),
+        button: ControlButton::Down,
+        state: ElementState::Pressed,
+    });
+    app.process_gamepad_event_batch(select_optional.chain([
         GamepadEvent::Direction {
             slot: GamepadSlot::new(0),
             button: ControlButton::Right,
@@ -2476,7 +2492,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             action: GamepadActionType::MenuToggle,
             state: ElementState::Pressed,
         },
-    ])
+    ]))
     .expect("release-close captures duplicate gamepad aliases");
     assert!(matches!(app.mode, AppMode::Running));
     assert!(app.definition_selector.is_none());
@@ -6263,8 +6279,7 @@ fn l008_fractional_loader_scales_reach_native_text() {
     ]);
     let paths = AppPaths::discover().expect("installed paths");
     for (scale, physical_width, physical_height) in [(1.5, 480_u32, 300_u32), (0.5, 160, 100)] {
-        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-        .expect("app");
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("app");
         app.configure_native_startup_fonts(scale, false);
         assert_eq!(app.mode, AppMode::Loading);
         assert!(app.can_defer_native_loader_text(scale));
@@ -6298,8 +6313,7 @@ fn l008_scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
     let paths = AppPaths::discover().expect("installed paths");
 
     for client in [false, true] {
-        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-        .expect("app");
+        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("app");
         app.configure_native_startup_fonts(0.5, false);
         app.loader_screen
             .as_mut()
@@ -6400,8 +6414,7 @@ fn l149_scale_three_host_start_wait_renders_after_native_loader_text() {
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
     let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-    .expect("app");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("app");
     app.configure_native_startup_fonts(3.0, false);
     app.loader_screen
         .as_mut()
@@ -6480,8 +6493,7 @@ fn l149_fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
     let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-    .expect("app");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("app");
     app.configure_native_startup_fonts(1.5, false);
     app.loader_screen
         .as_mut()
@@ -6606,8 +6618,7 @@ fn scale_three_clipped_loader_uses_native_text_after_chrome_upscale() {
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
     let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-    .expect("app");
+    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("app");
     app.configure_native_startup_fonts(3.0, false);
     // C++ rounds 598 / 3 up to 200 logical rows, renders a nominal
     // 600-row GL viewport, and lets the framebuffer clip its top two rows.
@@ -6638,8 +6649,8 @@ fn scale_three_clipped_main_menu_commits_native_captions_after_bilinear_base() {
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
     let paths = AppPaths::discover().expect("discover app paths");
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-    .expect("initialise app");
+    let mut app =
+        test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("initialise app");
     wait_for_menu(&mut app);
     app.configure_native_startup_fonts(3.0, false);
     assert!(app.can_defer_native_main_menu_text(3.0));
@@ -6794,6 +6805,7 @@ fn reference_query_settings_use_cpp_configured_locale() {
         clonk_network::ReferenceQueryConfig {
             language_charset: "RUSSIAN".to_string(),
             language_sequence: "RU,US,DE".to_string(),
+            http_backend: Default::default(),
         }
     );
     assert_eq!(
@@ -7090,8 +7102,8 @@ fn network_host_preparation_keeps_cpp_configured_participant_order() {
                 b"\"\nControlRate=7\nControlMode=1\nPortTCP=12345\nPortUDP=12346\nMaxLoadFileSize=123456\nNoRuntimeJoin=0\nEnableUPnP=0\n",
             );
     fs::write(paths.config_file(), config).expect("write native configured participants");
-    let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-    .expect("initialize app");
+    let app =
+        test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("initialize app");
     assert_eq!(
         app.startup_player_files
             .iter()
@@ -11852,11 +11864,14 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
     observer_menu.physical_viewports_authoritative = true;
     observer_menu.ingame_menu.replace(
         observer_menu.local_owner,
-        IngameMenuState::main_menu(&MainMenuConditions {
-            has_player: false,
-            player_count: 0,
-            ..MainMenuConditions::default()
-        }),
+        IngameMenuState::main_menu(
+            &MainMenuConditions {
+                has_player: false,
+                player_count: 0,
+                ..MainMenuConditions::default()
+            },
+            &IngameMenuLabels::default(),
+        ),
     );
     assert!(observer_menu.primary_physical_viewport_is_no_owner());
     assert!(
@@ -12776,7 +12791,8 @@ fn main_menu_player_join_uses_active_network_max_players() {
     }];
 
     let conditions = app.main_menu_conditions();
-    let menu = IngameMenuState::main_menu(&conditions).expect("main menu has entries");
+    let menu = IngameMenuState::main_menu(&conditions, &IngameMenuLabels::default())
+        .expect("main menu has entries");
 
     assert_eq!(conditions.max_players, 1);
     assert!(!menu
@@ -16514,6 +16530,431 @@ fn client_host_socket_loss_continues_the_running_round_locally() {
 }
 
 #[test]
+fn client_follows_an_announced_host_restart_back_to_the_lobby() {
+    // Same socket loss as the test above, but preceded by the host's restart
+    // notice. Native has no such notice and therefore no way to tell the two
+    // apart, so it drops every client to local control
+    // (src/C4Network2.cpp:1826-1832) and the restarted lobby comes up empty.
+    // With the intent stated, the client leaves the abandoned round and
+    // reconnects to the address it already joined.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+    app.control_clients.register(0, true, false);
+    app.control_clients.register(local_client, true, false);
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    event_tx
+        .send(NetworkEvent::PeerDisconnected {
+            client_id: 0,
+            reason: Some("connection lost".to_string()),
+        })
+        .expect("queue host socket loss");
+    app.process_network_events()
+        .expect("process the announced restart");
+
+    assert_eq!(
+        app.mode,
+        AppMode::Menu,
+        "the round the host abandoned is torn down, not continued locally"
+    );
+    assert!(app.network.is_none());
+    assert!(
+        app.pending_host_rejoin.is_some(),
+        "the rejoin stays armed until the connection resolves"
+    );
+    assert_eq!(
+        app.startup_network_connection
+            .as_ref()
+            .map(|connection| connection.purpose),
+        Some(StartupNetworkPurpose::Join),
+        "the client reconnects to the restarted host"
+    );
+}
+
+#[test]
+fn an_oversized_rejoin_window_is_clamped() {
+    // The window is a number off the wire. Honoured literally, a hostile or
+    // buggy host could hold this client in a once-a-second reconnect loop for
+    // eighteen hours.
+    let mut app = new_running_sandbox_app();
+    let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+
+    app.arm_pending_host_rejoin(u16::MAX);
+
+    let deadline = app
+        .pending_host_rejoin
+        .as_ref()
+        .expect("the notice still arms a rejoin")
+        .deadline;
+    assert!(
+        deadline
+            <= Instant::now() + Duration::from_secs(u64::from(MAX_HOST_RESTART_REJOIN_SECONDS)),
+        "a peer-supplied window must not exceed the local ceiling"
+    );
+
+    app.arm_pending_host_rejoin(0);
+    assert!(
+        app.pending_host_rejoin.is_some(),
+        "a zero window declines to re-arm; it does not disarm what is already armed"
+    );
+}
+
+#[test]
+fn cancelling_the_reconnect_dialog_abandons_the_rejoin() {
+    // Every attempt raises the same CANCEL modal. If Cancel left the rejoin
+    // armed, the retry would put the dialog straight back and the player would
+    // be held on the main menu until the window expired.
+    let mut app = new_classic_menu_app(800, 600);
+    app.pending_host_rejoin = Some(PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() + Duration::from_secs(30),
+        next_attempt_at: None,
+    });
+    let (_sender, receiver) = mpsc::channel();
+    app.startup_network_connection = Some(StartupNetworkConnection::new(
+        receiver,
+        None,
+        StartupNetworkPurpose::Join,
+    ));
+    app.push_message_dialog(
+        clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+            "Connecting to host".to_string(),
+            "Network".to_string(),
+            clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+        ),
+        MessageDialogContinuation::StartupNetworkConnectProgress,
+    )
+    .expect("push the reconnect progress dialog");
+
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+        .expect("cancel the reconnect");
+
+    assert!(app.startup_network_connection.is_none());
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "Cancel must end the rejoin, not just the attempt in flight"
+    );
+
+    app.poll_startup_network_connection()
+        .expect("poll after cancelling");
+    assert!(
+        app.startup_network_connection.is_none(),
+        "the cancelled rejoin must not reopen its dialog"
+    );
+}
+
+#[test]
+fn a_window_that_closes_mid_attempt_reports_one_failure() {
+    // The deadline can pass while a connect is still in flight. The failing
+    // attempt and the expiry must not both unwind the startup screen, or the
+    // player gets two teardowns and two stacked error dialogs.
+    let mut app = new_classic_menu_app(800, 600);
+    app.pending_host_rejoin = Some(PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() - Duration::from_secs(1),
+        next_attempt_at: None,
+    });
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Err(NetworkStartError::Other(
+            "connection refused".to_string(),
+        )))
+        .expect("queue the refused reconnect");
+    app.startup_network_connection = Some(StartupNetworkConnection::new(
+        receiver,
+        None,
+        StartupNetworkPurpose::Join,
+    ));
+
+    app.poll_startup_network_connection()
+        .expect("poll the attempt that outlived its window");
+    let after_failure = app.message_dialogs.len();
+    app.poll_startup_network_connection()
+        .expect("poll again once the entry is gone");
+
+    assert!(app.pending_host_rejoin.is_none());
+    assert_eq!(
+        app.message_dialogs.len(),
+        after_failure,
+        "the expired window must not raise a second failure behind the first"
+    );
+}
+
+#[test]
+fn an_armed_rejoin_survives_the_hosts_rebind_window_and_then_gives_up() {
+    // The host is still tearing its own session down when the notice arrives,
+    // so the first reconnect necessarily races an unbound port. A single
+    // refused connection must not end the rejoin — but the window the host
+    // named must, or a host that never comes back would spin forever.
+    let mut app = new_classic_menu_app(800, 600);
+    app.pending_host_rejoin = Some(PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() + Duration::from_secs(30),
+        next_attempt_at: None,
+    });
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Err(NetworkStartError::Other(
+            "connection refused".to_string(),
+        )))
+        .expect("queue refused reconnect");
+    app.startup_network_connection = Some(StartupNetworkConnection::new(
+        receiver,
+        None,
+        StartupNetworkPurpose::Join,
+    ));
+
+    app.poll_startup_network_connection()
+        .expect("poll the refused reconnect");
+
+    assert!(app.startup_network_connection.is_none());
+    let scheduled = app
+        .pending_host_rejoin
+        .as_ref()
+        .expect("a refused reconnect keeps the rejoin armed");
+    assert!(
+        scheduled.next_attempt_at.is_some(),
+        "the next attempt waits for the host to finish re-binding"
+    );
+    assert!(
+        app.startup_restart_diagnostics == StartupRestartDiagnostics::default(),
+        "a retryable reconnect must not present a startup failure"
+    );
+
+    app.pending_host_rejoin = Some(PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() - Duration::from_secs(1),
+        next_attempt_at: None,
+    });
+
+    app.poll_startup_network_connection()
+        .expect("poll past the rejoin deadline");
+
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "the rejoin stops at the window the host named"
+    );
+    assert_eq!(app.startup_view, StartupView::NetworkGame);
+}
+
+#[test]
+fn a_rejoin_reuses_the_live_join_settings_rather_than_rebuilding_them() {
+    // The reconnect has to be the same join, not a fresh one typed from the
+    // address bar: a password-protected or netpuncher-brokered host is only
+    // reachable with the credentials and routes this client already holds.
+    // Rebuilding ClientSettings from config would drop all of it and the
+    // reconnect would be refused for the whole window.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let password = clonk_engine::LegacyCString::from_bytes(b"hunter2".to_vec())
+        .expect("password fixture is NUL-free");
+    let settings = ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
+        .with_password(password.clone())
+        .with_compatibility_build(42);
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(settings.clone()));
+    app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    event_tx
+        .send(NetworkEvent::PeerDisconnected {
+            client_id: 0,
+            reason: None,
+        })
+        .expect("queue host socket loss");
+    app.process_network_events()
+        .expect("process the announced restart");
+
+    let relaunched = app
+        .pending_network_join
+        .as_ref()
+        .expect("the rejoin re-arms the same join it is repeating");
+    assert_eq!(relaunched.password, password);
+    assert_eq!(relaunched.compatibility_build, 42);
+    assert_eq!(
+        relaunched.logical_server_addresses,
+        settings.logical_server_addresses
+    );
+}
+
+#[test]
+fn dropping_to_local_control_abandons_an_armed_rejoin() {
+    // ChangeToLocal keeps the round running with no manager
+    // (src/C4GameControl.cpp:93-127), which is the same `network.is_none()`
+    // the rejoin poll waits for. Without an explicit abandon, a worker-level
+    // failure would open a reconnect dialog over a live, simulating round.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    event_tx
+        .send(NetworkEvent::FatalError("worker failed".to_string()))
+        .expect("queue worker failure");
+    app.process_network_events()
+        .expect("process the worker failure");
+    app.poll_startup_network_connection()
+        .expect("poll after dropping to local control");
+
+    assert_eq!(app.mode, AppMode::Running, "the round continues locally");
+    assert!(app.network.is_none());
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "a round that dropped to local control is no longer following the host"
+    );
+    assert!(
+        app.startup_network_connection.is_none(),
+        "no reconnect dialog may open over a live round"
+    );
+}
+
+#[test]
+fn an_announced_restart_alone_does_not_disturb_the_running_round() {
+    // The notice arrives while the host is still connected and the round is
+    // still simulating; only the disconnect it predicts may act on it. A host
+    // that announces and then does not go away must leave the round untouched.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    app.process_network_events()
+        .expect("process the restart notice");
+    app.poll_startup_network_connection()
+        .expect("poll with the rejoin armed but the host still connected");
+
+    assert!(app.pending_host_rejoin.is_some(), "the intent is recorded");
+    assert!(
+        app.startup_network_connection.is_none(),
+        "no reconnect may start while the session it would replace is still live"
+    );
+    assert!(app.network.is_some());
+    assert_eq!(app.mode, AppMode::Running);
+}
+
+#[test]
+fn a_client_waiting_in_the_lobby_also_follows_an_announced_restart() {
+    // The Restart button also exists on C4Network2StartWaitDlg
+    // (src/C4Network2Dialogs.cpp:574-584), so a client can be sitting in the
+    // lobby when the host restarts. Host loss there normally unwinds
+    // C4Game::Init back to the startup dialog (src/C4Network2.cpp:477-515),
+    // which for an announced restart would throw the player out of a lobby
+    // that is about to exist again.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.mode = AppMode::Menu;
+    app.startup_view = StartupView::NetworkLobby;
+    app.control_clients.register(0, true, false);
+    app.control_clients.register(local_client, true, false);
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    event_tx
+        .send(NetworkEvent::PeerDisconnected {
+            client_id: 0,
+            reason: Some("connection lost".to_string()),
+        })
+        .expect("queue host socket loss");
+    app.process_network_events()
+        .expect("process the announced restart from the lobby");
+
+    assert_eq!(
+        app.startup_network_connection
+            .as_ref()
+            .map(|connection| connection.purpose),
+        Some(StartupNetworkPurpose::Join),
+        "a lobby client reconnects instead of unwinding to the game list"
+    );
+    assert!(app.pending_host_rejoin.is_some());
+}
+
+#[test]
+fn a_rejoin_disarms_when_it_resolves_or_the_player_leaves() {
+    // An armed rejoin is a standing instruction to reconnect. Left armed after
+    // it has done its job, its window would later expire underneath a healthy
+    // lobby and tear that lobby down; left armed after the player quits, it
+    // would dial the host again from the main menu.
+    let mut app = new_real_classic_menu_app(800, 600);
+    let armed = || PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() + Duration::from_secs(30),
+        next_attempt_at: Some(Instant::now() + HOST_REJOIN_RETRY_INTERVAL),
+    };
+    app.pending_host_rejoin = Some(armed());
+    let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Ok((
+            NetworkMode::Client(ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            )),
+            manager,
+        )))
+        .expect("queue the completed rejoin");
+    app.startup_network_connection = Some(StartupNetworkConnection::new(
+        receiver,
+        None,
+        StartupNetworkPurpose::Join,
+    ));
+
+    let _ = app.poll_startup_network_connection();
+
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "a resolved rejoin must not keep its deadline running"
+    );
+
+    app.pending_host_rejoin = Some(armed());
+    app.return_to_menu();
+
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "leaving the round abandons the rejoin with it"
+    );
+}
+
+#[test]
 fn client_non_host_peer_loss_keeps_the_network_session() {
     // OnClientDisconnect clears a client's network only when the lost
     // C4Network2Client is the host. Another peer's eventual synchronized
@@ -18241,6 +18682,230 @@ fn l049_renderer_config_loads_native_defaults_and_graphics_values() {
     assert!(load_display_flags(Some(&paths)).splitscreen_dividers);
 }
 
+// C4Network2ClientDlg appends " (!ack)" only when Game.Network.isHost() and
+// the row's C4Network2Client exists and is not NCS_Ready
+// (src/C4Network2Dialogs.cpp:62,71; src/C4Network2Client.h:113).
+#[test]
+fn l174_client_info_ack_marker_needs_a_host_and_an_unready_net_client() {
+    let state = |status| network::RuntimeNetworkClientState {
+        client_id: 7,
+        status,
+        control_ready: true,
+        wait_ms: 0,
+    };
+    for unready in [
+        clonk_network::RemoteBarrierState::Joining,
+        clonk_network::RemoteBarrierState::Chasing,
+        clonk_network::RemoteBarrierState::NotReady,
+        clonk_network::RemoteBarrierState::Removing,
+    ] {
+        assert!(GameApp::runtime_client_row_unacknowledged(
+            true,
+            Some(&state(unready))
+        ));
+        assert!(
+            !GameApp::runtime_client_row_unacknowledged(false, Some(&state(unready))),
+            "a client never renders the host-only marker"
+        );
+    }
+    assert!(!GameApp::runtime_client_row_unacknowledged(
+        true,
+        Some(&state(clonk_network::RemoteBarrierState::Ready))
+    ));
+    assert!(
+        !GameApp::runtime_client_row_unacknowledged(true, None),
+        "the local row has no C4Network2Client to interrogate"
+    );
+}
+
+// `/netgetscen` copies the transferred scenario resource next to the
+// executable, and only for a non-host network client outside the lobby - the
+// lobby uses its Resources tab instead. Every other state, and every failure
+// along the way, is C++'s `return false`, which surfaces as the ordinary
+// unknown-command error (src/C4MessageInput.cpp:527-545).
+#[test]
+fn running_chat_netgetscen_saves_client_scenario_resource_like_cpp() {
+    let transfer = tempdir().expect("resource transfer folder");
+    let source = transfer.path().join("Transferred.c4s");
+    fs::write(&source, b"packed scenario bytes").expect("write transferred scenario");
+
+    // The sandbox app boots against the repository install root; only the
+    // netgetscen destination is redirected afterwards.
+    let mut app = new_classic_running_sandbox_app();
+    // AppPaths::discover validates planet/System.c4g, so the redirected root
+    // gets a minimal one; only the install root matters to netgetscen.
+    let install_root = tempdir().expect("install root");
+    let user_data = tempdir().expect("user data");
+    fs::create_dir_all(install_root.path().join("planet/System.c4g"))
+        .expect("minimal system group");
+    let _guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(install_root.path())),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+    ]);
+    app.app_paths = Some(AppPaths::discover().expect("discover isolated app paths"));
+    let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+
+    let host_config = clonk_network::HostConfig::default();
+    let mut snapshot = host_config
+        .initial_join_snapshot
+        .expect("default host publishes JoinData");
+    snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Scenario as u8,
+        id: 9,
+        loadable: true,
+        filename: LegacyCString::from_bytes(b"Scenarios/Remote.c4s".to_vec()).unwrap(),
+        ..Default::default()
+    };
+    app.pending_network_join_data = Some(clonk_network::JoinDataEnvelope {
+        client_id: 7,
+        start_control_tick: 0,
+        status: host_config.initial_status,
+        dynamic: snapshot.dynamic,
+        parameters: snapshot.parameters,
+    });
+
+    // The resource has not arrived yet: C++ returns false and the command is
+    // reported as unknown.
+    assert!(app.save_joined_scenario_resource().is_none());
+
+    app.admission_resources.resources.insert(
+        9,
+        AdmissionResourceState::Complete {
+            path: source.clone(),
+            removed: false,
+            local: false,
+        },
+    );
+
+    // `Game.Network.isHost()` is client-id based, so the host - which already
+    // owns the file - never gets the command.
+    let (host_network, _host_events) = NetworkManager::test_stub_for_client_id(0);
+    app.network = Some(host_network);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+    app.process_running_chat_text("/netgetscen");
+    assert!(
+        !install_root.path().join("Remote.c4s").exists(),
+        "the network host has the resource already"
+    );
+
+    let (client_network, _client_events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(client_network);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.process_running_chat_text("/netgetscen");
+
+    // Saved under the scenario's own base name, next to the executable, not
+    // under the resource's transfer name.
+    let destination = install_root.path().join("Remote.c4s");
+    assert_eq!(
+        fs::read(&destination).expect("saved scenario"),
+        b"packed scenario bytes"
+    );
+
+    // CreateItem erases an existing target first, so a repeat overwrites and
+    // succeeds (src/C4Group.cpp:147; src/StdFile.cpp:660-670).
+    fs::write(&source, b"newer scenario bytes").expect("rewrite transferred scenario");
+    assert_eq!(
+        app.save_joined_scenario_resource().as_deref(),
+        Some(destination.as_path())
+    );
+    assert_eq!(
+        fs::read(&destination).expect("overwritten scenario"),
+        b"newer scenario bytes"
+    );
+}
+
+// C4Network2::DrawStatus reads the live per-protocol accumulator through
+// getProtIRate/getProtORate/getProtBCRate, and coalesces the two protocol
+// lines into one "Msg/Data" entry when the message and data NetIO are the same
+// object (src/C4Network2.cpp:1148-1181).
+#[test]
+fn network_status_overlay_displays_live_protocol_rate_samples() {
+    let mut app = new_running_sandbox_app();
+    let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+    app.control_clients
+        .replace_snapshot([message_client(0, b"Host")]);
+    app.graphics
+        .set_debug_draw_flags(clonk_frontend::DebugDrawFlags {
+            show_net_status: true,
+            ..clonk_frontend::DebugDrawFlags::default()
+        });
+
+    // Both NetIO objects are bound, which is what makes the protocol line
+    // appear at all (src/C4Network2.cpp:1149-1150).
+    app.network
+        .as_ref()
+        .expect("network stub")
+        .set_test_local_addresses([
+            clonk_network::NetworkAddress::new(
+                clonk_network::NetworkProtocol::Tcp,
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            ),
+            clonk_network::NetworkAddress::new(
+                clonk_network::NetworkProtocol::Udp,
+                SocketAddr::from(([127, 0, 0, 1], 11_113)),
+            ),
+        ]);
+
+    // An unsampled accumulator reads zero, exactly like native startup.
+    app.update_network_status_overlay();
+    let text = app
+        .graphics
+        .network_status_text()
+        .expect("enabled network status text");
+    assert!(text.contains("i0 o0 bc0"), "{text}");
+
+    let network = app.network.as_ref().expect("network stub");
+    network.record_test_protocol_traffic(1, clonk_network::NetworkProtocol::Udp, 900, 300, 120);
+    network.record_test_protocol_traffic(2, clonk_network::NetworkProtocol::Tcp, 400, 100, 40);
+    // GenerateStatistics only consumes an edge strictly outside C++'s
+    // inclusive one-second window, so close the sample past it.
+    network.generate_test_statistics(2_000);
+
+    app.update_network_status_overlay();
+    let text = app
+        .graphics
+        .network_status_text()
+        .expect("sampled network status text");
+    let protocols = text
+        .split('|')
+        .find(|line| line.starts_with("Protocols:"))
+        .expect("protocol line");
+    assert!(
+        protocols.contains(" i") && protocols.contains(" o") && protocols.contains(" bc"),
+        "{protocols}"
+    );
+    assert!(
+        !protocols.contains("i0 o0 bc0"),
+        "the overlay must show the sampled rates, not zero: {protocols}"
+    );
+
+    // Reading the overlay must not consume the interval the per-second chart
+    // sampling owns: a second draw shows the same cached values.
+    let first = protocols.to_string();
+    app.update_network_status_overlay();
+    let second = app
+        .graphics
+        .network_status_text()
+        .expect("second network status text")
+        .split('|')
+        .find(|line| line.starts_with("Protocols:"))
+        .expect("protocol line")
+        .to_string();
+    assert_eq!(first, second);
+}
+
 #[test]
 fn runtime_client_list_maps_native_lifecycle_readiness_and_wait() {
     use clonk_frontend::runtime_client_list::RuntimeClientStatusIcon;
@@ -18656,8 +19321,13 @@ fn l144_standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
         wait_ms: None,
         connections: Vec::new(),
         can_moderate: false,
+        unacknowledged: false,
     };
-    app.runtime_client_list = Some(RuntimeClientListDialog::new_info("Client information", row));
+    app.runtime_client_list = Some(RuntimeClientListDialog::new_info(
+        "Client information",
+        row.client_id,
+        Some(row),
+    ));
     let (preferred, line_height) = app
         .runtime_client_list_input_geometry()
         .expect("standalone info geometry");
@@ -19402,5 +20072,388 @@ fn a_long_catch_up_still_draws_at_the_render_floor() {
     assert_eq!(
         app.frames_since_redraw, 0,
         "drawing resets the counter, so the floor is a rate and not a one-shot"
+    );
+}
+
+/// No native window backend clears player controls on focus loss: Win32
+/// deactivation only minimizes a fullscreen window (C4FullScreen.cpp:139-145),
+/// X11 FocusOut/Unmap only clears `Application.Active` (:310-315), and the SDL
+/// branch does not handle focus at all (:432-447). A synchronized
+/// `ClearPressed` belongs to the explicit modal flows
+/// (C4PlayerList.cpp:588-595), so Alt-Tab must add nothing to the session.
+#[test]
+fn focus_loss_does_not_submit_cpp_player_control() {
+    let mut app = new_running_sandbox_app();
+    let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+    // Drain whatever joining the sandbox already queued.
+    let _ = commands.take_submitted_local();
+
+    app.handle_focus_lost().expect("handle focus loss");
+
+    assert!(
+        commands.take_submitted_local().is_empty(),
+        "focus loss must not submit a network player control"
+    );
+    // The nonfatal UI/pointer cleanup still runs.
+    assert!(app.pressed_engine_keys.is_empty());
+    assert_eq!(app.ingame_pointer, None);
+}
+
+/// `Config.Network.MaxResSearchRecursion` defaults to 1 (C4Config.cpp:527-533)
+/// and bounds `C4Network2Res::SearchLocal`'s candidate walk
+/// (C4Network2Res.cpp:460-490). The live application has to load it and hand it
+/// to client bootstrap, not merely expose it in the advanced editor.
+#[test]
+fn configured_max_resource_search_recursion_reaches_client_candidates() {
+    let load = |body: Option<&str>| {
+        let root = tempdir().expect("recursion config root");
+        let user_data = tempdir().expect("recursion user data");
+        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("fixture System group");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        if let Some(body) = body {
+            fs::write(paths.config_file(), body).expect("write fixture config");
+        }
+        (
+            load_max_resource_search_recursion(Some(&paths)),
+            client_settings_for_paths(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Depth tester".to_string(),
+                Some(&paths),
+            )
+            .max_resource_search_recursion,
+        )
+    };
+
+    // The C++ default survives an absent config, an absent key and a
+    // non-numeric value.
+    assert_eq!(load(None), (1, 1));
+    assert_eq!(load(Some("[Network]\nName=Tester\n")), (1, 1));
+    assert_eq!(
+        load(Some("[Network]\nMaxResSearchRecursion=deep\n")),
+        (1, 1)
+    );
+    // A configured depth is loaded and carried into the client settings.
+    assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=0\n")), (0, 0));
+    assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=3\n")), (3, 3));
+    // A negative depth cannot deepen the search.
+    assert_eq!(load(Some("[Network]\nMaxResSearchRecursion=-2\n")), (0, 0));
+
+    // The settings value reaches the bootstrap candidate walk.
+    let config = clonk_network::ClientConfig::new("Depth tester", ParticipantKind::Player)
+        .with_max_resource_search_recursion(3);
+    assert_eq!(config.bootstrap_local_candidates.max_search_recursion(), 3);
+    assert_eq!(
+        clonk_network::ClientConfig::new("Depth tester", ParticipantKind::Player)
+            .bootstrap_local_candidates
+            .max_search_recursion(),
+        1,
+        "an unconfigured client keeps the native single-folder default"
+    );
+}
+
+/// `C4Network2Res` creates dynamic groups, received files and temporary
+/// download artifacts beneath `Config.Network.WorkPath`
+/// (C4Config.cpp:527-533,1369-1374; C4Network2Res.cpp:1709-1775), so a
+/// configured value has to move the staging directory as well as the wire
+/// names. The value is a relative name under the network cache; anything that
+/// could address a directory outside it keeps the native default.
+#[test]
+fn configured_network_work_path_controls_resource_staging_directory() {
+    let staging = |body: Option<&str>| {
+        let root = tempdir().expect("work-path config root");
+        let user_data = tempdir().expect("work-path user data");
+        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("fixture System group");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        if let Some(body) = body {
+            fs::write(paths.config_file(), body).expect("write fixture config");
+        }
+        let cache = paths.cache_dir().to_path_buf();
+        let name = network_work_directory_name(Some(&paths));
+        let directory = network_work_directory(Some(&paths)).expect("staging directory");
+        let client = client_settings_for_paths(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Work-path tester".to_string(),
+            Some(&paths),
+        )
+        .resource_directory;
+        // Host and client staging agree, and both stay inside the cache.
+        assert_eq!(directory, cache.join(&name));
+        assert_eq!(client, cache.join(&name));
+        assert!(directory.starts_with(&cache));
+        name
+    };
+
+    // The native default survives an absent config and an absent/empty key.
+    assert_eq!(staging(None), "Network");
+    assert_eq!(staging(Some("[Network]\nName=Tester\n")), "Network");
+    assert_eq!(staging(Some("[Network]\nWorkPath=\n")), "Network");
+    // A plain relative name moves the staging directory.
+    assert_eq!(staging(Some("[Network]\nWorkPath=NetCache\n")), "NetCache");
+    assert_eq!(
+        staging(Some("[Network]\nWorkPath=shared/net\n")),
+        "shared/net"
+    );
+
+    // Unsafe values cannot escape the cache and keep the default.
+    assert_eq!(staging(Some("[Network]\nWorkPath=..\n")), "Network");
+    assert_eq!(staging(Some("[Network]\nWorkPath=../escape\n")), "Network");
+    assert_eq!(staging(Some("[Network]\nWorkPath=net/../..\n")), "Network");
+    assert_eq!(
+        staging(Some("[Network]\nWorkPath=/tmp/escape\n")),
+        "Network"
+    );
+    assert_eq!(staging(Some("[Network]\nWorkPath=./here\n")), "Network");
+}
+
+/// `C4Application::DoInit` builds the global asynchronous pool with exactly
+/// `Config.General.ThreadPoolThreadCount` workers on every non-Windows target,
+/// defaulting to 8 (C4Config.cpp:406-408; C4Application.cpp:152-159). Windows
+/// uses the system pool, so the key is not read there.
+#[cfg(not(windows))]
+#[test]
+fn configured_thread_pool_count_builds_runtime_with_requested_workers() {
+    let workers = |body: Option<&str>| {
+        let root = tempdir().expect("thread-pool config root");
+        let user_data = tempdir().expect("thread-pool user data");
+        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        if let Some(body) = body {
+            fs::write(paths.config_file(), body).expect("write fixture config");
+        }
+        load_thread_pool_thread_count(Some(&paths))
+    };
+
+    // The native default survives an absent config, key and unparsable value.
+    assert_eq!(workers(None), 8);
+    assert_eq!(workers(Some("[General]\nName=Tester\n")), 8);
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=many\n")), 8);
+    // Zero and negative counts cannot ask tokio for an invalid pool.
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=0\n")), 8);
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=-4\n")), 8);
+    // A configured count is honoured verbatim.
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=1\n")), 1);
+    assert_eq!(workers(Some("[General]\nThreadPoolThreadCount=16\n")), 16);
+
+    // The count reaches the runtime builder, and a zero request still falls
+    // back rather than reaching tokio.
+    use clonk_app_netplay::network::{
+        network_runtime_worker_threads, set_network_runtime_worker_threads,
+        DEFAULT_NETWORK_RUNTIME_WORKER_THREADS,
+    };
+    let restore = network_runtime_worker_threads();
+    set_network_runtime_worker_threads(3);
+    assert_eq!(network_runtime_worker_threads(), 3);
+    set_network_runtime_worker_threads(0);
+    assert_eq!(
+        network_runtime_worker_threads(),
+        DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
+    );
+    assert_eq!(DEFAULT_NETWORK_RUNTIME_WORKER_THREADS, 8);
+    set_network_runtime_worker_threads(restore);
+}
+
+/// The `#ifndef NDEBUG` shortcuts in `C4Game::ParseCommandLine`
+/// (C4Game.cpp:3288-3304): `/host` stands up a lobby on the fixed pair with
+/// both signups off, and `/client:N` joins localhost on
+/// TCP `11112 + 2 * (N + 1)` / UDP `11113 + 2 * (N + 1)` using `atoi`.
+#[test]
+fn debug_classic_host_client_arguments_apply_cpp_lobby_ports() {
+    let parse = |argument: &str| parse_classic_command_line(&[argument.to_string().into()]);
+
+    if !DEBUG_CLASSIC_SHORTCUTS {
+        // A release build must not expose behaviour C++ compiles out.
+        let host = parse("/host");
+        assert_eq!(host.network_active, None);
+        assert_eq!(host.tcp_port, None);
+        let client = parse("/client:0");
+        assert_eq!(client.direct_join, None);
+        return;
+    }
+
+    let host = parse("/host");
+    assert_eq!(host.network_active, Some(true));
+    assert_eq!(host.lobby_timeout, Some(None));
+    assert_eq!(host.tcp_port, Some(11_112));
+    assert_eq!(host.udp_port, Some(11_113));
+    assert_eq!(host.master_server_signup, Some(false));
+    assert_eq!(host.league_server_signup, Some(false));
+    // `/host` does not set a join address; it is the host.
+    assert_eq!(host.direct_join, None);
+    // Case-insensitive, like SEqualNoCase.
+    assert_eq!(parse("/HOST").tcp_port, Some(11_112));
+
+    // `/client:N` targets localhost with a lobby and the derived pair.
+    for (index, tcp, udp) in [
+        ("0", 11_114, 11_115),
+        ("1", 11_116, 11_117),
+        ("2", 11_118, 11_119),
+        ("7", 11_128, 11_129),
+    ] {
+        let client = parse(&format!("/client:{index}"));
+        assert_eq!(client.network_active, Some(true));
+        assert_eq!(client.direct_join.as_deref(), Some("localhost"));
+        assert_eq!(client.lobby_timeout, Some(None));
+        assert_eq!(client.tcp_port, Some(tcp), "client {index} TCP");
+        assert_eq!(client.udp_port, Some(udp), "client {index} UDP");
+        // Unlike `/host`, signup state is left alone.
+        assert_eq!(client.master_server_signup, None);
+        assert_eq!(client.league_server_signup, None);
+    }
+    assert_eq!(parse("/CLIENT:1").tcp_port, Some(11_116));
+
+    // `atoi` takes the leading decimal prefix and yields zero without one, so
+    // these behave like index 0 rather than failing the argument.
+    for value in ["", "abc", "0x2"] {
+        let client = parse(&format!("/client:{value}"));
+        assert_eq!(client.tcp_port, Some(11_114), "/client:{value}");
+    }
+    // A trailing suffix keeps the numeric prefix.
+    assert_eq!(parse("/client:3rd").tcp_port, Some(11_120));
+}
+
+#[test]
+fn network_host_own_join_binds_the_local_presentation_to_its_player() {
+    // C4Game::JoinPlayer binds the local presentation to the number the join
+    // actually produced: `if (pPlr->LocalControl) CreateViewport(pPlr->Number)`
+    // (pristine 9ffa0a5d src/C4Game.cpp:3544-3556), and C4Player::FinalInit
+    // runs `Game.MouseControl.Init(Number)` for a locally controlled player
+    // (src/C4Player.cpp:784-791). A network host joins before every client, so
+    // C4PlayerList::GetFreeNumber hands it player 0 while `local_owner` still
+    // holds the process default. Mouse commands, HUD lookup and menu ownership
+    // all read `local_owner`, so it has to follow the join.
+    let directory = tempdir().expect("host player directory");
+    let player_path = directory.path().join("Host.c4p");
+    let mut player_group = MutableGroup::new("Host.c4p");
+    player_group
+        .add_file(
+            "Player.txt",
+            b"[Player]\nName=Host\n[Preferences]\nColorDw=255\nControl=0\n".to_vec(),
+        )
+        .expect("add host player core");
+    fs::write(&player_path, player_group.pack().expect("pack host player"))
+        .expect("write host player group");
+
+    let mut app = new_state_only_running_sandbox_app();
+    // A real network host owns no runtime player until its own synchronized
+    // JoinPlayer executes; the sandbox fixture pre-registers one.
+    app.remove_local_control_assignment(app.local_owner);
+    app.engine
+        .remove_player(app.local_owner)
+        .expect("drop the sandbox local player");
+    app.engine.set_local_players([]);
+    let (manager, _event_tx) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    app.engine.set_network_game(true);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+    app.control_clients.register(0, true, false);
+
+    let resource_id = 6;
+    let core = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: resource_id,
+        loadable: true,
+        filename: LegacyCString::from_bytes(b"Host.c4p".to_vec()).expect("valid wire name"),
+        ..clonk_engine::NetworkResourceCore::default()
+    };
+    app.admission_resources
+        .mark_complete(resource_id, player_path.clone());
+    let info_id = 1;
+    app.control_player_infos
+        .apply(clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: info_id,
+                name: LegacyCString::from_bytes(b"Host".to_vec()).expect("valid player name"),
+                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(core.clone()),
+                ..Default::default()
+            }],
+            by_client: 0,
+            ..Default::default()
+        });
+
+    app.apply_join_player_control(clonk_engine::JoinPlayerControlData {
+        filename: LegacyCString::from_bytes(b"Host.c4p".to_vec()).expect("valid legacy filename"),
+        at_client: 0,
+        info_id,
+        source: clonk_engine::JoinPlayerSource::Resource(core),
+        by_client: 0,
+    })
+    .expect("host executes its own synchronized join");
+
+    let joined = app
+        .engine
+        .players()
+        .find(|player| player.player_info_id() == info_id)
+        .map(|player| player.id())
+        .expect("host player joined the round");
+    assert_eq!(
+        app.engine.snapshot().hud.local_players,
+        vec![joined],
+        "the joined host player is the only local player"
+    );
+    assert_eq!(
+        app.local_owner, joined,
+        "local presentation must follow the host's own joined player number"
+    );
+}
+
+#[test]
+fn losing_the_last_local_viewport_flashes_the_native_observer_hint() {
+    // C4FullScreen::ViewportCheck's no-viewport case creates the ownerless
+    // observer viewport and then, outside film mode, flashes
+    // IDS_MSG_PRESSORPUSHANYGAMEPADBUTT with the FullscreenMenuOpen key name
+    // wrapped in the yellow markup (pristine 9ffa0a5d
+    // src/C4FullScreen.cpp:499-527). C4Game::InitKeyboard registers that key
+    // on K_SPACE (src/C4Game.cpp:3428). Without the hint an eliminated player
+    // only sees their controls stop working.
+    let mut app = new_running_sandbox_app();
+    let owner = app.local_owner;
+    let expected = format_resource_string(
+        app.runtime_flash_resources()
+            .expect("process-start flash resources")
+            .observer_menu
+            .clone(),
+        &["<c ffff00><Space></c>"],
+    );
+    app.runtime_flash_message = None;
+
+    assert!(app.close_physical_viewports(owner, false, true));
+    app.check_fullscreen_physical_viewports(true);
+
+    assert!(
+        app.primary_physical_viewport_is_no_owner(),
+        "the fullscreen fallback owns an ownerless observer viewport"
+    );
+    assert_eq!(
+        app.runtime_flash_message
+            .as_ref()
+            .map(|message| message.text.clone()),
+        Some(expected)
     );
 }

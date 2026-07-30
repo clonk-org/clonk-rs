@@ -192,6 +192,56 @@ pub(crate) fn map_folder_button_at(
         .rposition(|button| point_in_map_rect(point, &transform.rect(button.area)))
 }
 
+/// C++ tolerates a font zoom near unity rather than rescaling glyphs for it
+/// (`C4StartupScenSelDlg.cpp:380`).
+fn tolerated_font_zoom(height: i32, line_height: i32) -> f32 {
+    if line_height == 0 {
+        return 1.0;
+    }
+    let zoom = height as f32 / line_height as f32;
+    if (0.8..1.25).contains(&zoom) {
+        1.0
+    } else {
+        zoom
+    }
+}
+
+/// `C4GUI::Resource::GetFontByHeight` — the first font whose line height is at
+/// least the requested height, else the title font (`C4Gui.cpp:1235-1253`).
+pub(crate) fn gui_font_by_height(
+    fonts: &clonk_frontend::ClonkFontSet,
+    height: i32,
+) -> (&clonk_graphics::clonk_font::ClonkFont, f32) {
+    let font = if height <= fonts.mini.line_height {
+        &fonts.mini
+    } else if height <= fonts.text.line_height {
+        &fonts.text
+    } else if height <= fonts.caption.line_height {
+        &fonts.caption
+    } else {
+        &fonts.title
+    };
+    (font, tolerated_font_zoom(height, font.line_height))
+}
+
+/// `C4StartupGraphics::GetBlackFontByHeight` over the book faces
+/// (`C4Startup.cpp:125-143`).
+pub(crate) fn book_font_by_height(
+    fonts: &clonk_frontend::startup_scensel::BookFontSet,
+    height: i32,
+) -> (&clonk_graphics::clonk_font::ClonkFont, f32) {
+    let font = if height <= fonts.small.line_height {
+        &fonts.small
+    } else if height <= fonts.text.line_height {
+        &fonts.text
+    } else if height <= fonts.caption.line_height {
+        &fonts.caption
+    } else {
+        &fonts.title
+    };
+    (font, tolerated_font_zoom(height, font.line_height))
+}
+
 fn map_folder_text_color(color: u32) -> [u8; 4] {
     [
         ((color >> 16) & 0xff) as u8,
@@ -266,20 +316,10 @@ fn draw_scensel_map_dynamic(
         }
         if !button.title.is_empty() {
             let scaled_size = (button.title_font_size as f32 * transform.scale_y).round() as i32;
-            let font = if button.title_use_book_font {
-                if scaled_size >= 20 {
-                    &book_fonts.title
-                } else if scaled_size >= 15 {
-                    &book_fonts.caption
-                } else {
-                    &book_fonts.text
-                }
-            } else if scaled_size >= 20 {
-                &fonts.title
-            } else if scaled_size >= 15 {
-                &fonts.caption
+            let (font, _zoom) = if button.title_use_book_font {
+                book_font_by_height(book_fonts, scaled_size)
             } else {
-                &fonts.text
+                gui_font_by_height(fonts, scaled_size)
             };
             let (x, y) = transform.point(
                 button.area.x + button.title_offset_x,
@@ -2015,6 +2055,7 @@ fn collect_player_overlays_filtered(
                 label,
                 energy,
                 energy_capacity,
+                view_energy,
                 magic_energy,
                 magic_capacity,
                 breath,
@@ -2036,6 +2077,10 @@ fn collect_player_overlays_filtered(
                     .map(|physical| physical.magic)
                     .unwrap_or(object.magic_capacity);
                 let breath_capacity = physical.map(|physical| physical.breath).unwrap_or(0);
+                let view_energy = engine
+                    .find_object_index(object.id)
+                    .map(|index| engine.object_view_energy(index))
+                    .unwrap_or(0);
                 let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
                 let hide_hud_elements =
                     engine.definition_hide_hud_elements(object.definition_id.as_str());
@@ -2044,6 +2089,7 @@ fn collect_player_overlays_filtered(
                     label,
                     object.energy,
                     energy_capacity,
+                    view_energy,
                     object.magic_energy,
                     magic_capacity,
                     object.breath,
@@ -2054,13 +2100,14 @@ fn collect_player_overlays_filtered(
                 )
             } else {
                 let label = format!("Object #{}", object_id.as_u64());
-                (label, 0, 0, 0, 0, 0, 0, false, 0, 0)
+                (label, 0, 0, 0, 0, 0, 0, 0, false, 0, 0)
             };
             crew.push(CrewOverlay {
                 object_id: *object_id,
                 label,
                 energy,
                 energy_capacity,
+                view_energy,
                 magic_energy,
                 magic_capacity,
                 breath,
@@ -3709,7 +3756,20 @@ pub(crate) fn remove_file_or_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-fn copy_file_or_directory(source: &Path, destination: &Path) -> io::Result<()> {
+/// `EraseItem` (src/StdFile.cpp:642-658): remove an existing target of either
+/// kind, ignoring a target that was not there.
+pub(crate) fn erase_item(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    let _ = if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+}
+
+pub(crate) fn copy_file_or_directory(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     let file_type = metadata.file_type();
     if file_type.is_symlink() {

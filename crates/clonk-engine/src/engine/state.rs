@@ -794,6 +794,9 @@ impl Engine {
         }
         self.message_board_commands = state.message_board_commands.clone();
         self.debug_mode = false;
+        // Round setup and clear both start from debug output disabled
+        // (C4Game.cpp:640-652).
+        clonk_core::log_target::set_debug_mode_presentation(false);
         self.edit_cursor_target = None;
         self.time_go = false;
         let mut physics = state.physics;
@@ -1002,6 +1005,7 @@ impl Engine {
                 snapshot.id,
                 snapshot.definition_id.clone(),
                 ObjectState {
+                    view_energy: 0,
                     custom_name: snapshot.custom_name.clone(),
                     script_fixed_position: None,
                     script_fixed_velocity: None,
@@ -2240,7 +2244,7 @@ impl Engine {
                     source,
                     recovery: _,
                 }) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         %definition,
                         function,
                         error = %source,

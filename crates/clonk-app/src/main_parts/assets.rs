@@ -251,6 +251,46 @@ fn classic_argument_value<'a>(argument: &'a str, prefix: &str) -> Option<&'a str
         .then(|| &argument[prefix.len()..])
 }
 
+/// `atoi` semantics for `/client:N`: the longest leading decimal prefix, zero
+/// when there is none. C++ feeds the result straight into its port formula
+/// (C4Game.cpp:3298-3301), so a non-numeric index behaves like index 0.
+fn classic_atoi(value: &str) -> i64 {
+    let value = value.trim_start();
+    let (sign, digits) = match value.strip_prefix('-') {
+        Some(rest) => (-1, rest),
+        None => (1, value.strip_prefix('+').unwrap_or(value)),
+    };
+    let magnitude: i64 =
+        digits
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .fold(0_i64, |accumulated, byte| {
+                accumulated
+                    .saturating_mul(10)
+                    .saturating_add(i64::from(byte - b'0'))
+            });
+    sign * magnitude
+}
+
+/// `#ifndef NDEBUG` in `C4Game::ParseCommandLine` (C4Game.cpp:3288-3304). The
+/// two shortcuts stand up a local lobby on predictable ports; release builds
+/// never see them, matching the C++ gate.
+pub(crate) const DEBUG_CLASSIC_SHORTCUTS: bool = cfg!(debug_assertions);
+
+/// `/client:N` port pair: TCP `11112 + 2 * (N + 1)`, UDP `11113 + 2 * (N + 1)`
+/// (C4Game.cpp:3300-3301).
+pub(crate) fn classic_debug_client_ports(index: &str) -> (u16, u16) {
+    let offset = classic_atoi(index).saturating_add(1).saturating_mul(2);
+    (
+        i64::from(11_112_u16)
+            .saturating_add(offset)
+            .clamp(0, i64::from(u16::MAX)) as u16,
+        i64::from(11_113_u16)
+            .saturating_add(offset)
+            .clamp(0, i64::from(u16::MAX)) as u16,
+    )
+}
+
 fn classic_port(value: &str) -> u16 {
     value
         .trim()
@@ -367,6 +407,26 @@ pub(crate) fn parse_classic_command_line(arguments: &[OsString]) -> ClassicComma
                 parsed.direct_join = Some(target.to_string());
                 parsed.network_active = Some(true);
             }
+        } else if DEBUG_CLASSIC_SHORTCUTS && argument.eq_ignore_ascii_case("/host") {
+            // C4Game.cpp:3288-3296: network + lobby on the fixed pair, with
+            // both signup modes off.
+            parsed.network_active = Some(true);
+            parsed.lobby_timeout = Some(None);
+            parsed.tcp_port = Some(11_112);
+            parsed.udp_port = Some(11_113);
+            parsed.master_server_signup = Some(false);
+            parsed.league_server_signup = Some(false);
+        } else if let Some(value) =
+            classic_argument_value(argument, "/client:").filter(|_| DEBUG_CLASSIC_SHORTCUTS)
+        {
+            // C4Game.cpp:3297-3303: join localhost with a lobby on the
+            // index-derived pair. Signup state is deliberately untouched.
+            let (tcp, udp) = classic_debug_client_ports(value);
+            parsed.network_active = Some(true);
+            parsed.direct_join = Some("localhost".to_string());
+            parsed.lobby_timeout = Some(None);
+            parsed.tcp_port = Some(tcp);
+            parsed.udp_port = Some(udp);
         } else if let Some(value) = classic_argument_value(argument, "/tcpport:") {
             parsed.tcp_port = Some(classic_port(value));
         } else if let Some(value) = classic_argument_value(argument, "/udpport:") {
@@ -547,7 +607,7 @@ pub(crate) fn run_console_event_loop(
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.refresh_ceilings(),
     );
 
     let outcome = (|| -> Result<()> {
@@ -565,7 +625,7 @@ pub(crate) fn run_console_event_loop(
                 app.mode,
                 app.engine.game_tick_delay_ms(),
                 app.engine.game_tick_delay_revision(),
-                app.max_refresh_delay_ms,
+                app.refresh_ceilings(),
                 &mut frame_schedule,
                 &mut accumulator,
                 frame_time,
@@ -761,29 +821,30 @@ pub(crate) const SCENARIO_LOADING_LOG_CAPACITY: usize = 1_000;
 pub(crate) struct ScenarioLoadingReporter {
     sender: mpsc::Sender<ScenarioLoadingEvent>,
     last_progress: i32,
-    log: VecDeque<String>,
 }
 
 impl ScenarioLoadingReporter {
+    /// Opens the loader's log buffer, the way `C4MessageBoard::Init` hands the
+    /// loader a startup buffer before the round loads
+    /// (`src/C4MessageBoard.cpp:223-251`).
     pub(crate) fn new(sender: mpsc::Sender<ScenarioLoadingEvent>) -> Self {
+        clonk_logging::activate_loader_log();
         Self {
             sender,
             last_progress: 0,
-            log: VecDeque::new(),
         }
     }
 
+    /// Records a phase milestone. The line goes into the same buffer the GUI
+    /// log sink appends to, so a worker thread's log event between two
+    /// milestones keeps its position instead of either source replacing the
+    /// other (`src/C4Log.cpp:208-243`).
     pub(crate) fn report(&mut self, progress: i32, line: &'static str) {
         self.last_progress = self.last_progress.max(progress.clamp(0, 99));
-        if !line.is_empty() {
-            if self.log.len() == SCENARIO_LOADING_LOG_CAPACITY {
-                self.log.pop_front();
-            }
-            self.log.push_back(line.to_string());
-        }
+        clonk_logging::push_loader_log_line(line);
         let _ = self.sender.send(ScenarioLoadingEvent::LoaderFrame {
             progress: self.last_progress,
-            log: Some(self.log.iter().cloned().collect()),
+            log: Some(clonk_logging::loader_log_snapshot()),
         });
     }
 
@@ -2580,6 +2641,7 @@ pub(crate) fn resolve_classic_startup_font_bundle_for_request_with_system_fonts(
             title,
             caption: caption.clone(),
             text: text.clone(),
+            small: small.clone(),
         }),
         options: Arc::new(clonk_frontend::startup_options_dlg::BookFonts {
             book: text.clone(),
@@ -3974,6 +4036,74 @@ fn parse_runtime_help_language_table_with_charset(
     Ok(table)
 }
 
+/// The rest of SDL's physical scancode-name space, spelled exactly as
+/// `SDL_GetScancodeName` returns it. `String2KeyCode` accepts every non-UNKNOWN
+/// result (C4KeyboardInput.cpp:315-330), so a migrated `KeyConfig.txt` may name
+/// any of these; the port resolves the ones this event backend can deliver.
+/// Names SDL knows but winit cannot report stay unmapped and disable the
+/// binding, which is the same dead-binding outcome as `SDL_SCANCODE_UNKNOWN`.
+const EXTENDED_SDL_SCANCODE_NAMES: &[(&str, VirtualKeyCode)] = &[
+    // Modifiers (SDL_SCANCODE_LCTRL..RGUI).
+    ("Left Ctrl", VirtualKeyCode::LControl),
+    ("Right Ctrl", VirtualKeyCode::RControl),
+    ("Left Shift", VirtualKeyCode::LShift),
+    ("Right Shift", VirtualKeyCode::RShift),
+    ("Left Alt", VirtualKeyCode::LAlt),
+    ("Right Alt", VirtualKeyCode::RAlt),
+    ("Left GUI", VirtualKeyCode::LWin),
+    ("Right GUI", VirtualKeyCode::RWin),
+    // Media and volume keys.
+    ("Mute", VirtualKeyCode::Mute),
+    ("AudioMute", VirtualKeyCode::Mute),
+    ("VolumeUp", VirtualKeyCode::VolumeUp),
+    ("VolumeDown", VirtualKeyCode::VolumeDown),
+    ("AudioNext", VirtualKeyCode::NextTrack),
+    ("AudioPrev", VirtualKeyCode::PrevTrack),
+    ("AudioStop", VirtualKeyCode::MediaStop),
+    ("AudioPlay", VirtualKeyCode::PlayPause),
+    ("MediaSelect", VirtualKeyCode::MediaSelect),
+    // Application launch keys.
+    ("Mail", VirtualKeyCode::Mail),
+    ("Computer", VirtualKeyCode::MyComputer),
+    ("Calculator", VirtualKeyCode::Calculator),
+    ("Sleep", VirtualKeyCode::Sleep),
+    ("Power", VirtualKeyCode::Power),
+    ("Stop", VirtualKeyCode::Stop),
+    // Application-control (browser) keys.
+    ("AC Search", VirtualKeyCode::WebSearch),
+    ("AC Home", VirtualKeyCode::WebHome),
+    ("AC Back", VirtualKeyCode::WebBack),
+    ("AC Forward", VirtualKeyCode::WebForward),
+    ("AC Stop", VirtualKeyCode::WebStop),
+    ("AC Refresh", VirtualKeyCode::WebRefresh),
+    ("AC Bookmarks", VirtualKeyCode::WebFavorites),
+    // Editing keys SDL names separately from the Ctrl chords.
+    ("Cut", VirtualKeyCode::Cut),
+    ("Copy", VirtualKeyCode::Copy),
+    ("Paste", VirtualKeyCode::Paste),
+    // International and non-US keys. SDL names the extra ISO key next to the
+    // left Shift `NonUSBackslash`; winit reports it as OEM102. The JIS keys
+    // carry SDL's positional `International*`/`Lang*` names.
+    ("NonUSBackslash", VirtualKeyCode::OEM102),
+    ("International1", VirtualKeyCode::AbntC1),
+    ("International2", VirtualKeyCode::Kana),
+    ("International3", VirtualKeyCode::Yen),
+    ("International4", VirtualKeyCode::Convert),
+    ("International5", VirtualKeyCode::NoConvert),
+    ("Lang1", VirtualKeyCode::Kana),
+    ("Lang2", VirtualKeyCode::Kanji),
+    // Keypad names outside the arithmetic set handled above.
+    ("Keypad 00", VirtualKeyCode::Numpad0),
+    ("Keypad Equals", VirtualKeyCode::NumpadEquals),
+];
+
+fn extended_sdl_scancode_name(name: &str) -> Option<VirtualKeyCode> {
+    EXTENDED_SDL_SCANCODE_NAMES
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, key)| *key)
+}
+
 fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     let name = name.trim();
     if name.len() == 1 {
@@ -4161,6 +4291,9 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     };
     if named_key.is_some() {
         return named_key;
+    }
+    if let Some(key) = extended_sdl_scancode_name(name) {
+        return Some(key);
     }
 
     if let Some(number) = lower_name
@@ -4828,6 +4961,9 @@ fn runtime_help_default_key_name(name: &str, index: usize) -> &'static str {
         ("MsgBoardScrollDown", 0) => "Shift+Down",
         ("ToggleChat", 0) => "Alt+C",
         ("ScoreboardToggle", 0) => "Tab",
+        // C4Game::InitKeyboard registers the observer-menu opener on K_SPACE
+        // (C4Game.cpp:3428); C4FullScreen::ViewportCheck renders its name.
+        ("FullscreenMenuOpen", 0) => "Space",
         ("Screenshot", 0) => "F9",
         ("ScreenshotEx", 0) => "Ctrl+F9",
         ("GameSpeedUp", 0) => {
@@ -4863,8 +4999,50 @@ fn validate_runtime_help_line_buffers(left: &str, right: &str) -> Result<()> {
     Ok(())
 }
 
+/// `C4KeyboardInput::GetKeyCodeNameByKeyName` renders the registered chord's
+/// current code, so a `KeyConfig` override changes the displayed name
+/// (C4GraphicsSystem.cpp:692-724). Modifiers precede the key, joined by `+`,
+/// exactly like `C4KeyCodeEx::ToString`.
+pub(crate) fn runtime_help_key_name(
+    config: Option<&RuntimeKeyConfig>,
+    name: &str,
+    index: usize,
+) -> String {
+    let Some(chord) = config
+        .and_then(|config| config.override_for(name))
+        .and_then(|chords| chords.get(index))
+    else {
+        return runtime_help_default_key_name(name, index).to_string();
+    };
+    let RuntimePhysicalKey::Keyboard(key) = chord.physical else {
+        // A gamepad override has no keyboard name, which is the empty string
+        // `GetKeyCodeNameByKeyName` yields for an unresolvable code.
+        return String::new();
+    };
+    let mut label = String::new();
+    for (active, modifier) in [
+        (chord.modifiers.shift(), "Shift"),
+        (chord.modifiers.ctrl(), "Ctrl"),
+        (chord.modifiers.alt(), "Alt"),
+    ] {
+        if active {
+            label.push_str(modifier);
+            label.push('+');
+        }
+    }
+    label.push_str(&crate::control_options::format_key_label(key));
+    label
+}
+
 pub(crate) fn build_runtime_help_columns(
     table: &HashMap<String, String>,
+) -> Result<RuntimeHelpColumns> {
+    build_runtime_help_columns_with_keys(table, None)
+}
+
+pub(crate) fn build_runtime_help_columns_with_keys(
+    table: &HashMap<String, String>,
+    keys: Option<&RuntimeKeyConfig>,
 ) -> Result<RuntimeHelpColumns> {
     let text = |key: &str| {
         table
@@ -4872,7 +5050,7 @@ pub(crate) fn build_runtime_help_columns(
             .cloned()
             .unwrap_or_else(|| format!("[Undefined: {key}]"))
     };
-    let key = runtime_help_default_key_name;
+    let key = |name: &str, index: usize| runtime_help_key_name(keys, name, index);
     let left = format!(
         "[{}]\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}/{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n",
         text("IDS_CTL_GAMEFUNCTIONS"),
@@ -4933,6 +5111,7 @@ pub(crate) fn build_runtime_flash_resources(table: &RuntimeLanguageTable) -> Run
         no_debug_mode: text("IDS_MSG_NODEBUGMODE"),
         on: text("IDS_CTL_ON"),
         off: text("IDS_CTL_OFF"),
+        observer_menu: text("IDS_MSG_PRESSORPUSHANYGAMEPADBUTT"),
     }
 }
 
@@ -5037,6 +5216,18 @@ fn classic_loader_resources(
     let graphics_registrations = loader_graphics_registrations(registrations)?;
     let progress = load_named_graphics_image("GUIProgress", &graphics_registrations, graphics)?;
     LoaderResources::new(fonts, progress)
+}
+
+/// `C4LoaderScreen::Init` answers a missing `C4CFN_StartupBackgroundMain` by
+/// seeking the requested extensions in the main graphics group and then the
+/// general `Loader*` wildcard, so a classic pack without `LoaderGoldmine1.png`
+/// still has a startup background (src/C4LoaderScreen.cpp:57-87). The search
+/// runs over the already-open group; the GroupSet pass belongs to the loader
+/// screen itself (`build_startup_loader`).
+fn startup_menu_background_wildcard(graphics: &GraphicsResource) -> Option<ImageData> {
+    let selected =
+        select_loader_with_safe_random(&[], graphics.group(), STARTUP_LOADER_SPECIFICATION).ok()?;
+    decode_selected_loader(&selected).ok()
 }
 
 pub(crate) fn build_startup_loader(
@@ -5894,7 +6085,8 @@ impl FrontendAssets {
                     menu_background = graphics
                         .load_image("LoaderGoldmine1.png")
                         .ok()
-                        .map(Self::image_to_data);
+                        .map(Self::image_to_data)
+                        .or_else(|| startup_menu_background_wildcard(&graphics));
                     scenario_browser_background = graphics
                         .load_image("StartupScenSelBG.png")
                         .ok()
@@ -6221,6 +6413,10 @@ impl FrontendAssets {
             book_scroll: self.dialog_image("StartupBookScroll.png")?,
             context_arrow: self.dialog_image("StartupContext.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,
+            // The control facets degrade to text buttons when absent, so these
+            // are optional rather than failing the whole dialog.
+            control: self.dialog_image("Control.png"),
+            gamepad: self.dialog_image("Gamepad.png"),
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             button: self.dialog_image("GUIButton.png")?,
         })
@@ -6407,6 +6603,8 @@ impl FrontendAssets {
                 .as_ref()
                 .or_else(|| self.startup_dialog_images.get("Player.png")),
             hud.score.as_ref(),
+            self.startup_dialog_images.get("GUIScroll.png"),
+            hud.crew.as_ref(),
         ))
     }
 
@@ -7188,13 +7386,40 @@ impl FrontendAssets {
             return Ok(());
         }
 
-        let mut missing = Vec::new();
-        if hud.background.is_none() {
-            missing.push("Background.png");
-        }
-        if hud.upper_board.is_none() {
-            missing.push("UpperBoard.png");
-        }
+        // `C4GraphicsResource::Init` returns false on the first game/HUD file
+        // it cannot load, so every entry below is mandatory
+        // (C4GraphicsResource.cpp:200-231). The order mirrors that sequence, so
+        // the reported set reads like the native load order. `Options`, the
+        // cursor atlas and `Liquid` have their own gates.
+        let mandatory: [(&str, bool); 23] = [
+            ("Control.png", hud.control.is_none()),
+            ("Fire.png", hud.fire.is_none()),
+            ("Background.png", hud.background.is_none()),
+            ("Flag.png", hud.flag.is_none()),
+            ("Crew.png", hud.crew.is_none()),
+            ("Score.png", hud.score.is_none()),
+            ("Wealth.png", hud.wealth.is_none()),
+            ("Player.png", hud.player.is_none()),
+            ("Rank.png", hud.rank.is_none()),
+            ("Captain.png", hud.captain.is_none()),
+            ("SelectMark.png", hud.select_mark.is_none()),
+            ("Menu.png", hud.menu.is_none()),
+            ("Logo.png", hud.logo.is_none()),
+            ("Construction.png", hud.construction.is_none()),
+            ("Energy.png", hud.energy.is_none()),
+            ("Magic.png", hud.magic.is_none()),
+            ("UpperBoard.png", hud.upper_board.is_none()),
+            ("Arrow.png", hud.arrow.is_none()),
+            ("Exit.png", hud.exit.is_none()),
+            ("Hand.png", hud.hand.is_none()),
+            ("Gamepad.png", hud.gamepad.is_none()),
+            ("Build.png", hud.build.is_none()),
+            ("EnergyBars.png", hud.energy_bars.is_none()),
+        ];
+        let missing: Vec<&str> = mandatory
+            .into_iter()
+            .filter_map(|(name, absent)| absent.then_some(name))
+            .collect();
         if missing.is_empty() {
             Ok(())
         } else {
@@ -7409,6 +7634,7 @@ pub(crate) fn client_settings_for_paths(
     settings.league_transport = clonk_network::LeagueHttpTransportConfig {
         language_charset: query.language_charset,
         language_sequence: query.language_sequence,
+        http_backend: query.http_backend,
     };
     settings.league_auth = load_league_auth_settings(paths);
     if let Some(paths) = paths {
@@ -7420,7 +7646,9 @@ pub(crate) fn client_settings_for_paths(
             (ports.tcp != 0).then_some(SocketAddr::from(([0_u16; 8], ports.tcp)));
         settings.mesh_udp_bind_address =
             (ports.udp != 0).then_some(SocketAddr::from(([0_u16; 8], ports.udp)));
-        settings.resource_directory = paths.cache_dir().join("Network");
+        settings.resource_directory = paths
+            .cache_dir()
+            .join(network_work_directory_name(Some(paths)));
         settings.local_system_path = Some(paths.system_group_path().to_path_buf());
         settings.local_resource_roots = vec![
             paths.install_root().to_path_buf(),
@@ -7429,6 +7657,9 @@ pub(crate) fn client_settings_for_paths(
         if let Some(content) = paths.content_dir() {
             settings.local_resource_roots.push(content.to_path_buf());
         }
+        // `SearchLocal` bounds its candidate walk by the configured depth
+        // (C4Network2Res.cpp:460-490).
+        settings.max_resource_search_recursion = load_max_resource_search_recursion(Some(paths));
     }
     settings
 }
@@ -8375,6 +8606,47 @@ pub(crate) fn configured_sky_dither(config: &[u8]) -> bool {
     configured_remaster_feature(config, "SkyDither")
 }
 
+/// `Graphics.SmoothPresentation`: opt in to presenting at the display's own
+/// refresh period instead of C++'s 30 ms `Graphics.MaxRefreshDelay` ceiling.
+///
+/// C++ chose 30 ms against a 28 ms game tick, which welds presentation to one
+/// frame per tick. That is invisible for world content — the simulation really
+/// does advance only every 28 ms — but the mouse pointer is drawn *into* the
+/// frame (`draw_classic_gui_cursor`) with the platform cursor hidden, so the
+/// refresh period is also the pointer's update period. On a 120 Hz panel that
+/// is a 35.7 Hz pointer next to a 120 Hz system cursor.
+///
+/// This substitutes the panel period for the ceiling of the **startup timer**
+/// only, and changes nothing else: the divisor is C++'s own
+/// (`refresh_interval_for_tick`) and the 16 ms logic tick is untouched. The game
+/// timer deliberately keeps the oracle ceiling — measured, subdividing it buys
+/// +0.6 FPS for an 8 ms longer average pass and 49x the automatic frame skips,
+/// because in game the pass cost binds first. See `RefreshCeilings` and the
+/// `PORT_STATUS.md` divergence entry.
+pub(crate) fn configured_smooth_presentation(config: &[u8]) -> bool {
+    configured_remaster_feature(config, "SmoothPresentation")
+}
+
+/// The refresh ceiling actually in force. An explicit `Graphics.MaxRefreshDelay`
+/// is always honoured; otherwise smooth presentation substitutes the display
+/// period, clamped so it can never be slower than the native default.
+pub(crate) fn effective_max_refresh_delay_ms(
+    config: &[u8],
+    display_refresh_period_ms: Option<u64>,
+) -> u64 {
+    if crate::native_config_text(config, "Graphics", "MaxRefreshDelay").is_some() {
+        return configured_max_refresh_delay_ms(config);
+    }
+    if !configured_smooth_presentation(config) {
+        return DEFAULT_MAX_REFRESH_DELAY_MS;
+    }
+    // A panel that reports nothing still gets the 60+ FPS presentation the
+    // startup timer already assumes; it just does not get 120.
+    display_refresh_period_ms
+        .unwrap_or(STARTUP_FRAME_INTERVAL.as_millis() as u64)
+        .clamp(1, DEFAULT_MAX_REFRESH_DELAY_MS)
+}
+
 pub(crate) fn configured_max_refresh_delay_ms(config: &[u8]) -> u64 {
     u64::try_from(startup_config_integer(
         config,
@@ -8577,12 +8849,27 @@ pub(crate) fn discover_validated_startup_paths(
     Ok(app_paths)
 }
 
+/// `C4FullScreen::Init` titles the carrier window with `STD_PRODUCT`
+/// (C4FullScreen.cpp:474-480); the developer console is a separate surface with
+/// its own caption. Factored so the selection is testable without a window.
+pub(crate) fn native_window_title(console: bool) -> &'static str {
+    if console {
+        clonk_platform::CONSOLE_CAPTION
+    } else {
+        clonk_platform::ENGINE_CAPTION
+    }
+}
+
 pub(crate) fn startup_window_builder(
     display_options: &DisplayOptions,
     initial_size: PhysicalSize<u32>,
 ) -> WindowBuilder {
     let mut window_builder = WindowBuilder::new()
-        .with_title("Clonk Rust")
+        .with_title(native_window_title(false))
+        // Both shells share this builder, matching C++ assigning one icon
+        // resource to the fullscreen and console window classes alike
+        // (C4FullScreen.cpp:196-211; C4Console.cpp:297-310).
+        .with_window_icon(crate::window_icon::window_icon())
         .with_inner_size(initial_size);
     if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
         if let Some((x, y)) = display_options.position {

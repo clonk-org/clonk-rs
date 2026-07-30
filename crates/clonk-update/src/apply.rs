@@ -38,9 +38,9 @@
 //! a broken seal is reported by macOS as *"damaged and can't be opened"* —
 //! strictly worse than a stale but working copy. So the bundle is re-signed
 //! ad-hoc after the last swap, mirroring `xtask/src/main.rs`'s
-//! `sign_macos_bundle`: the nested `clonk-game` first, then the bundle, then
-//! `codesign --verify --deep --strict`. If verification fails the whole update
-//! is rolled back.
+//! `sign_macos_bundle`: the nested `clonk-game` and `c4group` executables first,
+//! then the bundle, then `codesign --verify --deep --strict`. If verification
+//! fails the whole update is rolled back.
 //!
 //! That has one consequence worth stating plainly, because it was **measured
 //! rather than assumed**: `codesign --verify --strict` refuses a bundle holding
@@ -87,8 +87,8 @@ const MINIMUM_UNPACKED_BUDGET: u64 = 64 * 1024 * 1024;
 /// from the new `planet/`.
 pub const LAUNCHER_STAGED_GROUPS: [&str; 2] = ["System.c4g", "Graphics.c4g"];
 
-/// The nested executable a bundle must sign before the bundle that seals it.
-const NESTED_LAUNCHER: &str = "clonk-game";
+/// The nested executables a bundle must sign before the bundle that seals them.
+const NESTED_BUNDLE_EXECUTABLES: [&str; 2] = ["clonk-game", "c4group"];
 
 /// `HKCU` subkey the Windows installer writes, and the value naming the
 /// installed release (`scripts/windows-installer.nsi:54,76`).
@@ -1030,11 +1030,13 @@ fn purge_launcher_staged_groups(layout: &InstallLayout) -> Result<Vec<PathBuf>, 
 /// Re-seals a bundle, in the order `xtask`'s `sign_macos_bundle` uses.
 fn resign_bundle(layout: &InstallLayout, ops: &dyn PlatformOps) -> Result<(), ApplyError> {
     // Nested code first: the bundle's own signature seals it, so signing the
-    // bundle before its nested executable would seal the old one.
-    ops.codesign(
-        &["--force", "--sign", "-"],
-        &layout.binaries_dir().join(NESTED_LAUNCHER),
-    )?;
+    // bundle before its nested executables would seal the old ones.
+    for executable in NESTED_BUNDLE_EXECUTABLES {
+        ops.codesign(
+            &["--force", "--sign", "-"],
+            &layout.binaries_dir().join(executable),
+        )?;
+    }
     ops.codesign(&["--force", "--sign", "-"], layout.root())?;
     // Proving it validates is the point: an unopenable "damaged" bundle is
     // worse than a stale one, so a failure here rolls the update back.
@@ -1428,6 +1430,7 @@ mod tests {
                 &[
                     (&format!("{prefix}/clonk-app"), "new app"),
                     (&format!("{prefix}/clonk-game"), "new launcher"),
+                    (&format!("{prefix}/c4group"), "new c4group"),
                     ("COPYING", "licence"),
                 ],
             )
@@ -1449,6 +1452,7 @@ mod tests {
         write_file(&data.join("planet/System.c4g/Rank.txt"), "old rank");
         write_file(&binaries.join("clonk-app"), "old app");
         write_file(&binaries.join("clonk-game"), "old launcher");
+        write_file(&binaries.join("c4group"), "old c4group");
         // Launcher-staged copies, in both places `ensure_runtime_assets` puts
         // them.
         write_file(&data.join("System.c4g/Rank.txt"), "staged rank");
@@ -1577,6 +1581,7 @@ mod tests {
         let binaries = install.layout.binaries_dir();
         assert_eq!(read_file(&binaries.join("clonk-app")), "new app");
         assert_eq!(read_file(&binaries.join("clonk-game")), "new launcher");
+        assert_eq!(read_file(&binaries.join("c4group")), "new c4group");
         // The launcher's staged group in `bin` is not in the archive, so it is
         // carried across rather than deleted.
         assert_eq!(
@@ -1810,9 +1815,9 @@ mod tests {
     }
 
     #[test]
-    fn a_bundle_apply_signs_the_nested_launcher_before_the_bundle_and_verifies() {
-        // The bundle's own signature seals its nested code, so signing them the
-        // other way round seals the executable that is about to be replaced.
+    fn a_bundle_apply_signs_the_nested_executables_before_the_bundle_and_verifies() {
+        // The bundle's own signature seals its nested code, so signing the
+        // bundle first would seal executables that are about to be replaced.
         let install = install_with(true);
         let platform = FakePlatform::new();
         let plan = plan(
@@ -1844,6 +1849,10 @@ mod tests {
                 (
                     vec!["--force".to_string(), "--sign".to_string(), "-".to_string()],
                     root.join("Contents/MacOS/clonk-game")
+                ),
+                (
+                    vec!["--force".to_string(), "--sign".to_string(), "-".to_string()],
+                    root.join("Contents/MacOS/c4group")
                 ),
                 (
                     vec!["--force".to_string(), "--sign".to_string(), "-".to_string()],
@@ -2214,6 +2223,7 @@ mod tests {
             archive: "content-abc.zip".to_string(),
             sha256: "cc".repeat(32),
             size: 4096,
+            source: None,
             destination: PathBuf::from("content"),
         };
         let staged =

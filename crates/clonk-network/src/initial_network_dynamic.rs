@@ -16,8 +16,6 @@ use crate::legacy::JoinGameParametersEnvelope;
 const SCENARIO_ENTRY: &str = "Scenario.txt";
 const GAME_ENTRY: &str = "Game.txt";
 const PARAMETERS_ENTRY: &str = "Parameters.txt";
-// C4GroupMaxMaker (`src/C4Group.h:54`).
-const GROUP_MAKER_MAX_BYTES: usize = 30;
 
 #[derive(Debug, Clone)]
 pub struct InitialNetworkDynamicSpec<'a> {
@@ -127,22 +125,15 @@ pub fn compose_initial_network_dynamic(
     let file_crc = c4group_file_crc(&packed_bytes);
     Ok(InitialNetworkDynamic {
         group_filename: spec.group_filename.to_owned(),
-        maker: packed_maker(spec.maker),
+        // See `compose_live_network_dynamic`: report the header that was packed,
+        // not the process maker that was offered for it.
+        maker: group.maker_bytes().to_vec(),
         packed_bytes,
         file_size,
         file_crc,
         contents_crc,
         entries,
     })
-}
-
-fn packed_maker(maker: &[u8]) -> Vec<u8> {
-    let length = maker
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(maker.len())
-        .min(GROUP_MAKER_MAX_BYTES);
-    maker[..length].to_vec()
 }
 
 fn dynamic_entry(

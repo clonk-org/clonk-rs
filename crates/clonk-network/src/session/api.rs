@@ -482,6 +482,14 @@ impl ClientConfig {
         self
     }
 
+    /// Bounds `SearchLocal`'s candidate walk at the configured depth
+    /// (C4Network2Res.cpp:460-490).
+    pub fn with_max_resource_search_recursion(mut self, max_search_recursion: usize) -> Self {
+        self.bootstrap_local_candidates
+            .set_max_search_recursion(max_search_recursion);
+        self
+    }
+
     pub fn with_bootstrap_local_candidates(
         mut self,
         candidates: crate::ClientBootstrapLocalCandidates,
@@ -781,6 +789,10 @@ pub enum HostCommand {
     SubmitLobbyCountdown(LobbyCountdownPacket),
     SubmitReadyCheck(ReadyCheckPacket),
     BroadcastLeagueRoundResults(crate::LeagueRoundResultsPacket),
+    BroadcastHostRestarting {
+        rejoin_seconds: u16,
+        completion: oneshot::Sender<()>,
+    },
     SubmitPacket {
         delivery: ControlDelivery,
         data: Vec<u8>,
@@ -846,6 +858,12 @@ pub enum HostCommand {
     },
     #[cfg(test)]
     InspectAcceptedRoutes {
+        completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
+    },
+    #[cfg(test)]
+    WaitForAcceptedRoutesChange {
+        initial_ids: BTreeSet<u32>,
+        expected_count: usize,
         completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
     },
     #[cfg(test)]
@@ -922,6 +940,22 @@ impl HostHandle {
             .send(HostCommand::BroadcastLeagueRoundResults(packet))
             .await
             .map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Tells every connected client that this session is closing to restart
+    /// the round, not because the host died. Resolves only once the notice has
+    /// been queued on each route, so the caller may tear the host down
+    /// immediately afterwards. See [`crate::host_restart`].
+    pub async fn broadcast_host_restarting(&self, rejoin_seconds: u16) -> Result<(), HostError> {
+        let (completion, broadcast) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::BroadcastHostRestarting {
+                rejoin_seconds,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        broadcast.await.map_err(|_| HostError::HostLoopGone)
     }
 
     pub async fn change_status(&self, status: NetworkStatus) -> Result<(), HostError> {
@@ -1285,6 +1319,26 @@ impl HostHandle {
     }
 
     #[cfg(test)]
+    pub(crate) async fn wait_for_accepted_routes_change(
+        &self,
+        initial_ids: BTreeSet<u32>,
+        expected_count: usize,
+    ) -> Vec<(u32, ClientId, u32)> {
+        let (completion, routes) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::WaitForAcceptedRoutesChange {
+                initial_ids,
+                expected_count,
+                completion,
+            })
+            .await
+            .expect("test host loop accepts a route-change barrier");
+        routes
+            .await
+            .expect("test host loop completes a route-change barrier")
+    }
+
+    #[cfg(test)]
     pub(crate) async fn connected_clients(&self) -> Vec<ClientId> {
         let (completion, clients) = oneshot::channel();
         self.command_tx
@@ -1415,6 +1469,12 @@ pub enum ClientEvent {
     },
     LeagueRoundResults {
         packet: crate::LeagueRoundResultsPacket,
+    },
+    /// The host is tearing this session down to restart the round, and expects
+    /// to be reachable again at the same address within `rejoin_seconds`.
+    /// Arrives *before* the disconnect it predicts. See [`crate::host_restart`].
+    HostRestarting {
+        rejoin_seconds: u16,
     },
     UnhandledPacket {
         packet_type: u8,

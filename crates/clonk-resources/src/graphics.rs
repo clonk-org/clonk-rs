@@ -95,6 +95,12 @@ impl GraphicsResource {
         Self::from_group(group)
     }
 
+    /// The backing group, so callers can run group-level searches without
+    /// reopening and reindexing the archive.
+    pub fn group(&self) -> &Group {
+        &self.group
+    }
+
     pub fn contains(&self, name: &str) -> bool {
         let key = fold_ascii_case(&clonk_script::c4_string_bytes(name));
         self.index.contains_key(&key)

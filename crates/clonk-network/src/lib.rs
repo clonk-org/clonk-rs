@@ -14,6 +14,8 @@ mod forward_packet;
 mod host_game_reference;
 mod host_initial_resources;
 mod host_resource_core;
+mod host_restart;
+mod http_backend;
 mod initial_network_dynamic;
 mod initial_network_metadata;
 mod initial_network_parameters;
@@ -69,6 +71,10 @@ pub use capabilities::{
 };
 pub use clonk_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 pub use control_latency::ControlLatencyEstimator;
+pub use host_restart::{
+    decode_host_restart_notice, encode_host_restart_notice, DEFAULT_HOST_RESTART_REJOIN_SECONDS,
+    PID_PORT_HOST_RESTARTING,
+};
 pub use join_client_registry::{reconcile_join_client_registry, JoinClientRegistrySnapshot};
 pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};
 pub use join_team_registry::{JoinTeamListSnapshot, JoinTeamSnapshot};
@@ -124,8 +130,9 @@ pub use host_initial_resources::{
 };
 pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
-    HostResourceType, MAX_PLAYER_BIG_ICON_SIZE,
+    HostResourceType, MAX_PLAYER_BIG_ICON_SIZE, STOCK_CHUNK_SIZE,
 };
+pub use http_backend::{HttpBackend, NETIO_HAPPY_EYEBALLS_TIMEOUT, NETIO_QUERY_TIMEOUT};
 pub use initial_network_dynamic::{
     compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,
     InitialNetworkDynamicError, InitialNetworkDynamicSpec,
@@ -141,8 +148,8 @@ pub use initial_network_parameters::{
 pub use irc::{
     resolve_irc_server, IrcChannel, IrcClientError, IrcClientEvent, IrcClientHandle,
     IrcClientSnapshot, IrcClientState, IrcCommand, IrcConnectConfig, IrcConnectionState,
-    IrcLineDecoder, IrcMessage, IrcMessageType, IrcReduceResult, IrcUser, IRC_DEFAULT_PORT,
-    IRC_MAX_LOG_LENGTH, IRC_MAX_READ_LOG_LENGTH,
+    IrcLineDecoder, IrcMessage, IrcMessageType, IrcReduceResult, IrcStatusTemplates, IrcUser,
+    IRC_DEFAULT_PORT, IRC_MAX_LOG_LENGTH, IRC_MAX_READ_LOG_LENGTH,
 };
 pub use league::{
     decode_league_auth_response, decode_league_end_response, decode_league_join_response,

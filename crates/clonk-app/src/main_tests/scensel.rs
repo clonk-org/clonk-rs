@@ -304,9 +304,11 @@
         .expect("grant and reload Mission Access");
         wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "secret");
+        // Memory-only until shutdown, as both native sites are
+        // (C4Script.cpp:2466-2471; C4StartupScenSelDlg.cpp:1838-1856).
         assert_eq!(
-            load_configured_mission_access(&paths).expect("load persisted mission access"),
-            "secret"
+            app.deferred_config.get("General", "MissionAccess"),
+            Some("secret")
         );
         assert_eq!(app.scenario_entry_enabled.get("Locked.c4s"), Some(&true));
         assert_eq!(app.scenario_entry_enabled.get("Native.c4s"), Some(&false));
@@ -3132,9 +3134,13 @@
         .expect("grant mission access");
         wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "Secret;Second");
+        // Both native mutation sites change `Config.General.MissionAccess` in
+        // memory alone and neither calls `Config.Save()`
+        // (C4Script.cpp:2466-2471; C4StartupScenSelDlg.cpp:1838-1856), so the
+        // grant is pending until a clean shutdown rather than on disk now.
         assert_eq!(
-            load_configured_mission_access(&paths).expect("load persisted mission access"),
-            "Secret;Second"
+            app.deferred_config.get("General", "MissionAccess"),
+            Some("Secret;Second")
         );
 
         app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
@@ -3146,8 +3152,9 @@
         wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "Second");
         assert_eq!(
-            load_configured_mission_access(&paths).expect("load updated mission access"),
-            "Second"
+            app.deferred_config.get("General", "MissionAccess"),
+            Some("Second"),
+            "a removal replaces the pending value rather than queueing a second write"
         );
         reset_cached_app_paths();
     }
@@ -3894,6 +3901,94 @@
             })]
         })
         .expect("FolderMap folder activation");
+    }
+
+    /// `C4MapFolderData::Load` answers `ImageDump=1` by blitting the scenario's
+    /// `Area` out of the FolderMap background and writing it to `BaseImage` as
+    /// a PNG, then skipping the ordinary base load
+    /// (src/C4StartupScenSelDlg.cpp:145-161). `CreateGUIElements` picks the
+    /// title font with `GetFontByHeight`'s ascending line-height ladder and its
+    /// `iHgt / lineHeight` zoom, snapped to 1.0 inside [0.8, 1.25)
+    /// (src/C4StartupScenSelDlg.cpp:374-381; src/C4Gui.cpp:1235-1253;
+    /// src/C4Startup.cpp:125-143).
+    #[test]
+    fn folder_map_image_dump_and_dynamic_title_font_match_cpp() {
+        let root = tempdir().expect("scenario root");
+        let map_path = root.path().join("Dump.c4f");
+        let scenario_path = map_path.join("Dumped.c4s");
+        fs::create_dir_all(&scenario_path).expect("create map scenario");
+        fs::write(map_path.join("Folder.txt"), "[Head]\nTitle=Dump Map\n")
+            .expect("write folder core");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Dumped\nMinPlayer=1\nMaxPlayer=4\n",
+        )
+        .expect("write scenario core");
+        // A background whose crop window is distinguishable from the whole.
+        let mut background = image::RgbaImage::from_pixel(16, 16, image::Rgba([10, 20, 30, 255]));
+        for y in 4..8 {
+            for x in 2..6 {
+                background.put_pixel(x, y, image::Rgba([200, 100, 50, 255]));
+            }
+        }
+        background
+            .save(map_path.join("FolderMap.png"))
+            .expect("write FolderMap background");
+        fs::write(
+            map_path.join("FolderMap.txt"),
+            "[FolderMap]\n    [Scenario]\n    File=Dumped.c4s\n    Area=2,4,4,4\n    BaseImage=Dumped.png\n    ImageDump=1\n",
+        )
+        .expect("write ImageDump layout");
+
+        let folder = FrontendScenario::from_resource(
+            resource_scenario::discover(root.path())
+                .expect("discover map folder")
+                .into_iter()
+                .find(|entry| entry.path == map_path)
+                .expect("map folder entry"),
+            "Test scenarios",
+        );
+        let map = load_map_folder_data(
+            &folder,
+            640,
+            480,
+            &MissionAccessStore::default(),
+            &["US".to_string()],
+        )
+        .expect("FolderMap data");
+
+        // The dump is written next to the FolderMap with the exact crop.
+        let dumped = image::open(map_path.join("Dumped.png"))
+            .expect("ImageDump output")
+            .into_rgba8();
+        assert_eq!(dumped.dimensions(), (4, 4));
+        assert!(dumped
+            .pixels()
+            .all(|pixel| pixel.0 == [200, 100, 50, 255]));
+        // `continue` skips the ordinary base load, so no base image is retained.
+        assert!(map.scenarios[0].base_image.is_none());
+
+        // GetFontByHeight ladders on line height, not on 15/20 thresholds.
+        let app = new_real_classic_menu_app(320, 200);
+        let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+        let pick = |height: i32| {
+            let (font, zoom) = gui_font_by_height(fonts, height);
+            (font.line_height, zoom)
+        };
+        assert_eq!(pick(fonts.mini.line_height), (fonts.mini.line_height, 1.0));
+        assert_eq!(pick(fonts.text.line_height), (fonts.text.line_height, 1.0));
+        assert_eq!(
+            pick(fonts.caption.line_height),
+            (fonts.caption.line_height, 1.0)
+        );
+        // Above every tier the title font takes over and keeps a real zoom.
+        let huge = fonts.title.line_height * 3;
+        let (line_height, zoom) = pick(huge);
+        assert_eq!(line_height, fonts.title.line_height);
+        assert!((zoom - huge as f32 / fonts.title.line_height as f32).abs() < 1e-4);
+        // Inside the tolerance band the zoom snaps back to 1.0.
+        let tolerated = (fonts.caption.line_height as f32 * 0.9).round() as i32;
+        assert_eq!(pick(tolerated).1, 1.0);
     }
 
     #[test]

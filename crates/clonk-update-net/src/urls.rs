@@ -4,7 +4,7 @@
 //! silently wrong rather than loudly broken, so they are separated here.
 
 use crate::error::TransportError;
-use clonk_update::{Manifest, TargetArchive};
+use clonk_update::{ArchiveSource, Manifest, TargetArchive};
 
 /// The manifest endpoint: the only URL that may use the `latest` redirect.
 pub const DEFAULT_UPDATE_BASE_URL: &str =
@@ -49,12 +49,54 @@ pub fn component_archive_url(version: &str, archive: &str) -> Result<String, Tra
         .ok_or_else(|| TransportError::UnsafeArchiveName(archive.to_owned()))
 }
 
-/// Resolves one manifest entry against the release the manifest describes.
+/// Resolves a component archive against a release in another repository.
+///
+/// `content` is published by the repository its files live in, so its bytes are
+/// re-uploaded when the content changes rather than daily. The repository and
+/// tag arrive inside an unsigned manifest fetched over the network and are
+/// pasted straight into a URL, so both are held to the same standard as an
+/// asset name: plain segments that cannot leave the release they name. The
+/// resulting host is `github.com`, which the redirect allowlist already covers.
+pub fn published_archive_url(
+    source: &ArchiveSource,
+    archive: &str,
+) -> Result<String, TransportError> {
+    let repository = plain_repository(&source.repo)
+        .ok_or_else(|| TransportError::UnsafeReleaseRepository(source.repo.clone()))?;
+    is_plain_asset_name(&source.tag)
+        .then_some(())
+        .ok_or_else(|| TransportError::UnsafeReleaseTag(source.tag.clone()))?;
+    is_plain_asset_name(archive)
+        .then(|| {
+            format!(
+                "https://github.com/{repository}/releases/download/{}/{archive}",
+                source.tag
+            )
+        })
+        .ok_or_else(|| TransportError::UnsafeArchiveName(archive.to_owned()))
+}
+
+/// Resolves one manifest entry against the release that published it.
+///
+/// Without a source that is the clonk-rs release this manifest describes; with
+/// one it is another repository's, and taking the default there would build a
+/// URL for an asset clonk-rs does not publish.
 pub fn archive_url_for(
     manifest: &Manifest,
     target: &TargetArchive,
 ) -> Result<String, TransportError> {
-    component_archive_url(&manifest.version, &target.archive)
+    target.source.as_ref().map_or_else(
+        || component_archive_url(&manifest.version, &target.archive),
+        |source| published_archive_url(source, &target.archive),
+    )
+}
+
+/// `owner/name`, both plain segments, as it appears in a release URL.
+fn plain_repository(repository: &str) -> Option<&str> {
+    repository
+        .split_once('/')
+        .filter(|(owner, name)| is_plain_asset_name(owner) && is_plain_asset_name(name))
+        .map(|_| repository)
 }
 
 /// `v`-prefixed release tag, accepting a version that already carries one.
@@ -109,6 +151,84 @@ mod tests {
             component_archive_url("0.4.0", "content-0123456789abcdef.zip").expect("plain name"),
             "https://github.com/syb0rg/clonk-rs/releases/download/v0.4.0/\
              content-0123456789abcdef.zip"
+        );
+    }
+
+    #[test]
+    fn a_component_published_by_another_repository_resolves_against_that_release() {
+        // `content` is built where the game data lives, so the engine
+        // repository stops re-uploading 225 MB of unchanged bytes daily. The
+        // tag names the exact content commit the submodule pins.
+        let source = ArchiveSource {
+            repo: "syb0rg/clonk-rs-content".to_string(),
+            tag: "content-9ce95af4359ce564bf7b4ef515c94f69091b0201".to_string(),
+        };
+        assert_eq!(
+            published_archive_url(&source, "content.zip").expect("plain names"),
+            "https://github.com/syb0rg/clonk-rs-content/releases/download/\
+             content-9ce95af4359ce564bf7b4ef515c94f69091b0201/content.zip"
+        );
+    }
+
+    #[test]
+    fn a_foreign_release_that_could_escape_its_repository_is_refused() {
+        // Every field here arrives inside an unsigned manifest fetched over the
+        // network and is pasted straight into a URL. The redirect allowlist
+        // cannot catch any of these — they all still resolve to github.com.
+        for (repo, tag) in [
+            ("syb0rg", "content-1"),
+            ("syb0rg/clonk-rs-content/extra", "content-1"),
+            ("syb0rg/../../evil", "content-1"),
+            ("syb0rg/clonk rs", "content-1"),
+            (
+                "syb0rg/clonk-rs-content",
+                "../../../../other/releases/download/v1",
+            ),
+            ("syb0rg/clonk-rs-content", "tag?query"),
+            ("", "content-1"),
+            ("syb0rg/clonk-rs-content", ""),
+        ] {
+            let source = ArchiveSource {
+                repo: repo.to_string(),
+                tag: tag.to_string(),
+            };
+            assert!(
+                published_archive_url(&source, "content.zip").is_err(),
+                "{repo:?} at {tag:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_foreign_component_is_still_fetched_from_an_allowlisted_host() {
+        // Verified against the live release rather than assumed: the content
+        // repository's download URL is github.com, which answers 302 towards
+        // release-assets.githubusercontent.com — both already allowlisted.
+        let source = ArchiveSource {
+            repo: "syb0rg/clonk-rs-content".to_string(),
+            tag: "content-abc".to_string(),
+        };
+        let url = published_archive_url(&source, "content.zip").expect("plain names");
+        assert!(url.starts_with("https://github.com/"));
+        assert!(ALLOWED_REDIRECT_HOSTS.contains(&"github.com"));
+        assert!(ALLOWED_REDIRECT_HOSTS.contains(&"release-assets.githubusercontent.com"));
+    }
+
+    #[test]
+    fn a_manifest_entry_from_another_repository_resolves_there_not_here() {
+        // The whole point of the field: without it this would silently build a
+        // clonk-rs URL for an asset that clonk-rs no longer publishes.
+        let manifest =
+            Manifest::parse(MANIFEST_WITH_FOREIGN_CONTENT.as_bytes()).expect("valid manifest");
+        let content = manifest.component("content").expect("content component");
+        let target = content
+            .target_for("x86_64-unknown-linux-gnu")
+            .expect("linux target");
+
+        assert_eq!(
+            archive_url_for(&manifest, target).expect("plain names"),
+            "https://github.com/syb0rg/clonk-rs-content/releases/download/\
+             content-abc/content.zip"
         );
     }
 
@@ -191,6 +311,30 @@ mod tests {
         assert!(ALLOWED_REDIRECT_HOSTS.contains(&"release-assets.githubusercontent.com"));
         assert!(!ALLOWED_REDIRECT_HOSTS.contains(&"githubusercontent.com"));
     }
+
+    const MANIFEST_WITH_FOREIGN_CONTENT: &str = r#"{
+      "schema": 1,
+      "version": "0.4.0",
+      "engine_version": [4, 9, 11, 0, 362],
+      "released_at": "2026-07-28T10:00:00Z",
+      "components": [
+        {
+          "name": "content",
+          "targets": {
+            "x86_64-unknown-linux-gnu": {
+              "archive": "content.zip",
+              "source": {
+                "repo": "syb0rg/clonk-rs-content",
+                "tag": "content-abc"
+              },
+              "sha256": "bb00112233445566778899aabbccddeeff00112233445566778899aabbccddee",
+              "size": 236117973,
+              "install": "content"
+            }
+          }
+        }
+      ]
+    }"#;
 
     const MANIFEST: &str = r#"{
       "schema": 1,

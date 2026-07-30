@@ -296,6 +296,24 @@ pub const FANPROJECT_TEXT: &str = "Clonk Rust is a fan project based on Clonk Ra
 /// IDS_BTN_BACK, IDS_BTN_CHECKFORUPDATES, IDS_BTN_LICENSES).
 pub const BUTTON_LABELS: [&str; 3] = ["Back", "Check for &updates", "&Licenses"];
 
+/// The bottom-line captions `C4StartupAboutDlg`'s constructor resolves through
+/// `LoadResStr` - `IDS_BTN_BACK`, `IDS_BTN_CHECKFORUPDATES` and
+/// `IDS_BTN_LICENSES` (C4StartupAboutDlg.cpp:279-284). `Default` reproduces the
+/// shipped `LanguageUS.txt` values, mnemonic markers included, because those
+/// markers are what `Button::SetText` turns into hotkeys.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AboutLabels {
+    pub buttons: [String; 3],
+}
+
+impl Default for AboutLabels {
+    fn default() -> Self {
+        Self {
+            buttons: BUTTON_LABELS.map(str::to_string),
+        }
+    }
+}
+
 /// One entry emitted into `generated/licenses.h` by the root CMake
 /// `LICENSES` list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -414,6 +432,7 @@ impl AboutButton {
 /// buttons.
 pub struct AboutDlgState {
     page: AboutPage,
+    labels: AboutLabels,
     layout: Option<AboutLayout>,
     pointer_position: Option<GuiPoint>,
     hovered: Option<AboutButton>,
@@ -442,9 +461,10 @@ impl Default for AboutDlgState {
 }
 
 impl AboutDlgState {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             page: AboutPage::Credits,
+            labels: AboutLabels::default(),
             layout: None,
             pointer_position: None,
             hovered: None,
@@ -465,6 +485,16 @@ impl AboutDlgState {
             scrollbar_dragging: None,
             scrollbar_arrow: None,
         }
+    }
+
+    /// Installs the active language table's About captions. C++ resolves them
+    /// while constructing the dialog, so the caller does the same.
+    pub fn set_labels(&mut self, labels: AboutLabels) {
+        self.labels = labels;
+    }
+
+    pub fn labels(&self) -> &AboutLabels {
+        &self.labels
     }
 
     pub fn resize(&mut self, width: i32, height: i32, fonts: &ClonkFontSet) {
@@ -706,7 +736,9 @@ impl AboutDlgState {
         AboutButton::ALL
             .into_iter()
             .filter(|button| self.is_visible(*button))
-            .find(|button| expand_hotkey_markup(BUTTON_LABELS[button.index()]).1 == Some(character))
+            .find(|button| {
+                expand_hotkey_markup(&self.labels.buttons[button.index()]).1 == Some(character)
+            })
             .map(|button| self.activate(button))
     }
 
@@ -1779,7 +1811,7 @@ impl AboutDlgScreen {
         // 4-6. Back / Update / Licenses buttons (Button::DrawElement,
         // C4GuiButton.cpp:81-109): released/down bar, additive focus/hover
         // highlight, then the fitted yellow caption with its pressed offset.
-        for (index, (rect, label)) in layout.buttons.iter().zip(BUTTON_LABELS).enumerate() {
+        for (index, (rect, label)) in layout.buttons.iter().zip(&state.labels.buttons).enumerate() {
             let button = AboutButton::ALL[index];
             if !state.is_visible(button) {
                 continue;

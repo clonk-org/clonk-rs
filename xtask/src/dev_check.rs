@@ -520,7 +520,16 @@ fn gameplay_path(path: &str) -> bool {
         || path.starts_with("testdata/dev-replays/")
 }
 
+fn replay_test_name(recording_host: bool) -> &'static str {
+    if recording_host {
+        "dev_feedback_replay::committed_real_scenario_replays_are_deterministic"
+    } else {
+        "dev_feedback_replay::real_scenario_replays_repeat_with_native_group_order"
+    }
+}
+
 fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
+    let replay_test = replay_test_name(cfg!(target_os = "macos"));
     plan.add(
         "deterministic-replay",
         CheckKind::Replay,
@@ -534,7 +543,7 @@ fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
             "--test",
             "engine_it",
             "--",
-            "dev_feedback_replay::committed_real_scenario_replays_are_deterministic",
+            replay_test,
             "--exact",
         ],
         reason,
@@ -791,22 +800,41 @@ fn add_engine_filter(plan: &mut CheckPlan, id: &str, filter: &str, kind: CheckKi
 }
 
 fn add_package(plan: &mut CheckPlan, package: &str, reason: &str) {
-    if package == "clonk-frontend" {
-        plan.add(
+    // Crates with `[lib] test = false` own no test binary, so
+    // `cargo nextest run -p <them>` compiles and then exits non-zero with "no
+    // tests to run". Route each to the companion crate that actually mounts its
+    // inline `#[cfg(test)]` modules; `clonk-logging` has no companion at all, so
+    // it gets no per-package unit command rather than a guaranteed failure.
+    const INLINE_COMPANIONS: [(&str, &str, &str, &str); 2] = [
+        (
+            "clonk-frontend",
             "clonk-frontend-inline",
+            "clonk-frontend-unit-tests",
+            "frontend_inline",
+        ),
+        (
+            "clonk-engine",
+            "clonk-engine-inline",
+            "clonk-engine-unit-tests",
+            "engine_inline",
+        ),
+    ];
+    if let Some((_, id, companion, target)) = INLINE_COMPANIONS
+        .iter()
+        .find(|(name, ..)| *name == package)
+        .copied()
+    {
+        plan.add(
+            id,
             CheckKind::Unit,
             CheckCwd::Workspace,
             "cargo",
-            &[
-                "nextest",
-                "run",
-                "-p",
-                "clonk-frontend-unit-tests",
-                "--test",
-                "frontend_inline",
-            ],
+            &["nextest", "run", "-p", companion, "--test", target],
             reason,
         );
+        return;
+    }
+    if package == "clonk-logging" {
         return;
     }
     plan.add(
@@ -1709,11 +1737,61 @@ mod tests {
     }
 
     #[test]
+    fn a_test_false_crate_never_plans_its_own_bare_package_run() {
+        // `clonk-engine`, `clonk-frontend` and `clonk-logging` all set
+        // `[lib] test = false`, so `cargo nextest run -p <them>` builds fine and
+        // then exits non-zero with "no tests to run". A `src/` change routes to
+        // the companion crates, but any other file in those packages fell
+        // through to the generic per-package command and reddened CI on a change
+        // that broke nothing (an edit to a `clonk-engine` example did exactly
+        // that). Their inline tests only ever run from the companion crates.
+        for (package, path) in [
+            (
+                "clonk-engine",
+                "crates/clonk-engine/examples/scenario_profile.rs",
+            ),
+            (
+                "clonk-frontend",
+                "crates/clonk-frontend/examples/anything.rs",
+            ),
+            ("clonk-logging", "crates/clonk-logging/examples/anything.rs"),
+        ] {
+            let plan = plan_for_paths(&[path], false);
+            assert!(
+                !plan.has_args(&["nextest", "run", "-p", package]),
+                "{path} planned a bare `-p {package}` run, which always fails"
+            );
+        }
+
+        // The engine case still has to be covered, not merely skipped.
+        let plan = plan_for_paths(&["crates/clonk-engine/examples/scenario_profile.rs"], false);
+        assert!(plan.has_args(&[
+            "nextest",
+            "run",
+            "-p",
+            "clonk-engine-unit-tests",
+            "--test",
+            "engine_inline",
+        ]));
+    }
+
+    #[test]
     fn gameplay_plan_starts_with_replay_and_render_then_engine_checks() {
         let plan = plan_for_paths(&["crates/clonk-engine/src/compat.rs"], false);
         assert_eq!(plan.commands[0].kind, CheckKind::Replay);
         assert_eq!(plan.commands[1].kind, CheckKind::RenderProbe);
         assert_eq!(plan.commands[2].kind, CheckKind::Hygiene);
+        assert!(plan.has_args(&[
+            "nextest",
+            "run",
+            "-p",
+            "clonk-engine-integration-tests",
+            "--test",
+            "engine_it",
+            "--",
+            replay_test_name(cfg!(target_os = "macos")),
+            "--exact",
+        ]));
         assert!(plan.has_args(&[
             "nextest",
             "run",
@@ -1739,6 +1817,18 @@ mod tests {
             "engine_it",
             "real_scenario_harness::",
         ]));
+    }
+
+    #[test]
+    fn recording_host_uses_committed_replay_oracles() {
+        assert_eq!(
+            replay_test_name(true),
+            "dev_feedback_replay::committed_real_scenario_replays_are_deterministic"
+        );
+        assert_eq!(
+            replay_test_name(false),
+            "dev_feedback_replay::real_scenario_replays_repeat_with_native_group_order"
+        );
     }
 
     #[test]

@@ -2496,37 +2496,63 @@
     fn same_group_duplicate_materials_retain_slots_across_overload_chain() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = dir.path().join("DuplicateMaterials.c4s");
-        let local = scenario_dir.join("Material.c4g");
-        std::fs::create_dir_all(&local).expect("local materials dir");
-        std::fs::write(
-            local.join("TexMap.txt"),
-            "OverloadMaterials\nOverloadTextures\n",
-        )
-        .expect("write local texmap");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        // C4MaterialMap::Load consumes the packed C4Group entry order
+        // (src/C4Material.cpp:242-276). Keep A, B, C in that physical order
+        // instead of inheriting host std::fs::read_dir order from a directory.
+        let mut local = clonk_resources::MutableGroup::new("Material.c4g");
+        local
+            .add_file(
+                "TexMap.txt",
+                b"OverloadMaterials\nOverloadTextures\n".to_vec(),
+            )
+            .expect("add local texmap");
         for (file, name, density, overlay) in [
             ("A.c4m", "Dup", 10, "Rough"),
             ("B.c4m", "dUp", 20, "Smooth"),
             ("C.c4m", "LocalOnly", 30, "Rough"),
         ] {
-            std::fs::write(
-                local.join(file),
-                format!("[Material]\nName={name}\nDensity={density}\nTextureOverlay={overlay}\n"),
-            )
-            .expect("write local material");
+            local
+                .add_file(
+                    file,
+                    format!(
+                        "[Material]\nName={name}\nDensity={density}\nTextureOverlay={overlay}\n"
+                    )
+                    .into_bytes(),
+                )
+                .expect("add local material");
         }
-        write_test_texture(&local, "Rough");
-        write_test_texture(&local, "Smooth");
+        for texture in ["Rough", "Smooth"] {
+            local
+                .add_file(
+                    format!("{texture}.bmp"),
+                    encode_indexed_bmp(&[&[0u8]]),
+                )
+                .expect("add local texture");
+        }
+        std::fs::write(
+            scenario_dir.join("Material.c4g"),
+            local.pack().expect("pack local materials"),
+        )
+        .expect("write local materials");
 
         let installed_root = dir.path().join("Installed");
-        let installed = installed_root.join("Material.c4g");
-        std::fs::create_dir_all(&installed).expect("installed materials dir");
-        std::fs::write(installed.join("TexMap.txt"), "# installed\n")
-            .expect("write installed texmap");
+        std::fs::create_dir_all(&installed_root).expect("installed root");
+        let mut installed = clonk_resources::MutableGroup::new("Material.c4g");
+        installed
+            .add_file("TexMap.txt", b"# installed\n".to_vec())
+            .expect("add installed texmap");
+        installed
+            .add_file(
+                "Global.c4m",
+                b"[Material]\nName=Global\nDensity=40\nTextureOverlay=Smooth\n".to_vec(),
+            )
+            .expect("add installed material");
         std::fs::write(
-            installed.join("Global.c4m"),
-            "[Material]\nName=Global\nDensity=40\nTextureOverlay=Smooth\n",
+            installed_root.join("Material.c4g"),
+            installed.pack().expect("pack installed materials"),
         )
-        .expect("write installed material");
+        .expect("write installed materials");
 
         let group = Group::open(&scenario_dir).expect("scenario group opens");
         let resolver = FileSystemResolver {
@@ -2592,4 +2618,3 @@
             Some("Smooth")
         );
     }
-

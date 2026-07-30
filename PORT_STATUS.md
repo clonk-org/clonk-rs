@@ -29,7 +29,10 @@ valid module against the effective Parameters capacity before landscape creation
 queues joins before `Initialize`, and executes them before frame-one simulation.
 Duplicate real paths retain separate infos but the later join is rejected like
 `FileInUse`; distinct local players receive their `.c4p` keyboard sets and route
-controls independently, including all-player focus-loss clearing. Scenario
+controls independently. Focus loss runs only the nonfatal UI/pointer
+cleanup: no native backend clears player controls there
+(C4FullScreen.cpp:139-145,310-315,432-447), so Alt-Tab adds nothing to a
+synchronized session. Scenario
 definition lists use classic quoted/numbered parsing and load explicit global
 packs before ancestor-local packs; later folder-local ID collisions overload
 the global definition, while packed parent graphics and materials resolve
@@ -422,6 +425,1063 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **`C4PlayerList::Join`'s max-player rejection is not ported.**
+  C++ refuses a join outright when `GetCount() + 1 > Game.Parameters.MaxPlayers`,
+  logs `IDS_PRC_TOOMANYPLRS` and returns no `C4Player`
+  (`C4PlayerList.cpp:288-294`). The Rust execution chain
+  (`apply_join_player_control` -> `join_player_at_client_with_semantics` ->
+  `register_joining_player`) never consults `max_players`, so it is strictly
+  more permissive. This is reachable in shipped content, not theoretical:
+  HarpoonRace's `Script1` calls parameterless `SetMaxPlayer()`
+  (`content/EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s/Script.c:14-18`),
+  which both engines resolve to `MaxPlayers = 0`, closing later admission in
+  C++ only. Initial joins are unaffected — they are issued at the Go tick,
+  before `Initialize()` and long before the Tick10-gated `Script1` — so this
+  can only diverge on a **runtime** join into such a round, where C++ drops the
+  player and Rust seats them. Closing it means adding the count gate to the
+  synchronized join path, with an audit of the fixtures that currently join
+  past a scenario's declared `MaxPlayer`.
+
+- **`C4Player::Eliminate`'s early client deactivation is missing.**
+  When the control host eliminates a player belonging to a *non-host* client
+  and no unbeaten player is left at that client, C++ submits
+  `CID_ClientUpdate`/`CUT_Activate(false)` for it
+  (`C4Player.cpp:2075-2088`). `player.rs::eliminate` has no equivalent, so a
+  fully eliminated remote client keeps its activated slot. The branch is gated
+  on `AtClient > C4ClientIDHost`, so an eliminated host is unaffected either
+  way; the visible effect is confined to lobby/roster activation state and
+  control-tick participation of wiped-out clients.
+
+- **Property-panel composition landed; the surfaces open.**
+  `clonk-engine::developer_property_text` ports `C4PropertyDlg::Update`'s body
+  (`C4PropertyDlg.cpp:169-256`): the 0/1/many switch, the fixed section order
+  (type, owner, contents, action, locals, effects), and the `fFirstLocal`-style
+  headers that appear **once** before their first entry and not at all when the
+  section is empty. Section *values* are supplied by the caller, so this is
+  independent of the value formatting, which M10-P4-L085 supplies. Pinned by
+  `object_list_and_property_dialog_share_edit_cursor_selection_order`.
+  **Still open:** the panel and object-list surfaces (which need the developer
+  window host, M10-P4-L081), the script input's `EMMO_Script` fan-out, and the
+  refresh cadence.
+
+- **Object-inspection read model landed; the windows that consume it are open.**
+  `clonk-engine::developer_inspection` and `::developer_locals` supply the
+  native ordering the console needs and nothing else exposes.
+  `object_tree` reverses `SimulationSnapshot::render_order` — which is the draw
+  direction, `Last -> Prev` (`C4ObjectList.cpp:390-395`) — to recover
+  `Game.Objects` First -> Next, then skips contained objects at the top level
+  and recurses through each `Contents` list, matching `C4ObjectListDlg`'s
+  repeated "Skip Contained Objects in the main list"
+  (`C4ObjectListDlg.cpp:100-101,557-560`). `name_list` ports
+  `GetListID`/`GetNameList` including the fixed 500-slot id buffer and the
+  separator keyed on the *index* rather than on what was emitted, so a skipped
+  unknown leading definition still leaves its comma
+  (`C4ObjectList.cpp:55-83,536-574`). `locals_in_emission_order` ports
+  `C4PropertyDlg.cpp:210-234`'s two asymmetric loops: indexed `Local[n]` slots
+  ascending and **truthy-only**, then **every** declared named local, assigned
+  or not. Declaration order is the *definition's* — `SetNameList` /
+  `OnNameListChanged` (`C4ValueMap.cpp`) re-map a loaded object's `LocalNamed=`
+  onto the definition's name list and drop anything it no longer declares — so
+  it comes from `Script::var_decls`, not from the object's map. Numbered slots
+  already exist in the port as `__local_{n}` keys, the same keys
+  `Local(n)`/`SetLocal` use. `clonk_script::data_string` is now the public
+  `C4Value::GetDataString`. Completion keeps C++'s two *different* rules:
+  the engine list tests `GetPublic()`, so every global script function shows
+  even when declared private, while a definition function must be exactly
+  `AA_PUBLIC` (`C4PropertyDlg.cpp:337-358`). Pinned by
+  `developer_object_inspection_preserves_master_contents_local_and_effect_order`,
+  `developer_object_inspection_exposes_data_strings_and_public_def_functions`
+  and `locals_split_into_indexed_then_named_like_the_property_panel`.
+  **Still open:** the tree and property windows themselves (M10-P4-L045 and the
+  window host M10-P4-L081), and wiring the engine's live function tables into
+  `completion_functions`.
+
+- **File-monitor arming and the external reload trigger landed; the watcher is
+  open.** `clonk-engine::developer_file_monitor` ports the two gates.
+  A monitor starts only when `Developer.AutoFileReload` is set, the app is
+  **not** fullscreen, and none is already running (`C4Game.cpp:2414`) — a
+  fullscreen session never watches however the key is set. The external
+  `WM_USER_RELOADFILE` payload is accepted only when its **last byte is NUL**
+  (`C4Console.cpp:243-249`); C++ tests that byte alone and `break`s otherwise,
+  so an unterminated buffer is silently ignored rather than truncated. An
+  embedded NUL earlier in the buffer still passes, and the path simply ends
+  there, because C++ then reads it as a C string. Pinned by
+  `console_auto_file_reload_watches_unpacked_sources_and_dispatches_paths` and
+  `external_reload_trigger_validates_path_and_reload_particle_is_name_based`.
+  **Still open:** the watcher itself, its app-thread delivery, and
+  `ReloadParticle` — the last of which needs the definition reload from
+  M10-P4-L086.
+  Which definitions get registered once it is armed is ported too
+  (`C4Def.cpp:547-560`): only **unpacked** groups — a packed `.c4d` has no
+  directory to observe — and only a **new** location, so reloading from the path
+  a definition already has re-registers nothing. The ordering is the trap: C++
+  computes the flag *before* `SCopy` overwrites `Filename`, and evaluating it
+  afterwards would compare the group's name against itself, always be false, and
+  silently watch nothing at all.
+
+- **Viewport lock, scroll ranges and input routing landed; windows open.**
+  `clonk-engine::developer_viewport` ports `C4Viewport::TogglePlayerLock`
+  (`C4Viewport.cpp:250-267`) with its asymmetry intact: unlocking always
+  succeeds, but locking requires `ValidPlr(Player)`, so an **ownerless
+  (`NO_OWNER`) viewport can never be locked** and keeps free scroll — the call
+  still reports success, so a caller cannot detect the refusal from its return
+  value. Locked viewports hide their scroll bars, and
+  `ScrollBarsByViewPosition` refuses outright while locked (`:272`); unlocked,
+  each bar spans the landscape with the view extent as its page and the view
+  origin as its position. Input routes by cursor mode — Play to ordinary mouse
+  control, Edit and Draw to the editor sink. Pinned by
+  `console_viewport_windows_route_redraw_resize_close_and_input_by_window_id`.
+  The window a viewport materialises with is ported too
+  (`C4Viewport.cpp:1350-1351`): `ceilf(400 * scale)` by `ceilf(250 * scale)` —
+  **ceiling**, so a fractional scale always rounds the window up — titled
+  `IDS_CNS_VIEWPORT` when ownerless and after the **player's name** otherwise.
+  Its remembered geometry is keyed `Viewport{Player + 1}`, so an ownerless
+  viewport is `Viewport0` and player 0 is `Viewport1`, stored under the
+  **`Console`** config subkey with `storeSize` set. Keying on the player rather
+  than a list index is what keeps duplicate-owner viewports from colliding.
+  **Still open:** actually opening those windows, which needs a second live
+  record in `clonk-app::developer_windows` alongside the console shell.
+
+- **Component-host edit model landed; the editors themselves open.**
+  `clonk-engine::developer_components` ports `C4ComponentHost`'s commit and save
+  rules. OK replaces the bytes and sets `Modified`
+  (`C4ComponentHost.cpp:330-334`) — including when the text is unchanged, since
+  C++ does not compare; Cancel mutates nothing, not even the flag. Saving
+  (`:231-236`) has two behaviours a naive port loses: an **unmodified host is
+  skipped entirely**, which is what stops a save touching components the user
+  never opened, and an **emptied host deletes the component** rather than
+  writing a zero-byte file. Only the Script editor relinks the script tree
+  (`C4Console.cpp:1328-1351`), and all three are refused outright in a network
+  game.
+  The Script commit is now wired through the engine.
+  `Engine::apply_scenario_script_edit` reproduces `C4Console::EditScript`
+  (`C4Console.cpp:1335-1342`), where two details are easy to lose: it must
+  **not** re-run `Initialize` — C++ only replaces the host's `Data` and relinks,
+  and the scenario is already running, so re-initialising would recreate its
+  objects — and the relink is **unconditional**, because
+  `Game.ScriptEngine.ReLink(&Game.Defs)` sits outside the `#ifdef _WIN32` and
+  runs even when the dialog was cancelled or never opened.
+  `Engine::relink_after_component_edit` is that second arm. Pinned by
+  `console_component_editors_commit_bytes_and_relink_script` and
+  `console_component_editors_commit_bytes_and_relink_script_through_the_engine`,
+  which drives a live engine through two edits and a bare relink.
+  The accepted bytes now reach the save.
+  `developer_console_save::component_save_mutations` projects each host onto the
+  group journal three ways: an **unmodified** host contributes nothing — which
+  is what stops a save rewriting components the user never opened — an
+  **emptied** one contributes a `DeleteEntry` rather than a zero-byte write, and
+  only a modified non-empty host is written, as `PutFile` with
+  `FolderSaveAddFailure::Fatal`, because silently dropping a component the user
+  just edited would lose their edit. Pinned by
+  `edited_component_hosts_reach_the_scenario_save_as_group_mutations`.
+  **Still open:** the editor surfaces — which do not exist on the reference
+  build; see the console-dialog note above.
+
+- **The edit cursor's overlay draw list landed.**
+  Unlike the console's dialogs, `C4EditCursor::Draw` is *not* a native widget —
+  it draws through the engine's own rasterizer, so it has an exact pixel oracle.
+  `clonk-engine::developer_overlay` ports it: a selection mark per selected
+  object in selection order, then the drag frame, then the drag line, then the
+  drop-target icon. `DrawSelectMark` is the fiddly part — **twelve individual
+  pixels** forming an L at each corner, not a rectangle outline, and nothing at
+  all when the shape is under a pixel wide or tall. The drag frame **normalises**
+  its corners (`min`/`max`) so dragging up-left frames the same rectangle as
+  down-right, while the drag line does not and keeps its direction. Holding
+  Shift interleaves an additive re-draw of each object after its mark
+  (`ColorMod = 0xffffff`, `C4GFXBLIT_CLRSFC_MOD2 | C4GFXBLIT_ADDITIVE`, both
+  restored), rather than appending a second pass. The drop-target icon is
+  centred horizontally on the target and rests on top of its shape. Nothing is
+  emitted in a fullscreen game, because `C4Viewport::Draw` only calls the cursor
+  when windowed. Pinned by
+  `console_overlay_emits_marks_frame_line_and_drop_target_in_cpp_order`.
+
+- **Edit-cursor mode, context enablement and gestures landed; overlays open.**
+  `clonk-engine::developer_cursor` ports `C4EditCursor::ToggleMode`
+  (`C4EditCursor.cpp:540-556`) — Play -> Edit -> Draw -> Play, gated on
+  `EditingOK()`, which is just `Console.Editing` (`:683-692`); a refused toggle
+  leaves the mode alone *and clears `Hold`*. It also ports the viewport context
+  entries (`:594-605`): Delete and Duplicate need a selection **and** editing
+  rights, Contents additionally needs the *first* selected object to hold
+  something, and **Properties is gated on mode alone** — enabled with no
+  selection and without editing rights, disabled only in Play. Its caption also
+  switches: outside Edit mode the entry reads `IDS_CNS_TOOLS`, not
+  `IDS_CNS_PROPERTIES` (`:605`).
+  The pointer gestures are now ported too. `edit_target` mirrors
+  `C4EditCursor::Move`'s `do`/`while` (`:143-151`): the target is picked at
+  least once, Shift resumes after `Selection.Last` rather than from the top and
+  keeps advancing past anything already selected, and — easy to get wrong —
+  there is **no wrap-around**, so an all-selected stack ends at `nullptr`.
+  `edit_move` gives a held non-frame drag `MoveSelection(xoff, yoff)` while a
+  rubber-band drag keeps re-targeting, and `edit_tick_move` reproduces
+  `Execute`'s **zero-offset** `EMMO_Move` re-issued every tick while `Hold` is
+  set (`:65-69`) — a stationary held selection still emits control traffic.
+  `drop_target` ports `UpdateDropTarget` (`:653-670`): Ctrl plus a non-empty
+  selection, then the first object in `Game.Objects` order whose shape rectangle
+  contains the cursor, skipping deleted, contained and selected ones; the
+  rectangle is half-open (`Inside(.., 0, Wdt - 1)`), so a zero-area shape
+  contains nothing. `edit_release` emits `FrameSelection` before the
+  `EMMO_Enter` of `PutContents`, both optional and in that order (`:672-682`).
+  `EditCursor()` already reaches the hovered object —
+  `Engine::set_edit_cursor_target` feeds the host world context. Pinned by
+  `console_edit_cursor_selects_cycles_drags_and_emits_cpp_ordered_controls`.
+  The mode-change publication is ported too (`C4EditCursor::SetMode`). Three
+  details: `Console.UpdateModeCtrls` runs **before** the unchanged-mode early
+  return, so it fires even when nothing changed; entering Draw clears the
+  **Property** page while entering Edit or Play clears the **Tools** page; and
+  the toolbox reopens *only* when one of the two was already active — a mode
+  switch never opens it from nothing. Play shows the mouse cursor, Edit and Draw
+  hide it, and the focused window is saved and restored around the switch so it
+  is never stolen from the console.
+
+- **The viewport draw order and the console overlay's place in it landed.**
+  The console's edit cursor draws *inside* the ordinary viewport pass, not on a
+  finished frame, so where its hook sits is a parity question.
+  `clonk-frontend::viewport_draw_order` ports `C4Viewport::Draw`'s phase
+  sequence (`C4Viewport.cpp:1023-1119`). Three things a from-scratch version
+  gets wrong: the hook goes **after** the foreground and custom-GUI objects but
+  **before** `DrawOverlay`, the per-player HUD — last would draw over the HUD,
+  earlier would let the HUD cover it; it runs **after the border inset is
+  undone** (`:1093-1099`), so the console draws across the whole viewport
+  including the border strips the world was clipped out of; and it is gated on
+  `!Application.isFullScreen`, *not* on `fDrawOverlay` — so a full-map
+  screenshot pass still draws it while dropping borders, clipper and HUD. Fog of
+  war is disabled before both, so neither is modulated. Cursors are skipped only
+  when a film **and** a replay (`if (!Film || !Replay)`). Pinned by
+  `detached_viewport_overlay_hook_precedes_player_hud`.
+  Addressing by identity landed with it. `ActiveViewportProjection` now carries
+  the concrete viewport's `identity`, and `viewport_projection_for_identity`
+  resolves it. That matters because both handles a caller previously had are
+  wrong for a detached window: `index` is the *rendered layout* order and moves
+  whenever the layout is recalculated, and `owner` repeats when two viewports
+  follow the same player — exactly what a console second window on an
+  already-viewed player produces. The camera store was already keyed by
+  `CameraKey::Physical`; what was missing was exposing that identity to the
+  caller. Pinned by
+  `detached_viewport_projection_is_addressable_by_physical_identity`, which
+  renders two same-owner viewports, swaps their layout order, and checks the
+  indices move while the identities do not. **Still open:** drawing a single
+  identity into a supplied target — the part that touches the rasterizer.
+
+- **Per-viewport pointer projection landed; identity-addressed rendering open.**
+  `clonk-frontend::viewport_projection` ports `C4Viewport`'s local-to-world
+  conversion (`C4Viewport.cpp:112,181,192`):
+  `ViewX + static_cast<int32_t>(local / scale)`. Two details a from-scratch
+  implementation gets wrong: the division is floating point and the cast
+  truncates **toward zero**, not floors — so a pointer above or left of the
+  window projects differently — and the view origin is added *after*
+  truncation. A non-finite or non-positive scale yields the view origin rather
+  than a wild coordinate. Pinned by
+  `detached_viewport_pointer_projection_uses_window_identity_and_scale`.
+  **Still open:** rendering one physical identity into a supplied target,
+  keying camera state by identity rather than the last global layout, and the
+  console-overlay hook that must run after world/foreground and before the
+  per-viewport HUD (`C4Viewport.cpp:1023-1110`).
+
+- **Live-reload path matching landed; the reload itself is open.**
+  `clonk-engine::developer_reload` ports `C4DefList::GetByPath`
+  (`C4Def.cpp:1137-1152`), which decides whether a changed file names a loaded
+  definition. The rule is narrower than it looks: a path matches only the
+  definition **root** or **exactly one component below it** — a grandchild such
+  as `Rock.c4d/Graphics/Overlay.png` does *not* match and falls through to the
+  generic script-host reload (`C4ScriptHost.cpp:135-149`). Comparison is
+  case-insensitive (`SEqual2NoCase`), and a prefix that stops mid-component
+  (`Rock.c4d` against `Rock.c4dx`) is rejected because the following byte is
+  neither NUL nor a separator. Pinned by
+  `definition_path_matches_only_the_root_or_one_immediate_child` and
+  `definition_lookup_returns_the_first_match_in_list_order`. **Note the ticket
+  cites `C4Def.cpp:1158-1175` for this, which is `CheckRequireDef` — the wrong
+  function.**
+  `C4Game::ReloadDef`'s surrounding policy is ported too. The network refusal is
+  its *first* line, so a network game never reloads whatever changed on disk;
+  the synchronise that follows is `Synchronize(false)`, which closes menus
+  holding dead surfaces but deliberately does **not** write player files back.
+  The two outcomes are symmetric sweeps over every object of that id in master
+  order, and both are blunter than they look: on success **all** of them get
+  `UpdateFace(true)` — C++ does not work out which are affected, because an
+  object can use another definition's graphics — and on failure **all** of them
+  are removed, the script profiler is aborted, and the definition itself is
+  dropped from the list. `Messages.UpdateDef(id)` runs after either arm. Pinned
+  by `console_definition_reload_refuses_network_and_sweeps_every_matching_object`.
+  The watcher's dispatch is ported too. `C4Game::ReloadFile`
+  (`C4Game.cpp:2306-2319`) refuses in a network game, converts the path with
+  `Config.AtExeRelativePath` **before** matching — so an absolute watcher path
+  never reaches `GetByPath` — and falls through to
+  `ScriptEngine.ReloadScript` for anything no definition owns; the script host
+  is the fallback, not a sibling branch. `C4Game::ReloadParticle` is blunter
+  than it looks: an unknown name reloads nothing, and a *failed* reload clears
+  **every particle in the system**, not just that definition's, then deletes the
+  definition. Pinned by
+  `external_reload_routes_by_definition_and_clears_particles_on_failure`.
+  `C4DefList::Reload`'s sequence is ported as well, and its order is
+  load-bearing in three places. `SortByID` rebuilds the quick-access table
+  **before** the relink, so the relink sees the definition at its final
+  position; `ReLink` runs **before** graphics are restored and "will also do
+  include callbacks", so a script inspecting graphics from an include callback
+  sees the *backed-up* set, not the reloaded one; and graphics are restored last
+  via `AssignUpdate`, which remaps live pointers rather than reassigning. On any
+  early return — the group failing to open, or `Load` failing — the graphics
+  backup's destructor resets every graphic to default, and `Clear` deliberately
+  keeps the filename, which is what lets the reload re-open the group it came
+  from. Pinned by `definition_reload_relinks_before_restoring_graphics`.
+  **Still open:** the reload's body — retaining source provenance through
+  production loading and rebuilding DefCore, ActMap, scripts, graphics,
+  portraits, ranks and localised components in place — and the file watcher that
+  feeds it.
+
+- **Deferred runtime config save: mechanism landed, most callers still write
+  through.** C++ mutates its process-wide `Config` for ordinary runtime toggles
+  and writes once in `C4Application::Clear` (`C4Application.cpp:351-367`); the
+  port wrote every toggle straight to disk, so a transient change survived a
+  crash C++ would have discarded and each toggle rewrote the whole file.
+  `clonk-app::deferred_config` now holds pending `(section, key) -> value`
+  writes, replacing rather than queueing a repeated key, and `main` flushes them
+  grouped by section on the clean-exit path only — an aborted run discards them,
+  which is the behaviour the ticket asks for. Pinned by
+  `runtime_config_mutations_remain_process_local_until_shutdown_save`.
+  **Migrated so far, each with an oracle citation:**
+  `Network.MasterServerSignUp` and `General.Record`
+  (`C4StartupNetDlg::OnBtnInternet`/`OnBtnRecord`, `C4StartupNetDlg.cpp:840-850`),
+  and `General.MissionAccess` — both of *its* native mutation sites,
+  `FnGainMissionAccess` (`C4Script.cpp:2466-2471`) and the cheat-code
+  add/remove (`C4StartupScenSelDlg.cpp:1838-1856`), change the string in memory
+  and return; `C4StartupScenSelDlg.cpp` contains no `Config.Save()` at all.
+  The four `[Sound]` toggles defer too: `C4SoundSystem::ToggleOnOff` is
+  `enabled = !enabled` with no save (`C4SoundSystem.cpp:138-142`), and neither
+  `C4SoundSystem.cpp` nor `C4MainMenu.cpp` contains a `Config.Save()`.
+  The `[Startup]` hide-message flags defer too: `ShowMessageModal` takes
+  `Config.Startup.HideMsg*` **by pointer** and writes it in memory
+  (`C4ChatDlg.cpp:624`), and none of `C4Gui.cpp`, `C4GuiDialogs.cpp` or
+  `C4ChatDlg.cpp` contains a `Config.Save()`. Six tests asserted the file was
+  written immediately; two now assert the pending value and four flush
+  explicitly before reloading, since their subject is the written *content*
+  rather than the timing. All had pinned the divergence. The IRC preference is
+  deliberately left writing eagerly — it goes through
+  `persist_irc_warning_preference`, a different native path.
+  **There are two flush points, not one.** `C4StartupOptionsDlg::SaveConfig`
+  ends with an outright `Config.Save()` — "make sure config is saved, in case
+  the game crashes later on" (`C4StartupOptionsDlg.cpp:1188-1189`) — so leaving
+  the Options dialog is an explicit save surface, not something to defer.
+  `close_options_menu` now flushes the pending store alongside its existing
+  options write, and the clean-shutdown path flushes the same store. Deferring
+  the Options save to shutdown would have lost exactly the crash protection that
+  comment describes. **Still open:** every other
+  `persist_config_value` caller needs its own C++ site read before being moved —
+  MissionAccess, Participants, sound toggles, ServerAddress and the Startup
+  checkboxes are *not* settled by the oracle lines this ticket cites, and the
+  many `main_tests` callers are fixture set-up that must keep writing
+  immediately.
+
+- **A proven C++ defect: `c4group -g` produces update packages `c4group -y`
+  cannot apply.** Reproduced end-to-end against the pinned oracle build
+  (`build-arm64-native/c4group`, arm64 macOS). `C4UpdatePackage::MkUp` builds
+  each `GRPUP_Entries.txt` record with
+  `std::format("{}={}", strItemName, ...)` where `strItemName` is a
+  `char[_MAX_PATH]` whose only initialised byte is `[0]`; the format writes the
+  **whole array**, so every record carries about a kilobyte of uninitialised
+  stack memory between the name and its `=`. `DoGrpUpdate` then matches those
+  names against real entries with `SEqual`, matches nothing, and **deletes every
+  entry of the target group**, so the update fails. The same omission is in
+  `C4UpdatePackageCore`'s constructor, which initialises `GrpChks1` but not
+  `GrpContentsCRC1`/`GrpContentsCRC2`, leaving fifty uninitialised words in
+  `AutoUpdate.txt`; `Check` compares against them and only works by falling
+  through to its `GrpChks1` comparison.
+  Two consequences for M10-P4-L087, both of which overturn an earlier note in
+  that ticket. **Byte-identical output cannot be the acceptance criterion** —
+  three runs of C++ `-g` over identical inputs produce three different files,
+  because the garbage differs per run. And writing a correct manifest is a
+  **fix**, not a divergence needing justification: an update package is not
+  simulation state, so it cannot affect determinism.
+  `clonk-c4group::update_entries` writes the manifest `MkUp` intends and reads
+  the corrupted form tolerantly, since C++-produced packages exist in the wild.
+  `clonk-c4group::update_core` does the same for `AutoUpdate.txt`, checked
+  against a package the oracle's own `c4group -g` produced. Two traps there:
+  the `UpGrpCnt` member is serialised under the key **`TargetCount`**, so
+  reading a key named after the member silently yields a zero-target package;
+  and only the first `TargetCount` array entries are meaningful, which is what
+  discards the uninitialised `GrpContentsCRC1` tail on read. Writing pads
+  nothing, so the same inputs give the same bytes every time — unlike C++.
+  Pinned by
+  `update_entry_manifest_round_trips_and_tolerates_cpp_uninitialised_names`,
+  which also asserts that parsing those records *literally* would delete the
+  whole group — the observed C++ behaviour.
+  `clonk-c4group::make_update` ports `MkUp`'s diff, which decides **two**
+  separate things that are easy to conflate. Which entries to *copy*: changed
+  when `EntrySize` **or** `EntryCRC32` differs — size-then-CRC, never a byte
+  compare — or when there is no source group. And whether the group is written
+  at all (`includeInUpdate`): set by a copied entry, but *also* by a header
+  difference or an **entry-order** difference on its own, so two groups with
+  identical entries in a different order still produce an update. `group_file_crc`
+  is verified numerically against the oracle's own output. Pinned by
+  `update_plan_copies_changed_entries_and_lists_every_target_entry`.
+  **`c4group -g` now works, and works better than C++'s.** Generating a package
+  from the same two groups and handing it to the *oracle's own* `c4group -y`
+  applies correctly: `a.txt` updated, `added.txt` added, `keep.txt` kept,
+  `removed.txt` deleted — where C++'s own package deletes every entry, because
+  its manifest is corrupt. Its core matches C++'s field for field
+  (`GrpChks1=1686362931`, `GrpChks2=1194512086`).
+  **And byte-identical repacking is not required after all** — which finally
+  settles a claim this file carried in two earlier forms.
+  `C4UpdatePackage::Execute`'s verdict is
+  `if ((!GrpContentsCRC2 || GrpContentsCRC2 != iResContentsChks) && iResChks != GrpChks2) return false;`
+  — success needs the result's *contents* CRC to match `GrpContentsCRC2` **or**
+  its *file* CRC to match `GrpChks2`. The contents CRC
+  (`C4Group_GetFileContentsCRC` -> `C4Group::EntryCRC32(nullptr)`) is the
+  **XOR** of every entry's CRC, so it is order- and packing-independent: that is
+  the escape hatch that lets an equivalent repack pass.
+  One trap in it, and it is the whole reason a first attempt fails: an entry's
+  CRC is **not** a CRC of its data. C++ computes `crc32(0, data)` and then
+  *continues the same CRC over the entry's filename bytes*. `entry_crc` and
+  `group_contents_crc` reproduce that, verified numerically —
+  `GrpContentsCRC2=3949291798` is exactly that XOR over the fixture's three
+  entries.
+  With those written, the oracle's own `c4group -y` reports **`Ok`** on a
+  Rust-generated package, where its own package fails.
+  `-y` is implemented too (`clonk-c4group::apply_update`), reproducing
+  `Execute`'s ladder rather than tidying it: already-updated is a *success*, not
+  a refusal; the source check consults `GrpContentsCRC1[i]` first — guarded by
+  `GrpContentsCRC1[i] &&`, which is the only thing stopping C++'s garbage
+  matching by accident — and falls back to `GrpChks1[i]`, which is what makes
+  real packages work.
+  Verified in **both** directions against the reference tool: Rust `-g` then
+  C++ `-y` is `Ok`, and Rust `-y` applies a **C++-generated** package correctly
+  — the very package C++ itself cannot apply, because the tolerant manifest
+  parse recovers the entry names from its corrupted records. Caveat: reproduced on one
+  toolchain; `std::format` over `char[N]` may differ elsewhere.
+
+- **Actionable ready-check toasts: the concurrency core landed, backends open.**
+  The lobby ready check already runs as an in-window Yes/No dialog with a
+  countdown; making the desktop notification beside it *actionable* means an
+  answer can arrive from a backend callback thread while the same question is
+  still answerable in-window. That race, not the API shape, is the hard part —
+  getting it wrong double-submits to a live protocol request.
+  `clonk-app::ready_check_notification::ReadyCheckContinuation` claims the
+  answer with a single atomic swap, so exactly one of the dialog thread and any
+  number of activation callbacks may resolve it; every later one is dropped.
+  Whatever wins also hides the toast, so a stale notification can never answer a
+  question that no longer exists, and a `Default` activation (clicking the body)
+  closes *without* submitting an answer — it means "come back to the game", not
+  "yes". Backend show and hide failures are logged and ignored, because a
+  missing notification daemon must not take the lobby down. Pinned by
+  `ready_check_notification_actions_answer_and_dialog_close_hides_toast` against
+  a fake sink, and by
+  `concurrent_ready_check_resolution_submits_exactly_one_answer`, which races
+  four threads 64 times and asserts a single winner and a single hide.
+  The freedesktop wire encoding is ported too, because it is the part of a Linux
+  backend that is both easy to get wrong and testable without a bus.
+  `org.freedesktop.Notifications.Notify` takes actions as a **flat
+  `key, label, key, label` array**, not as pairs — swapping that shows the key
+  as the button text — and `"default"` is the reserved key that fires on a body
+  click with no button of its own, which is where
+  `NotificationActivation::Default` comes from. An unrecognised `ActionInvoked`
+  key is **ignored rather than guessed at**, so another application's action can
+  never be read as an answer. For `NotificationClosed`, only reason 3
+  (`CloseNotification`) is our own doing and leaves the continuation alone;
+  expiry, user dismissal and undefined all end the prompt. Pinned by
+  `freedesktop_actions_interleave_keys_and_labels_with_a_default_entry`.
+  **Still open:** the D-Bus and WinRT plumbing itself — the `Notify` call, the
+  signal listener thread and `CloseNotification`. No Linux target is installed
+  here (`rustup target list --installed` shows only darwin and windows), so that
+  code could not be compiled, let alone run; writing a signal listener that
+  cannot even be type-checked is exactly where the concurrency bugs this core
+  exists to prevent would enter.
+
+- **`Network.UseCurl` now selects the HTTP backend, as a policy rather than a
+  second stack.** `C4Network2HTTPClient` picks one of two implementations at
+  construction (`C4Network2Reference.cpp:410-413`), and they differ on the wire,
+  not just internally. curl follows `Location` (`CURLOPT_FOLLOWLOCATION`), keeps
+  an in-memory cookie jar (`CURLOPT_COOKIEFILE ""`), reuses connections
+  (`CURLOPT_SHARE`) and bounds the connect phase plus a stalled transfer
+  (`C4HTTPClient.cpp:189-198`). NetIO does none of that: it writes `HTTP/1.0`
+  with `Connection: Close`, has **no `Location` handling at all**, no cookie
+  state, and one 20-second query timeout (`C4Network2Reference.cpp:404-405,
+  825-856`). `clonk-network::HttpBackend` is that difference, applied to a
+  `reqwest` client builder and threaded through `ReferenceQueryConfig` and
+  `LeagueHttpTransportConfig` so both reference and league traffic follow the
+  configured backend; the key defaults to true (`C4Config.cpp:561`), which is
+  the behaviour that already shipped.
+  **Deliberate divergence, with a reason.** The alternative reading — port
+  `C4Network2HTTPClientImplNetIO` literally — means a hand-written HTTP header
+  and gzip parser reading straight off the reference and league sockets,
+  duplicating `reqwest` on exactly the paths this repo forbids panicking on.
+  The acceptance criterion is observable request semantics, so the policy is
+  what is reproduced. Two residuals: `reqwest` cannot emit an `HTTP/1.0`
+  request line, so a version-sensitive server still sees `HTTP/1.1` with
+  `Connection: close`, and this `reqwest` has no happy-eyeballs builder, though
+  its connector default already matches C++'s 300 ms. Pinned by
+  `use_curl_false_selects_netio_compatible_http_transport`.
+
+- **Keyed developer window host landed, with the console shell as a live record.**
+  The runner owns exactly one Window/Pixels/FramePresenter, so console
+  viewports, the Tools/Property toolbox and the object-list window had nowhere
+  to live. `clonk-app::developer_windows` is the registry: records keyed by
+  `WindowId`, each owning one host plus a `HostPurpose`, and every operation
+  addresses exactly one record. Close semantics follow the oracle rather than
+  one rule — a viewport or the object list is destroyed
+  (`C4Viewport.cpp:775-834`), the toolbox is only *hidden* so its notebook
+  pages survive (`C4DevmodeDlg.cpp:79-101`), and the shell ignores a
+  child-style close entirely, so closing a child can never take the console
+  down. `request_redraw_visible` skips hidden hosts, and `present_visible`
+  reports each failure against its own `WindowId`, so one host's lost surface is
+  never attributed to another. Pinned by
+  `developer_window_host_routes_resize_redraw_hide_and_close_by_window_id`.
+  Presenting needed a design fix before any live record was possible. C++ gets
+  its drawing state for free — `C4Viewport::Execute` reads the global `Game`, so
+  a viewport appears to present itself — while the port passes that state
+  explicitly and it differs per purpose. `present` therefore moved to a separate
+  `DeveloperWindowPresenter<Ctx>` trait: mocks present with `()`, and
+  `shell_window_host::ShellWindowHost` presents with `GameApp` through the
+  retained GPU pipeline. Without that split the shell simply could not implement
+  the host contract.
+  The runner now registers the shell under the reserved `SHELL_WINDOW` key. Its
+  window, pixel surface, frame presenter and retained GPU renderer used to be
+  four separate locals; they are one record's worth of state — the renderer is
+  built from the surface's own device, queue and format — and bundling them is
+  what makes them addressable by id. The event loop destructures the record once
+  per event, so the per-site borrows are unchanged. This is deliberately pure
+  indirection today: with one window it changes no behaviour, and it pays off
+  when the console opens its second (M10-P4-L047). **Still open:** the
+  feature-specific surfaces themselves — the Tools/Property toolbox
+  (M10-P4-L044's criterion 7), the property and object-list windows
+  (M10-P4-L045) and console viewports (M10-P4-L047).
+
+- **The reference C++ build has no console dialog windows at all.** Worth
+  stating plainly, because it reframes the whole console-surface group.
+  `C4ToolsDlg::Open` (and its Property/object-list siblings) creates a window
+  only under `_WIN32` or `WITH_DEVELOPER_MODE`. `WITH_DEVELOPER_MODE` defaults
+  to **OFF** (`CMakeLists.txt:205-206`), and the pinned oracle's own arm64 macOS
+  build is compiled `WITH_DEVELOPER_MODE:BOOL=OFF`, `USE_SDL_MAINLOOP:BOOL=ON`.
+  On that build `Open` falls straight through to `Active = true` plus an ordered
+  refresh — `InitGradeCtrl`, `UpdateLandscapeModeCtrls`, `UpdateToolCtrls`,
+  `UpdateIFTControls`, `InitMaterialCtrls`, `EnableControls` — and `Clear` drops
+  `Active` and nothing else, which is why re-opening restores the previous
+  selection rather than the defaults. `C4ToolsDlg::Default`'s starting state is
+  Brush, grade 5, IFT on, material `Earth`, texture `Rough`. All of that is now
+  in `clonk-engine::developer_tools` (`open`, `clear`, `active`, `material`,
+  `texture`), pinned by
+  `console_draw_mode_routes_pointer_gestures_through_tools_state`.
+  So M10-P4-L044's "native separate-window/notebook behavior" describes the
+  Win32 and GTK builds, neither of which is the reference build — and against the
+  reference build the ported state *is* the dialog. The same reading applies to
+  M10-P4-L045's property and object-list surfaces. Whether those cards close on
+  that basis is a scoping decision for the queue owner, not a worker's.
+
+- **The toolbox notebook landed; its rendered controls are open.**
+  `C4DevmodeDlg` (`C4DevmodeDlg.cpp:28-121`) is one shared utility window
+  holding the Tools and Property pages in a **tabless** notebook
+  (`gtk_notebook_set_show_tabs(FALSE)`), so a page is never picked by clicking —
+  the console switches it. `clonk-app::developer_toolbox` ports the four
+  behaviours a port loses first: the close button **hides** (its `delete-event`
+  handler calls `SwitchPage(nullptr)` and returns `TRUE`, suppressing GTK's
+  destroy), the window position is **remembered across hides** in `static` x/y
+  and restored on the next show rather than re-centring, the title follows the
+  current page's *invisible* tab label, and the window is destroyed only when
+  its **last page** is removed — not when it is closed. Capturing the position
+  is guarded on visibility, which is what stops a hidden window's stale
+  coordinates overwriting a good one. Window chrome (utility type hint,
+  `"toolbox"` role, transient-for the console, centre-on-parent) is carried in
+  `ToolboxChrome` so the platform layer applies C++'s hints rather than
+  inventing its own. Pinned by
+  `developer_toolbox_hides_on_close_and_remembers_its_position`.
+  The Tools page's own contract is in `clonk-app::developer_tools_page`: the
+  fourteen controls in the order `C4ToolsDlg`'s box tree builds them
+  (`C4ToolsDlg.cpp:289-377`), and `EnableControls`' rules (`:912-940`), which
+  are three rules rather than one. Nearly everything needs
+  `Mode >= C4LSC_Static`, but **Fill needs `>= C4LSC_Exact`** — it is the only
+  tool absent from a static landscape — and the **texture list additionally
+  requires the material not to be Sky**. The three landscape-mode buttons are
+  never disabled, which is what stops a dynamic landscape being a dead end: in
+  that mode they are the *only* live controls. Win32 selects a disabled bitmap
+  from the same predicates, so the enablement answer picks the artwork too.
+  Pinned by `tools_page_enables_fill_only_in_exact_and_textures_only_off_sky`.
+  **Still open:** rendering the page — the button artwork, the grade scale, the
+  material and texture pickers and the preview — and window focus.
+
+- **Developer draw-tool state machine and mode control landed; dialog open.**
+  `clonk-engine::developer_tools` carries `C4ToolsDlg`'s retained state and
+  `C4EditCursor`'s gesture cadence. `ToggleTool` is `(Tool + 1) % 4`
+  (`C4ToolsDlg.h:148`), which never lands on Picker — including from Picker
+  itself, where it goes to Line. Grade clamps to 1..50 with five-unit key steps
+  (`C4ToolsDlg.cpp:732-737`). The per-tool cadence matches
+  `C4EditCursor.cpp:74,159,234,301-304` exactly: Brush emits on click *and*
+  every drag step, Line/Rect record an anchor and emit once on release with both
+  coordinate pairs, and Fill emits nothing on the click — it arms `Hold` and
+  repeats from `Execute` every frame while the game runs, refusing while halted
+  or when the console is not editing. Alt selects the Picker temporarily in Draw
+  mode only and restores the previous tool on release
+  (`C4EditCursor.cpp:773-792`).
+  Landscape-mode changes are now modelled as the *control* they are
+  (`C4ToolsDlg::SetLandscapeMode`, `C4ToolsDlg.cpp:865-894`). The local path
+  changes nothing: it asks `IDS_CNS_EXACTTOSTATIC` only for Exact -> Static,
+  and on confirmation enqueues `EMDT_SetMode` as `CDT_Decide`. All the state
+  lives in the `fThroughControl` arm — `landscape_mode_change` sets the mode,
+  redraws from the map on Exact -> Static, and corrects the tool, because Fill
+  exists only in Exact mode and any other mode falls back to Brush. No other
+  tool is corrected, and a mode arriving through the queue is never
+  re-confirmed. Pinned by
+  `console_draw_mode_routes_pointer_gestures_through_tools_state`. The material
+  and texture catalogue and the picker itself already exist in
+  `developer_landscape` (M10-P4-L084). **Still open:** the dialog chrome and its
+  window host, gated on M10-P4-L081.
+
+- Closed 2026-07-29: **Options control sheets draw the classic facets.**
+  `C4StartupOptionsDlg` draws the Keyboard/Gamepad pages from facets, not text
+  buttons (`C4StartupOptionsDlg.cpp:215-345`). Two of the three pieces are in:
+  `startup_options_controls::key_button_facets` ports
+  `KeySelButton::DrawElement`'s geometry exactly — `fctKey` at phase `fDown`,
+  then `fctCommand` at phase `iKeyID` inset by a fifth of the button width
+  either side, three quarters of that above, and nudged down half an indent
+  while held — and the twelve action labels now resolve through the
+  `IDS_CTL_*` table in C++'s order (`:166-169`) via `OptionsLabels::control_keys`
+  instead of baked English, falling back to the shipped US text per key. Pinned
+  by `startup_options_control_sheets_render_classic_facets_and_resource_text`.
+  The key buttons now blit the real facets: `OptionsDlgAssets` carries optional
+  `control` (`Control.png`, source of `fctKeyboard` 0,0,80,36; `fctCommand`
+  0,36,32,32; `fctKey` 0,100,64,64) and `gamepad` (`Gamepad.png`, its own image
+  with an 80px phase width) per `C4GraphicsResource.cpp:200-203,229`, and
+  `draw_control_sheet` blits `fctKey` then the inset `fctCommand`. Both assets
+  are optional, so a headless run or missing data keeps the text buttons rather
+  than failing the dialog. The device set selectors blit `fctKeyboard`/`fctGamepad`
+  phases too — `fctCtrlPic = fGamepad ? fctGamepad : fctKeyboard` with the set
+  index as phase (`C4StartupOptionsDlg.cpp:271`) — and the `Keyboard` and
+  `Gamepad` `MENU_PARITY.md` rows record the change.
+
+- Closed 2026-07-29: **Overflow menu scrollbars.**
+  `C4GUI::ScrollBar` had two independent implementations — the drawing half in
+  `clonk-app-menus::game_over` (`draw_classic_scrollbar`, pinned by the
+  evaluation-dialog tests) and the interaction half in `clonk-frontend`'s
+  startup chat transcript. They agreed on the arithmetic, so
+  `clonk-app-menus::scrollbar` is the promotion of both: the arrow/pin/track hit
+  regions, the proportional pin placement, and the drag-to-scroll inverse
+  (`C4GuiContainers.cpp:309-470,477-623`). `game_over` now calls it rather than
+  keeping its own copy, and all 123 menu tests still pass. Pinned by
+  `overflow_menu_scrollbar_arrows_track_and_thumb_match_cpp`, which covers the
+  arrow/shaft boundaries, out-of-range clamping, the pin/scroll round trip, and
+  a bar too short for two full arrows. Both menu draw paths now render it:
+  `IngameMenuGraphics` carries the `scroll` facet and the in-game and
+  engine-script draws call the shared `draw_classic_scrollbar` after their client
+  contents, leaving it undrawn when the facet is absent as a null `C4Facet` does.
+  The `MENU_PARITY.md` row is updated. Arrow auto-repeat and track clicks are wired: a held arrow steps one unit per
+  drawn frame exactly as `ScrollBar::DrawElement` does, and a track click
+  **jumps** the thumb to the pointer rather than paging — C++ has no paging
+  behaviour here at all (`C4GuiContainers.cpp:414-423`), which corrects an
+  earlier note on this work. A held arrow draws from its pressed
+  facet cell and the `ArrowHit`/`Command` sounds are raised on C++'s exact
+  transitions, so the `Mouse hit testing/scrollbars/tooltips` parity row is now
+  **Complete**. This replaces the earlier note about
+  ticket's first criterion asks for — the **engine object menu is now wired**:
+  its layout exposes the reserved column as a `scrollbar` rect (present only
+  while the menu overflows, the same condition that reserves its width), and
+  `engine_menu_scrollbar_hit`/`engine_menu_scroll_from_pointer` route pointer
+  input through the shared model. Pinned by
+  `engine_menu_overflow_scrollbar_routes_arrows_track_and_thumb`. Note that
+  menu's bar is only two 16px rows tall, so the two arrows consume it entirely
+  and the pin has no travel — `rect.h - 3 * extent` is negative — which is what
+  C++ does for a bar that short; the shared model's own test covers a bar with
+  travel. `draw_classic_scrollbar` moved into the shared module too, so the
+  drawing, hit-testing and pin arithmetic now have exactly one implementation
+  between them. **The in-game menu is wired too, and it was a parity fix, not just
+  plumbing:** `C4Menu::InitSize` widens an overflowing menu by
+  `C4GUI_ScrollBarWdt` (`C4Menu.cpp:776`), and the port's in-game menu did not —
+  it was 16px too narrow whenever it overflowed, with no test covering that
+  case. It now widens, exposes the bar rect, and routes pointer input through
+  the shared model via `scrollbar_hit`/`scrollbar_scroll_from_pointer`, pinned by
+  `ingame_menu_overflow_widens_for_the_scroll_bar`. Note `C4Menu.cpp:765-771`
+  gives Dialog-style menus vertical auto-enlargement and explicitly **no** bar;
+  the ticket's first criterion lists Dialog among the barred styles, which is
+  wrong against the oracle. This chassis has only Normal and Context, so the
+  distinction does not bite yet. Two hazards recorded on the ticket: the
+  in-game menu render is cached and version-gated, so a newly interactive
+  element must bump `menu_render_version` or the frame goes stale; and
+  `object_menu.rs` already reserves a scrollbar column, so check the reserved
+  extent matches `SCROLLBAR_EXTENT` before drawing into it.
+
+- Closed 2026-07-29: **`c4group` command-line utility.** The C++ product builds
+  and installs a standalone `c4group` (`CMakeLists.txt:431-437,749-750`); the
+  port had no binary. `crates/clonk-c4group` provides one, and it is installed
+  by `xtask` alongside the runtime. The argument parser is complete — the whole
+  matrix from `c4group_ng.cpp:146-400`, the leading options (:545-576, including
+  `-x:<command>` reading from `argv+3` and `fQuiet` defaulting to true),
+  multi-group dispatch, and the rule that a `-` argument ends the previous
+  command's argument list. Implemented: the default listing (:120-124),
+  `-l`/`-v` with wildcard filtering (:270-284), `-k` (:346-348), `-e`/`-et`,
+  `-a`/`-as`, `-m` (which deletes its sources only after the rewrite succeeds,
+  :181-200), `-d`, `-r`, `-o`, and in-place `-p`/`-u`, which replace the path
+  with the other representation as C++ does (:289-326).
+  **Mutation strategy:** this port's writer builds groups rather than opening
+  them for mutation, so a mutating command rebuilds the group into a
+  `MutableGroup` and repacks. The rebuild preserves each entry's timestamp and
+  executable bit and re-adds nested groups *already packed* with their stored
+  CRC, so children are never unpacked and repacked;
+  `untouched_rebuild_round_trips_byte_for_byte` pins that a no-op rebuild
+  reproduces the file byte for byte, without which every mutating command would
+  silently rewrite unrelated entries. Pinned by six parser tests, three rebuild
+  tests, and the end-to-end `c4group_cli_round_trips_native_command_matrix`.
+  Also implemented: `-s` (the sort list, ranked by first matching `|` segment
+  then case-insensitively by name, `C4Group.cpp:2290-2340`), `-x` (explode,
+  which unpacks and then explodes each child group), `-z`, `-w`, the
+  `-p`/`-x:` end-of-run prompt and detached execute (`c4group_ng.cpp:680-704`),
+  and `-i`/`-u` shell registration and unregistration on Windows, which reuse
+  the registry table from `clonk-platform::file_classes`. Unregistration deletes
+  deepest key first, because `RegDeleteKey` refuses a key that still has
+  subkeys, and treats an absent key as success so it is idempotent over a
+  partly-registered machine.
+  **Still unimplemented, reporting themselves and exiting non-zero rather than
+  silently succeeding:** `-g` and `-y`, update generation and application. They
+  depend on the `C4UpdatePackage` format (`C4Update.cpp`, 909 lines), which
+  **nothing in this port implements**. It needs no binary diffing — updates are
+  whole-file replacement — but `C4GroupEx` reaches into `C4Group`'s private
+  header and entry cores (`C4Update.cpp:149-200`), and `clonk-resources`
+  exposes no equivalent. That is a separate subsystem port, not a CLI concern.
+
+- Closed 2026-07-29: **Live `UserPath` re-expansion.** `AppPaths` resolved
+  `General.UserPath` once at discovery and cached everything derived from it,
+  while `C4Config::AtUserPath` re-reads and re-expands on **every** call
+  (`C4Config.cpp:1351-1357`), so a `UserPath` or environment change made while
+  the game runs moves later lookups in C++ but not here.
+  `AppPaths::at_user_path` now mirrors that. **Blast radius is two C++ files,
+  not the whole path system** — an earlier note on this ticket implied
+  otherwise. `AtUserPath` is called only from the startup directory creation
+  (:1337-1338, once, so re-expansion is unobservable) and from
+  `C4FileSelDlg`'s default-portrait extraction (`C4FileSelDlg.cpp:614-622`).
+  The port's counterpart, `extract_default_startup_portraits_once`, was the one
+  real consumer and now goes through `at_user_path`. `user_data_dir()` stays
+  cached deliberately: the session log and cache must not move mid-session.
+  Pinned by `at_user_path_reexpands_live_user_path_and_environment`, which
+  changes both the config text and `$HOME` after discovery.
+
+- Closed 2026-07-29: **Developer ordered edit selection.** The engine retained
+  only a single hovered `edit_cursor_target`, so nothing owned the ordered
+  selection the edit cursor, property panel and object tree share.
+  `clonk-engine::developer_selection` now does. Entries append at the tail the
+  way `C4ObjectList::stNone` does (`C4ObjectList.cpp:110-135`) and never
+  duplicate; a plain click replaces (`C4EditCursor.cpp:219`), ctrl-click
+  removes-or-appends (:213-214) so a re-added object moves to the tail, and a
+  frame drag takes the enumerated order with duplicates collapsed. Pruning drops
+  removed or unknown objects without reordering survivors, in one revision
+  rather than one per removal. The hovered object stays a separate scalar, as
+  C++ keeps `Target` outside the list (`C4EditCursor.h:39`) — setting it never
+  advances the revision, though a vanished hover is pruned. Every mutator
+  returns a snapshot only when something actually changed, so a no-op notifies
+  nobody, and each snapshot carries its `SelectionWriter` so a subscriber can
+  suppress its own echo (`C4ObjectListDlg.cpp:599-646`). Pinned by
+  `developer_selection_preserves_toggle_frame_and_tree_order` and
+  `developer_selection_prunes_removed_objects_and_notifies_once`.
+  The console's script input and its refresh cadence now sit here too.
+  `EMMO_Script` builds **one** `C4ControlScript` at `SCOPE_Global` and executes
+  it **once per selected object**, re-pointing only the target
+  (`C4Control.cpp:932-944`); an empty selection runs nothing, because C++
+  returns on `!pObjects` rather than falling back to a single global run.
+  The refresh is deferred and coalesced: `OnSelectionChanged` merely raises
+  `fSelectionChanged`, and `Execute` consumes it once per frame before updating
+  the property dialog and object list (`C4EditCursor.cpp:80-86,196-199`), so a
+  multi-object edit refreshes the panel once, not once per object.
+  **There is no periodic refresh to pair with it.** `PropertyDlg::Update` has
+  exactly five callers in the pinned source and every one is selection-driven;
+  `Tick35` never appears near the console (only `C4Viewport` and `C4Object`
+  use it). M10-P4-L045's criterion 5 asks for a "Windows-only Tick35 periodic
+  refresh" that does not exist — adding one would be an invention. Pinned by
+  `script_input_fans_out_over_the_selection_and_refresh_is_coalesced`.
+  Hit testing, gestures and dialog content stay out by design; the parity row
+  flips when the dependent edit/object UI lands.
+
+- Closed 2026-07-29: **Developer landscape-tool read model.**
+  `clonk-engine::developer_landscape` exposes the material/texture catalog and
+  tool picker the native `C4ToolsDlg` reads, without the console reconstructing
+  engine internals. The material list is `Sky` then the material map in its own
+  order (`C4ToolsDlg.cpp:486-489`); the texture list puts invalid
+  material/texture pairs at the bottom and valid ones above, and Exact mode
+  contributes no invalid section because every texture is selectable there
+  (:517-548). `corrected_tool_texture` mirrors `AssertValidTexture` — Static
+  mode only, sky exempt, first valid texture wins (:965-983).
+  `Engine::developer_landscape_tool_state` supplies mode, `MapZoom` and map
+  availability, and `Engine::developer_tool_pick` mirrors
+  `C4EditCursor::ApplyToolPicker` (`C4EditCursor.cpp:698-731`): Static divides
+  by `MapZoom` and decodes the retained map byte into tex-map index (`& 0x7F`)
+  and IFT bit (`& 0x80`), Exact reads the live material and IFT, and an empty
+  byte, unresolved slot, off-map coordinate or invalid material all resolve to
+  sky. Pinned by `developer_landscape_tool_catalog_partitions_valid_pairs` and
+  `developer_landscape_picker_reads_static_mapzoom_and_exact_ift`. Dialog state,
+  rendering, shortcuts and `EMDrawTool` emission remain out of scope by design
+  (M10-P4-L044); the parity row flips when that lands.
+
+- Closed 2026-07-29: **Windows file associations and the `clonk:` protocol.**
+  The runtime accepted classic launch arguments but nothing registered the
+  shell entries that deliver them. `clonk-platform::file_classes` now carries
+  `SetC4FileClasses`' full table (`C4FileClasses.cpp:46-71`): all eleven classes
+  with their names, icon ordinals — including the deliberately skipped 5 and 12 —
+  extension mappings and content types (three of which are not the group type),
+  the `clonk:` URL protocol, the default-made `Update` verb for `.c4u`, and the
+  `AppUserModelId` display name. Key and value shapes follow
+  `StdRegistry.cpp:224-279`; everything is written as `REG_SZ` under
+  `HKEY_CLASSES_ROOT`. `main` registers it after the window exists, graphical
+  Windows builds only, best-effort with the result logged at debug — C++ ignores
+  the result outright because it "will only work if we have administrator
+  rights" (`C4Application.cpp:219-223`). The composition is host-independent and
+  pinned everywhere by `windows_file_classes_match_the_native_registry_entries`;
+  the registry write is Windows-gated and was verified to compile and clippy
+  clean against `x86_64-pc-windows-msvc`. **Not carried over:** the deletion of
+  the stale `HKLM\...\App Paths\Clonk.exe` key (`C4FileClasses.cpp:68`) — the
+  constant is recorded as `STALE_APP_PATHS_KEY` but nothing deletes it, since
+  this port never created that key and removing an `HKEY_LOCAL_MACHINE` entry
+  belonging to a different product is not something to do unasked.
+
+- Closed 2026-07-29: **Developer console Help > About.** The menu item existed
+  but only appended a log line. It now opens `ConsoleAboutModal`, owned and laid
+  out by the console itself the way `C4Console::HelpAbout` opens its dialog
+  directly (`C4Console.cpp:1193-1200`), carrying the caption, the running
+  version, and `"Copyright (c) 2008 RedWolf Design GmbH"` from the
+  `C4COPYRIGHT_YEAR`/`C4COPYRIGHT_COMPANY` defines (:1190-1191). The version
+  comes from `clonk-core`, the single source — specifically `PORT_VERSION`,
+  since that names the running build, whereas C++'s `C4VERSION` names the C++
+  engine. The dialog is task-modal like C++'s `MB_TASKMODAL`: it swallows other
+  keys until Enter or Escape acknowledges it (`MB_OK`), then returns focus to
+  the command line without touching the running game or the log. Pinned by
+  `console_about_action_opens_versioned_modal`. `DeveloperConsoleAction::ShowAbout`
+  and its host arm were removed — the console no longer needs a host round trip
+  for this, and a never-emitted variant would be dead API.
+
+- Closed 2026-07-29: **Native startup-failure dialog.** Failures before the
+  window existed were only returned and logged, so a packaged graphical launch
+  could vanish with no visible explanation. `main` is now a thin wrapper over
+  `run()`: an error returned before `note_window_created()` is additionally
+  reported through `clonk-platform::startup_dialog`, under the `STD_PRODUCT`
+  caption this port already uses as its window title, with `MB_ICONERROR |
+  MB_OK` on Windows (`C4WinMain.cpp:97-117`). The original diagnostic still
+  reaches stderr and Clonk.log and the exit status still fails — the dialog is
+  an addition, exactly as C++ both prints and shows the message
+  (`C4WinMain.cpp:274-289`). Pinned by
+  `startup_failure_uses_native_error_dialog_before_window_exists`. **Platform
+  coverage:** only Windows has a real sink, mirroring C++ where the Unix dialog
+  exists solely under `WITH_DEVELOPER_MODE`; macOS and Linux select
+  `NoStartupDialog` and stay stderr-only, which is deterministic and cannot
+  block. `report_startup_failure` also takes a `headless` gate — tested, but
+  currently always passed `false` from `main`, because the port has no headless
+  signal resolved that early; the platform sink is what makes the fallback
+  deterministic today.
+
+- Closed 2026-07-29: **Recording and screenshot output-folder semantics.**
+  `clonk-app::output_folders` now carries C++'s rules. The record root gains the
+  language-prefixed `Title.txt` that `C4ConfigGeneral::CreateSaveFolder` writes
+  (`C4Config.cpp:1397-1412`), taken from `IDS_GAME_RECORDSTITLE` and the existing
+  two-character `classic_save_folder_language`; an existing title is never
+  overwritten, matching C++'s `FileExists` guard. Screenshot handling drops the
+  non-native `trim()` on the configured `ScreenshotFolder`, so the value composes
+  verbatim as `C4Config.cpp:1326-1332` leaves it, and
+  `prepare_numbered_screenshot_path` now attempts a single directory creation
+  with the ExePath fallback instead of `create_dir_all`, matching
+  `C4Config::AtScreenshotPath` (:1381-1390) — a failed creation no longer builds
+  intermediate directories. Pinned by
+  `recording_root_writes_localized_title_component` and
+  `screenshot_folder_matches_native_raw_single_mkdir_fallback`. **Note:** the
+  record root still uses the port's `create_dir` on a path already rooted at the
+  install root, so its single-level creation matches C++; `Network.WorkPath` is
+  untouched, as the card requires.
+
+- Closed 2026-07-29: **Developer console window position.** Console mode forced
+  `position = None` at startup and the exit path explicitly declined to persist
+  anything, so the console reopened at the OS default every run.
+  `clonk-app::console_window_position` now carries the stored grammar from
+  `StdRegistry.cpp:283-327` — the literals `Maximized`/`Minimized`, or `x,y`
+  (`x,y,w,h` only when `storeSize` is set, which the console never does, though a
+  four-field entry is still honoured for its position). Startup restores from the
+  `Console`/`Main` slot `C4Console::GetPositionData` names
+  (`C4Console.cpp:1278-1284`), and shutdown writes the position alone, beside but
+  separate from the game window's `persist_if_dirty` so the two never share keys.
+  The 320x320 console default size stands; a `Maximized`/`Minimized` entry is
+  logged and falls back to platform placement, since the port has no console
+  equivalent of `ShowWindow(SW_MAXIMIZE)`. Unparseable entries restore nothing
+  rather than moving to a garbage coordinate. Pinned by
+  `console_window_position_round_trips_without_overwriting_game_display`.
+
+- Closed 2026-07-29: **Window application icon.** Both shells built iconless
+  windows. `startup_window_builder` now attaches a decoded product icon, which
+  covers the game window and the developer console alike — the port routes both
+  through one builder, matching C++ assigning one resource to both window
+  classes (`C4FullScreen.cpp:196-211`; `C4Console.cpp:297-310`). **Deliberate
+  source divergence:** C++ uses `src/res/lc.ico`, which carries LegacyClonk's
+  branding; this port ships as a separate product whose release bundle icon is
+  already derived from `planet/Graphics.c4g/Logo.png` (`xtask/src/main.rs:31-32`),
+  so the window icon comes from that same file and the bundle and window chrome
+  keep one identity. The logo is embedded rather than read from the data root so
+  the window still has an icon when content is missing, and it is centred on a
+  transparent square before scaling to preserve its aspect ratio — the same fit
+  the bundle icon uses. A decode failure leaves the platform default, as C++
+  does with a null `HICON`. Pinned by
+  `classic_window_icon_decodes_and_is_attached_to_both_shells`.
+
+- **Windows taskbar loading progress landed, with a real COM backend.**
+  `clonk-platform::taskbar_progress` now carries C++'s logic: `LoaderTaskbarProgress`
+  applies `C4Game::SetInitProgress`'s strictly-increasing gate
+  (`C4Game.cpp:4094-4106`) and `CStdWindow::SetProgress`'s branch — 100 clears the
+  indicator, anything else sets `TBPF_INDETERMINATE` plus the value
+  (`StdWindow.cpp:183-196`) — and entering startup clears it and re-arms the gate
+  (`C4Application.cpp:422-426`). The app drives it from
+  `apply_scenario_loader_frame` and clears it when the loader consumes
+  `Finished`. Pinned by `windows_loader_progress_updates_and_clears_taskbar_state`
+  against an injected recording sink.
+  `Win32TaskbarProgress` is the real sink: `CoCreateInstance(TaskbarList)`,
+  `HrInit()`, then `SetProgressState`/`SetProgressValue` exactly as
+  `CStdWindow` calls them, with every call best-effort because C++ simply skips
+  them when its interface pointer is null. A failed create or `HrInit` yields
+  `None` so the caller falls back to `NoTaskbarProgress` — a machine with no
+  shell taskbar shows no progress rather than failing to start.
+  The vtable is **generated**, not hand-written. An earlier note here proposed
+  counting slot indices by hand because `windows-sys` types `ITaskbarList3` as
+  an opaque `*mut c_void`; that was unnecessary — `clonk-app` already depends on
+  the `windows` crate at 0.54 with `Win32_UI_Shell`, which generates safe
+  bindings, so `clonk-platform` now does too. Hand-counted indices would have
+  been unverifiable without a Windows machine and an off-by-one calls the wrong
+  method with the wrong signature; generated bindings remove the risk entirely.
+  Verified with `cargo check -p clonk-platform --target x86_64-pc-windows-msvc
+  --all-targets`.
+  The app now installs it. `GameApp::taskbar_progress` holds a boxed sink so the
+  backend can be chosen once the platform window exists — which is also when
+  C++ first has an `ITaskbarList3`, since `CStdWindow` needs a handle — and
+  `run()` swaps it in right after the window is created. The handle is extracted
+  **unconditionally**, because `RawWindowHandle::Win32` exists on every
+  platform; only the two-line sink construction is target-gated. That is
+  deliberate: `clonk-app` cannot be cross-checked for Windows (stacker's C build
+  needs an MSVC toolchain), so the untestable surface is kept to those two
+  lines and everything around them is compiled and linted on every host.
+  **Still open:** observing it on a real taskbar.
+
+- Closed 2026-07-29: **Loading-screen GUI log capture.** The loader's log box
+  showed only its own hard-coded phase labels: `ScenarioLoadingReporter` kept a
+  private `VecDeque` that `report` replaced wholesale, so engine diagnostics
+  emitted while a scenario loaded reached Clonk.log and stderr but never the
+  only screen the player can see. `clonk-logging` now owns a bounded ordered
+  loader buffer that both the GUI log sink and the reporter's milestones append
+  to under one mutex, so a worker-thread event landing between two milestones
+  keeps its position instead of either source replacing the other
+  (`src/C4Log.cpp:208-243`). The sink is permanently attached and gated by an
+  active flag rather than rebuilt per round; it reuses `GuiSinkFormat`, so lines
+  carry the C++ GUI severity prefix rather than raw tracing metadata. The buffer
+  opens with the reporter (`src/C4MessageBoard.cpp:223-251`) and is released
+  when the loader consumes `Finished`. Pinned by
+  `loader_captures_runtime_log_lines_in_gui_order`, which interleaves a
+  worker-thread event between two phase updates and covers the capacity and
+  before/after-loader boundaries.
+
+- Closed 2026-07-29: **`DebugLog` routing.** `DebugLog` emitted an ordinary
+  `tracing::debug!` on the same target as `Log`, so the one process-start
+  `EnvFilter` discarded it everywhere at default verbosity — script diagnostics
+  never reached Clonk.log — while a verbose session pushed debug-only lines to
+  the message board in rounds where C++ suppresses them. `DebugLog` now has its
+  own target (`clonk-core::log_target::SCRIPT_DEBUG_LOG_TARGET`), the registry
+  filter admits it unconditionally so the session log always keeps it, stderr
+  re-applies the operator's verbosity, and the GUI sinks take it only while the
+  round has debug mode on. The engine publishes that gate from every site that
+  mutates `debug_mode` — `set_debug_mode` (round setup and Ctrl+F5),
+  `disable_debug` (synchronized DisableDebug) and the state reset (clear) — so
+  all four transitions are covered without rebuilding any sink. Pinned by
+  `debug_log_file_and_gui_routes_follow_runtime_debug_mode`. Per the standing
+  directive that `clonk-logging` is judged on best practice rather than
+  `C4Log.cpp` parity, this reproduces the *behaviour* with tracing's own layer
+  and writer filters instead of mirroring C++'s spdlog sink tree.
+  `debug_log_message_emits_debug_event_with_script_target` pinned the old shared
+  target and was renamed and updated as part of this behaviour change.
+
+- Closed 2026-07-29: **`Graphics.VerboseObjectLoading` diagnostics.** The level
+  had an editor row but no runtime consumer. `clonk-engine`'s
+  `scenario::verbose_loading` now carries it as a process global — the same
+  shape as C++'s `Config` global, which the definition loader reads far from
+  where the app parses configuration — published by `main` from the config with
+  C++'s default of 0 (`C4Config.cpp:453`). Level 3 logs each definition's group
+  full name (`C4Def.cpp:555-556`), level 1 logs `IDS_PRC_DEFOVERLOAD` for
+  definition and particle overloads (`C4Def.cpp:1051`; `C4Particles.cpp:182`),
+  and level 2 adds the `Old def at`/`Overload by` lines (:1055-1058); the levels
+  are floors, so level 3 emits all three. Pinned by
+  `verbose_object_loading_levels_gate_definition_diagnostics`. The overload
+  bookkeeping is skipped entirely below level 1 so the default path adds no
+  allocation to scenario load. **Not covered:** the overload template is the
+  shipped US `IDS_PRC_DEFOVERLOAD` text — the engine has no resource-string
+  table of its own, and unlike `NeededMaterialStrings`/`ConstructionCheckStrings`
+  the app does not yet overwrite this one, so a German session logs the US
+  wording. The seam to do so exists.
+
+- Closed 2026-07-29: **Windows `/allocconsole` bootstrap.** `C4WinMain.cpp:72-93`
+  allocates a console before normal initialization — unconditionally for debug
+  GUI builds, only for `/allocconsole` in release GUI builds — aborts startup
+  with `C4XRV_Failure` when allocation fails, and reopens stdin on `CONIN$` and
+  stdout/stderr on `CONOUT$`. `clonk-platform::alloc_console` now carries that
+  policy and `main` applies it before any output, ahead of the existing
+  `attach_parent_console` (which solves the different problem of a terminal
+  launch under `windows_subsystem = "windows"`). **Deliberate mechanism
+  divergence:** C++ reattaches the CRT `FILE` streams with `freopen`, but Rust's
+  `std::io` reads the process standard handles rather than the CRT, so the port
+  opens the console devices and publishes them with `SetStdHandle` to reach the
+  same observable state. A process that already owns a console makes
+  `AllocConsole` fail with `ERROR_ACCESS_DENIED`; that arm is treated as success
+  and only the streams are reattached, matching where C++'s `freopen` calls
+  leave such a process. Pinned by `console_policy_matches_the_cpp_build_gates`
+  on every platform and by the Windows-gated
+  `windows_release_allocconsole_attaches_standard_streams`, which asserts all
+  three standard handles are console devices via `GetConsoleMode`.
+
+- Closed 2026-07-29: **Unix effective-root startup refusal.** `C4WinMain.cpp:251-255`
+  refuses `geteuid() == 0` before the debug facilities and application
+  initialization. `clonk-platform::privileges` now supplies that guard and
+  `main` consults it immediately after the macOS translocation chdir and before
+  the crash handlers, printing `Do not run <argv[0]> as root!` to stdout — with
+  C++'s `"this program"` fallback when `argv[0]` is absent — and exiting
+  `C4XRV_Failure` (1). Non-root and non-Unix startup are untouched. Pinned by
+  `unix_effective_root_is_rejected_before_bootstrap`, which drives the guard
+  with an explicit effective UID: an unprivileged test run cannot spawn a
+  privileged child, so the decision function is exercised directly and `main`
+  feeds it the real `geteuid()`.
+
+- Closed 2026-07-29: **Windows unhandled-exception diagnostics.**
+  `clonk-platform::crash_win32` installs the one-shot
+  `SetUnhandledExceptionFilter` before application initialization
+  (`C4WinMain.cpp:68-70`; `C4CrashHandlerWin32.cpp:644`). A first crash composes
+  the `SafeTextDump` report — banner, exception code and sentence,
+  continuability, access-violation/page-error detail, the x86_64 register block
+  and the EFLAGS letters (`C4CrashHandlerWin32.cpp:86-202`) — writes it to the
+  session log descriptor, writes a `LegacyClonk-crash-<UTC>.dmp` minidump under
+  `Config.General.UserPath` via `CreateFileA(CREATE_NEW)` + `MiniDumpWriteDump`
+  (:390,410,417,455-464), shows the `MessageBoxA` naming both artifacts
+  (:427-447), and returns `EXCEPTION_CONTINUE_SEARCH` so the OS keeps its own
+  processing (:467-468). The user path and log descriptor are published as they
+  become known, mirroring C++ reading them from inside the filter. Report
+  composition is host-independent and pinned by unit tests on every platform;
+  the artifact path is pinned on Windows by
+  `windows_unhandled_exception_writes_log_minidump_and_dialog`, which drives the
+  same code the filter does — the OS-invoked filter itself cannot run in-process
+  without killing the harness. **Not covered:** the symbolised stack walk and
+  loaded-module list (`C4CrashHandlerWin32.cpp:280-350`), which need DbgHelp
+  `StackWalk64`/`SymFromAddr` and a `Module32First` snapshot; the report carries
+  registers but no frames.
+
+- Closed 2026-07-29: **Unix fatal-signal diagnostics.** `clonk-platform::crash`
+  installs the classic handler set — SIGBUS, SIGILL, SIGSEGV, SIGABRT, SIGINT,
+  SIGQUIT, SIGFPE, SIGTERM, in `C4WinMain.cpp:257-264` order — before
+  application initialization. A handled signal writes `<product>: Caught signal
+  <NAME>` and up to 100 `backtrace_symbols_fd` frames to stderr and to the
+  session log's raw descriptor, then restores `SIG_DFL` and reraises so the
+  process keeps its original signal exit status and core-dump behaviour
+  (`C4WinMain.cpp:179-213`). The handler uses only async-signal-safe calls;
+  `clonk-logging` `dup(2)`s the log descriptor out from behind the buffered
+  tracing writer so the banner never touches it. Because the log does not exist
+  when the handlers are installed, an early crash is stderr-only, exactly as
+  C++'s `GetLogFD` sentinel yields. Pinned by the subprocess test
+  `unix_fatal_signal_writes_diagnostics_then_reraises`, which asserts the child
+  dies *from* SIGABRT rather than exiting.
+
+- Closed 2026-07-29: **macOS app translocation.** A quarantined bundle runs from
+  a read-only `AppTranslocation` mount whose siblings are absent, so resource
+  discovery saw a copy with no `Contents/Resources`. `clonk-platform` now
+  resolves `SecTranslocateIsTranslocatedURL` /
+  `SecTranslocateCreateOriginalPathForURL` out of Security.framework at run time
+  the way C++ does (`MacAppTranslocation.cpp:27-63`) — dynamically, so a system
+  without those symbols simply reports "not translocated" — and `main` chdirs to
+  the directory holding the `.app` before path discovery
+  (`C4WinMain.cpp:233-238`). Non-translocated bundles and explicit
+  `LC_INSTALL_ROOT`/`/config` overrides are unchanged; the recovery returns the
+  original path only when the probe positively reports translocation. Unlike
+  C++, an unusual path encoding recovers through `CFStringGetCString` instead of
+  throwing on a null `CFStringGetCStringPtr`. Pinned by the platform-gated
+  `macos_translocated_bundle_uses_original_root_and_cwd`.
+
 - Open gap (found 2026-07-28, not closed): **point and line raster width does
   not track world zoom.** `DrawProjection::line_width` is
   `presentation.scale` alone (`draw_projection`,
@@ -446,32 +1506,55 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   enablement, composition state, and rendering. Classic keyboard parity remains
   covered, but screen-reader and international text-entry completeness must not
   be claimed.
-- Open gap (found 2026-07-28, not closed): **material slots follow host
-  `readdir` order, so every landscape golden is host-specific and Linux CI
-  cannot pass them.** `C4Group`'s folder scan is unsorted — `DirectoryIterator`
+- Open content gap (found 2026-07-28, CI treatment added 2026-07-29):
+  **material slots follow host `readdir` order, so raw material-index and
+  landscape goldens are host-specific.** `C4Group`'s folder scan is unsorted —
+  `DirectoryIterator`
   wraps `DIR *`/`dirent` on Unix and `_finddata_t` on Windows (StdFile.h:102-126)
   — and `C4MaterialMap::Load` takes material slots straight from that scan
   (C4Material.cpp:263-299). `directory_entries` (`clonk-resources/src/group.rs`)
   mirrors this faithfully via `WalkDir` with no sort, and
   `MaterialLibrary::from_group` (`material.rs:204-219`) consumes that order. With
   `content/` checked out **unpacked**, material indices therefore depend on the
-  filesystem: on APFS `Material.c4g` happens to enumerate case-insensitively
-  sorted, on ext4 it does not. Frame 0 of `tutorial01-idle` diverges in 277
-  leaves, all under `landscape/` — `liquids/*/material` reads 1 on macOS and 10
-  on Linux, and the texmap material names rotate (`Ice`/`Ashes`/`Vehicle`/
-  `Tunnel`). Consequence: `dev_feedback_replay::committed_real_scenario_replays_are_deterministic`
-  fails on Linux CI on **every** revision, and it only surfaced once the
-  `cargo fmt` gate stopped short-circuiting the rest of the parity job.
+  filesystem: the APFS recording host and ext4 CI enumerate `Material.c4g`
+  differently. Frame 0 of `tutorial01-idle` diverges in 277 leaves, all under
+  `landscape/` — `liquids/*/material` reads 1 on macOS and 10 on Linux, and the
+  texmap material names rotate (`Ice`/`Ashes`/`Vehicle`/`Tunnel`). The mismatch
+  only surfaced once the `cargo fmt` gate stopped short-circuiting the rest of
+  the parity job.
   Sorting the folder listing was measured and **rejected**: it makes Rust
   disagree with the C++ oracle on the recording host, breaking
   `elevator_motion_oracle::tutorial07_seed_zero_landscape_matches_cpp_surface8`
   (a whole-plane Surface8 hash, i.e. per-pixel material indices),
   `real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence`, and three
   real-scenario routes. C++ is right, so the engine keeps the unsorted scan.
-  Closing this belongs at the content/harness layer, not in the engine: pack
-  `content/*.c4g` so archive order fixes the enumeration (how LegacyClonk
-  shipped, and what the goldens already encode), or re-derive the goldens and
-  the C++ oracle together under one pinned order.
+  Simply packing the current global group is not a compatible shortcut:
+  `c4group -p` applies the stock `C4FLS_Material` archive sort and changes the
+  committed replay checkpoints too. Reproducing the recording order in a
+  packed temporary group works, but the content tree contains 29 unpacked
+  `Material.c4g` directories that would each need an explicit pinned order.
+  CI therefore separates portable determinism from recording-host oracle
+  values: Ubuntu repeats real replays under its native order and synthetic
+  order tests use explicitly ordered packed groups; the raw real-content
+  oracles carry a named non-macOS ignore reason and run in the required
+  `Recording-host material-order oracles (macOS)` job. A repository script test
+  requires every such ignored oracle to appear in that job, so the platform
+  gate cannot become a silent skip. The underlying content gap remains open;
+  closing it means shipping pinned packed groups and re-recording Rust and C++
+  oracles together under that archive order.
+- Test portability note (2026-07-29): the full-frame value in
+  `loader_screen::tests::real_graphics_and_endeavour_frame_hash_is_stable` is a
+  **Rust raster regression, not a captured C++ framebuffer oracle**. Its
+  `LoaderSky1.jpg` input already differs before rendering: `jpeg-decoder`
+  0.3.2 selects SSSE3 IDCT/color conversion on capable x86 CPUs and its scalar
+  path elsewhere. The test therefore pins both decoder-specific input and
+  composed-frame hashes; treating the scalar value as a macOS oracle, or the
+  SSSE3 value as a Linux oracle, would be false because the split follows the
+  decoder backend rather than the OS. C++ is not a portable pixel authority
+  here either: the pinned build selects WIC or system libjpeg
+  (`CMakeLists.txt:202-203,353-359,529-533`), rasterizes through runtime
+  FreeType, and filters through OpenGL. Keep this test in the portable suite,
+  separate from the APFS material-order oracle job.
 - Open gap (found 2026-07-27, not closed): **scenario load is ~half the
   process cost and is unoptimized.** `ClonkMars/03_Chaos` takes 13.8-15.7 s to
   load on the reference machine — roughly two minutes on a Pi 4 — and 99% of
@@ -564,13 +1647,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   test wants an injectable send seam so the congested case can be simulated
   without a real blocked socket.
 
-- Flaky test (observed 2026-07-24, not fixed): `clonk-network`
-  `session::tests::dual_client_reconnects_a_missing_tcp_route` failed once in a
-  full `cargo nextest run --workspace` and was not reproducible — 5/5 green in
-  isolation and the immediately following full workspace run was 8828/8828. It
-  is a real-socket reconnect test, so it is load/timing sensitive like the
-  `control_sync_and_reconnect_smoke` case that already carries `retries = 2` in
-  `.config/nextest.toml`. Root-cause it rather than adding another retry.
+- Flaky test (fixed 2026-07-29): `clonk-network`
+  `session::tests::dual_client_reconnects_a_missing_tcp_route` started its
+  reconnect deadline as soon as it asked the proxy task to cut TCP, before
+  that task had been scheduled to abort and await its copier and thereby drop
+  both sockets. It then polled the host through its command channel on every
+  scheduler yield; those queued inspection commands deliberately take priority
+  over network arms and could starve the very disconnect/admission events the
+  test awaited. The proxy now acknowledges completed cancellation, an
+  event-driven host barrier observes route removal and replacement without
+  command flooding, and the test proves UDP traffic remains live while TCP is
+  held absent. Its only lifecycle deadline is the native 30-second ping-timeout
+  horizon, not a Rust-only immediate-redial requirement; no retry was added.
 - Flaky test (observed 2026-07-24, not fixed): `clonk-network`
   `session::tests::sync_controls_wait_for_status_barrier_and_keep_fifo_order`
   failed once in a full workspace run at `session.rs:13493`, asserting that no
@@ -741,6 +1829,44 @@ an ordered-map model gap.
   configured every one of them is off and the renderer stays C++-exact. Pinned
   by `the_remaster_switch_supplies_a_default_that_each_key_can_override`.
 
+- **Presentation may run at the display's refresh period instead of the
+  oracle's 30 ms ceiling** (`configured_smooth_presentation` +
+  `effective_max_refresh_delay_ms` + `refresh_interval_for_tick`,
+  `crates/clonk-app`; opt-in `Graphics.SmoothPresentation`, default off).
+  Approved 2026-07-29. C++ defaults `Graphics.MaxRefreshDelay` to 30
+  (C4Config.cpp:485) against a 28 ms game tick, so `C4Application` leaves that
+  tick undivided (C4Application.cpp:510-531) and presents once per tick; the
+  startup timer is a flat 16 ms. That is correct for world content, which
+  really does advance only once per tick — but the mouse pointer is composited
+  *into* the frame while the platform cursor is hidden
+  (`classic_platform_cursor_visible`), so the refresh period is also the
+  pointer's update period: measured 35.7 Hz in game and 62.9 Hz in the startup
+  menu against a 120 Hz panel whose GPU pass costs 0.83 ms and whose event loop
+  is idle 96 % of the time. When enabled, the panel period (clamped so it can
+  never be slower than the oracle default) replaces only the *ceiling* of the
+  **startup timer**; the divisor applied to it is C++'s own, and the 16 ms logic
+  tick keeps its exact rate, so menu animation ages identically.
+  The **game timer keeps the oracle ceiling unconditionally** (`RefreshCeilings`),
+  which is why this is safe: all four C++-mirrored per-render behaviours (the
+  C4Viewport camera smoother, `C4MessageBoard::Execute` plus the screen fader,
+  flash-message `remaining_draws`, and the object-audibility cache) live in the
+  running path and never see a changed cadence. Subdividing the game timer was
+  measured and rejected: on an M4 Max at Scale=300 fullscreen a 7 ms ceiling
+  moved presentation from 35.66 to 36.30 FPS while the average graphics pass
+  grew 10.49 -> 18.17 ms and automatic frame skips went 2 -> 98, because in game
+  the pass cost and swapchain back-pressure bind long before the timer does.
+  In-game pointer smoothness is therefore still bounded by graphics-pass cost,
+  not by this key. **This supersedes the unlogged
+  `DEFAULT_MAX_REFRESH_DELAY_MS = 16` divergence** that `469eca304`
+  (2026-07-20) introduced and `d9315f876` (2026-07-24) correctly reverted for
+  being unlogged — the default now stays at the oracle's 30 permanently and the
+  faster cadence is reachable only through this key or `Graphics.Remaster`.
+  Pinned by `smooth_presentation_substitutes_the_display_period_for_the_native_ceiling`
+  and `startup_refresh_honours_the_same_refresh_ceiling_as_the_game_timer`;
+  `max_refresh_delay_defaults_to_cpp_30_ms_and_honors_positive_config` and
+  `max_refresh_delay_missing_or_invalid_matches_cpp_thirty_ms` still hold the
+  default path unchanged.
+
 - **The sky gradient may be dithered below the 8-bit step**
   (`GpuSolidStyle::dither` + `SOLID_SHADER`, `crates/clonk-app-render`; opt-in
   `Graphics.SkyDither`, default off). Approved 2026-07-28. C++ emits the sky
@@ -840,6 +1966,32 @@ an ordered-map model gap.
   `eke_missile_down_and_up_still_straighten_the_guided_missile`,
   `classic_release_is_emitted_only_when_no_autostop_set_claims_the_key` and
   `selected_player_classic_control_synchronizes_horizontal_key_release`.
+
+- **The repeated-key flag is now a per-target choice, and macOS never sets it.**
+  C++ decides this per windowing backend, chosen at build time. Win32 reads the
+  hardware bit (`!!(lParam & 0x40000000)`, `C4Viewport.cpp:89,100`,
+  `C4FullScreen.cpp:59,64`, `C4GuiDialogs.cpp:231,240`); X11 passes `false` and
+  `C4Game::DoKeyboardInput` re-derives it from its own `PressedKeys` map, but
+  only inside `#ifdef USE_X11` (`C4Game.cpp:2153-2166`); **SDL passes a literal
+  `false` for every keydown and keyup** (`C4FullScreen.cpp:388-400`) and gets no
+  synthesis, and SDL is the default main loop on Apple with `USE_X11` excluded
+  there outright (`CMakeLists.txt:191-197`). The port runs winit on every
+  platform, so the equivalent choice is by target:
+  `game_app::input::BACKEND_SYNTHESIZES_KEY_REPEAT` is `!cfg!(target_os =
+  "macos")`. Previously the port synthesized repeats everywhere, which matched
+  Win32 and X11 but not the default macOS build.
+  This is observable, not cosmetic: `C4Game::LocalControlKey` swallows a repeat
+  for AutoStopControl players (`C4Game.cpp:3580-3583`) and
+  `C4Player::CountControl` raises a second identical com to `COM_Double`
+  (`C4Player.cpp:1568`). On macOS neither happens, so holding a direction key
+  can now issue the repeated control and arm the double-down window — including
+  the `DFA_PUSH` ungrab that follows a `COM_Down_D`.
+  The two tests that previously produced a repeat by pressing the same key twice
+  now drive the flag explicitly (`AppVirtualKeyboard::repeat`), because what
+  they pin is the engine's handling of a repeat, not the backend that reports
+  one. Pinned by `sdl_repeated_keydown_remains_fresh_like_cpp`,
+  `autostop_ignores_repeated_physical_keydown_until_release` and
+  `app_virtual_keyboard_flings_tutorial05_wood_to_the_right_hill`.
 
 - **A catch-up burst reserves wall-clock for drawing, and a repaint floor
   outranks every frame skip** (`RenderFloor`,
@@ -982,11 +2134,36 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
-- **One chunk in flight per peer while a game is running, three in the lobby**
+- **One chunk in flight per peer while a game is running, thirty in the lobby**
   (`crates/clonk-network/src/resource_catalog.rs`,
   `ResourceCatalog::set_max_loads_per_peer`, narrowed at the game-start
-  transition in `session/host_dispatch.rs`; C++
-  `C4NetResMaxLoadPerPeerPerFile` = 3 always). Approved 2026-07-27.
+  transition in `session/host_dispatch.rs` and `session/client_loop.rs`; C++
+  `C4NetResMaxLoadPerPeerPerFile` = 3 always). Approved 2026-07-27, lobby value
+  rescaled 2026-07-29.
+  The lobby cap is thirty rather than C++'s three because a chunk here is a tenth
+  of `C4NetResChunkSize`: the cap counts chunks, but what it buys is a byte
+  window, and 30 x 10 KiB is exactly C++'s 3 x 100 KiB. `RESOURCE_MAX_LOADS` is
+  scaled the same way (200 against C++'s 20), preserving C++'s ratio between the
+  two. Left at three, the smaller chunk would have divided C++'s
+  bandwidth-delay product by ten and held one resource to 30 KiB per round trip
+  — 375 KiB/s on an 80 ms link, minutes for a definition pack, which is what a
+  joining player experienced as "still loading". The equivalence is pinned by
+  `the_lobby_load_caps_hold_the_cpp_byte_window`; the two tests that assert C++'s
+  literal 3/20 thresholds now set them explicitly via `set_max_loads_per_peer` /
+  `set_max_loads` so they remain true C++ oracles.
+  **Not re-measured:** the lobby window now queues the same bytes ahead of
+  control as C++'s configuration, so lobby control latency should be the
+  `100 KiB x3` row below rather than the `10 KiB x3` row. That is the accepted
+  trade — the lobby has no lockstep control to protect — but the figure is
+  inferred from equal byte counts, not measured. In-game is unaffected and stays
+  at one.
+  Until 2026-07-29 the in-game narrowing was a **no-op on the real download
+  path**: it was applied to `ClientResourceState::catalog` / `HostState::
+  resource_catalog`, but `dispatch_client_resource_packet` schedules through the
+  *backend's* catalog whenever a backend exists and only falls back to the bare
+  one when there is none. Both sites now also narrow the backend
+  (`ResourceTransferBackend::set_max_loads_per_peer`), pinned by
+  `narrowing_the_window_reaches_the_scheduling_catalog`.
   This cap, not `C4NetResMaxLoad`, is what governs head-of-line blocking: bulk
   outstanding *on one connection* is this times the chunk size, and the global
   cap only spreads work across different peers, which are different connections.
@@ -995,8 +2172,8 @@ an ordered-map model gap.
   ticks, `sim::bulk_stream_tests`). Control latency, mean and worst:
   no bulk at all 49.7 ms / 80 ms;
   100 KiB x3, C++'s configuration, 110.1 ms / 892 ms;
-  10 KiB x3, this port after the chunk-size entry below, 63.1 ms / 445 ms;
-  10 KiB x1, this entry, 53.1 ms / 393 ms.
+  10 KiB x3, the former lobby value, 63.1 ms / 445 ms;
+  10 KiB x1, the in-game value, 53.1 ms / 393 ms.
   So the narrower window recovers most of the remaining gap to an unloaded link.
   It is *not* set to one everywhere, because it also divides transfer throughput
   by three — a peer can only have one chunk in flight per round trip, and on a
@@ -1127,9 +2304,24 @@ an ordered-map model gap.
   lost fragment withholds all of them from the game loop until the repair lands —
   which proceeds at ten fragment asks per check packet. Three concurrent chunks
   to one peer queue 618 fragments ahead of control. 10 KiB is 21 datagrams,
-  cutting that head-of-line window by an order of magnitude, and with
-  `RESOURCE_MAX_LOADS` unchanged at C++'s 20 it also drops the maximum
-  outstanding bulk from 2 MB to 200 KB.
+  cutting that head-of-line window by an order of magnitude.
+  **This divergence delivered none of that until 2026-07-29**, and cost a
+  ten-times *slowdown* instead. `ResourceFileStore::read_chunk` derived the chunk
+  offset from the core's chunk size but capped the chunk *length* with the
+  hardcoded 100 KiB literal — a faithful copy of
+  `src/C4Network2Res.cpp:1268-1269`, which is self-consistent in C++ only because
+  every core C++ publishes carries `ChunkSize = C4NetResChunkSize`
+  (`src/C4Network2Res.cpp:81`, `:89`). Against a 10 KiB core each chunk therefore
+  overlapped the following nine: the host served roughly ten times the file to
+  deliver it once, the reliable-UDP burst stayed 206 fragments so the head-of-line
+  window was never actually reduced, and the client credited one chunk per
+  response. Fixed by sizing from the core's own stride, which is identical for
+  every core C++ can publish and also stops wasting a stock C++ client's
+  bandwidth. Pinned by `serving_every_chunk_moves_the_file_exactly_once` and
+  `cpp_chunk_reads_offset_and_size_by_the_core_chunk_size`, which asserts the two
+  forms still coincide at C++'s own chunk size.
+  `RESOURCE_MAX_LOADS` is scaled with the chunk size (see the per-peer entry
+  above), so the maximum outstanding bulk stays C++'s 2 MB.
   The existing `reliable_udp_redundant_copies` mitigation does not help here: it
   is gated at inner packets <= 256 bytes, so it protects control against *loss*
   and does nothing about control being *queued behind* bulk.
@@ -1310,6 +2502,48 @@ an ordered-map model gap.
   (quiet inside the window, strictly higher holes continue immediately, the
   first ask's deadline survives continuations) remains C++'s and is still
   asserted.
+
+- **Restarting a network round returns every client to the lobby**
+  (`clonk-network/src/host_restart.rs` PID `0x71`,
+  `GameApp::announce_network_round_restart`,
+  `GameApp::begin_pending_host_rejoin`,
+  `GameApp::poll_pending_host_rejoin`; C++ `C4Application::QuitGame`
+  src/C4Application.cpp:373-405, `C4Network2::Clear` src/C4Network2.cpp:748-796,
+  `C4Network2::OnClientDisconnect` src/C4Network2.cpp:1802-1834). Approved
+  2026-07-29. A restart re-hosts from scratch — C++ backs up only
+  `NetworkActive` and the password, runs `Game.Clear()` (which closes `NetIO`
+  and drops every connection), then re-enters `Game::Init` with `fLobby` set.
+  Clients therefore observe nothing but a closed socket, which
+  `OnClientDisconnect` reads as a dead host: it records `NR_NetError` and calls
+  `Clear()`, so each client is left alone in the abandoned round with
+  `ChangeToLocal` while the host's new lobby comes up empty. Nothing in C++ can
+  distinguish this from a crash — there is no restart packet, and `C4Game::Clear`
+  zeroes `DirectJoinAddress` (src/C4Game.cpp:648-651), so a native client can
+  only rejoin by hand. The port states the intent on the wire instead: the host
+  broadcasts `PID_PortHostRestarting` before tearing down, and a client that
+  receives it leaves the round and reconnects to the address it already joined,
+  retrying once a second across the host's re-bind window (30 s by default,
+  carried in the packet and clamped locally to 120 s) before falling back to the
+  ordinary join failure. The reconnect repeats the *same join* — the retained
+  `ClientSettings`, so the password, netpuncher brokerage and full route list
+  survive — rather than rebuilding one from config. This is a
+  lobby/session-lifecycle change only: the notice never enters the control
+  queue, so control ticks, `RandomCount` and simulation state are untouched.
+  **Note on the port-only ID range:** the rationale in
+  `crates/clonk-network/src/capabilities.rs` — that C++ silently ignores an
+  unknown packet ID — is wrong. `C4IDPacket::CompileFunc` `excCorrupt`s on an ID
+  with no `FnUnpack` and `C4Network2IO::HandlePacket` catches that and closes
+  the connection in a release build (src/C4Network2IO.cpp:820-834,
+  src/C4Packet2.cpp:210-217). That is harmless for *this* packet, because the
+  host sends it immediately before closing the session anyway, so a C++ client
+  loses the connection it was about to lose and keeps native behavior. It is not
+  a general licence, and `capabilities.rs`'s own claim should be revisited.
+  Because a relayed `PID_FwdReq` reaches its target on the host's route and is
+  indistinguishable from a host-authored packet, the host refuses to relay the
+  whole `0x7x` port-only range
+  (`a_client_cannot_forge_a_restart_notice_through_the_forward_relay`).
+  Without the notice the client path is byte-identical to today's, pinned by
+  `client_host_socket_loss_continues_the_running_round_locally`.
 
 ## Preserve
 

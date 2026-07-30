@@ -77,6 +77,7 @@ fn main() {
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     clonk_logging::init();
+    clonk_logging::install_panic_hook();
 
     if let Err(error) = run() {
         tracing::error!(error = ?error, "clonk-game encountered an error");
@@ -1995,7 +1996,7 @@ fn validate_update_tool(paths: &AppPaths, logger: &LauncherLogger) -> Result<()>
     }
 
     let install_root = paths.install_root();
-    let Some(patcher) = locate_update_tool(install_root) else {
+    let Some(patcher) = locate_update_tool(paths) else {
         logger
             .log_line(
                 "optional c4group updater not found; continuing without legacy update support",
@@ -2020,14 +2021,14 @@ fn validate_update_tool(paths: &AppPaths, logger: &LauncherLogger) -> Result<()>
         .context("failed to record updater probe output")
 }
 
-fn locate_update_tool(install_root: &Path) -> Option<PathBuf> {
-    candidate_patcher_paths(install_root)
+fn locate_update_tool(paths: &AppPaths) -> Option<PathBuf> {
+    candidate_patcher_paths(paths)
         .into_iter()
         .find(|candidate| candidate.exists())
 }
 
-fn candidate_patcher_paths(install_root: &Path) -> Vec<PathBuf> {
-    const CANDIDATES: &[&str] = &[
+fn candidate_patcher_paths(paths: &AppPaths) -> Vec<PathBuf> {
+    const DEVELOPMENT_CANDIDATES: &[&str] = &[
         "c4group",
         "c4group.exe",
         "build/c4group",
@@ -2037,9 +2038,15 @@ fn candidate_patcher_paths(install_root: &Path) -> Vec<PathBuf> {
         "build/Release/c4group",
         "build/Release/c4group.exe",
     ];
-    CANDIDATES
+    let binaries_dir = paths.binaries_dir();
+    ["c4group", "c4group.exe"]
         .iter()
-        .map(|relative| install_root.join(relative))
+        .map(|name| binaries_dir.join(name))
+        .chain(
+            DEVELOPMENT_CANDIDATES
+                .iter()
+                .map(|relative| paths.install_root().join(relative)),
+        )
         .collect()
 }
 
@@ -3251,6 +3258,75 @@ mod tests {
             log_contents.contains("c4group responded: LegacyClonk C4Group 9.0"),
             "probe output missing in log:\n{log_contents}"
         );
+    }
+
+    #[test]
+    fn packaged_update_tool_precedes_development_fallbacks() {
+        // xtask/src/main.rs:1741-1763 stages every shipped executable under
+        // `bin`; a source-tree fallback must not shadow the installed tool.
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+        let packaged = install_dir.path().join("bin/c4group");
+        fs::create_dir_all(packaged.parent().unwrap()).unwrap();
+        fs::write(&packaged, b"packaged").unwrap();
+        fs::write(install_dir.path().join("c4group"), b"development").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+        let paths = AppPaths::discover().unwrap();
+
+        assert_eq!(locate_update_tool(&paths), Some(packaged));
+    }
+
+    #[test]
+    fn bundled_update_tool_resolves_from_contents_macos() {
+        // xtask/src/main.rs:1812-1824 moves the flat `bin` payload beside the
+        // bundle executable while AppPaths treats `Contents/Resources` as the
+        // install root.
+        let install_dir = TempDir::new().unwrap();
+        let contents = install_dir.path().join("Clonk Rust.app/Contents");
+        let resources = contents.join("Resources");
+        fs::create_dir_all(resources.join("planet")).unwrap();
+        fs::write(resources.join("planet/System.c4g"), b"stub").unwrap();
+        let bundled = contents.join("MacOS/c4group");
+        fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        fs::write(&bundled, b"bundled").unwrap();
+        fs::write(resources.join("c4group"), b"development").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(resources.as_path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+        let paths = AppPaths::discover().unwrap();
+
+        assert_eq!(paths.binaries_dir(), contents.join("MacOS"));
+        assert_eq!(locate_update_tool(&paths), Some(bundled));
+    }
+
+    #[test]
+    fn development_update_tool_fallback_remains_available() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+        let fallback = install_dir.path().join("build/Release/c4group");
+        fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        fs::write(&fallback, b"development").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+        let paths = AppPaths::discover().unwrap();
+
+        assert_eq!(locate_update_tool(&paths), Some(fallback));
     }
 
     #[test]

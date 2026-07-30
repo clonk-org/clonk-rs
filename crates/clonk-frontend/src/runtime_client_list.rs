@@ -164,6 +164,10 @@ pub struct RuntimeClientRow {
     pub wait_ms: Option<i32>,
     pub connections: Vec<RuntimeConnectionRow>,
     pub can_moderate: bool,
+    /// `Game.Network.isHost() && pNetClient && !pNetClient->isReady()`
+    /// (src/C4Network2Dialogs.cpp:71): only a host sees this, and only for a
+    /// remote client that has not acknowledged the current network status.
+    pub unacknowledged: bool,
 }
 
 impl RuntimeClientRow {
@@ -391,16 +395,24 @@ impl RuntimeClientListDialog {
 
     /// Reuses the C4Network2ClientDlg-compatible detail presentation without
     /// constructing the surrounding F4 client-list dialog.
-    pub fn new_info(caption: impl Into<String>, row: RuntimeClientRow) -> Self {
-        let client_id = row.client_id;
-        let lines = client_info_lines(&row);
+    ///
+    /// The C++ dialog is constructed from an id alone and resolves the client
+    /// in `UpdateText`, so `row` may legitimately be absent: the dialog then
+    /// shows the unknown-id line (src/C4Network2Dialogs.cpp:42-59).
+    pub fn new_info(
+        caption: impl Into<String>,
+        client_id: i32,
+        row: Option<RuntimeClientRow>,
+    ) -> Self {
+        let rows = row.into_iter().collect::<Vec<_>>();
+        let lines = client_info_lines_for(&rows, client_id);
         Self {
             caption: String::new(),
             info_dialog: ScrollingInfoDialog::new(caption, 10, true),
             caption_scroll: Cell::new(CaptionScrollState::default()),
             info_caption_scroll: Cell::new(CaptionScrollState::default()),
             options: Vec::new(),
-            rows: vec![row],
+            rows,
             status: RuntimeClientListStatus::default(),
             dialog_offset: (0, 0),
             info_dialog_offset: (0, 0),
@@ -610,18 +622,13 @@ impl RuntimeClientListDialog {
         self.options = options;
         self.rows = rows;
         self.status = status;
-        if self
+        // A client that leaves while its info dialog is open does not close it:
+        // the next UpdateText simply resolves nothing and prints the unknown-id
+        // line (src/C4Network2Dialogs.cpp:54-59).
+        if let Some(lines) = self
             .info_client_id
-            .is_some_and(|id| !self.rows.iter().any(|row| row.client_id == id))
+            .map(|id| client_info_lines_for(&self.rows, id))
         {
-            self.close_info();
-        }
-        if let Some(lines) = self.info_client_id.and_then(|id| {
-            self.rows
-                .iter()
-                .find(|row| row.client_id == id)
-                .map(client_info_lines)
-        }) {
             if sec1_timer {
                 let _ = self.info_dialog.on_sec1_timer(|| lines);
             } else {
@@ -1093,9 +1100,8 @@ impl RuntimeClientListDialog {
             }
             HitTarget::ClientInfo(client_id) => {
                 self.reset_info_presentation();
-                if let Some(row) = self.rows.iter().find(|row| row.client_id == client_id) {
-                    self.info_dialog.reset_lines(client_info_lines(row));
-                }
+                self.info_dialog
+                    .reset_lines(client_info_lines_for(&self.rows, client_id));
                 self.info_open = true;
                 self.info_client_id = Some(client_id);
                 RuntimeClientListAction::OpenInfo(client_id)
@@ -2777,13 +2783,30 @@ impl RuntimeClientListDialog {
     }
 }
 
+/// `C4Network2ClientDlg::UpdateText` binds to a client *id*, not to a row, and
+/// looks the client up on every update. An id that is not in the current list —
+/// because the context entry went stale, or because the client left while the
+/// dialog is open — renders the native fallback line rather than closing
+/// (src/C4Network2Dialogs.cpp:54-59).
+fn client_info_lines_for(rows: &[RuntimeClientRow], client_id: i32) -> Vec<String> {
+    rows.iter()
+        .find(|row| row.client_id == client_id)
+        .map_or_else(
+            || vec![format!("Unknown client ID #{client_id}.")],
+            client_info_lines,
+        )
+}
+
 fn client_info_lines(row: &RuntimeClientRow) -> Vec<String> {
     let role = if row.host { "host" } else { "client" };
     let location = if row.local { "local" } else { "remote" };
     let activity = if row.activated { "active" } else { "inactive" };
+    // The native format string ends in the acknowledgement marker
+    // (`IDS_NET_CLIENT_INFO_FORMAT` = `%s %s %s %s (ID #%d):%s`).
+    let acknowledgement = if row.unacknowledged { " (!ack)" } else { "" };
     let mut lines = vec![
         format!("{activity}, {location}, {role}"),
-        format!("{} ({})", row.label(), row.client_id),
+        format!("{} ({}){acknowledgement}", row.label(), row.client_id),
     ];
     if !row.player_names.is_empty() {
         lines.push(format!("Players: {}", row.player_names.join(", ")));
@@ -3067,6 +3090,7 @@ mod tests {
             wait_ms: Some(12),
             connections: Vec::new(),
             can_moderate: true,
+            unacknowledged: false,
         }
     }
 
@@ -3561,7 +3585,8 @@ mod tests {
 
     #[test]
     fn standalone_client_info_starts_on_the_requested_row_and_closes_as_info() {
-        let mut dialog = RuntimeClientListDialog::new_info("Client information", row());
+        let mut dialog =
+            RuntimeClientListDialog::new_info("Client information", row().client_id, Some(row()));
         assert!(dialog.is_info_only());
         assert_eq!(dialog.info_client_id(), Some(7));
         assert_eq!(dialog.rows().len(), 1);
@@ -3570,6 +3595,47 @@ mod tests {
             Some(RuntimeClientListAction::CloseInfo)
         );
         assert_eq!(dialog.info_client_id(), None);
+    }
+
+    // C4Network2ClientDlg::UpdateText resolves the client id on every update:
+    // an unresolvable id prints IDS_NET_CLIENT_INFO_UNKNOWNID, and a host adds
+    // the ` (!ack)` tail of IDS_NET_CLIENT_INFO_FORMAT while the client has not
+    // acknowledged the current network status
+    // (src/C4Network2Dialogs.cpp:54-71).
+    #[test]
+    fn l174_client_info_text_shows_unknown_ids_and_the_host_ack_marker() {
+        assert_eq!(
+            client_info_lines_for(&[], 12),
+            vec!["Unknown client ID #12.".to_string()],
+            "an id with no client renders the native fallback line"
+        );
+
+        let known = row();
+        assert_eq!(
+            client_info_lines_for(std::slice::from_ref(&known), 7)[1],
+            "Remote:Nick (7)"
+        );
+
+        let mut unacknowledged = known.clone();
+        unacknowledged.unacknowledged = true;
+        assert_eq!(
+            client_info_lines_for(&[unacknowledged.clone()], 7)[1],
+            "Remote:Nick (7) (!ack)"
+        );
+
+        // The dialog is bound to an id, so a client that leaves keeps the
+        // dialog open on the fallback text instead of closing it.
+        let mut dialog = RuntimeClientListDialog::new_info("Client information", 7, Some(known));
+        assert_eq!(dialog.info_client_id(), Some(7));
+        dialog.replace_snapshot(
+            Vec::new(),
+            vec![unacknowledged],
+            RuntimeClientListStatus::default(),
+        );
+        assert_eq!(dialog.info_lines()[1], "Remote:Nick (7) (!ack)");
+        dialog.replace_snapshot_on_sec1(Vec::new(), Vec::new(), RuntimeClientListStatus::default());
+        assert_eq!(dialog.info_client_id(), Some(7), "the dialog stays open");
+        assert_eq!(dialog.info_lines(), ["Unknown client ID #7.".to_string()]);
     }
 
     #[test]

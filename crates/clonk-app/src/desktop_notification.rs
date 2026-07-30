@@ -32,7 +32,7 @@ impl DesktopNotifier {
     pub(crate) fn initialize() -> Result<Option<Self>> {
         #[cfg(any(target_os = "linux", windows))]
         {
-            return backend::Notifier::initialize().map(|backend| Some(Self { backend }));
+            backend::Notifier::initialize().map(|backend| Some(Self { backend }))
         }
 
         #[cfg(not(any(target_os = "linux", windows)))]
@@ -44,7 +44,7 @@ impl DesktopNotifier {
     pub(crate) fn show(&self, notification: &DesktopNotification) -> Result<()> {
         #[cfg(any(target_os = "linux", windows))]
         {
-            return self.backend.show(notification);
+            self.backend.show(notification)
         }
 
         #[cfg(not(any(target_os = "linux", windows)))]

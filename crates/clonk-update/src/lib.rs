@@ -52,5 +52,7 @@ pub use extract::{extract_archive, EntryFault, ExtractError, ExtractSummary};
 pub use journal::{
     Journal, JournalError, JournalStep, StepState, JOURNAL_FILE_NAME, JOURNAL_SCHEMA,
 };
-pub use manifest::{ComponentEntry, Manifest, ManifestError, TargetArchive, SUPPORTED_SCHEMA};
+pub use manifest::{
+    ArchiveSource, ComponentEntry, Manifest, ManifestError, TargetArchive, SUPPORTED_SCHEMA,
+};
 pub use state::{InstalledComponent, InstalledState, StateError};

@@ -1,0 +1,81 @@
+"""The host-specific material oracles stay visible in the Rust CI workflow."""
+
+import re
+import unittest
+from pathlib import Path
+
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
+ORACLE_REASON = (
+    "recording-host material order; required macOS CI job"
+)
+EXPECTED_ORACLES = {
+    "alchemy_real_scenario_subcases_batch_4",
+    "app_virtual_keyboard_completes_real_tutorial02_route",
+    "committed_real_scenario_replays_are_deterministic",
+    "real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence",
+    "tutorial02_virtual_player_completes_the_real_tutorial_route",
+    "tutorial07_seed_zero_landscape_matches_cpp_surface8",
+}
+
+
+def step_script(name):
+    """Return one workflow step's literal block without a YAML dependency."""
+    lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+    try:
+        start = lines.index(f"      - name: {name}")
+    except ValueError:
+        raise AssertionError(f"{WORKFLOW.name} has no step named {name!r}") from None
+
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("      - "):
+            break
+        if line == "        run: |":
+            body = []
+            for candidate in lines[index + 1 :]:
+                if candidate.strip() and not candidate.startswith(" " * 10):
+                    break
+                body.append(candidate[10:])
+            return "\n".join(body)
+    raise AssertionError(f"step {name!r} has no `run: |` block")
+
+
+def recording_host_oracles():
+    """Find every test deliberately ignored away from the recording host."""
+    reason = re.escape(ORACLE_REASON)
+    pattern = re.compile(
+        rf"(?:#\[test\]\s*)?"
+        rf'#\[cfg_attr\(\s*not\(target_os\s*=\s*"macos"\),\s*'
+        rf'ignore\s*=\s*"{reason}"\s*\)\]\s*'
+        rf"(?:#\[test\]\s*)?fn\s+([A-Za-z0-9_]+)",
+        re.MULTILINE,
+    )
+    found = set()
+    for source in (REPOSITORY / "crates").rglob("*.rs"):
+        found.update(pattern.findall(source.read_text(encoding="utf-8")))
+    return found
+
+
+class RecordingHostGateTests(unittest.TestCase):
+    def test_known_material_oracles_are_explicitly_platform_gated(self):
+        self.assertEqual(recording_host_oracles(), EXPECTED_ORACLES)
+
+    def test_named_macos_job_runs_every_platform_gated_oracle(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        job = workflow.index("  recording-host-oracles:")
+        next_job = re.search(r"(?m)^  [A-Za-z0-9_-]+:$", workflow[job + 1 :])
+        end = job + 1 + next_job.start() if next_job else None
+        block = workflow[job:end]
+        self.assertIn("name: Recording-host material-order oracles (macOS)", block)
+        self.assertIn("runs-on: macos-latest", block)
+
+        script = step_script("Run recording-host material-order oracles")
+        for oracle in recording_host_oracles():
+            with self.subTest(oracle=oracle):
+                self.assertRegex(script, rf"\b{re.escape(oracle)}\s+--exact\b")
+
+
+if __name__ == "__main__":
+    unittest.main()

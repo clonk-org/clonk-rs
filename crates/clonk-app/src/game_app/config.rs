@@ -1329,6 +1329,8 @@ impl GameApp {
         let native_config = load_native_config_bytes(paths);
         self.allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
         self.max_refresh_delay_ms = configured_max_refresh_delay_ms(&native_config);
+        self.startup_refresh_delay_ms =
+            crate::effective_max_refresh_delay_ms(&native_config, self.display_refresh_period_ms);
         let record = load_recording_flag(paths);
         self.startup_view_flags.record = record;
         self.recording_enabled = record && self.recordings_dir.is_some();
@@ -1456,14 +1458,27 @@ impl GameApp {
         )
     }
 
-    fn begin_options_scale_test(
+    /// `ResChangeConfirmDlg::UpdateText` re-renders `IDS_MNU_SWITCHRESOLUTION_TEXT`
+    /// with the remaining seconds on every tick (C4StartupOptionsDlg.cpp:115-125).
+    fn options_scale_test_message(&self, remaining_seconds: u32) -> String {
+        clonk_app_menus::substitute_resource_arguments(
+            &self.runtime_resource_text(
+                "IDS_MNU_SWITCHRESOLUTION_TEXT",
+                "This is your new resolution. Do you like it?|Original resolution will be \
+                 restored in %u seconds...",
+            ),
+            &[&remaining_seconds.to_string()],
+        )
+    }
+
+    pub(crate) fn begin_options_scale_test(
         &mut self,
         old_percent: i32,
         new_percent: i32,
     ) -> Result<(), EngineError> {
         let dialog = clonk_frontend::message_dialog::MessageDialogState::new(
-            "Keep this display scale?|12 seconds remaining.",
-            "Test graphics scale",
+            self.options_scale_test_message(12),
+            self.runtime_resource_text("IDS_MNU_SWITCHRESOLUTION", "Switch resolution"),
             clonk_frontend::message_dialog::MessageDialogButtons::YES_NO,
             clonk_frontend::message_dialog::MessageDialogIcon::CONFIRM,
             clonk_frontend::message_dialog::MessageDialogSize::Regular,
@@ -1495,16 +1510,22 @@ impl GameApp {
             .unwrap_or("Unknown control");
         let (message, icon) = match target.device {
             clonk_frontend::startup_options_controls::ControlDevice::Keyboard => (
-                format!(
-                    "Press the key for \"{control}\" on keyboard block {}.",
-                    target.set + 1
+                clonk_app_menus::substitute_resource_arguments(
+                    &self.runtime_resource_text(
+                        "IDS_MSG_PRESSKEY",
+                        "Press the key for \"%s\" on keyboard block %d.",
+                    ),
+                    &[control, &(target.set + 1).to_string()],
                 ),
                 clonk_frontend::message_dialog::MessageDialogIcon::Standard(24),
             ),
             clonk_frontend::startup_options_controls::ControlDevice::Gamepad => (
-                format!(
-                    "Press the button for \"{control}\" on gamepad {}.",
-                    target.set + 1
+                clonk_app_menus::substitute_resource_arguments(
+                    &self.runtime_resource_text(
+                        "IDS_MSG_PRESSBTN",
+                        "Press the button for \"%s\" on gamepad %d.",
+                    ),
+                    &[control, &(target.set + 1).to_string()],
                 ),
                 clonk_frontend::message_dialog::MessageDialogIcon::Standard(25),
             ),
@@ -1512,7 +1533,7 @@ impl GameApp {
         self.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::new(
                 message,
-                "Assign key",
+                self.runtime_resource_text("IDS_MSG_DEFINEKEY", "Assign key"),
                 clonk_frontend::message_dialog::MessageDialogButtons::CANCEL,
                 icon,
                 clonk_frontend::message_dialog::MessageDialogSize::Regular,
@@ -1697,6 +1718,7 @@ impl GameApp {
             ),
             load_options_network_state(self.app_paths.as_ref()),
         );
+        dialog.set_labels(self.localized_options_labels());
         if let (Some(fonts), Some(book)) = (
             self.assets.clonk_fonts.as_deref(),
             self.assets.options_book_fonts.as_deref(),
@@ -1711,6 +1733,65 @@ impl GameApp {
         self.startup_options_dialog = Some(dialog);
         self.replace_startup_dialog(StartupView::Options, StartupDialog::Options);
         self.status_text.clear();
+    }
+
+    /// Projects the active language table onto `C4StartupOptionsDlg`'s visible
+    /// strings. C++ resolves each key through `LoadResStr` while constructing
+    /// the dialog, so the port resolves them at the same moment
+    /// (C4StartupOptionsDlg.cpp:609-1033).
+    pub(crate) fn localized_options_labels(
+        &self,
+    ) -> clonk_frontend::startup_options_dlg::OptionsLabels {
+        let text = |key: &str, fallback: &str| self.runtime_resource_text(key, fallback);
+        clonk_frontend::startup_options_dlg::OptionsLabels {
+            // The caption strips its mnemonic marker like every FullscreenDialog title.
+            title: text("IDS_DLG_OPTIONS", "&Options").replace('&', ""),
+            // The twelve IDS_CTL_* action labels in C++'s own order
+            // (C4StartupOptionsDlg.cpp:166-169), each falling back to the
+            // shipped US text.
+            control_keys: std::array::from_fn(|control| {
+                text(
+                    clonk_frontend::startup_options_controls::CONTROL_KEY_LABEL_KEYS[control],
+                    clonk_frontend::startup_options_controls::CONTROL_KEY_LABELS[control],
+                )
+            }),
+            sheets: [
+                text("IDS_DLG_PROGRAM", "Program"),
+                text("IDS_DLG_GRAPHICS", "Graphics"),
+                text("IDS_DLG_SOUND", "Sound"),
+                text("IDS_DLG_KEYBOARD", "Keyboard"),
+                text("IDS_DLG_GAMEPAD", "Gamepad"),
+                text("IDS_DLG_NETWORK", "Network"),
+            ],
+            back: text("IDS_BTN_BACK", "Back"),
+            language: text("IDS_CTL_LANGUAGE", "Language"),
+            font: text("IDS_CTL_FONT", "Font"),
+            white_chat: text("IDS_MNU_WHITECHAT", "White Chat"),
+            white_chat_ingame: text("IDS_CTL_WHITECHAT_INGAME", "Ingame"),
+            white_chat_lobby: text("IDS_CTL_WHITECHAT_LOBBY", "Lobby"),
+            timestamps: text("IDS_CTL_TIMESTAMPS", "Timestamps"),
+            preloading: text("IDS_CTL_PRELOADING", "Preload game data"),
+            reset_config: text("IDS_BTN_RESETCONFIG", "Reset configuration"),
+            advanced_settings: text("IDS_DLG_ADVANCED_SETTINGS", "Advanced settings"),
+            fair_crew_strength: text("IDS_CTL_FAIRCREWSTRENGTH", "Strength of \"Fair Crew\""),
+            no_language_info: text("IDS_CTL_NOLANGINFO", "Language pack not available."),
+            music: text("IDS_CTL_MUSIC", "Music"),
+            sound_effects: text("IDS_CTL_SOUNDFX", "Sound effects"),
+            display_mode: text("IDS_CTL_DISPLAYMODE", "Display mode"),
+            graphics_scale: text("IDS_CTL_GRAPHICSSCALE", "Scale"),
+            effects_low: text("IDS_CTL_SMOKELOW", "Low"),
+            effects_high: text("IDS_CTL_SMOKEHI", "High"),
+            apply_scale: text("IDS_BTN_TESTGRAPHICSSCALE", "Apply"),
+            reset_keyboard: text("IDS_BTN_RESETKEYBOARD", "Reset all"),
+            port_reference: text("IDS_NET_PORT_REFERENCE", "Reference port"),
+            port_discovery: text("IDS_NET_PORT_DISCOVERY", "Discovery port"),
+            active: text("IDS_CTL_ACTIVE", "Active"),
+            use_other_server: text("IDS_CTL_USEOTHERSERVER", "Use alternate internet server"),
+            automatic_updates: text("IDS_CTL_AUTOMATICUPDATES", "Enable automatic updates"),
+            upnp: text("IDS_CTL_UPNP", "Use UPnP"),
+            computer_name: text("IDS_NET_COMPUTERNAME", "Computer name:"),
+            chat_name: text("IDS_NET_USERNAME", "Chat name:"),
+        }
     }
 
     pub(crate) fn persist_open_options_config(&self) -> Option<io::Result<()>> {
@@ -1745,7 +1826,35 @@ impl GameApp {
 
     fn close_options_menu(&mut self) -> Result<(), EngineError> {
         let save_result = self.persist_open_options_config();
+        // `C4StartupOptionsDlg::SaveConfig` ends with an outright
+        // `Config.Save()` — "make sure config is saved, in case the game
+        // crashes later on" (C4StartupOptionsDlg.cpp:1188-1189). Leaving the
+        // dialog is therefore an explicit save surface, so anything held for
+        // the shutdown flush is written here too.
+        self.flush_deferred_config();
         self.close_options_menu_with_persist_result(save_result)
+    }
+
+    /// Writes every pending runtime config change now. Used by the explicit
+    /// save surfaces; the clean-shutdown path flushes the same store.
+    pub(crate) fn flush_deferred_config(&mut self) {
+        let Some(paths) = self.app_paths.clone() else {
+            return;
+        };
+        for (section, entries) in self.deferred_config.take_by_section() {
+            let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.as_str(),
+                        clonk_app_netplay::NativeConfigValue::RawAscii(value.as_str()),
+                    )
+                })
+                .collect();
+            if let Err(error) = persist_native_config_values(&paths, &section, &updates) {
+                tracing::warn!(%error, section, "could not save deferred config values");
+            }
+        }
     }
 
     pub(crate) fn close_options_menu_with_persist_result(
@@ -1788,6 +1897,13 @@ impl GameApp {
         }) else {
             return false;
         };
+        // The template is resolved before the borrow so the countdown refresh
+        // uses the same active-language text the dialog opened with.
+        let scale_test_template = self.runtime_resource_text(
+            "IDS_MNU_SWITCHRESOLUTION_TEXT",
+            "This is your new resolution. Do you like it?|Original resolution will be \
+             restored in %u seconds...",
+        );
         let expires = self
             .message_dialogs
             .get_mut(prompt_index)
@@ -1802,10 +1918,12 @@ impl GameApp {
                     return true;
                 }
                 *remaining_seconds -= 1;
-                dialog.state.set_message(format!(
-                    "Keep this display scale?|{} seconds remaining.",
-                    *remaining_seconds
-                ));
+                dialog
+                    .state
+                    .set_message(clonk_app_menus::substitute_resource_arguments(
+                        &scale_test_template,
+                        &[&remaining_seconds.to_string()],
+                    ));
                 false
             });
         if expires {

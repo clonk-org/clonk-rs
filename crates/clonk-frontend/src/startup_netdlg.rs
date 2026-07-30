@@ -27,6 +27,13 @@ use clonk_gui::Rect as GuiRect;
 // (0xff = opaque); box/line colors are engine AARRGGBB with INVERTED alpha
 // (0x00 = opaque).
 /// C4GUI_FullscreenCaptionFontClr / C4GUI_Caption2FontClr / C4GUI_ButtonFontClr.
+/// `C4GUI::TextWindow`'s constructor defaults, which `C4ChatControl::ChatSheet`
+/// takes verbatim (src/C4Gui.h:1309; src/C4ChatDlg.cpp:194).
+/// `C4GUI_ScrollArrowHgt` (src/C4Gui.h).
+const CHAT_SCROLL_ARROW_EXTENT: i32 = 16;
+const CHAT_TRANSCRIPT_MAX_LINES: usize = 100;
+const CHAT_TRANSCRIPT_MAX_TEXT: usize = 4096;
+
 const CLR_YELLOW: [u8; 4] = [0xff, 0xff, 0x00, 0xff];
 /// C4GUI_CaptionFontClr / C4GUI_MessageFontClr.
 const CLR_WHITE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
@@ -636,7 +643,6 @@ pub struct NetDlgChatStrings {
     pub real_name: String,
     pub channel: String,
     pub connect: String,
-    pub no_message: String,
     pub not_connected_error: String,
     /// Use `{command}` for the command name.
     pub insufficient_parameters: String,
@@ -644,6 +650,40 @@ pub struct NetDlgChatStrings {
     /// Use `{command}` for the command name.
     pub unknown_command: String,
     pub not_on_channel: String,
+    /// `IDS_NET_CONNECTING`. C4ChatControl substitutes the server address and
+    /// an empty second argument (C4ChatDlg.cpp:643).
+    pub connecting: String,
+}
+
+/// C4ResStrTable substitutes positional `%s`/`%d` arguments in template order.
+/// A placeholder without a matching argument stays literal, which is what the
+/// C++ `sprintf` fallback yields for a truncated language table.
+fn substitute_resource_arguments(template: &str, arguments: &[&str]) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut remainder = template;
+    let mut arguments = arguments.iter();
+    while let Some(placeholder) = remainder.find('%') {
+        output.push_str(&remainder[..placeholder]);
+        let rest = &remainder[placeholder..];
+        let mut characters = rest.chars();
+        characters.next();
+        match characters.next() {
+            Some('s' | 'd' | 'i' | 'u') => match arguments.next() {
+                Some(argument) => output.push_str(argument),
+                None => output.push_str(&rest[..2]),
+            },
+            Some('%') => output.push('%'),
+            Some(_) => output.push_str(&rest[..2]),
+            None => {
+                output.push('%');
+                remainder = "";
+                break;
+            }
+        }
+        remainder = &rest[2..];
+    }
+    output.push_str(remainder);
+    output
 }
 
 impl Default for NetDlgChatStrings {
@@ -657,12 +697,12 @@ impl Default for NetDlgChatStrings {
             real_name: "Real name:".into(),
             channel: "Channel:".into(),
             connect: "Connect".into(),
-            no_message: "No message entered".into(),
             not_connected_error: "Not connected to a server".into(),
             insufficient_parameters: "Insufficient parameters for /{command}".into(),
-            invalid_nick: "Invalid nickname".into(),
+            invalid_nick: "/{command}: invalid nick name".into(),
             unknown_command: "Unknown command: {command}".into(),
             not_on_channel: "Not on a channel".into(),
+            connecting: "Connecting to %s at %s".into(),
         }
     }
 }
@@ -818,6 +858,10 @@ pub struct NetDlgChatSheet {
     pub transcript_scroll: i32,
     /// True while incoming lines keep the transcript pinned to its bottom.
     pub transcript_follow_bottom: bool,
+    /// Retained `C4GUI::ScrollWindow` offset of the channel nick pane, which
+    /// C++ builds as a scrollable `ListBox` (src/C4ChatDlg.cpp:226-238).
+    /// Rows below the fold are reachable rather than dropped.
+    pub user_scroll: i32,
 }
 
 /// Commands parsed from the classic slash-command language. These mirror the
@@ -1294,6 +1338,9 @@ pub struct NetDlgController {
     /// NetDlg's embedded chat group.
     chat_bounds_override: Option<IntRect>,
     chat_server: String,
+    /// Sheet a still-unreported send was submitted from, so the transport's
+    /// asynchronous error lands where `ProcessInput` would have put it.
+    chat_send_error_origin: Option<(NetDlgChatSheetKind, String)>,
     chat_login_edits: [NetDlgEditState; 4],
     chat_login_field: NetDlgChatLoginField,
     chat_connect_focused: bool,
@@ -1318,6 +1365,8 @@ pub struct NetDlgController {
     list_scroll_y: i32,
     list_scroll_pin: i32,
     scrollbar_dragging: bool,
+    /// A held `C4GUI::ScrollBar` pin on the IRC transcript.
+    chat_transcript_scrollbar_dragging: bool,
     scrollbar_arrow_captured: bool,
     scrollbar_arrow: i8,
 }
@@ -1332,6 +1381,13 @@ enum NetDlgChatHit {
     TabClose(usize),
     Input,
     Transcript,
+    /// `C4GUI::ScrollBar`'s three pointer regions
+    /// (src/C4GuiContainers.cpp:477-623): the two arrow buttons step one line,
+    /// the pin is draggable, and pressing the bare track pages.
+    TranscriptScrollUp,
+    TranscriptScrollDown,
+    TranscriptScrollPin,
+    TranscriptScrollTrack,
     User(usize),
 }
 
@@ -1412,6 +1468,7 @@ impl NetDlgController {
             chat_strings: NetDlgChatStrings::default(),
             chat_bounds_override: None,
             chat_server: login.server.clone(),
+            chat_send_error_origin: None,
             chat_login_edits,
             chat_login_field: NetDlgChatLoginField::Nick,
             chat_connect_focused: false,
@@ -1428,6 +1485,7 @@ impl NetDlgController {
                 unread: false,
                 transcript_scroll: 0,
                 transcript_follow_bottom: true,
+                user_scroll: 0,
             }],
             chat_active_sheet: 0,
             chat_edit: NetDlgEditState::default(),
@@ -1447,6 +1505,7 @@ impl NetDlgController {
             list_scroll_y: 0,
             list_scroll_pin: 0,
             scrollbar_dragging: false,
+            chat_transcript_scrollbar_dragging: false,
             scrollbar_arrow_captured: false,
             scrollbar_arrow: 0,
         }
@@ -1804,7 +1863,10 @@ impl NetDlgController {
                 &mut sheets[0],
                 NetDlgChatLine {
                     kind: NetDlgChatLineKind::Status,
-                    text: format!("Connecting to {}...", self.chat_server),
+                    text: substitute_resource_arguments(
+                        &self.chat_strings.connecting,
+                        &[&self.chat_server, ""],
+                    ),
                 },
                 true,
             );
@@ -1849,13 +1911,17 @@ impl NetDlgController {
                     })
                     .map(Some)
                     .unwrap_or(None)
-            } else if Self::is_irc_service(source_nick)
-                || source_nick.is_empty()
-                || matches!(message.kind, NetDlgChatMessageKind::Status)
-            {
+            } else if Self::is_irc_service(source_nick) {
                 Some(0)
             } else if matches!(message.kind, NetDlgChatMessageKind::Notice) {
+                // Native `Update` tests `MSG_Notice` before the empty-source
+                // fallback, so a source-less notice stays on the active sheet
+                // (C4ChatDlg.cpp:742-747).
                 Some(selected.min(sheets.len().saturating_sub(1)))
+            } else if matches!(message.kind, NetDlgChatMessageKind::Status)
+                || source_nick.is_empty()
+            {
+                Some(0)
             } else {
                 let outgoing = source_nick.eq_ignore_ascii_case(&snapshot.nick);
                 let query = if outgoing {
@@ -1866,18 +1932,25 @@ impl NetDlgController {
                 if Self::is_irc_service(query) {
                     Some(0)
                 } else {
+                    // `SplitAtChar('!')` leaves the ident behind the nick, and
+                    // `OpenQuery` matches on it, so a nick change reuses and
+                    // retitles the sheet. An own message passes no ident at all
+                    // (C4ChatDlg.cpp:753-770,834-854).
                     let ident = if outgoing {
-                        query
+                        ""
                     } else {
-                        message.source.as_str()
+                        message
+                            .source
+                            .split_once('!')
+                            .map_or(message.source.as_str(), |(_, ident)| ident)
                     };
                     let query_index = Self::ensure_query_sheet(&mut sheets, query, ident);
-                    if !outgoing && !message.source.is_empty() {
-                        sheets[query_index].topic.clone_from(&message.source);
-                    }
                     if outgoing {
+                        sheets[query_index].topic = query.to_string();
                         selected = query_index;
                         sheets[query_index].unread = false;
+                    } else if !message.source.is_empty() {
+                        sheets[query_index].topic.clone_from(&message.source);
                     }
                     Some(query_index)
                 }
@@ -1896,8 +1969,17 @@ impl NetDlgController {
                 kind: NetDlgChatLineKind::Error,
                 text: format!("Error: {error}"),
             };
-            if sheets[0].lines.last() != Some(&line) {
-                Self::append_chat_line(&mut sheets[0], line, selected == 0);
+            let target = self
+                .chat_send_error_origin
+                .take()
+                .and_then(|(kind, ident)| {
+                    sheets.iter().position(|sheet| {
+                        sheet.kind == kind && sheet.ident.eq_ignore_ascii_case(&ident)
+                    })
+                })
+                .unwrap_or(0);
+            if sheets[target].lines.last() != Some(&line) {
+                Self::append_chat_line(&mut sheets[target], line, target == selected);
             }
         }
 
@@ -2150,6 +2232,16 @@ impl NetDlgController {
     /// Maximum displacement for the current rows and viewport.
     pub fn list_max_scroll(&self) -> i32 {
         self.max_list_scroll(&self.layout())
+    }
+
+    /// Whether the Chat tab is shown, which decides button visibility exactly
+    /// like `C4StartupNetDlg::UpdateCollapsed`.
+    pub fn is_chat_mode(&self) -> bool {
+        self.mode == NetDlgMode::Chat
+    }
+
+    pub fn masterserver_signup(&self) -> bool {
+        self.config.masterserver_signup
     }
 
     pub fn list_is_collapsed(&self) -> bool {
@@ -2554,6 +2646,10 @@ impl NetDlgController {
                     .drag_pointer_selection(character, edit_rect, font);
             }
         }
+        if self.chat_transcript_scrollbar_dragging {
+            self.set_chat_transcript_scroll_from_pointer(position);
+            return Vec::new();
+        }
         if self.scrollbar_dragging {
             self.set_scroll_from_pointer(position, &layout);
         } else if self.scrollbar_arrow_captured {
@@ -2622,6 +2718,19 @@ impl NetDlgController {
                             .begin_pointer_selection(character, edit_rect, font);
                     }
                     NetDlgChatHit::Connect => self.chat_connect_focused = true,
+                    NetDlgChatHit::TranscriptScrollUp => {
+                        self.scroll_active_chat_by(-self.metrics.text_line_height.max(1));
+                    }
+                    NetDlgChatHit::TranscriptScrollDown => {
+                        self.scroll_active_chat_by(self.metrics.text_line_height.max(1));
+                    }
+                    NetDlgChatHit::TranscriptScrollPin => {
+                        self.chat_transcript_scrollbar_dragging = true;
+                    }
+                    NetDlgChatHit::TranscriptScrollTrack => {
+                        self.set_chat_transcript_scroll_from_pointer(position);
+                        self.chat_transcript_scrollbar_dragging = true;
+                    }
                     NetDlgChatHit::DialogClose
                     | NetDlgChatHit::DialogCaption
                     | NetDlgChatHit::Tab(_)
@@ -2701,10 +2810,19 @@ impl NetDlgController {
                         | NetDlgChatHit::DialogCaption
                         | NetDlgChatHit::Input
                         | NetDlgChatHit::Transcript
+                        | NetDlgChatHit::TranscriptScrollUp
+                        | NetDlgChatHit::TranscriptScrollDown
+                        | NetDlgChatHit::TranscriptScrollPin
+                        | NetDlgChatHit::TranscriptScrollTrack
                         | NetDlgChatHit::User(_) => Vec::new(),
                     };
                 }
             }
+        }
+        if self.chat_transcript_scrollbar_dragging {
+            self.set_chat_transcript_scroll_from_pointer(position);
+            self.chat_transcript_scrollbar_dragging = false;
+            return Vec::new();
         }
         if self.scrollbar_dragging {
             let layout = self.layout();
@@ -2796,6 +2914,10 @@ impl NetDlgController {
             let chat = self.chat_layout();
             if contains(chat.transcript, position) {
                 self.scroll_active_chat_by(delta.saturating_neg());
+                return Vec::new();
+            }
+            if chat.users.is_some_and(|users| contains(users, position)) {
+                self.scroll_active_chat_users_by(delta.saturating_neg());
                 return Vec::new();
             }
         }
@@ -3093,6 +3215,7 @@ impl NetDlgController {
             unread: false,
             transcript_scroll: 0,
             transcript_follow_bottom: true,
+            user_scroll: 0,
         }
     }
 
@@ -3131,9 +3254,34 @@ impl NetDlgController {
             .collect()
     }
 
+    /// `C4ChatControl::ChatSheet` builds its transcript as a plain
+    /// `C4GUI::TextWindow(rcDefault)` (src/C4ChatDlg.cpp:194), which takes the
+    /// constructor's `iMaxLines = 100` / `iMaxTextLen = 4096` defaults
+    /// (src/C4Gui.h:1309). Those reach a `C4LogBuffer` that evicts from the
+    /// front - `DiscardFirstLine` on reaching the line cap, and again until an
+    /// oversized message fits the character ring
+    /// (src/C4LogBuf.cpp:96-148), so an IRC session cannot retain unbounded
+    /// scrollback.
+    fn bound_chat_transcript(sheet: &mut NetDlgChatSheet) {
+        while sheet.lines.len() > CHAT_TRANSCRIPT_MAX_LINES {
+            sheet.lines.remove(0);
+        }
+        // The native buffer counts the trailing NUL of every stored line.
+        let mut budget = sheet
+            .lines
+            .iter()
+            .map(|line| line.text.len() + 1)
+            .sum::<usize>();
+        while budget > CHAT_TRANSCRIPT_MAX_TEXT && !sheet.lines.is_empty() {
+            budget -= sheet.lines[0].text.len() + 1;
+            sheet.lines.remove(0);
+        }
+    }
+
     fn append_chat_line(sheet: &mut NetDlgChatSheet, mut line: NetDlgChatLine, active: bool) {
         line.text = Self::sanitize_chat_line(&line.text);
         sheet.lines.push(line);
+        Self::bound_chat_transcript(sheet);
         // TextWindow::AddTextLine always ScrollToBottom, even on an inactive
         // tab. The inactive caption is then marked unread.
         sheet.transcript_follow_bottom = true;
@@ -3451,7 +3599,10 @@ impl NetDlgController {
         let mut wrapped = Vec::new();
         for line in &sheet.lines {
             let mut first_physical = true;
-            for paragraph in line.text.split('|') {
+            // Chat TextWindows are constructed with `fMarkup = false`, so
+            // `AppendLines` only counts CR and LF as line breaks and `|` stays
+            // literal (C4Gui.h:1309; C4LogBuf.cpp:180-183).
+            for paragraph in line.text.split(['\r', '\n']) {
                 let broken = font.map_or_else(
                     || paragraph.to_string(),
                     |font| break_message(font, paragraph, width.max(1)),
@@ -3529,6 +3680,105 @@ impl NetDlgController {
         }
     }
 
+    /// Maximum `ScrollWindow` offset of the nick `ListBox`: the rows that do
+    /// not fit its viewport (src/C4GuiContainers.cpp:477-623).
+    pub(crate) fn chat_users_max_scroll(&self, line_height: i32) -> i32 {
+        let Some(users) = self.chat_layout().users else {
+            return 0;
+        };
+        let Some(sheet) = self.chat_sheets.get(self.chat_active_sheet) else {
+            return 0;
+        };
+        let content = i32::try_from(sheet.users.len())
+            .unwrap_or(i32::MAX)
+            .saturating_mul(line_height.max(1));
+        (content - users.h).max(0)
+    }
+
+    fn scroll_active_chat_users_by(&mut self, delta: i32) {
+        let line_height = self.metrics.text_line_height.max(1);
+        let max_scroll = self.chat_users_max_scroll(line_height);
+        if let Some(sheet) = self.chat_sheets.get_mut(self.chat_active_sheet) {
+            sheet.user_scroll = sheet.user_scroll.saturating_add(delta).clamp(0, max_scroll);
+        }
+    }
+
+    /// `C4GUI::ScrollBar`'s pointer regions: the two `C4GUI_ScrollArrowHgt`
+    /// arrow buttons and, between them, the draggable pin over a pageable
+    /// track (src/C4GuiContainers.cpp:477-623). The bar exists only while the
+    /// transcript overflows.
+    fn chat_transcript_scrollbar_hit(
+        &self,
+        layout: &NetDlgChatLayout,
+        point: GuiPoint,
+    ) -> Option<NetDlgChatHit> {
+        let bar = layout.transcript_scrollbar;
+        let max_scroll = self.chat_transcript_max_scroll_for(self.chat_active_sheet, layout);
+        if max_scroll <= 0 || !contains(bar, point) {
+            return None;
+        }
+        let arrow = CHAT_SCROLL_ARROW_EXTENT.min(bar.h / 2);
+        let y = point.y.floor() as i32;
+        if y < bar.y + arrow {
+            return Some(NetDlgChatHit::TranscriptScrollUp);
+        }
+        if y >= bar.y + bar.h - arrow {
+            return Some(NetDlgChatHit::TranscriptScrollDown);
+        }
+        let pin = self.chat_transcript_pin_rect(layout, max_scroll);
+        Some(if contains(pin, point) {
+            NetDlgChatHit::TranscriptScrollPin
+        } else {
+            NetDlgChatHit::TranscriptScrollTrack
+        })
+    }
+
+    fn chat_transcript_pin_rect(&self, layout: &NetDlgChatLayout, max_scroll: i32) -> IntRect {
+        let bar = layout.transcript_scrollbar;
+        let arrow = CHAT_SCROLL_ARROW_EXTENT.min(bar.h / 2);
+        let travel = (bar.h - 3 * arrow).max(0);
+        let scroll = self
+            .chat_sheets
+            .get(self.chat_active_sheet)
+            .map_or(0, |sheet| {
+                if sheet.transcript_follow_bottom {
+                    max_scroll
+                } else {
+                    sheet.transcript_scroll
+                }
+            });
+        let offset = if max_scroll > 0 && travel > 0 {
+            (i64::from(scroll) * i64::from(travel) / i64::from(max_scroll)) as i32
+        } else {
+            0
+        };
+        IntRect {
+            x: bar.x,
+            y: bar.y + arrow + offset,
+            w: bar.w,
+            h: arrow,
+        }
+    }
+
+    /// `ScrollBar::MouseInput`'s drag/page: centre the pin under the pointer
+    /// and map that back to a scroll offset.
+    fn set_chat_transcript_scroll_from_pointer(&mut self, point: GuiPoint) {
+        let layout = self.chat_layout();
+        let max_scroll = self.chat_transcript_max_scroll_for(self.chat_active_sheet, &layout);
+        let bar = layout.transcript_scrollbar;
+        let arrow = CHAT_SCROLL_ARROW_EXTENT.min(bar.h / 2);
+        let travel = (bar.h - 3 * arrow).max(0);
+        if max_scroll <= 0 || travel <= 0 {
+            return;
+        }
+        let position = (point.y.floor() as i32 - bar.y - arrow - arrow / 2).clamp(0, travel);
+        let scroll = (i64::from(position) * i64::from(max_scroll) / i64::from(travel)) as i32;
+        if let Some(sheet) = self.chat_sheets.get_mut(self.chat_active_sheet) {
+            sheet.transcript_scroll = scroll.clamp(0, max_scroll);
+            sheet.transcript_follow_bottom = sheet.transcript_scroll == max_scroll;
+        }
+    }
+
     fn scroll_active_chat_by(&mut self, delta: i32) {
         let layout = self.chat_layout();
         let max_scroll = self.chat_transcript_max_scroll_for(self.chat_active_sheet, &layout);
@@ -3589,6 +3839,7 @@ impl NetDlgController {
                         .map(NetDlgChatHit::Tab)
                 })
                 .or_else(|| contains(layout.input, point).then_some(NetDlgChatHit::Input))
+                .or_else(|| self.chat_transcript_scrollbar_hit(&layout, point))
                 .or_else(|| {
                     contains(layout.transcript_viewport, point).then_some(NetDlgChatHit::Transcript)
                 })
@@ -3711,8 +3962,10 @@ impl NetDlgController {
         self.chat_edit.set_text("");
         self.chat_history_index = None;
         if input.is_empty() {
-            let error = self.chat_strings.no_message.clone();
-            return (self.chat_error(error), false);
+            // `OnChatInput` answers empty submission with `DoError(nullptr)`,
+            // which sounds without adding a line and never reaches
+            // `ProcessInput` or the back buffer (C4ChatDlg.cpp:254-259,329-336).
+            return (vec![NetDlgAction::GuiSound(NetDlgSound::Error)], false);
         }
         self.store_chat_history(&input);
         let mut actions = vec![NetDlgAction::ChatHistoryStored(input.clone())];
@@ -3726,11 +3979,10 @@ impl NetDlgController {
         let parsed: Result<(NetDlgChatCommand, bool), String> =
             if input.starts_with('/') && !input[1..].to_ascii_lowercase().starts_with("me ") {
                 let command_line = &input[1..];
-                let (name, parameter) = command_line
-                    .split_once(' ')
-                    .map_or((command_line, ""), |(name, parameter)| {
-                        (name, parameter.trim_start())
-                    });
+                // `SplitAtChar` cuts at the first delimiter only and takes the
+                // remainder verbatim, so parameter spacing survives
+                // (StdBuf.h:579-588).
+                let (name, parameter) = command_line.split_once(' ').unwrap_or((command_line, ""));
                 match name.to_ascii_lowercase().as_str() {
                     "quit" => Ok((
                         NetDlgChatCommand::Quit {
@@ -3844,7 +4096,10 @@ impl NetDlgController {
                         },
                         false,
                     )),
-                    "nick" => Err(self.chat_strings.invalid_nick.clone()),
+                    "nick" => Err(Self::chat_string_command(
+                        &self.chat_strings.invalid_nick,
+                        name,
+                    )),
                     _ => Err(Self::chat_string_command(
                         &self.chat_strings.unknown_command,
                         name,
@@ -3879,6 +4134,14 @@ impl NetDlgController {
             };
         match parsed {
             Ok((command, abort_paste)) => {
+                // `ProcessInput` reports a failed send on the sheet it was
+                // handed (C4ChatDlg.cpp:1014-1017). The port sends
+                // asynchronously, so the origin is retained until the
+                // transport's error reaches the next snapshot.
+                self.chat_send_error_origin = self
+                    .chat_sheets
+                    .get(self.chat_active_sheet)
+                    .map(|sheet| (sheet.kind, sheet.ident.clone()));
                 actions.push(NetDlgAction::ChatCommand(command));
                 (actions, abort_paste)
             }
@@ -3906,6 +4169,46 @@ impl NetDlgController {
                 _ => None,
             }
         })
+    }
+
+    /// Captions the dialog advertises, in `C4StartupNetDlg`'s construction
+    /// order (C4StartupNetDlg.cpp:651-728). `Back` carries no marker.
+    const HOTKEY_CAPTIONS: [(NetDlgControl, &'static str); 8] = [
+        (NetDlgControl::GamesButton, "&Games"),
+        (NetDlgControl::ChatButton, "&Chat"),
+        (NetDlgControl::Internet, "&Internet"),
+        (NetDlgControl::Record, "&Record"),
+        (NetDlgControl::Back, "Back"),
+        (NetDlgControl::Refresh, "Reloa&d"),
+        (NetDlgControl::JoinGame, "&Join game"),
+        (NetDlgControl::CreateGame, "&New game"),
+    ];
+
+    /// `Dialog::OnHotkey` walks the visible elements and lets the first
+    /// matching enabled `Button` press itself (C4GuiButton.cpp:73-79). Chat
+    /// mode removes Internet, Record, Reload and Join from the dialog, so
+    /// their markers cannot fire.
+    pub fn handle_hotkey(&mut self, character: char) -> Option<Vec<NetDlgAction>> {
+        let character = character.to_ascii_uppercase();
+        if !character.is_ascii_alphanumeric() {
+            return None;
+        }
+        Self::HOTKEY_CAPTIONS
+            .into_iter()
+            .filter(|(control, _)| self.control_is_shown(*control))
+            .find(|(_, caption)| expand_hotkey_markup(caption).1 == Some(character))
+            .map(|(control, _)| self.activate(control))
+    }
+
+    fn control_is_shown(&self, control: NetDlgControl) -> bool {
+        self.mode == NetDlgMode::GameList
+            || !matches!(
+                control,
+                NetDlgControl::Internet
+                    | NetDlgControl::Record
+                    | NetDlgControl::Refresh
+                    | NetDlgControl::JoinGame
+            )
     }
 
     fn hit_button(&self, point: GuiPoint) -> Option<NetDlgControl> {
@@ -5687,10 +5990,17 @@ impl NetDlgScreen {
                     CLR_DARK_BG,
                     gamma,
                 );
+                // ScrollWindow shows the rows under its retained offset; a
+                // partially scrolled row exposes one more at the bottom.
+                let first_row = usize::try_from(sheet.user_scroll / line_h).unwrap_or(0);
+                let visible_rows = usize::try_from((users.h / line_h).max(0)).unwrap_or(0)
+                    + usize::from(sheet.user_scroll % line_h != 0);
+                let row_offset = sheet.user_scroll % line_h;
                 for (row, user) in sheet
                     .users
                     .iter()
-                    .take(usize::try_from((users.h / line_h).max(0)).unwrap_or(0))
+                    .skip(first_row)
+                    .take(visible_rows)
                     .enumerate()
                 {
                     let icon = match user.prefix.as_bytes().first().copied() {
@@ -5700,7 +6010,8 @@ impl NetDlgScreen {
                         Some(b'+') => 20,
                         _ => 9,
                     };
-                    let row_y = users.y + i32::try_from(row).unwrap_or(i32::MAX) * line_h;
+                    let row_y =
+                        users.y + i32::try_from(row).unwrap_or(i32::MAX) * line_h - row_offset;
                     Self::draw_icon_phase(
                         surface,
                         &assets.gui_icons,
@@ -8027,6 +8338,183 @@ mod tests {
         assert_eq!(controller.chat_login_field(), NetDlgChatLoginField::Nick);
     }
 
+    // `C4ChatControl::ChatSheet`'s transcript is a plain
+    // `C4GUI::TextWindow(rcDefault)`, so it takes the constructor's
+    // `iMaxLines = 100` / `iMaxTextLen = 4096` defaults, and its `C4LogBuffer`
+    // evicts from the front on both bounds. The channel nick pane is a real
+    // scrollable `ListBox`, so rows below the fold stay reachable
+    // (src/C4ChatDlg.cpp:194,226-238; src/C4Gui.h:1309;
+    // src/C4LogBuf.cpp:96-148; src/C4GuiContainers.cpp:477-623).
+    #[test]
+    fn irc_chat_scroll_windows_match_cpp_pointer_overflow_and_limits() {
+        let message = |text: &str| NetDlgChatMessage {
+            kind: NetDlgChatMessageKind::Message,
+            source: "Keeper!ident@example".into(),
+            target: "#clonken".into(),
+            text: text.into(),
+            is_channel: true,
+        };
+
+        // Far more than the native line cap, each line short enough that the
+        // character budget is not what evicts.
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let many = (0..250)
+            .map(|index| message(&format!("m{index}")))
+            .collect();
+        controller.sync_chat_snapshot(chat_snapshot(NetDlgChatConnectionState::Connected, many, 0));
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .find(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel tab");
+        assert_eq!(
+            channel.lines.len(),
+            CHAT_TRANSCRIPT_MAX_LINES,
+            "the transcript is bounded by iMaxLines"
+        );
+        assert_eq!(
+            channel.lines.last().expect("newest line"),
+            &"<Keeper> m249",
+            "eviction is from the front"
+        );
+
+        // Long lines hit the character budget before the line cap.
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let long = (0..40)
+            .map(|index| message(&format!("{index:03}{}", "x".repeat(200))))
+            .collect();
+        controller.sync_chat_snapshot(chat_snapshot(NetDlgChatConnectionState::Connected, long, 0));
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .find(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel tab");
+        assert!(
+            channel.lines.len() < CHAT_TRANSCRIPT_MAX_LINES,
+            "the character budget evicts before the line cap"
+        );
+        let retained = channel
+            .lines
+            .iter()
+            .map(|line| line.text.len() + 1)
+            .sum::<usize>();
+        assert!(
+            retained <= CHAT_TRANSCRIPT_MAX_TEXT,
+            "retained {retained} bytes exceeds iMaxTextLen"
+        );
+        assert!(
+            channel
+                .lines
+                .last()
+                .expect("newest line")
+                .text
+                .contains("039"),
+            "the newest line always survives"
+        );
+
+        // The transcript bar's arrows step a line, its pin drags, and its bare
+        // track pages, exactly like C4GUI::ScrollBar.
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        let overflow = (0..90)
+            .map(|index| message(&format!("line {index}")))
+            .collect();
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            overflow,
+            0,
+        ));
+        let channel_index = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel tab");
+        controller.select_chat_sheet(channel_index);
+        controller.force_chat_mode_and_focus();
+        let layout = controller.chat_layout();
+        let bar = layout.transcript_scrollbar;
+        let max_scroll =
+            controller.chat_transcript_max_scroll_for(controller.chat_active_sheet, &layout);
+        assert!(max_scroll > 0, "90 lines overflow the transcript viewport");
+        assert_eq!(
+            controller.chat_sheets()[channel_index].transcript_scroll,
+            max_scroll,
+            "AddTextLine leaves the transcript pinned to the bottom"
+        );
+
+        let at = |y: i32| GuiPoint::new((bar.x + bar.w / 2) as f32, y as f32);
+        // The up arrow steps one line off the bottom.
+        controller.handle_pointer_down(at(bar.y + 2), text_font());
+        controller.handle_pointer_up(at(bar.y + 2), text_font());
+        let stepped = controller.chat_sheets()[channel_index].transcript_scroll;
+        assert_eq!(stepped, max_scroll - metrics().text_line_height.max(1));
+        assert!(!controller.chat_sheets()[channel_index].transcript_follow_bottom);
+
+        // The down arrow steps back and re-pins.
+        controller.handle_pointer_down(at(bar.y + bar.h - 2), text_font());
+        controller.handle_pointer_up(at(bar.y + bar.h - 2), text_font());
+        assert_eq!(
+            controller.chat_sheets()[channel_index].transcript_scroll,
+            max_scroll
+        );
+        assert!(controller.chat_sheets()[channel_index].transcript_follow_bottom);
+
+        // Pressing the bare track pages to that position, and dragging the pin
+        // tracks the pointer.
+        controller.handle_pointer_down(at(bar.y + bar.h / 2), text_font());
+        let paged = controller.chat_sheets()[channel_index].transcript_scroll;
+        assert!(paged > 0 && paged < max_scroll, "paged to {paged}");
+        controller.handle_pointer_move(at(bar.y + CHAT_SCROLL_ARROW_EXTENT), text_font());
+        assert_eq!(controller.chat_sheets()[channel_index].transcript_scroll, 0);
+        controller.handle_pointer_up(at(bar.y + bar.h), text_font());
+        assert_eq!(
+            controller.chat_sheets()[channel_index].transcript_scroll,
+            max_scroll,
+            "the release position is applied before the drag ends"
+        );
+
+        // The nick list retains a scroll offset instead of dropping rows.
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
+        snapshot.channels[0].users = (0..500)
+            .map(|index| NetDlgChatUser {
+                prefix: String::new(),
+                name: format!("User{index:02}"),
+            })
+            .collect();
+        controller.sync_chat_snapshot(snapshot);
+        let channel_index = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel tab");
+        controller.select_chat_sheet(channel_index);
+        controller.force_chat_mode_and_focus();
+        let line_height = metrics().text_line_height.max(1);
+        let max_scroll = controller.chat_users_max_scroll(line_height);
+        assert!(max_scroll > 0, "500 users overflow the nick pane");
+
+        let users = controller.chat_layout().users.expect("channel nick pane");
+        let inside = GuiPoint::new(
+            (users.x + users.w / 2) as f32,
+            (users.y + users.h / 2) as f32,
+        );
+        controller.handle_wheel(inside, -60);
+        let scrolled = controller.chat_sheets()[channel_index].user_scroll;
+        assert!(scrolled > 0, "the wheel moves the nick ListBox");
+        controller.handle_wheel(inside, 60);
+        assert_eq!(controller.chat_sheets()[channel_index].user_scroll, 0);
+        for _ in 0..200 {
+            controller.handle_wheel(inside, -60);
+        }
+        assert_eq!(
+            controller.chat_sheets()[channel_index].user_scroll,
+            max_scroll,
+            "the offset is bounded by the overflow"
+        );
+    }
+
     #[test]
     fn irc_login_validation_counts_legacy_bytes_and_rejects_unrepresentable_text() {
         let password_at_limit = format!("{}é", "a".repeat(30));
@@ -8100,7 +8588,7 @@ mod tests {
         assert_eq!(controller.chat_page(), NetDlgChatPage::Chats);
         assert_eq!(
             controller.chat_sheets()[0].lines,
-            vec!["Connecting to irc.example.test..."]
+            vec!["Connecting to irc.example.test at "]
         );
 
         controller.sync_chat_snapshot(chat_snapshot(
@@ -8125,7 +8613,7 @@ mod tests {
         );
         assert_eq!(
             controller.chat_sheets()[0].lines,
-            vec!["Connecting to irc.example.test..."]
+            vec!["Connecting to irc.example.test at "]
         );
     }
 
@@ -8598,6 +9086,209 @@ mod tests {
                     channel: "#clonken".into(),
                 }),
             ]
+        );
+    }
+
+    /// Chat `TextWindow`s are built with `fMarkup = false` (C4Gui.h:1309), so
+    /// `C4LogBuffer::AppendLines` breaks on CR/LF only and leaves `|` literal
+    /// (C4LogBuf.cpp:180-183). `Update` tests `MSG_Notice` before the
+    /// empty-source Server fallback, and `OpenQuery` keys queries by the post-`!`
+    /// ident so a nick change reuses and retitles the sheet
+    /// (C4ChatDlg.cpp:729-773,834-854).
+    #[test]
+    fn irc_transcript_literal_pipes_and_query_routing_match_cpp() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.set_text_font(text_font());
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            vec![NetDlgChatMessage {
+                kind: NetDlgChatMessageKind::Message,
+                source: "Keeper!ident@example".into(),
+                target: "#clonken".into(),
+                text: "a|b".into(),
+                is_channel: true,
+            }],
+            0,
+        ));
+        controller.force_chat_mode_and_focus();
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel sheet");
+        let lines = NetDlgController::wrapped_chat_lines(
+            &controller.chat_sheets()[channel],
+            Some(text_font()),
+            4000,
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["<Keeper> a|b"]
+        );
+
+        // A source-less notice reaches the active sheet, not Server.
+        controller.select_chat_sheet(channel);
+        let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
+        snapshot.messages = vec![NetDlgChatMessage {
+            kind: NetDlgChatMessageKind::Notice,
+            source: String::new(),
+            target: "Clonker".into(),
+            text: "server notice".into(),
+            is_channel: false,
+        }];
+        snapshot.unread_index = 0;
+        controller.sync_chat_snapshot(snapshot);
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel sheet");
+        assert!(
+            controller.chat_sheets()[channel]
+                .lines
+                .iter()
+                .any(|line| line.text.contains("server notice")),
+            "{:?}",
+            controller.chat_sheets()[channel].lines
+        );
+        assert!(
+            !controller.chat_sheets()[0]
+                .lines
+                .iter()
+                .any(|line| line.text.contains("server notice")),
+            "{:?}",
+            controller.chat_sheets()[0].lines
+        );
+
+        // One query survives the sender's nick change because its ident did not.
+        let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
+        snapshot.messages = vec![
+            NetDlgChatMessage {
+                kind: NetDlgChatMessageKind::Message,
+                source: "Keeper!ident@example".into(),
+                target: "Clonker".into(),
+                text: "first".into(),
+                is_channel: false,
+            },
+            NetDlgChatMessage {
+                kind: NetDlgChatMessageKind::Message,
+                source: "Wache!ident@example".into(),
+                target: "Clonker".into(),
+                text: "second".into(),
+                is_channel: false,
+            },
+        ];
+        snapshot.unread_index = 0;
+        controller.sync_chat_snapshot(snapshot);
+        let queries = controller
+            .chat_sheets()
+            .iter()
+            .filter(|sheet| sheet.kind == NetDlgChatSheetKind::Query)
+            .collect::<Vec<_>>();
+        assert_eq!(queries.len(), 1, "{queries:?}");
+        assert_eq!(queries[0].title, "Wache");
+        assert_eq!(queries[0].ident, "ident@example");
+        assert_eq!(
+            queries[0]
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["<Keeper> first", "<Wache> second"]
+        );
+    }
+
+    /// `OnChatInput` answers empty submission with `DoError(nullptr)`, which is
+    /// sound-only (C4ChatDlg.cpp:250-273,329-336). `SplitAtChar` keeps every
+    /// character after the first delimiter (StdBuf.h:579-588), the invalid-nick
+    /// error carries its command token, and a failed send is reported on the
+    /// originating sheet rather than Server (C4ChatDlg.cpp:899-1018).
+    #[test]
+    fn irc_process_input_errors_spacing_and_send_failure_match_cpp() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            Vec::new(),
+            0,
+        ));
+        controller.force_chat_mode_and_focus();
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel sheet");
+        controller.select_chat_sheet(channel);
+
+        // Empty submission sounds without a transcript line or a history entry.
+        controller.handle_key_down(KeyCode::Up);
+        let before = controller.chat_sheets()[channel].lines.clone();
+        let actions = controller.submit_chat_input();
+        assert_eq!(actions, vec![NetDlgAction::GuiSound(NetDlgSound::Error)]);
+        assert_eq!(controller.chat_sheets()[channel].lines, before);
+        assert!(controller.chat_history().is_empty());
+        assert_eq!(controller.chat_input(), "");
+
+        // Everything after the first delimiter survives verbatim.
+        controller.handle_text_input("/ns  identify   secret ", text_font());
+        let actions = controller.submit_chat_input();
+        assert!(
+            actions.contains(&NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
+                target: "NickServ".into(),
+                text: " identify   secret ".into(),
+            })),
+            "{actions:?}"
+        );
+        controller.handle_text_input("/raw PRIVMSG #clonken  :two  spaces", text_font());
+        let actions = controller.submit_chat_input();
+        assert!(
+            actions.contains(&NetDlgAction::ChatCommand(NetDlgChatCommand::Raw(
+                "PRIVMSG #clonken  :two  spaces".into()
+            ))),
+            "{actions:?}"
+        );
+
+        // The invalid-nick error carries the command token like IDS_ERR_INVALIDNICKNAME2.
+        controller.handle_text_input("/nick bad nick", text_font());
+        controller.submit_chat_input();
+        assert_eq!(
+            controller.chat_sheets()[channel]
+                .lines
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("/nick: invalid nick name")
+        );
+
+        // A queued send that fails reports on the sheet it was typed into.
+        controller.handle_text_input("hello", text_font());
+        controller.submit_chat_input();
+        let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
+        snapshot.last_error = Some("Send failed".into());
+        controller.sync_chat_snapshot(snapshot);
+        let channel = controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .expect("channel sheet");
+        assert!(
+            controller.chat_sheets()[channel]
+                .lines
+                .iter()
+                .any(|line| line.text.contains("Send failed")),
+            "{:?}",
+            controller.chat_sheets()[channel].lines
+        );
+        assert!(
+            !controller.chat_sheets()[0]
+                .lines
+                .iter()
+                .any(|line| line.text.contains("Send failed")),
+            "{:?}",
+            controller.chat_sheets()[0].lines
         );
     }
 

@@ -488,6 +488,10 @@ fn cpp_request_selection_excludes_inflight_chunks_and_preserves_limit_off_by_one
     // (src/C4Network2Res.cpp:254-272,1066-1108; constants at
     // src/C4Network2Res.h:29-35).
     let mut catalog = ResourceCatalog::new(0);
+    // C++'s own thresholds: this test pins StartLoad's guards, not the port's
+    // scaled lobby window (see `the_lobby_load_caps_hold_the_cpp_byte_window`).
+    catalog.set_max_loads_per_peer(3);
+    catalog.set_max_loads(20);
     catalog.register(ResourceRegistration {
         resource_id: 70,
         chunk_count: 50,
@@ -917,6 +921,10 @@ fn cpp_refill_shuffles_peers_then_fills_each_to_its_effective_limit() {
     // StartLoad's peer guard allows three requests, so each peer receives three
     // before scanning advances (src/C4Network2Res.cpp:1017-1064,1066-1108).
     let mut catalog = ResourceCatalog::new(0);
+    // C++'s own thresholds: this test pins StartLoad's guards, not the port's
+    // scaled lobby window (see `the_lobby_load_caps_hold_the_cpp_byte_window`).
+    catalog.set_max_loads_per_peer(3);
+    catalog.set_max_loads(20);
     catalog.register(ResourceRegistration {
         resource_id: 130,
         chunk_count: 6,
@@ -1069,5 +1077,32 @@ fn the_per_peer_window_narrows_in_game_and_relaxes_in_the_lobby() {
         catalog.schedule_request(40, 2, 0, 100),
         None,
         "in game, one chunk per peer is the whole window"
+    );
+}
+
+/// The load caps count *chunks*, so they only describe a byte window together
+/// with the chunk size. This port publishes a tenth of C++'s
+/// `C4NetResChunkSize`, which would divide C++'s bandwidth-delay product by ten
+/// and cap one resource at 30 KiB per round trip -- minutes for a definition
+/// pack on an internet link. The caps are scaled by the same factor so the
+/// window stays the byte-for-byte equivalent of C++'s
+/// `C4NetResMaxLoadPerPeerPerFile` x `C4NetResChunkSize`
+/// (`src/C4Network2Res.h:27`, `:32`, `:33`).
+#[test]
+fn the_lobby_load_caps_hold_the_cpp_byte_window() {
+    const CPP_CHUNK_SIZE: usize = 100 * 1024;
+    const CPP_MAX_LOAD_PER_PEER_PER_FILE: usize = 3;
+    const CPP_MAX_LOADS: usize = 20;
+
+    let chunk_size = usize::try_from(clonk_network::STOCK_CHUNK_SIZE).unwrap();
+    assert_eq!(
+        RESOURCE_MAX_LOAD_PER_PEER_PER_FILE * chunk_size,
+        CPP_MAX_LOAD_PER_PEER_PER_FILE * CPP_CHUNK_SIZE,
+        "per-peer window must stay C++'s 300 KiB"
+    );
+    assert_eq!(
+        crate::resource_catalog::RESOURCE_MAX_LOADS * chunk_size,
+        CPP_MAX_LOADS * CPP_CHUNK_SIZE,
+        "per-resource window must stay C++'s 2 MiB"
     );
 }

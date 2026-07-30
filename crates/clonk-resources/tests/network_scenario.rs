@@ -207,9 +207,10 @@ fn retrieve_scenario_preserves_legacy_names_metadata_and_opaque_children() {
 
     let opaque_entry = exact_entry(&combined, OPAQUE_NAME);
     assert_eq!(opaque_entry.time, 0x90a0_b0c0);
-    assert!(
-        !opaque_entry.executable,
-        "extract/repack clears the ordinary child's outer executable core"
+    assert_eq!(
+        opaque_entry.executable,
+        cfg!(target_os = "linux"),
+        "extract/repack retains the ordinary child's outer executable core only on Linux"
     );
     let combined_opaque_raw = combined.read_entry_bytes_exact(&opaque_entry).unwrap();
     assert_eq!(

@@ -535,6 +535,15 @@ pub struct ReplayRunReport {
     pub artifact_dir: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayCheckpointPolicy {
+    /// Require the first run to match the hashes stored in the replay fixture.
+    Committed,
+    /// Compare both runs while projecting the first run's native-host hashes
+    /// into retained artifacts.
+    SameHost,
+}
+
 #[derive(Debug)]
 pub struct ReplayRunError {
     message: String,
@@ -575,6 +584,16 @@ pub fn run_replay_twice(
     replay: &ScenarioReplayV1,
     artifact_label: &str,
 ) -> Result<ReplayRunReport, ReplayRunError> {
+    run_replay_twice_with_policy(replay, artifact_label, ReplayCheckpointPolicy::Committed)
+}
+
+/// Runs two fresh engines and selects whether the first run must also match the
+/// fixture's recording-host hashes.
+pub fn run_replay_twice_with_policy(
+    replay: &ScenarioReplayV1,
+    artifact_label: &str,
+    checkpoint_policy: ReplayCheckpointPolicy,
+) -> Result<ReplayRunReport, ReplayRunError> {
     replay
         .validate()
         .map_err(|error| ReplayRunError::new(error.to_string()))?;
@@ -591,6 +610,23 @@ pub fn run_replay_twice(
         schema_version: REPLAY_SCHEMA_VERSION,
         runs: vec![first.metrics.clone(), second.metrics.clone()],
     };
+    let actual_checkpoints = replay
+        .checkpoints
+        .iter()
+        .map(|checkpoint| {
+            let snapshot = first
+                .observations
+                .get(&checkpoint.frame)
+                .expect("checkpoint frame included in observation set");
+            ReplayCheckpointV1::new(checkpoint.frame, snapshot_hash(snapshot))
+        })
+        .collect::<Vec<_>>();
+    let same_host_replay =
+        (checkpoint_policy == ReplayCheckpointPolicy::SameHost).then(|| ScenarioReplayV1 {
+            checkpoints: actual_checkpoints.clone(),
+            ..replay.clone()
+        });
+    let artifact_replay = same_host_replay.as_ref().unwrap_or(replay);
 
     for (&frame, expected) in &first.observations {
         let Some(actual) = second.observations.get(&frame) else {
@@ -599,7 +635,7 @@ pub fn run_replay_twice(
             attach_replay_failure_artifacts(
                 &mut error,
                 ReplayFailureArtifacts {
-                    replay,
+                    replay: artifact_replay,
                     label: artifact_label,
                     metrics: &metrics,
                     first: &first,
@@ -623,7 +659,7 @@ pub fn run_replay_twice(
             attach_replay_failure_artifacts(
                 &mut error,
                 ReplayFailureArtifacts {
-                    replay,
+                    replay: artifact_replay,
                     label: artifact_label,
                     metrics: &metrics,
                     first: &first,
@@ -636,59 +672,56 @@ pub fn run_replay_twice(
         }
     }
 
-    let actual_checkpoints = replay
-        .checkpoints
-        .iter()
-        .map(|checkpoint| {
-            let snapshot = first
-                .observations
-                .get(&checkpoint.frame)
-                .expect("checkpoint frame included in observation set");
-            ReplayCheckpointV1::new(checkpoint.frame, snapshot_hash(snapshot))
-        })
-        .collect::<Vec<_>>();
-
-    for (expected, actual) in replay.checkpoints.iter().zip(&actual_checkpoints) {
-        if expected != actual {
-            let actuals = actual_checkpoints
-                .iter()
-                .map(|checkpoint| format!("{}={}", checkpoint.frame, checkpoint.snapshot_hash))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let diff = SnapshotDiff {
-                entries: vec![SnapshotDiffEntry {
-                    path: "/snapshot_hash".to_owned(),
-                    expected: json!(expected.snapshot_hash),
-                    actual: json!(actual.snapshot_hash),
-                }],
-                truncated: false,
-            };
-            let mut error = ReplayRunError::new(format!(
-                "checkpoint hash mismatch at frame {}: expected {}, actual {}; actual checkpoints: [{}]",
-                expected.frame, expected.snapshot_hash, actual.snapshot_hash, actuals
-            ));
-            attach_replay_failure_artifacts(
-                &mut error,
-                ReplayFailureArtifacts {
-                    replay,
-                    label: artifact_label,
-                    metrics: &metrics,
-                    first: &first,
-                    second: &second,
-                    frame: expected.frame,
-                    diff: Some(diff),
-                },
-            );
-            return Err(error);
+    if checkpoint_policy == ReplayCheckpointPolicy::Committed {
+        for (expected, actual) in replay.checkpoints.iter().zip(&actual_checkpoints) {
+            if expected != actual {
+                let actuals = actual_checkpoints
+                    .iter()
+                    .map(|checkpoint| format!("{}={}", checkpoint.frame, checkpoint.snapshot_hash))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let diff = SnapshotDiff {
+                    entries: vec![SnapshotDiffEntry {
+                        path: "/snapshot_hash".to_owned(),
+                        expected: json!(expected.snapshot_hash),
+                        actual: json!(actual.snapshot_hash),
+                    }],
+                    truncated: false,
+                };
+                let mut error = ReplayRunError::new(format!(
+                    "checkpoint hash mismatch at frame {}: expected {}, actual {}; actual checkpoints: [{}]",
+                    expected.frame, expected.snapshot_hash, actual.snapshot_hash, actuals
+                ));
+                attach_replay_failure_artifacts(
+                    &mut error,
+                    ReplayFailureArtifacts {
+                        replay,
+                        label: artifact_label,
+                        metrics: &metrics,
+                        first: &first,
+                        second: &second,
+                        frame: expected.frame,
+                        diff: Some(diff),
+                    },
+                );
+                return Err(error);
+            }
         }
     }
 
+    let (kind, message) = match checkpoint_policy {
+        ReplayCheckpointPolicy::Committed => ("passed", "replay completed without mismatches"),
+        ReplayCheckpointPolicy::SameHost => (
+            "same_host_passed",
+            "replay repeated without same-host mismatches",
+        ),
+    };
     let artifact_dir = if keep_pass_artifacts() {
         write_replay_bundle(ReplayBundleRequest {
-            replay,
-            kind: "passed",
+            replay: artifact_replay,
+            kind,
             label: artifact_label,
-            message: "replay completed without mismatches",
+            message,
             metrics: &metrics,
             first: &first,
             second: &second,
@@ -909,7 +942,11 @@ fn write_replay_bundle(
             directory,
             &json!({
                 "frame": request.frame,
-                "level": if request.kind == "passed" { "info" } else { "error" },
+                "level": if matches!(request.kind, "passed" | "same_host_passed") {
+                    "info"
+                } else {
+                    "error"
+                },
                 "target": "dev_feedback_replay",
                 "message": request.message,
                 "label": request.label,
@@ -1128,7 +1165,7 @@ fn write_logs(directory: &Path, value: &Value) -> Result<(), DevFeedbackError> {
 
 fn write_readme(directory: &Path, scenario: &str) -> Result<(), DevFeedbackError> {
     let contents = format!(
-        "Deterministic Clonk Rust replay artifact\n\nScenario: {scenario}\nReplay: replay.json\nMetrics: replay-metrics.json\n\nReproduce from the repository root:\n  LC_CONTENT_ROOT=/path/to/content cargo nextest run -p clonk-engine-integration-tests --test engine_it -- dev_feedback_replay::committed_real_scenario_replays_are_deterministic --exact\n"
+        "Deterministic Clonk Rust replay artifact\n\nScenario: {scenario}\nReplay: replay.json\nMetrics: replay-metrics.json\n\nReproduce from the repository root:\n  LC_CONTENT_ROOT=/path/to/content LC_REPLAY_PATH=/path/to/artifact/replay.json cargo nextest run -p clonk-engine-integration-tests --test engine_it -- dev_feedback_replay::replay_artifact_from_env_repeats --ignored --exact\n"
     );
     fs::write(directory.join("README.txt"), contents)
         .map_err(|error| io_error("write README.txt", error))

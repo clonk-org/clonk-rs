@@ -105,6 +105,10 @@ pub(crate) struct GameApp {
     pub(crate) focus_snapshot: Option<clonk_engine::ObjectSnapshot>,
     pub(crate) frame_text: String,
     pub(crate) status_text: String,
+    /// Ordinary runtime config toggles, held until a clean shutdown the way
+    /// C++ mutates its process-wide `Config` and saves once in
+    /// `C4Application::Clear` (C4Application.cpp:351-367).
+    pub(crate) deferred_config: crate::deferred_config::DeferredConfig,
     pub(crate) startup_restart_diagnostics: StartupRestartDiagnostics,
     pub(crate) energy_fraction: f32,
     pub(crate) scenario_label: String,
@@ -120,6 +124,9 @@ pub(crate) struct GameApp {
     /// independently of the startup network dialog, so changing startup
     /// screens must not tear down a live connection.
     pub(crate) startup_irc_client: Option<clonk_network::IrcClientHandle>,
+    /// `Application.launchEditor`: set by `SwitchToEditor`, consumed by
+    /// `~C4Application` after subsystem cleanup (C4Application.cpp:58-74).
+    pub(crate) pending_editor_launch: Option<PathBuf>,
     pub(crate) startup_irc_server: String,
     /// Whether the singleton-style C4ChatDlg analogue is currently shown.
     /// The controller and transport remain process-global when this UI closes.
@@ -294,6 +301,12 @@ pub(crate) struct GameApp {
     /// scenario load. A missing screen is paired with `loader_error` and is
     /// always a logged typed boundary, never a generic pane.
     pub(crate) loader_screen: Option<LoaderScreen>,
+    /// Loader percentage mirrored to the platform taskbar
+    /// (`C4Game.cpp:4094-4106`; `StdWindow.cpp:183-196`). The backend is
+    /// injected because C++'s SDL and X11 windows implement it as no-ops.
+    pub(crate) taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress<
+        Box<dyn clonk_platform::taskbar_progress::TaskbarProgressSink>,
+    >,
     pub(crate) loader_error: Option<String>,
     pub(crate) loader_render_config: Option<LoaderRenderConfig>,
     pub(crate) loader_render_error: Option<String>,
@@ -441,6 +454,13 @@ pub(crate) struct GameApp {
     /// Process-local Config.Graphics.MaxRefreshDelay used by the application
     /// timer divisor. It is read once, then refreshed only after Options saves.
     pub(crate) max_refresh_delay_ms: u64,
+    /// Ceiling for the startup timer alone. Equal to `max_refresh_delay_ms`
+    /// unless `Graphics.SmoothPresentation` substituted the panel period, which
+    /// deliberately leaves the game timer on the oracle value.
+    pub(crate) startup_refresh_delay_ms: u64,
+    /// Active monitor refresh period in whole milliseconds, once a window
+    /// exists. Retained so an Options save can re-resolve the startup ceiling.
+    pub(crate) display_refresh_period_ms: Option<u64>,
     /// C4Game::pNetworkStatistics exists for every running game. Only the
     /// Pings presentation tab is conditional on an enabled network session.
     pub(crate) network_stats: Option<NetworkStats>,
@@ -468,6 +488,12 @@ pub(crate) struct GameApp {
     /// PlayerListItem runs its restore hook only on construction, not on each
     /// later row update. Track the items already constructed in this lobby.
     pub(crate) restart_restore_roster_items: HashSet<(i32, i32)>,
+    /// Armed on this client by the host's restart notice
+    /// (`clonk_network::host_restart`). While it is armed, losing the host is a
+    /// restart to follow rather than the dead host native assumes
+    /// (src/C4Network2.cpp:1826-1832), so the round is torn down and the same
+    /// address re-joined instead of dropping to local control.
+    pub(crate) pending_host_rejoin: Option<PendingHostRejoin>,
     /// Process-local `C4PlayerInfo::dwAlternateColor` values for players
     /// loaded by this host. The synchronized row intentionally omits this
     /// field, so resource identity carries it across authoritative echoes and
@@ -2023,6 +2049,10 @@ pub(crate) struct RuntimeFlashResources {
     pub(crate) no_debug_mode: String,
     pub(crate) on: String,
     pub(crate) off: String,
+    /// `C4FullScreen::ViewportCheck` flashes this when the last owned viewport
+    /// closes and the ownerless observer viewport takes over
+    /// (C4FullScreen.cpp:519-526).
+    pub(crate) observer_menu: String,
 }
 
 impl RuntimeFlashResources {
@@ -2037,6 +2067,7 @@ impl RuntimeFlashResources {
             no_debug_mode: text("IDS_MSG_NODEBUGMODE"),
             on: text("IDS_CTL_ON"),
             off: text("IDS_CTL_OFF"),
+            observer_menu: text("IDS_MSG_PRESSORPUSHANYGAMEPADBUTT"),
         }
     }
 
@@ -2816,12 +2847,20 @@ impl PresentationDetailGovernor {
                 self.over_budget = 0;
                 self.detail = self.detail.step_down();
             }
-        } else if graphics_duration <= comfortable_ceiling {
+        } else {
+            // Both streaks are consecutive-pass counters, so a pass that fails
+            // one side's test still has to break the other's streak. A pass in
+            // the deadband between `comfortable_ceiling` and `budget` is
+            // neither an overrun nor comfortable: it clears both.
             self.over_budget = 0;
-            self.comfortable = self.comfortable.saturating_add(1);
-            if self.comfortable >= DETAIL_STEP_UP_PASSES {
+            if graphics_duration <= comfortable_ceiling {
+                self.comfortable = self.comfortable.saturating_add(1);
+                if self.comfortable >= DETAIL_STEP_UP_PASSES {
+                    self.comfortable = 0;
+                    self.detail = self.detail.step_up();
+                }
+            } else {
                 self.comfortable = 0;
-                self.detail = self.detail.step_up();
             }
         }
     }
@@ -3376,52 +3415,88 @@ pub(crate) struct SimulationPassOutcome {
     pub(crate) yielded_for_render: bool,
 }
 
+/// The refresh ceilings in force, one per application timer.
+///
+/// C++ has a single `Graphics.MaxRefreshDelay` because both of its timers are
+/// welded to it. The port keeps `running_ms` on the oracle value and lets the
+/// startup timer be subdivided independently, because only the startup timer is
+/// actually timer-bound: see `smooth_presentation_subdivides_only_the_startup_timer`.
+/// `From<u64>` keeps a bare ceiling meaning "both", so every C++-faithful
+/// caller reads exactly as before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RefreshCeilings {
+    pub(crate) running_ms: u64,
+    pub(crate) startup_ms: u64,
+}
+
+impl From<u64> for RefreshCeilings {
+    fn from(max_refresh_delay_ms: u64) -> Self {
+        Self {
+            running_ms: max_refresh_delay_ms,
+            startup_ms: max_refresh_delay_ms,
+        }
+    }
+}
+
 pub(crate) fn frame_schedule_for_mode(
     mode: AppMode,
     game_tick_delay_ms: u64,
     game_tick_delay_revision: u64,
-    max_refresh_delay_ms: u64,
+    ceilings: impl Into<RefreshCeilings>,
 ) -> FrameSchedule {
+    let ceilings = ceilings.into();
     match mode {
         AppMode::Menu | AppMode::Loading => FrameSchedule {
             simulation_interval: STARTUP_FRAME_INTERVAL,
-            refresh_interval: STARTUP_FRAME_INTERVAL,
+            // The startup timer takes the same ceiling. The divisor is the
+            // identity for every ceiling at or above 16 ms, so the native
+            // default leaves the startup screens exactly as they were.
+            refresh_interval: refresh_interval_for_tick(
+                STARTUP_FRAME_INTERVAL.as_millis() as u64,
+                ceilings.startup_ms,
+            ),
             running_revision: None,
         },
         AppMode::Running => {
             let game_tick_delay_ms = game_tick_delay_ms.max(1);
-            let max_refresh_ms = max_refresh_delay_ms.max(1);
-            // C4Application::SetGameTickDelay keeps graphics/input wakeups
-            // responsive at slow game speeds by choosing a divisor no larger
-            // than the configured Graphics.MaxRefreshDelay.
-            let refresh_ms = if game_tick_delay_ms < max_refresh_ms {
-                game_tick_delay_ms
-            } else {
-                game_tick_delay_ms / game_tick_delay_ms.div_ceil(max_refresh_ms)
-            };
             FrameSchedule {
                 simulation_interval: Duration::from_millis(game_tick_delay_ms),
-                refresh_interval: Duration::from_millis(refresh_ms.max(1)),
+                refresh_interval: refresh_interval_for_tick(
+                    game_tick_delay_ms,
+                    ceilings.running_ms,
+                ),
                 running_revision: Some(game_tick_delay_revision),
             }
         }
     }
 }
 
+/// `C4Application::SetGameTickDelay`'s graphics divisor: keep graphics and
+/// input wakeups responsive at slow tick rates by dividing the logic tick into
+/// whole graphics periods no longer than the configured
+/// `Graphics.MaxRefreshDelay` (C4Application.cpp:510-531). Subdividing changes
+/// only how often the frame is presented; the caller's logic tick is untouched.
+fn refresh_interval_for_tick(tick_ms: u64, max_refresh_delay_ms: u64) -> Duration {
+    let tick_ms = tick_ms.max(1);
+    let max_refresh_ms = max_refresh_delay_ms.max(1);
+    let refresh_ms = if tick_ms < max_refresh_ms {
+        tick_ms
+    } else {
+        tick_ms / tick_ms.div_ceil(max_refresh_ms)
+    };
+    Duration::from_millis(refresh_ms.max(1))
+}
+
 pub(crate) fn synchronize_frame_schedule(
     mode: AppMode,
     game_tick_delay_ms: u64,
     game_tick_delay_revision: u64,
-    max_refresh_delay_ms: u64,
+    ceilings: impl Into<RefreshCeilings>,
     frame_schedule: &mut FrameSchedule,
     accumulator: &mut Duration,
 ) -> bool {
-    let next_schedule = frame_schedule_for_mode(
-        mode,
-        game_tick_delay_ms,
-        game_tick_delay_revision,
-        max_refresh_delay_ms,
-    );
+    let next_schedule =
+        frame_schedule_for_mode(mode, game_tick_delay_ms, game_tick_delay_revision, ceilings);
     if next_schedule == *frame_schedule {
         return false;
     }
@@ -3434,7 +3509,7 @@ pub(crate) fn accumulate_frame_time_for_mode(
     mode: AppMode,
     game_tick_delay_ms: u64,
     game_tick_delay_revision: u64,
-    max_refresh_delay_ms: u64,
+    ceilings: impl Into<RefreshCeilings>,
     frame_schedule: &mut FrameSchedule,
     accumulator: &mut Duration,
     elapsed: Duration,
@@ -3448,7 +3523,7 @@ pub(crate) fn accumulate_frame_time_for_mode(
         mode,
         game_tick_delay_ms,
         game_tick_delay_revision,
-        max_refresh_delay_ms,
+        ceilings,
         frame_schedule,
         accumulator,
     );
@@ -3557,7 +3632,7 @@ pub(crate) fn advance_simulation_pass_within(
             app.mode,
             app.engine.game_tick_delay_ms(),
             app.engine.game_tick_delay_revision(),
-            app.max_refresh_delay_ms,
+            app.refresh_ceilings(),
             frame_schedule,
             accumulator,
         );
@@ -4201,6 +4276,35 @@ impl NetworkLobbyLayout {
         }
     }
 }
+
+/// A restart announced by the host, and the window in which this client keeps
+/// trying to find it again.
+///
+/// The host re-binds the port it was already configured with and keeps its
+/// password (`C4Application::QuitGame` backs the password up across
+/// `Game.Clear` and hands the same scenario to a fresh `Game::Init`,
+/// src/C4Application.cpp:373-405), so the *whole join this client already made*
+/// is what to repeat — not just its address. Rebuilding the settings from
+/// config would drop the password, the netpuncher brokerage and every route
+/// but the first, which is exactly what a password-protected or NAT'd host
+/// needs. Attempts are spaced because the host is mid-teardown when the notice
+/// arrives and cannot accept a connection yet.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingHostRejoin {
+    pub(crate) settings: ClientSettings,
+    pub(crate) deadline: Instant,
+    pub(crate) next_attempt_at: Option<Instant>,
+}
+
+/// Spacing between reconnect attempts while the host is re-hosting. The first
+/// attempt necessarily races the host's own teardown, so a refused connection
+/// is the expected case rather than a failure.
+pub(crate) const HOST_REJOIN_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Longest reconnect window this client will honour, whatever a peer asks for.
+/// A restart that has not come back in two minutes is not coming back, and the
+/// number arrives from the network.
+pub(crate) const MAX_HOST_RESTART_REJOIN_SECONDS: u16 = 120;
 
 #[derive(Clone, Debug)]
 pub(crate) struct NetworkLobbyState {
@@ -6845,7 +6949,25 @@ fn build_map_folder_data(
             .map(|entry| entry.title.as_str())
             .unwrap_or("<c ff0000>ERROR</c>");
         let title = scenario.title.replace("TITLE", replacement);
-        let base_image = if scenario.base_image.is_empty() || scenario.image_dump {
+        let base_image = if scenario.image_dump {
+            // `Load` blits the scenario area out of the background into a
+            // fresh facet, saves it under BaseImage, then `continue`s past the
+            // ordinary base load - a failed dump only logs
+            // (C4StartupScenSelDlg.cpp:145-161).
+            if let Err(error) = dump_map_folder_base_image(
+                source_path,
+                &background,
+                scenario.area,
+                &scenario.base_image,
+            ) {
+                tracing::warn!(
+                    image = %scenario.base_image,
+                    %error,
+                    "FolderMap ImageDump could not be written"
+                );
+            }
+            None
+        } else if scenario.base_image.is_empty() {
             None
         } else {
             Some(load_map_folder_image(group, &scenario.base_image)?)
@@ -6898,6 +7020,48 @@ fn build_map_folder_data(
         access_overlays,
         selected_button: None,
     })
+}
+
+/// `C4MapFolderData::Load`'s developer ImageDump: crop `Area` out of the
+/// FolderMap background and write it beside the map as a PNG with alpha
+/// (C4StartupScenSelDlg.cpp:147-158). C++ blits into a facet of exactly the
+/// requested size, so a window reaching past the background edge keeps the
+/// uncovered pixels transparent.
+fn dump_map_folder_base_image(
+    source_path: &Path,
+    background: &ImageData,
+    area: MapFolderRect,
+    base_image: &str,
+) -> Result<()> {
+    anyhow::ensure!(!base_image.is_empty(), "ImageDump has no BaseImage name");
+    let width = u32::try_from(area.w).context("ImageDump width is negative")?;
+    let height = u32::try_from(area.h).context("ImageDump height is negative")?;
+    anyhow::ensure!(width > 0 && height > 0, "ImageDump area is empty");
+    let mut dump = image::RgbaImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let source_x = area.x + x as i32;
+            let source_y = area.y + y as i32;
+            if source_x < 0 || source_y < 0 {
+                continue;
+            }
+            let (Ok(source_x), Ok(source_y)) = (u32::try_from(source_x), u32::try_from(source_y))
+            else {
+                continue;
+            };
+            if source_x >= background.width() || source_y >= background.height() {
+                continue;
+            }
+            let offset = ((source_y * background.width() + source_x) * 4) as usize;
+            let Some(pixel) = background.pixels().get(offset..offset + 4) else {
+                continue;
+            };
+            dump.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], pixel[3]]));
+        }
+    }
+    let destination = source_path.join(base_image);
+    dump.save(&destination)
+        .with_context(|| format!("writing ImageDump to {}", destination.display()))
 }
 
 fn load_map_folder_background(group: &Group) -> Result<ImageData> {

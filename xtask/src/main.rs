@@ -35,8 +35,53 @@ const MACOS_ICON_SOURCE: &str = "planet/Graphics.c4g/Logo.png";
 const MACOS_BUNDLED_RESOURCES: [&str; 5] =
     ["planet", "content", "COPYING", "README.md", "credits.txt"];
 
+/// What a macOS release names itself, and the directory its fused binaries land
+/// in. Not a rustc target — `lipo` produces it, cargo never does.
+const MACOS_UNIVERSAL_TRIPLE: &str = "universal-apple-darwin";
+
+/// The real architectures a universal build fuses, in `lipo` argument order.
+///
+/// One `.app` for both cuts the macOS release in half: a per-architecture disk
+/// image is ~340 MB of identical game data wrapped around ~20 MB of different
+/// executables.
+const MACOS_UNIVERSAL_ARCHES: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
+
+/// One executable shipped by every release layout.
+///
+/// The Cargo package and executable usually share a name. Keeping both here
+/// makes the exceptional `clonk-c4group` -> `c4group` mapping part of the same
+/// inventory used to build, audit, stage, bundle and test the release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeBinary {
+    package: &'static str,
+    executable: &'static str,
+    macos_bundle_main: bool,
+}
+
+/// The executables a release ships, in every layout. `c4group` is the classic
+/// standalone group tool, installed alongside the runtime as C++ does
+/// (`CMakeLists.txt:431-437,749-750`).
+const RUNTIME_BINARIES: [RuntimeBinary; 3] = [
+    RuntimeBinary {
+        package: "clonk-game",
+        executable: "clonk-game",
+        macos_bundle_main: false,
+    },
+    RuntimeBinary {
+        package: "clonk-app",
+        executable: "clonk-app",
+        macos_bundle_main: true,
+    },
+    RuntimeBinary {
+        package: "clonk-c4group",
+        executable: "c4group",
+        macos_bundle_main: false,
+    },
+];
+
 fn main() -> Result<()> {
     clonk_logging::init();
+    clonk_logging::install_panic_hook();
 
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
@@ -83,7 +128,7 @@ fn main() -> Result<()> {
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir>  Describe the emitted update components for in-app updating.\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir> --content-commit <sha> --content-sha256 <hex> --content-size <bytes>  Describe the update components for in-app updating.\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
     );
 }
 
@@ -869,7 +914,7 @@ fn parity_command(args: &[String]) -> Result<()> {
 fn update_manifest_command(args: &[String]) -> Result<()> {
     if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
         tracing::info!(
-            "Usage:\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir>"
+            "Usage:\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir> --content-commit <sha> --content-sha256 <hex> --content-size <bytes>"
         );
         return Ok(());
     }
@@ -884,12 +929,65 @@ fn update_manifest_command(args: &[String]) -> Result<()> {
 
 /// The triples a release ships, and therefore the ones every component must
 /// offer an archive for.
-const UPDATE_TARGET_TRIPLES: [&str; 4] = [
+///
+/// Six entries for three builds: `x86_64-pc-windows-gnu` and the two macOS
+/// architecture triples are all served through [`UPDATE_TRIPLE_ALIASES`] rather
+/// than being builds of their own.
+const UPDATE_TARGET_TRIPLES: [&str; 6] = [
     "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
     "x86_64-pc-windows-gnu",
+    MACOS_UNIVERSAL_TRIPLE,
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
 ];
+
+/// `(the triple a client reports, the triple whose archive it is served)`.
+///
+/// A client can only report the triple *cargo* built it for: `build.rs` reads
+/// `TARGET`, and nothing else in the toolchain knows. Dropping a key here
+/// therefore leaves every install that reports it with no entry for itself —
+/// told there is no update, for ever, with nothing to notice it, because
+/// "nothing offered for my triple" is indistinguishable from "up to date".
+///
+/// The two aliases are not the same kind of thing:
+///
+/// * **Windows** releases were cross-built from Linux as `x86_64-pc-windows-gnu`
+///   until the build moved to a native MSVC runner. That alias is a *migration*
+///   and drains: the `engine` component replaces the executables wholesale, so
+///   applying it turns a gnu install into an MSVC one and the next check
+///   reports the new triple.
+/// * **macOS** ships one universal `.app`, but each slice of it is compiled for
+///   a real architecture triple, so a universal install still reports
+///   `aarch64-apple-darwin` or `x86_64-apple-darwin` *after* updating. Those two
+///   aliases are permanent — they are how every Mac resolves, not a bridge from
+///   an older layout — and removing either one strands that architecture.
+///
+/// Only `engine` needs an alias; the shared components are offered to every
+/// triple in [`UPDATE_TARGET_TRIPLES`] already.
+const UPDATE_TRIPLE_ALIASES: [(&str, &str); 3] = [
+    ("x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"),
+    ("aarch64-apple-darwin", MACOS_UNIVERSAL_TRIPLE),
+    ("x86_64-apple-darwin", MACOS_UNIVERSAL_TRIPLE),
+];
+
+/// The repository that builds and publishes the `content` archive.
+///
+/// It is the repository the game data lives in, and the *only* builder of those
+/// bytes. This one used to build them too and re-upload 225 MB on every daily
+/// release; two content-addressed producers would have to agree byte for byte
+/// forever, so it stopped and references the published artifact instead. See
+/// [`components::BuiltComponent`].
+const CONTENT_REPOSITORY: &str = "syb0rg/clonk-rs-content";
+
+/// The asset name that repository publishes.
+const CONTENT_ARCHIVE: &str = "content.zip";
+
+/// The tag naming a content commit's release, which is how the `content`
+/// submodule pin resolves to an artifact with no lookup table in between.
+fn content_release_tag(commit: &str) -> String {
+    format!("content-{commit}")
+}
 
 /// The triple recorded against a shared archive.
 ///
@@ -919,6 +1017,16 @@ struct GenerateManifestOptions {
     /// because the name is part of the client contract — clients fetch
     /// `releases/latest/download/manifest.json` and nothing else.
     out_dir: PathBuf,
+    /// The `content` submodule pin, which names the release in
+    /// [`CONTENT_REPOSITORY`] that publishes the archive this release points at.
+    content_commit: String,
+    /// The digest that release published, as its `content.sha256` sidecar
+    /// records it. Copied rather than recomputed: recomputing would mean
+    /// downloading 225 MB into the publishing job to learn something the
+    /// producer already stated, and a mismatch is caught by the client anyway.
+    content_sha256: String,
+    /// The published asset's size, used for the client's disk-space check.
+    content_size: u64,
 }
 
 impl GenerateManifestOptions {
@@ -927,6 +1035,9 @@ impl GenerateManifestOptions {
         let mut released_at = None;
         let mut components_dir = None;
         let mut out_dir = None;
+        let mut content_commit = None;
+        let mut content_sha256 = None;
+        let mut content_size = None;
 
         let mut index = 0;
         while index < arguments.len() {
@@ -952,20 +1063,86 @@ impl GenerateManifestOptions {
                 "--released-at" => released_at = Some(value),
                 "--components" => components_dir = Some(PathBuf::from(value)),
                 "--out-dir" => out_dir = Some(PathBuf::from(value)),
+                "--content-commit" => content_commit = Some(value),
+                "--content-sha256" => content_sha256 = Some(value),
+                "--content-size" => content_size = Some(value),
                 other => bail!("unexpected argument `{other}` for `update-manifest generate`"),
             }
         }
 
         // Every field is required: defaulting any of them would publish a
-        // manifest that quietly describes the wrong release.
+        // manifest that quietly describes the wrong release. Resolved in the
+        // order they are documented, so an omitted argument is reported as
+        // itself rather than as whichever check happened to run first.
+        let version = version.ok_or_else(|| missing_manifest_argument("--version"))?;
+        let released_at = released_at.ok_or_else(|| missing_manifest_argument("--released-at"))?;
+        let components_dir =
+            components_dir.ok_or_else(|| missing_manifest_argument("--components"))?;
+        let out_dir = out_dir.ok_or_else(|| missing_manifest_argument("--out-dir"))?;
+
+        // The `content` arguments especially: that archive is not in the
+        // components directory to be missed, so nothing downstream would
+        // notice its absence.
+        let content_commit = content_commit
+            .filter(|commit| is_commit_sha(commit))
+            .ok_or_else(|| {
+                anyhow!(
+                    "`update-manifest generate` needs `--content-commit <40 hex digits>`, the \
+                     `content` submodule pin whose release publishes {CONTENT_ARCHIVE}"
+                )
+            })?;
+        let content_sha256 = content_sha256
+            .filter(|digest| is_sha256_hex(digest))
+            .ok_or_else(|| {
+                anyhow!(
+                    "`update-manifest generate` needs `--content-sha256 <64 hex digits>`; with no \
+                     manifest signature that digest is the whole integrity story for {CONTENT_ARCHIVE}"
+                )
+            })?;
+        let content_size = content_size
+            .and_then(|size| size.parse::<u64>().ok())
+            .filter(|size| *size > 0)
+            .ok_or_else(|| {
+                anyhow!("`update-manifest generate` needs `--content-size <bytes>`, above zero")
+            })?;
+
         Ok(Self {
-            version: version.ok_or_else(|| missing_manifest_argument("--version"))?,
-            released_at: released_at.ok_or_else(|| missing_manifest_argument("--released-at"))?,
-            components_dir: components_dir
-                .ok_or_else(|| missing_manifest_argument("--components"))?,
-            out_dir: out_dir.ok_or_else(|| missing_manifest_argument("--out-dir"))?,
+            version,
+            released_at,
+            components_dir,
+            out_dir,
+            content_commit,
+            content_sha256,
+            content_size,
         })
     }
+}
+
+/// A full Git object name, which is what a submodule pin always is.
+///
+/// Lowercase, like [`is_sha256_hex`] and for the same reason: this pin becomes
+/// the release tag `content-<sha>`, and GitHub matches a tag byte for byte. An
+/// uppercase pin would name a release that does not exist while looking
+/// perfectly valid here. Git renders object names in lowercase, so the stricter
+/// rule turns nothing legitimate away.
+fn is_commit_sha(text: &str) -> bool {
+    is_lowercase_hex(text, 40)
+}
+
+/// Lowercase hex SHA-256, the form the manifest records and a client compares.
+fn is_sha256_hex(text: &str) -> bool {
+    is_lowercase_hex(text, 64)
+}
+
+/// Exactly `digits` lowercase hex characters, and nothing else.
+///
+/// Deliberately not `is_ascii_hexdigit`: every hex string in a manifest is
+/// compared as text by something downstream that will not case-fold it.
+fn is_lowercase_hex(text: &str, digits: usize) -> bool {
+    text.len() == digits
+        && text
+            .chars()
+            .all(|digit| digit.is_ascii_digit() || matches!(digit, 'a'..='f'))
 }
 
 fn missing_manifest_argument(name: &str) -> anyhow::Error {
@@ -974,16 +1151,27 @@ fn missing_manifest_argument(name: &str) -> anyhow::Error {
 
 /// Which component an emitted archive is, and which triple it was built for.
 ///
-/// `None` means every triple: `content` and `planet` are prefix-free, so their
-/// bytes are identical on all four. `engine` is the reason the manifest is
-/// keyed by triple at all, and its filename is the only place that triple
-/// survives — the archives arrive in the publishing job as a flat directory.
+/// `None` means every triple: `planet` is prefix-free, so its bytes are
+/// identical on all six of [`UPDATE_TARGET_TRIPLES`]. `engine` is the
+/// reason the manifest is keyed by triple at all, and its filename is the only
+/// place that triple survives — the archives arrive in the publishing job as a
+/// flat directory.
 fn archive_identity(
     name: &str,
     version: &str,
 ) -> Result<(components::ComponentId, Option<String>)> {
-    components::ComponentId::ALL
+    // A content archive here would be a second builder of bytes that must stay
+    // identical forever, which is exactly what moving the build away removed.
+    if name == CONTENT_ARCHIVE || name.starts_with("content-") {
+        bail!(
+            "`{name}` is a content archive, and content is built and published by \
+             {CONTENT_REPOSITORY}; this release references that artifact rather than \
+             uploading one of its own"
+        );
+    }
+    components::BuiltComponent::ALL
         .into_iter()
+        .map(components::BuiltComponent::id)
         .filter(|component| component.is_platform_independent())
         .find(|component| name.starts_with(&format!("{}-", component.name())))
         .map(|component| Ok((component, None)))
@@ -1133,13 +1321,64 @@ fn verify_every_triple_is_covered(manifest: &manifest::Manifest) -> Result<()> {
     Ok(())
 }
 
+/// Offers each aliased triple the archive of the triple that serves it.
+///
+/// A second entry pointing at the *same* archive, rather than a second build:
+/// nothing is copied or re-hashed, so the release uploads three engine archives
+/// and the manifest names them under six triples.
+///
+/// Not a migration mechanism, despite the Windows alias reading like one. Both
+/// macOS aliases are permanent: the release fuses one universal `.app`, but a
+/// client can only report the triple *cargo* compiled it for, so a Mac running
+/// the universal build still asks for `aarch64-apple-darwin` or
+/// `x86_64-apple-darwin` after updating. Those two keys never drain away and
+/// removing either one strands every install on that architecture. See
+/// [`UPDATE_TRIPLE_ALIASES`].
+fn serve_aliased_triples(
+    scanned: &[(String, components::EmittedComponent)],
+) -> Vec<(String, components::EmittedComponent)> {
+    let aliased = scanned.iter().flat_map(|(built_for, component)| {
+        UPDATE_TRIPLE_ALIASES
+            .into_iter()
+            // Shared components already reach every triple; aliasing them
+            // would record the same archive twice under one key.
+            .filter(move |(_, served_by)| {
+                !component.id.is_platform_independent() && served_by == built_for
+            })
+            .map(move |(alias, _)| (alias.to_string(), component.clone()))
+    });
+    scanned.iter().cloned().chain(aliased).collect()
+}
+
+/// The `content` entry, describing an archive this repository does not build.
+///
+/// Everything about it comes from the content repository's release: the tag
+/// derives from the submodule pin, and the digest and size are what that
+/// release published. Nothing is recomputed, because recomputing would require
+/// the second builder this arrangement exists to remove.
+fn referenced_content(options: &GenerateManifestOptions) -> manifest::ReferencedComponent {
+    manifest::ReferencedComponent {
+        id: components::ComponentId::Content,
+        source: manifest::ArchiveSource {
+            repo: CONTENT_REPOSITORY.to_string(),
+            tag: content_release_tag(&options.content_commit),
+        },
+        archive: CONTENT_ARCHIVE.to_string(),
+        sha256: options.content_sha256.clone(),
+        size: options.content_size,
+    }
+}
+
 fn generate_update_manifest(options: GenerateManifestOptions) -> Result<()> {
-    let emitted = scan_emitted_components(&options.components_dir, &options.version)?;
+    let scanned = scan_emitted_components(&options.components_dir, &options.version)?;
+    let emitted = serve_aliased_triples(&scanned);
+    let referenced = [referenced_content(&options)];
     let manifest = manifest::build_manifest(
         &options.version,
         clonk_core::version::ENGINE_VERSION,
         &options.released_at,
         &emitted,
+        &referenced,
         &UPDATE_TARGET_TRIPLES,
     );
     // Checked before anything is written, so a refused manifest leaves no
@@ -1154,7 +1393,9 @@ fn generate_update_manifest(options: GenerateManifestOptions) -> Result<()> {
         path = %options.out_dir.join("manifest.json").display(),
         version = %manifest.version,
         components = manifest.components.len(),
-        archives = emitted.len(),
+        // The archives that exist, not the manifest entries: an alias adds an
+        // entry without adding a file.
+        archives = scanned.len(),
         "wrote update manifest"
     );
     Ok(())
@@ -1256,7 +1497,9 @@ enum ComponentSelection {
     None,
     /// Just this platform's binaries.
     Engine,
-    /// Binaries plus the platform-independent `planet` and `content`.
+    /// Binaries plus the platform-independent `planet`. Not `content`: that
+    /// archive is published by [`CONTENT_REPOSITORY`], and building a second
+    /// one here is precisely what must not happen.
     All,
 }
 
@@ -1324,12 +1567,13 @@ fn package(options: PackageOptions) -> Result<()> {
 
     // Shared components are emitted from the flat layout, before the macOS
     // bundle relocates `planet` and `content` into `Contents/Resources`, and
-    // before any platform prefix could reach their entry names.
+    // before any platform prefix could reach their entry names. `content` is
+    // not among them: the content repository builds and publishes that archive.
     if options.components.includes_shared() {
-        for component in [
-            components::ComponentId::Planet,
-            components::ComponentId::Content,
-        ] {
+        for component in components::BuiltComponent::ALL
+            .into_iter()
+            .filter(|component| component.id().is_platform_independent())
+        {
             let emitted = emit_update_component(component, &package_dir, &components_dir, &paths)?;
             tracing::info!(
                 path = %emitted.path.display(),
@@ -1351,7 +1595,7 @@ fn package(options: PackageOptions) -> Result<()> {
     // `PkgInfo` and the icon only exist once the bundle has been assembled.
     if options.components.includes_engine() {
         let emitted = emit_update_component(
-            components::ComponentId::Engine,
+            components::BuiltComponent::Engine,
             &staged,
             &components_dir,
             &paths,
@@ -1380,18 +1624,29 @@ fn package(options: PackageOptions) -> Result<()> {
 }
 
 fn build_runtime_binaries(paths: &WorkspacePaths) -> Result<()> {
-    tracing::info!("building clonk-game and clonk-app (release)");
+    if paths.target_triple == MACOS_UNIVERSAL_TRIPLE {
+        return build_universal_macos_binaries(paths);
+    }
+    cargo_build_runtime(paths, None)
+}
+
+/// One `cargo build --release` of every shipped executable.
+///
+/// `target` is passed on the command line rather than through the environment
+/// so a single run can build both macOS architectures; when it is `None` the
+/// inherited `CARGO_BUILD_TARGET` still decides, exactly as before.
+fn cargo_build_runtime(paths: &WorkspacePaths, target: Option<&str>) -> Result<()> {
+    tracing::info!(target, "building release executables");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(&cargo)
-        .args([
-            "build",
-            "--release",
-            "--locked",
-            "-p",
-            "clonk-game",
-            "-p",
-            "clonk-app",
-        ])
+    let mut command = Command::new(&cargo);
+    command.args(["build", "--release", "--locked"]);
+    for binary in RUNTIME_BINARIES {
+        command.args(["-p", binary.package]);
+    }
+    if let Some(target) = target {
+        command.args(["--target", target]);
+    }
+    let status = command
         .arg("--target-dir")
         .arg(&paths.target_dir)
         .current_dir(&paths.workspace_dir)
@@ -1400,6 +1655,90 @@ fn build_runtime_binaries(paths: &WorkspacePaths) -> Result<()> {
     if !status.success() {
         bail!("cargo build failed with status {:?}", status.code());
     }
+    Ok(())
+}
+
+/// Builds every macOS architecture and fuses each executable into one fat file.
+///
+/// Everything downstream — the audit, the staged layout, the bundle, the engine
+/// component, the disk image — then reads a single `release_dir`, so exactly
+/// one `.app` is assembled and signed.
+fn build_universal_macos_binaries(paths: &WorkspacePaths) -> Result<()> {
+    // Only reachable when the run was *asked* for a universal build, since the
+    // implicit path falls back to the host triple instead. That demand is never
+    // downgraded: a release that quietly fused one architecture into a file
+    // named `universal-apple-darwin` would be served to Macs it cannot run on,
+    // and nothing downstream re-checks the name against the bytes.
+    let missing = missing_macos_arches(&paths.workspace_dir);
+    if !missing.is_empty() {
+        bail!(
+            "a universal build needs every macOS architecture, and {} {} not installed; \
+             run `rustup target add {}`",
+            missing.join(", "),
+            if missing.len() == 1 { "is" } else { "are" },
+            missing.join(" ")
+        );
+    }
+    for arch in MACOS_UNIVERSAL_ARCHES {
+        cargo_build_runtime(paths, Some(arch))?;
+    }
+    fs::create_dir_all(&paths.release_dir)
+        .with_context(|| format!("failed to create {}", paths.release_dir.display()))?;
+    for binary in RUNTIME_BINARIES {
+        lipo_create(
+            &macos_universal_slices(paths, binary.executable),
+            &paths.release_dir.join(binary.executable),
+        )?;
+    }
+    Ok(())
+}
+
+/// Where cargo left each architecture's build of one executable.
+///
+/// Explicitly per-target, never `target/release`: a slice read from the host's
+/// default output directory would be whichever architecture was built last, and
+/// `lipo` would happily fuse a binary with itself.
+fn macos_universal_slices(paths: &WorkspacePaths, binary_name: &str) -> Vec<PathBuf> {
+    MACOS_UNIVERSAL_ARCHES
+        .iter()
+        .map(|arch| {
+            paths
+                .target_dir
+                .join(arch)
+                .join("release")
+                .join(binary_name)
+        })
+        .collect()
+}
+
+/// Fuses architecture slices into one universal executable.
+///
+/// The result carries no valid signature: the linker ad-hoc signs each slice,
+/// and `lipo` rebuilds the file around them. That is why signing has to happen
+/// after this, on the bundle these binaries end up in.
+fn lipo_create(slices: &[PathBuf], destination: &Path) -> Result<()> {
+    if let Some(missing) = slices.iter().find(|slice| !slice.exists()) {
+        bail!(
+            "expected a macOS architecture slice at {}; `rustup target add` each of {}",
+            missing.display(),
+            MACOS_UNIVERSAL_ARCHES.join(", ")
+        );
+    }
+    let status = Command::new("lipo")
+        .arg("-create")
+        .args(slices)
+        .arg("-output")
+        .arg(destination)
+        .status()
+        .with_context(|| format!("failed to invoke lipo for {}", destination.display()))?;
+    if !status.success() {
+        bail!(
+            "lipo -create failed for {} with status {:?}",
+            destination.display(),
+            status.code()
+        );
+    }
+    set_executable(destination)?;
     Ok(())
 }
 
@@ -1426,12 +1765,13 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
 
-    for binary_name in ["clonk-game", "clonk-app"] {
-        let exe_name = executable_name(binary_name, &paths.target_triple);
+    for binary in RUNTIME_BINARIES {
+        let exe_name = executable_name(binary.executable, &paths.target_triple);
         let built_binary = paths.release_dir.join(&exe_name);
         if !built_binary.exists() {
             bail!(
-                "expected {binary_name} binary at {}",
+                "expected {} binary at {}",
+                binary.executable,
                 built_binary.display()
             );
         }
@@ -1494,9 +1834,9 @@ fn assemble_macos_app_bundle(paths: &WorkspacePaths, package_dir: &Path) -> Resu
     }
 
     let bin_dir = package_dir.join("bin");
-    for binary_name in ["clonk-game", "clonk-app"] {
-        let staged = bin_dir.join(binary_name);
-        let bundled = macos_dir.join(binary_name);
+    for binary in RUNTIME_BINARIES {
+        let staged = bin_dir.join(binary.executable);
+        let bundled = macos_dir.join(binary.executable);
         fs::rename(&staged, &bundled).with_context(|| {
             format!(
                 "failed to move {} into {}",
@@ -1542,14 +1882,23 @@ fn assemble_macos_app_bundle(paths: &WorkspacePaths, package_dir: &Path) -> Resu
 /// This is not a substitute for Developer ID signing and notarization: the
 /// download still needs the quarantine flag cleared before it will launch.
 fn sign_macos_bundle(app_dir: &Path, macos_dir: &Path) -> Result<()> {
-    // The launcher is nested code and must be signed before the bundle that
-    // seals it; `clonk-app` is the bundle executable and is covered below.
-    codesign(&["--force", "--sign", "-"], &macos_dir.join("clonk-game"))?;
+    // Helpers are nested code and must be signed before the bundle that seals
+    // them; `clonk-app` is the bundle executable and is covered below.
+    for binary_name in macos_nested_binary_names() {
+        codesign(&["--force", "--sign", "-"], &macos_dir.join(binary_name))?;
+    }
     codesign(&["--force", "--sign", "-"], app_dir)?;
     // Packaging must fail loudly rather than ship an unopenable bundle.
     codesign(&["--verify", "--deep", "--strict"], app_dir)
         .context("the packaged application bundle does not carry a valid signature")?;
     Ok(())
+}
+
+fn macos_nested_binary_names() -> impl Iterator<Item = &'static str> {
+    RUNTIME_BINARIES
+        .iter()
+        .filter(|binary| !binary.macos_bundle_main)
+        .map(|binary| binary.executable)
 }
 
 fn codesign(arguments: &[&str], target: &Path) -> Result<()> {
@@ -1671,6 +2020,22 @@ fn write_macos_icon(paths: &WorkspacePaths, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The drag-to-Applications shortcut a disk image opens with.
+///
+/// Only ever reached on macOS — `hdiutil` exists nowhere else — but this tool
+/// now also *compiles* on Windows, where the release runs natively, and
+/// `std::os::unix` does not exist there.
+#[cfg(unix)]
+fn link_applications_shortcut(staging: &Path) -> Result<()> {
+    std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
+        .context("failed to create the /Applications shortcut")
+}
+
+#[cfg(not(unix))]
+fn link_applications_shortcut(_staging: &Path) -> Result<()> {
+    bail!("macOS disk images can only be built on a unix host")
+}
+
 /// Wrap the bundle in a compressed disk image with the conventional
 /// drag-to-Applications layout.
 fn create_dmg(paths: &WorkspacePaths, app_dir: &Path) -> Result<PathBuf> {
@@ -1690,8 +2055,7 @@ fn create_dmg(paths: &WorkspacePaths, app_dir: &Path) -> Result<PathBuf> {
             staged_app.display()
         )
     })?;
-    std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
-        .context("failed to create the /Applications shortcut")?;
+    link_applications_shortcut(&staging)?;
 
     let image_path = dist_dir.join(format!(
         "clonk-rust-{}-{}.dmg",
@@ -1777,12 +2141,12 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
 /// `_CodeSignature` seals whatever is present — neither belongs in an engine
 /// archive, and the seal would be stale by the time a client applied it.
 fn emit_update_component(
-    component: components::ComponentId,
+    component: components::BuiltComponent,
     source_dir: &Path,
     output_dir: &Path,
     paths: &WorkspacePaths,
 ) -> Result<components::EmittedComponent> {
-    let is_bundle = component == components::ComponentId::Engine
+    let is_bundle = component == components::BuiltComponent::Engine
         && paths.target_triple.contains("apple-darwin");
 
     let write = |archive: &Path, root: &Path, include: &dyn Fn(&Path) -> bool| -> Result<()> {
@@ -2143,10 +2507,10 @@ fn rustc_host_target(workspace_dir: &Path) -> Result<String> {
 }
 
 fn audit_release_dependencies(paths: &WorkspacePaths) -> Result<()> {
-    for binary_name in ["clonk-game", "clonk-app"] {
+    for binary in RUNTIME_BINARIES {
         let binary = paths
             .release_dir
-            .join(executable_name(binary_name, &paths.target_triple));
+            .join(executable_name(binary.executable, &paths.target_triple));
         if paths.target_triple.contains("apple-darwin") {
             audit_macos_release_binary(&binary)?;
         } else if paths.target_triple.contains("linux") {
@@ -2296,6 +2660,68 @@ fn validate_linux_elf_output(binary: &Path, output: &str) -> Result<()> {
     Ok(())
 }
 
+/// The triple a packaging run names every artifact after.
+///
+/// A macOS host with no target named builds *both* architectures and fuses
+/// them, so the run is not for the host triple at all. Naming an explicit
+/// target keeps the single-architecture behaviour: cargo can only be asked for
+/// one, and an artifact that claims to be fat when it is not would be served to
+/// Macs it cannot run on.
+///
+/// `universal_is_buildable` reports whether every architecture in
+/// [`MACOS_UNIVERSAL_ARCHES`] has a standard library installed, and is consulted
+/// only on the implicit macOS path. A stock toolchain carries the host
+/// architecture alone, so demanding both would make `cargo xtask package` — the
+/// command `README.md` gives contributors — fail on a default install. The
+/// fallback names the run after the *host* triple rather than
+/// `universal-apple-darwin`, so a thin build is never published under a name
+/// that promises both. An explicitly named target is a demand and is never
+/// downgraded: a release asks for `universal-apple-darwin` and must fail rather
+/// than ship half of it.
+fn packaging_triple(
+    host_triple: &str,
+    explicit_target: Option<&str>,
+    universal_is_buildable: bool,
+) -> String {
+    explicit_target.map(str::to_string).unwrap_or_else(|| {
+        if host_triple.contains("apple-darwin") && universal_is_buildable {
+            MACOS_UNIVERSAL_TRIPLE.to_string()
+        } else {
+            host_triple.to_string()
+        }
+    })
+}
+
+/// Whether a triple's standard library is present, so cargo could build for it.
+///
+/// `rustc --print target-libdir` answers for every triple rustc *knows*,
+/// installed or not, so the directory existing is the signal rather than the
+/// command succeeding. Probed through rustc rather than
+/// `rustup target list --installed` because a toolchain installed by something
+/// other than rustup has no `rustup` command at all, which would read as every
+/// architecture being absent. Rustc itself is known to be runnable by the time
+/// this is reached — `detect` has already taken the host triple from
+/// `rustc -vV`, and fails outright if that does not run.
+fn target_std_is_installed(workspace_dir: &Path, triple: &str) -> bool {
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    Command::new(&rustc)
+        .args(["--print", "target-libdir", "--target", triple])
+        .current_dir(workspace_dir)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|libdir| Path::new(libdir.trim()).is_dir())
+}
+
+/// The macOS architectures this toolchain could not build a slice for.
+fn missing_macos_arches(workspace_dir: &Path) -> Vec<&'static str> {
+    MACOS_UNIVERSAL_ARCHES
+        .into_iter()
+        .filter(|arch| !target_std_is_installed(workspace_dir, arch))
+        .collect()
+}
+
 struct WorkspacePaths {
     workspace_dir: PathBuf,
     repo_root: PathBuf,
@@ -2328,9 +2754,28 @@ impl WorkspacePaths {
         let explicit_target = env::var("CARGO_BUILD_TARGET")
             .ok()
             .filter(|target| !target.is_empty());
-        let target_triple = explicit_target
-            .clone()
-            .unwrap_or_else(|| host_triple.clone());
+        // Probed, not assumed: a stock macOS toolchain carries only the host
+        // architecture, and `cargo xtask package` has to work on one. Skipped
+        // whenever a target was named, because that path never fuses anything.
+        let missing_arches = if explicit_target.is_none() && host_triple.contains("apple-darwin") {
+            missing_macos_arches(&workspace_dir)
+        } else {
+            Vec::new()
+        };
+        if !missing_arches.is_empty() {
+            tracing::warn!(
+                missing = %missing_arches.join(", "),
+                packaging_as = %host_triple,
+                "packaging a single-architecture build; run `rustup target add {}` \
+                 for the universal one a release ships",
+                missing_arches.join(" ")
+            );
+        }
+        let target_triple = packaging_triple(
+            &host_triple,
+            explicit_target.as_deref(),
+            missing_arches.is_empty(),
+        );
         if !target_triple
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -2339,10 +2784,15 @@ impl WorkspacePaths {
                 "CARGO_BUILD_TARGET must be a target triple suitable for an archive name, got `{target_triple}`"
             );
         }
-        let release_dir = explicit_target.map_or_else(
-            || target_dir.join("release"),
-            |target| target_dir.join(target).join("release"),
-        );
+        // A universal run owns a directory of its own, because `target/release`
+        // holds whichever single architecture the host builds by default.
+        let release_dir = explicit_target
+            .as_deref()
+            .or((target_triple == MACOS_UNIVERSAL_TRIPLE).then_some(MACOS_UNIVERSAL_TRIPLE))
+            .map_or_else(
+                || target_dir.join("release"),
+                |directory| target_dir.join(directory).join("release"),
+            );
         Ok(Self {
             workspace_dir,
             repo_root,
@@ -2401,18 +2851,14 @@ mod tests {
             &root.join("content/ClonkMars.c4f/Test.c4s/Scenario.txt"),
             b"mars scenario",
         );
-        write_fixture(
-            &root
-                .join("workspace-target/release")
-                .join(executable_name("clonk-game", FIXTURE_TARGET)),
-            b"launcher",
-        );
-        write_fixture(
-            &root
-                .join("workspace-target/release")
-                .join(executable_name("clonk-app", FIXTURE_TARGET)),
-            b"runtime",
-        );
+        for binary in RUNTIME_BINARIES {
+            write_fixture(
+                &root
+                    .join("workspace-target/release")
+                    .join(executable_name(binary.executable, FIXTURE_TARGET)),
+                binary.executable.as_bytes(),
+            );
+        }
 
         let paths = WorkspacePaths {
             workspace_dir: root.to_path_buf(),
@@ -2486,6 +2932,26 @@ mod tests {
     }
 
     #[test]
+    fn every_shipped_executable_names_the_cargo_package_that_builds_it() {
+        assert_eq!(
+            RUNTIME_BINARIES.map(|binary| (binary.package, binary.executable)),
+            [
+                ("clonk-game", "clonk-game"),
+                ("clonk-app", "clonk-app"),
+                ("clonk-c4group", "c4group"),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_macos_helper_is_signed_before_the_bundle_main() {
+        assert_eq!(
+            macos_nested_binary_names().collect::<Vec<_>>(),
+            ["clonk-game", "c4group"]
+        );
+    }
+
+    #[test]
     fn the_bundle_engine_component_excludes_data_and_the_stale_seal() {
         // `Contents/Resources` also holds the shared components, and
         // `_CodeSignature` seals whatever was present at packaging time — a
@@ -2500,8 +2966,14 @@ mod tests {
                 "{excluded} must not ride along in the engine component"
             );
         }
+        for binary in RUNTIME_BINARIES {
+            let included = format!("Contents/MacOS/{}", binary.executable);
+            assert!(
+                !bundle_path_belongs_to_another_component(Path::new(&included)),
+                "{included} belongs to the engine component"
+            );
+        }
         for included in [
-            "Contents/MacOS/clonk-app",
             "Contents/Info.plist",
             "Contents/PkgInfo",
             "Contents/Resources/ClonkRust.icns",
@@ -2516,14 +2988,19 @@ mod tests {
 
     #[test]
     fn executables_are_marked_in_both_the_flat_and_bundle_layouts() {
-        assert_eq!(
-            executable_bit_for_component(Path::new("bin/clonk-app")),
-            0o755
-        );
-        assert_eq!(
-            executable_bit_for_component(Path::new("Contents/MacOS/clonk-app")),
-            0o755
-        );
+        for binary in RUNTIME_BINARIES {
+            assert_eq!(
+                executable_bit_for_component(Path::new(&format!("bin/{}", binary.executable))),
+                0o755
+            );
+            assert_eq!(
+                executable_bit_for_component(Path::new(&format!(
+                    "Contents/MacOS/{}",
+                    binary.executable
+                ))),
+                0o755
+            );
+        }
         assert_eq!(executable_bit_for_component(Path::new("COPYING")), 0o644);
         assert_eq!(
             executable_bit_for_component(Path::new("Contents/Resources/ClonkRust.icns")),
@@ -2548,6 +3025,10 @@ mod tests {
     #[test]
     fn packaging_produces_a_disk_image_on_macos_and_an_archive_elsewhere() {
         assert_eq!(
+            package_output("universal-apple-darwin", true),
+            PackageOutput::DiskImage
+        );
+        assert_eq!(
             package_output("x86_64-apple-darwin", true),
             PackageOutput::DiskImage
         );
@@ -2555,6 +3036,118 @@ mod tests {
             package_output("x86_64-unknown-linux-gnu", true),
             PackageOutput::Archive
         );
+    }
+
+    #[test]
+    fn a_macos_host_packages_one_universal_build_for_both_architectures() {
+        // Every artifact name — the disk image and the engine component alike —
+        // is derived from this triple, so naming the run `universal-apple-darwin`
+        // is what collapses the two macOS passes into one.
+        for host in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            assert_eq!(packaging_triple(host, None, true), "universal-apple-darwin");
+        }
+    }
+
+    #[test]
+    fn the_architecture_probe_separates_installed_from_absent() {
+        // The fallback is only as good as this probe. Reporting everything
+        // installed would restore the failure it exists to avoid; reporting
+        // everything absent would silently package every macOS release thin.
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask manifest has a parent")
+            .to_path_buf();
+        let host = rustc_host_target(&workspace).expect("host triple");
+
+        assert!(
+            target_std_is_installed(&workspace, &host),
+            "the toolchain running this test has its own standard library"
+        );
+        assert!(
+            !target_std_is_installed(&workspace, "nonexistent-unknown-triple"),
+            "a triple rustc cannot even name has no standard library"
+        );
+    }
+
+    #[test]
+    fn a_macos_host_missing_an_architecture_packages_only_its_own() {
+        // `cargo xtask package` is the command README hands a contributor, and a
+        // stock macOS toolchain carries the host architecture alone. Failing
+        // there would make the documented build unrunnable, so the run falls
+        // back — under the *host* triple, never `universal-apple-darwin`, so no
+        // artifact claims to be fat when it is thin.
+        for host in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            assert_eq!(packaging_triple(host, None, false), host);
+        }
+    }
+
+    #[test]
+    fn a_named_universal_target_never_falls_back() {
+        // The release asks for `universal-apple-darwin` by name. That demand
+        // must survive a toolchain that cannot satisfy it, so the build fails
+        // loudly instead of quietly publishing a thin binary under a name that
+        // promises both architectures.
+        assert_eq!(
+            packaging_triple("aarch64-apple-darwin", Some(MACOS_UNIVERSAL_TRIPLE), false),
+            MACOS_UNIVERSAL_TRIPLE
+        );
+    }
+
+    #[test]
+    fn a_named_target_still_packages_only_that_architecture() {
+        // The escape hatch: `CARGO_BUILD_TARGET` names one real triple, and a
+        // build that was asked for one architecture must not claim to be fat.
+        assert_eq!(
+            packaging_triple("aarch64-apple-darwin", Some("x86_64-apple-darwin"), true),
+            "x86_64-apple-darwin"
+        );
+        assert_eq!(
+            packaging_triple(
+                "x86_64-unknown-linux-gnu",
+                Some("x86_64-pc-windows-msvc"),
+                true
+            ),
+            "x86_64-pc-windows-msvc"
+        );
+    }
+
+    #[test]
+    fn a_non_macos_host_packages_for_itself() {
+        // Only macOS has `lipo`; everywhere else the host triple is the whole
+        // story and this must stay exactly what it was.
+        assert_eq!(
+            packaging_triple("x86_64-unknown-linux-gnu", None, false),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            packaging_triple("x86_64-pc-windows-msvc", None, false),
+            "x86_64-pc-windows-msvc"
+        );
+    }
+
+    #[test]
+    fn a_universal_build_is_fused_from_both_architecture_slices() {
+        // Read from cargo's per-target directories, never `target/release`: a
+        // slice picked up from the host's default output would be single-arch
+        // and `lipo` would happily fuse a binary with itself.
+        let (_temp, mut paths) = package_fixture();
+        paths.target_triple = MACOS_UNIVERSAL_TRIPLE.to_string();
+
+        for binary in RUNTIME_BINARIES {
+            assert_eq!(
+                macos_universal_slices(&paths, binary.executable),
+                [
+                    paths
+                        .target_dir
+                        .join("aarch64-apple-darwin/release")
+                        .join(binary.executable),
+                    paths
+                        .target_dir
+                        .join("x86_64-apple-darwin/release")
+                        .join(binary.executable),
+                ]
+            );
+        }
     }
 
     #[test]
@@ -2569,33 +3162,42 @@ mod tests {
 
     #[test]
     fn executable_name_follows_the_target_triple_not_the_host() {
-        assert_eq!(
-            executable_name("clonk-app", "x86_64-pc-windows-gnu"),
-            "clonk-app.exe"
-        );
-        assert_eq!(
-            executable_name("clonk-app", "x86_64-pc-windows-msvc"),
-            "clonk-app.exe"
-        );
-        assert_eq!(
-            executable_name("clonk-app", "x86_64-unknown-linux-gnu"),
-            "clonk-app"
-        );
-        assert_eq!(
-            executable_name("clonk-game", "aarch64-apple-darwin"),
-            "clonk-game"
-        );
+        for binary in RUNTIME_BINARIES {
+            assert_eq!(
+                executable_name(binary.executable, "x86_64-pc-windows-gnu"),
+                format!("{}.exe", binary.executable)
+            );
+            assert_eq!(
+                executable_name(binary.executable, "x86_64-pc-windows-msvc"),
+                format!("{}.exe", binary.executable)
+            );
+            assert_eq!(
+                executable_name(binary.executable, "x86_64-unknown-linux-gnu"),
+                binary.executable
+            );
+            assert_eq!(
+                executable_name(binary.executable, "aarch64-apple-darwin"),
+                binary.executable
+            );
+        }
     }
 
     #[test]
-    fn package_layout_contains_both_binaries_content_and_legal_files() {
+    fn package_layout_contains_every_binary_content_and_legal_files() {
         let (_temp, paths) = package_fixture();
 
         let package_dir = assemble_package_layout(&paths).expect("assemble package");
 
+        for binary in RUNTIME_BINARIES {
+            let relative =
+                PathBuf::from("bin").join(executable_name(binary.executable, FIXTURE_TARGET));
+            assert!(
+                package_dir.join(&relative).is_file(),
+                "package is missing {}",
+                relative.display()
+            );
+        }
         for relative in [
-            PathBuf::from("bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
-            PathBuf::from("bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
             PathBuf::from("COPYING"),
             PathBuf::from("README.md"),
             PathBuf::from("credits.txt"),
@@ -2690,17 +3292,22 @@ mod tests {
         let extracted = TempDir::new().expect("temporary extraction directory");
         zip.extract(extracted.path())
             .expect("extract package archive");
-        for relative in [
-            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
-            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
-            PathBuf::from("clonk-rust/content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
-        ] {
+        for binary in RUNTIME_BINARIES {
+            let relative = PathBuf::from("clonk-rust/bin")
+                .join(executable_name(binary.executable, FIXTURE_TARGET));
             assert!(
                 extracted.path().join(&relative).is_file(),
                 "extracted package is missing {}",
                 relative.display()
             );
         }
+        let scenario =
+            PathBuf::from("clonk-rust/content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt");
+        assert!(
+            extracted.path().join(&scenario).is_file(),
+            "extracted package is missing {}",
+            scenario.display()
+        );
         drop(zip);
 
         create_archive(&paths, &package_dir).expect("recreate archive");
@@ -2873,6 +3480,12 @@ mod tests {
                 "components".to_string(),
                 "--out-dir".to_string(),
                 "release".to_string(),
+                "--content-commit".to_string(),
+                CONTENT_COMMIT_FIXTURE.to_string(),
+                "--content-sha256".to_string(),
+                CONTENT_SHA256_FIXTURE.to_string(),
+                "--content-size".to_string(),
+                "236117973".to_string(),
             ])
             .expect("the release workflow's arguments parse"),
             GenerateManifestOptions {
@@ -2880,6 +3493,9 @@ mod tests {
                 released_at: "2026-07-28T10:00:00Z".to_string(),
                 components_dir: PathBuf::from("components"),
                 out_dir: PathBuf::from("release"),
+                content_commit: CONTENT_COMMIT_FIXTURE.to_string(),
+                content_sha256: CONTENT_SHA256_FIXTURE.to_string(),
+                content_size: 236_117_973,
             }
         );
     }
@@ -2904,9 +3520,131 @@ mod tests {
         );
     }
 
-    /// The six archives a complete release run leaves in
-    /// `target/dist/components`: one engine build per shipped triple, plus the
-    /// two shared components.
+    #[test]
+    fn a_manifest_without_the_published_content_release_is_refused() {
+        // The content archive is not in the components directory to be found,
+        // so nothing else would notice it missing: the manifest would simply
+        // ship without game data and every client would stop receiving it.
+        for missing in ["--content-commit", "--content-sha256", "--content-size"] {
+            let arguments: Vec<String> = [
+                "--version",
+                "0.4.0",
+                "--released-at",
+                "2026-07-28T10:00:00Z",
+                "--components",
+                "components",
+                "--out-dir",
+                "release",
+                "--content-commit",
+                CONTENT_COMMIT_FIXTURE,
+                "--content-sha256",
+                CONTENT_SHA256_FIXTURE,
+                "--content-size",
+                "236117973",
+            ]
+            .chunks(2)
+            .filter(|pair| pair[0] != missing)
+            .flatten()
+            .map(|argument| argument.to_string())
+            .collect();
+
+            let error = GenerateManifestOptions::parse(&arguments)
+                .expect_err("a manifest that cannot reach content must not be generated");
+            assert!(
+                error.to_string().contains(missing),
+                "error names the missing argument: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_content_release_that_cannot_be_verified_is_refused() {
+        // The recorded digest is the whole integrity story for 225 MB with no
+        // signature behind it. A malformed one fails every client *after* the
+        // download, so it has to fail here instead.
+        for (commit, sha256, size) in [
+            ("not-a-commit", CONTENT_SHA256_FIXTURE, "236117973"),
+            (CONTENT_COMMIT_FIXTURE, "abc", "236117973"),
+            (CONTENT_COMMIT_FIXTURE, &CONTENT_SHA256_FIXTURE[..63], "1"),
+            (CONTENT_COMMIT_FIXTURE, CONTENT_SHA256_FIXTURE, "0"),
+            (CONTENT_COMMIT_FIXTURE, CONTENT_SHA256_FIXTURE, "huge"),
+        ] {
+            assert!(
+                GenerateManifestOptions::parse(&[
+                    "--version".to_string(),
+                    "0.4.0".to_string(),
+                    "--released-at".to_string(),
+                    "2026-07-28T10:00:00Z".to_string(),
+                    "--components".to_string(),
+                    "components".to_string(),
+                    "--out-dir".to_string(),
+                    "release".to_string(),
+                    "--content-commit".to_string(),
+                    commit.to_string(),
+                    "--content-sha256".to_string(),
+                    sha256.to_string(),
+                    "--content-size".to_string(),
+                    size.to_string(),
+                ])
+                .is_err(),
+                "commit {commit:?} / digest {sha256:?} / size {size:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn hex_arguments_are_lowercase_or_refused() {
+        // Both are lowercase hex or nothing, and for the same reason: each is
+        // compared as text somewhere that will not case-fold it. The pin
+        // becomes the release tag `content-<sha>`, which GitHub matches byte
+        // for byte, so an uppercase pin would pass validation and then resolve
+        // to no release at all; the digest is compared against the client's own
+        // lowercase rendering. Git and `sha256sum` only ever emit lowercase, so
+        // nothing legitimate is turned away.
+        for (commit, sha256) in [
+            (
+                CONTENT_COMMIT_FIXTURE.to_uppercase(),
+                CONTENT_SHA256_FIXTURE.to_string(),
+            ),
+            (
+                CONTENT_COMMIT_FIXTURE.to_string(),
+                CONTENT_SHA256_FIXTURE.to_uppercase(),
+            ),
+        ] {
+            assert!(
+                GenerateManifestOptions::parse(&[
+                    "--version".to_string(),
+                    "0.4.0".to_string(),
+                    "--released-at".to_string(),
+                    "2026-07-28T10:00:00Z".to_string(),
+                    "--components".to_string(),
+                    "components".to_string(),
+                    "--out-dir".to_string(),
+                    "release".to_string(),
+                    "--content-commit".to_string(),
+                    commit.clone(),
+                    "--content-sha256".to_string(),
+                    sha256.clone(),
+                    "--content-size".to_string(),
+                    "236117973".to_string(),
+                ])
+                .is_err(),
+                "uppercase hex must be refused: commit {commit:?} / digest {sha256:?}"
+            );
+        }
+    }
+
+    /// The four archives a complete release run leaves in
+    /// `target/dist/components`: one engine build per shipped *build*, plus
+    /// `planet`.
+    ///
+    /// `content` is absent because this repository no longer builds it — it is
+    /// referenced from the content repository's own release instead.
+    ///
+    /// Three engine archives for the six triples in [`UPDATE_TARGET_TRIPLES`]:
+    /// macOS ships one universal build for its universal triple and both real
+    /// architecture triples, and Windows serves its retired gnu triple from the
+    /// msvc archive. See [`UPDATE_TRIPLE_ALIASES`].
     ///
     /// Every archive carries different bytes, so a manifest that mixed two of
     /// them up cannot pass by coincidence.
@@ -2920,32 +3658,44 @@ mod tests {
 
     /// `(archive name, bytes)`. The digests asserted below were taken from
     /// `shasum -a 256` over these exact strings, not from the code under test.
-    const RELEASE_COMPONENTS_FIXTURE: [(&str, &str); 6] = [
+    const RELEASE_COMPONENTS_FIXTURE: [(&str, &str); 4] = [
         (
             "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
             "linux engine",
         ),
         (
-            "clonk-rust-0.4.0-engine-x86_64-pc-windows-gnu.zip",
+            "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
             "windows engine",
         ),
         (
-            "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip",
-            "arm64 macos engine",
-        ),
-        (
-            "clonk-rust-0.4.0-engine-x86_64-apple-darwin.zip",
-            "x86_64 macos engine",
-        ),
-        (
-            "content-00112233445566778899aabbccddeeff.zip",
-            "shared content",
+            "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+            "universal macos engine",
         ),
         (
             "planet-ffeeddccbbaa99887766554433221100.zip",
             "shared planet",
         ),
     ];
+
+    /// The `content` submodule pin the publishing job would resolve.
+    const CONTENT_COMMIT_FIXTURE: &str = "d34d385591134ce6c262b8c9ed53faaa6229cc6b";
+    /// The digest that commit's content release published.
+    const CONTENT_SHA256_FIXTURE: &str =
+        "9cf12dcd98c461a96039ca6ed9be926301ddaf457d572b8a82981fe567819c2b";
+
+    /// The options the publishing job passes, with the content release the
+    /// submodule pin resolves to.
+    fn manifest_options(components_dir: &Path, out_dir: &Path) -> GenerateManifestOptions {
+        GenerateManifestOptions {
+            version: "0.4.0".to_string(),
+            released_at: "2026-07-28T10:00:00Z".to_string(),
+            components_dir: components_dir.to_path_buf(),
+            out_dir: out_dir.to_path_buf(),
+            content_commit: CONTENT_COMMIT_FIXTURE.to_string(),
+            content_sha256: CONTENT_SHA256_FIXTURE.to_string(),
+            content_size: 236_117_973,
+        }
+    }
 
     /// Generates a manifest from `components` and reads back the published
     /// bytes, so the assertions are about the document a client downloads.
@@ -2954,13 +3704,8 @@ mod tests {
         // Nested, because the publishing job writes the manifest beside assets
         // it has only just downloaded.
         let out_dir = out.path().join("release");
-        generate_update_manifest(GenerateManifestOptions {
-            version: "0.4.0".to_string(),
-            released_at: "2026-07-28T10:00:00Z".to_string(),
-            components_dir: components.path().to_path_buf(),
-            out_dir: out_dir.clone(),
-        })
-        .expect("generate the manifest");
+        generate_update_manifest(manifest_options(components.path(), &out_dir))
+            .expect("generate the manifest");
 
         let bytes = fs::read(out_dir.join("manifest.json")).expect("read the manifest");
         serde_json::from_slice(&bytes).expect("the manifest parses")
@@ -2979,7 +3724,7 @@ mod tests {
 
     #[test]
     fn every_triple_resolves_to_its_own_engine_archive() {
-        // The reason the manifest is keyed by triple at all: four different
+        // The reason the manifest is keyed by triple at all: three different
         // engine builds ship under one component, and a client has nothing but
         // this map to tell which of them is its own.
         let components = release_components_fixture();
@@ -2994,24 +3739,17 @@ mod tests {
                 ),
             ),
             (
-                "x86_64-pc-windows-gnu",
+                "x86_64-pc-windows-msvc",
                 (
-                    "clonk-rust-0.4.0-engine-x86_64-pc-windows-gnu.zip",
+                    "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
                     "4f5e971ed560a857e53dfa16525c9a7aeb58d02a61a18b75c403f1eae333b7dd",
                 ),
             ),
             (
-                "aarch64-apple-darwin",
+                "universal-apple-darwin",
                 (
-                    "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip",
-                    "7f2056195596313b436e5d52ce95845372aeff5776e16be72b4d7ddf13c52db4",
-                ),
-            ),
-            (
-                "x86_64-apple-darwin",
-                (
-                    "clonk-rust-0.4.0-engine-x86_64-apple-darwin.zip",
-                    "3d866264cd2e8015a19de6086555e710f83aab5a0deb30cbd1c7942474b43908",
+                    "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+                    "6da2dcb44809e63fda53cf66b9cd958585a9b6453b7b06e283c38cee2eed014a",
                 ),
             ),
         ] {
@@ -3042,39 +3780,149 @@ mod tests {
             .collect();
         assert_eq!(
             digests.len(),
-            4,
-            "four separate builds must not share a digest"
+            3,
+            "three separate builds must not share a digest"
+        );
+    }
+
+    #[test]
+    fn both_macos_triples_are_served_the_universal_engine_archive() {
+        // macOS ships one universal `.app` for both architectures, but a binary
+        // can only report the triple *cargo* built it for — `build.rs` reads
+        // `TARGET`, and each slice of a `lipo` build is compiled for a real
+        // arch triple. So no Mac ever asks for `universal-apple-darwin`: the
+        // arm64 slice asks as `aarch64-apple-darwin` and the Intel slice as
+        // `x86_64-apple-darwin`, both before *and* after they update.
+        //
+        // Losing either key would tell every Mac there is no update, for ever
+        // and silently, because "nothing offered for my triple" is
+        // indistinguishable from "up to date".
+        let components = release_components_fixture();
+        let engine = component_entry(&generated_manifest(&components), "engine").clone();
+
+        for triple in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            let target = engine
+                .targets
+                .get(triple)
+                .unwrap_or_else(|| panic!("engine has no archive for {triple}"));
+            assert_eq!(
+                target.archive, "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+                "{triple} must be offered the universal build"
+            );
+            // The whole target, not just the name: a client verifies the digest
+            // it was given, so an alias that agreed on the filename alone would
+            // fail every Mac at the integrity check instead of at the manifest.
+            assert_eq!(
+                target, &engine.targets["universal-apple-darwin"],
+                "{triple} must resolve to the same bytes, not merely the same name"
+            );
+            assert_eq!(
+                target.install, "",
+                "the engine archive carries its own layout"
+            );
+        }
+    }
+
+    #[test]
+    fn a_windows_gnu_client_is_served_the_msvc_engine_archive() {
+        // Windows shipped as `x86_64-pc-windows-gnu` — cross-built from Linux
+        // with mingw — until the release moved to a native MSVC runner. A
+        // client reports the triple it was *built* for, so dropping the gnu key
+        // would leave every Windows install that already exists with no entry
+        // for itself: told there is no update, for ever, and silently, because
+        // "nothing offered for my triple" is indistinguishable from "up to
+        // date". The `engine` component replaces the executables wholesale, so
+        // handing those clients the MSVC archive is the migration itself.
+        let components = release_components_fixture();
+        let engine = component_entry(&generated_manifest(&components), "engine").clone();
+
+        assert_eq!(
+            engine.targets["x86_64-pc-windows-gnu"].archive,
+            "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+            "a gnu client must be offered the archive that replaced its build"
+        );
+        // The whole target, not just the name: a client verifies the digest it
+        // was given, so an alias that agreed on the filename alone would fail
+        // every gnu install at the integrity check instead of at the manifest.
+        assert_eq!(
+            engine.targets["x86_64-pc-windows-gnu"], engine.targets["x86_64-pc-windows-msvc"],
+            "the retired triple must resolve to the same bytes, not merely the same name"
+        );
+    }
+
+    #[test]
+    fn content_is_referenced_from_the_repository_that_publishes_it() {
+        // This repository no longer builds `content.zip`. It records where the
+        // content repository published it, the digest that release declared,
+        // and its size — so a client fetches the same bytes from the place they
+        // were produced instead of a daily re-upload of unchanged data.
+        let components = release_components_fixture();
+        let content = component_entry(&generated_manifest(&components), "content").clone();
+
+        let linux = &content.targets["x86_64-unknown-linux-gnu"];
+        assert_eq!(linux.archive, "content.zip");
+        let source = linux
+            .source
+            .as_ref()
+            .expect("content must name the release that publishes it");
+        assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+        // The tag names the exact commit the `content` submodule pins, so the
+        // pin resolves to an artifact with no lookup table in between.
+        assert_eq!(source.tag, format!("content-{CONTENT_COMMIT_FIXTURE}"));
+        assert_eq!(linux.sha256, CONTENT_SHA256_FIXTURE);
+        assert_eq!(linux.size, 236_117_973);
+        assert_eq!(linux.install, "content");
+
+        // Prefix-free and identical everywhere; only the destination differs.
+        let macos = &content.targets["aarch64-apple-darwin"];
+        assert_eq!(macos.source, linux.source);
+        assert_eq!(macos.sha256, linux.sha256);
+        assert_eq!(macos.install, "Contents/Resources/content");
+    }
+
+    #[test]
+    fn only_this_repository_s_own_components_omit_a_source() {
+        // Absence is the instruction to resolve against the clonk-rs release,
+        // so an engine archive that grew one would send clients elsewhere.
+        let components = release_components_fixture();
+        let manifest = generated_manifest(&components);
+        for name in ["engine", "planet"] {
+            assert!(
+                component_entry(&manifest, name)
+                    .targets
+                    .values()
+                    .all(|target| target.source.is_none()),
+                "{name} is built and published here"
+            );
+        }
+    }
+
+    #[test]
+    fn a_content_archive_left_in_the_components_directory_is_refused() {
+        // Uploading one here would restore the second builder this change
+        // exists to remove, and the two would silently drift.
+        let components = release_components_fixture();
+        write_fixture(
+            &components
+                .path()
+                .join("content-00112233445566778899aabb.zip"),
+            b"stale content",
+        );
+
+        let error = scan_emitted_components(components.path(), "0.4.0")
+            .expect_err("this repository must not publish a content archive");
+        assert!(
+            error.to_string().contains(CONTENT_REPOSITORY),
+            "error points at the repository that owns content: {error}"
         );
     }
 
     #[test]
     fn shared_components_are_offered_to_every_triple_as_the_same_bytes() {
-        // `content` and `planet` are prefix-free and identical everywhere;
-        // only where they unpack differs.
+        // `planet` is prefix-free and identical everywhere; only where it
+        // unpacks differs.
         let components = release_components_fixture();
         let manifest = generated_manifest(&components);
-
-        let content = component_entry(&manifest, "content");
-        assert_eq!(
-            content.targets["x86_64-pc-windows-gnu"].archive,
-            "content-00112233445566778899aabbccddeeff.zip"
-        );
-        assert_eq!(
-            content.targets["aarch64-apple-darwin"].sha256,
-            "150f3319880afbee1efd333db4a6c6d67cc3af240a1b10694762c23a051a37aa"
-        );
-        assert_eq!(
-            content.targets["x86_64-unknown-linux-gnu"].sha256,
-            content.targets["aarch64-apple-darwin"].sha256
-        );
-        assert_eq!(
-            content.targets["x86_64-unknown-linux-gnu"].install,
-            "content"
-        );
-        assert_eq!(
-            content.targets["aarch64-apple-darwin"].install,
-            "Contents/Resources/content"
-        );
 
         let planet = component_entry(&manifest, "planet");
         assert_eq!(
@@ -3118,7 +3966,7 @@ mod tests {
             scan_emitted_components(components.path(), "0.4.0")
                 .expect("scan the components")
                 .len(),
-            6
+            4
         );
     }
 
@@ -3144,24 +3992,28 @@ mod tests {
         // before the tag, which is what makes the failure recoverable.
         let components = TempDir::new().expect("temporary components directory");
         for (name, contents) in RELEASE_COMPONENTS_FIXTURE {
-            if !name.contains("aarch64-apple-darwin") {
+            if !name.contains("apple-darwin") {
                 write_fixture(&components.path().join(name), contents.as_bytes());
             }
         }
         let out = TempDir::new().expect("temporary output directory");
 
-        let error = generate_update_manifest(GenerateManifestOptions {
-            version: "0.4.0".to_string(),
-            released_at: "2026-07-28T10:00:00Z".to_string(),
-            components_dir: components.path().to_path_buf(),
-            out_dir: out.path().to_path_buf(),
-        })
-        .expect_err("a manifest that strands a platform must not be published");
+        let error = generate_update_manifest(manifest_options(components.path(), out.path()))
+            .expect_err("a manifest that strands a platform must not be published");
 
-        assert!(
-            error.to_string().contains("engine/aarch64-apple-darwin"),
-            "error names the component and triple that would be missing: {error}"
-        );
+        // Every Mac triple, not just the one that was not built: the aliases
+        // are what the two architecture triples resolve through, so a missing
+        // universal archive strands all three at once.
+        for triple in [
+            "universal-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+        ] {
+            assert!(
+                error.to_string().contains(&format!("engine/{triple}")),
+                "error names the component and triple that would be missing: {error}"
+            );
+        }
         assert!(
             !out.path().join("manifest.json").exists(),
             "nothing may be written when the manifest is refused"
@@ -3201,13 +4053,8 @@ mod tests {
         );
         let out = TempDir::new().expect("temporary output directory");
 
-        let error = generate_update_manifest(GenerateManifestOptions {
-            version: "0.4.0".to_string(),
-            released_at: "2026-07-28T10:00:00Z".to_string(),
-            components_dir: components.path().to_path_buf(),
-            out_dir: out.path().to_path_buf(),
-        })
-        .expect_err("a triple the release does not ship must not reach the manifest");
+        let error = generate_update_manifest(manifest_options(components.path(), out.path()))
+            .expect_err("a triple the release does not ship must not reach the manifest");
         assert!(
             error.to_string().contains("riscv64gc-unknown-linux-gnu"),
             "error names the unshipped triple: {error}"

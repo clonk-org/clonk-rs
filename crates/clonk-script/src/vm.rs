@@ -528,6 +528,21 @@ fn diagnostic_object_display(id: u64) -> Option<(String, Option<String>)> {
     DIAGNOSTIC_OBJECT_FORMATTER.with(|cell| cell.get().and_then(|formatter| formatter(id)))
 }
 
+/// `C4Value::GetDataString` (`C4Value.cpp`), the format the console's property
+/// panel and every runtime diagnostic print values in.
+///
+/// Object values resolve through the embedding engine's formatter — see
+/// [`with_diagnostic_object_formatter`] — so `Name #N` (or `{Name #N}` for a
+/// non-normal status) needs that bridge installed; without it an object prints
+/// as its bare number, exactly as C++ does for an object it cannot find.
+///
+/// C++'s `C4V_pC4Value` arm appends `*` to a reference's target. The port has
+/// no reference *value* — references are cells at the VM level — so that arm is
+/// unreachable here.
+pub fn data_string(value: &Value) -> String {
+    diagnostic_value_display(value)
+}
+
 fn diagnostic_value_display(value: &Value) -> String {
     match value {
         Value::Object(id) => diagnostic_object_display(*id)

@@ -922,6 +922,68 @@
         );
     }
 
+    /// `Config.Graphics.MaxRefreshDelay` is 30 (C4Config.cpp:485) and
+    /// `C4Application` uses it as the divisor ceiling when choosing the
+    /// graphics timer interval (C4Application.cpp:510-531). Every path that
+    /// materializes the value - the startup resolver and the advanced-config
+    /// editor row - has to agree on that default, and a valid positive value
+    /// must still reach the divisor.
+    #[test]
+    fn max_refresh_delay_missing_or_invalid_matches_cpp_thirty_ms() {
+        // Absent section, absent key and unparsable values all resolve to 30.
+        for config in [
+            &b""[..],
+            b"[Graphics]\n",
+            b"[Graphics]\nMaxRefreshDelay=\n",
+            b"[Graphics]\nMaxRefreshDelay=fast\n",
+            b"[Graphics]\nMaxRefreshDelay=0\n",
+            b"[Graphics]\nMaxRefreshDelay=-1\n",
+        ] {
+            assert_eq!(
+                configured_max_refresh_delay_ms(config),
+                30,
+                "{:?} must resolve to the native default",
+                String::from_utf8_lossy(config)
+            );
+        }
+        // A trailing suffix is not invalid: StdCompiler reads the numeric
+        // prefix and ignores the rest, so `16ms` is the positive value 16.
+        assert_eq!(
+            configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=16ms\n"),
+            16
+        );
+
+        // A valid positive value is kept verbatim.
+        assert_eq!(
+            configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=50\n"),
+            50
+        );
+        assert_eq!(
+            configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=16\n"),
+            16
+        );
+
+        // The advanced-config editor materializes the same default rather than
+        // inventing a faster one.
+        let row = crate::advanced_config::sections(&Config::new())
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.name == "MaxRefreshDelay")
+            .expect("MaxRefreshDelay row");
+        assert_eq!(row.value.serialized(), "30");
+
+        // The retained value still feeds the divisor: 30 leaves the 28 ms game
+        // timer as one graphics opportunity, a smaller ceiling splits it.
+        assert_eq!(
+            frame_schedule_for_mode(AppMode::Running, 28, 1, 30).refresh_interval,
+            Duration::from_millis(28)
+        );
+        assert_eq!(
+            frame_schedule_for_mode(AppMode::Running, 28, 1, 16).refresh_interval,
+            Duration::from_millis(14)
+        );
+    }
+
     #[test]
     fn max_refresh_delay_uses_cpp_divisor_without_speeding_simulation() {
         let default = frame_schedule_for_mode(AppMode::Running, 28, 1, 16);
@@ -941,6 +1003,117 @@
         let slow = frame_schedule_for_mode(AppMode::Running, 1_000, 1, 16);
         assert_eq!(slow.simulation_interval, Duration::from_millis(1_000));
         assert_eq!(slow.refresh_interval, Duration::from_millis(15));
+    }
+
+    #[test]
+    fn smooth_presentation_substitutes_the_display_period_for_the_native_ceiling() {
+        use crate::effective_max_refresh_delay_ms;
+
+        // Nothing configured stays exactly on the C++ default, whatever the
+        // panel reports: the oracle's 30 ms ceiling is the parity default.
+        assert_eq!(effective_max_refresh_delay_ms(b"", None), 30);
+        assert_eq!(effective_max_refresh_delay_ms(b"", Some(8)), 30);
+
+        // The remaster master switch supplies the default, exactly like every
+        // other presentation-only divergence.
+        assert_eq!(
+            effective_max_refresh_delay_ms(b"[Graphics]\nRemaster=1\n", Some(8)),
+            8
+        );
+        assert_eq!(
+            effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", Some(8)),
+            8
+        );
+
+        // A key the player wrote explicitly wins in both directions.
+        assert_eq!(
+            effective_max_refresh_delay_ms(
+                b"[Graphics]\nRemaster=1\nSmoothPresentation=0\n",
+                Some(8)
+            ),
+            30
+        );
+        assert_eq!(
+            effective_max_refresh_delay_ms(
+                b"[Graphics]\nSmoothPresentation=1\nMaxRefreshDelay=30\n",
+                Some(8)
+            ),
+            30
+        );
+
+        // An unknown or slower-than-native panel must never make presentation
+        // slower than the oracle default.
+        assert_eq!(
+            effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", None),
+            16
+        );
+        assert_eq!(
+            effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", Some(100)),
+            30
+        );
+    }
+
+    #[test]
+    fn smooth_presentation_subdivides_only_the_startup_timer() {
+        use crate::RefreshCeilings;
+
+        // Measured on an M4 Max at the reporter's own Scale=300 fullscreen
+        // settings: subdividing the *game* timer to 7 ms moved presentation
+        // from 35.66 to 36.30 FPS while the average graphics pass grew from
+        // 10.49 ms to 18.17 ms and automatic skips went from 2 to 98. In game
+        // the pass cost and swapchain back-pressure bind long before the timer
+        // does, so the game timer keeps the oracle ceiling and only the
+        // startup timer — which measured 62.88 FPS with a 0.83 ms GPU pass and
+        // a 96 %-idle event loop — is subdivided.
+        let ceilings = RefreshCeilings {
+            running_ms: 30,
+            startup_ms: 8,
+        };
+
+        let menu = frame_schedule_for_mode(AppMode::Menu, 28, 1, ceilings);
+        assert_eq!(menu.simulation_interval, Duration::from_millis(16));
+        assert_eq!(menu.refresh_interval, Duration::from_millis(8));
+
+        let running = frame_schedule_for_mode(AppMode::Running, 28, 1, ceilings);
+        assert_eq!(running.simulation_interval, Duration::from_millis(28));
+        assert_eq!(
+            running.refresh_interval,
+            Duration::from_millis(28),
+            "the game timer keeps the oracle ceiling even while the menu is subdivided"
+        );
+
+        // A bare ceiling still means "both", so every existing caller and the
+        // explicit `Graphics.MaxRefreshDelay` path are unchanged.
+        assert_eq!(
+            frame_schedule_for_mode(AppMode::Running, 28, 1, 16).refresh_interval,
+            Duration::from_millis(14)
+        );
+    }
+
+    #[test]
+    fn startup_refresh_honours_the_same_refresh_ceiling_as_the_game_timer() {
+        // The startup screens are where the pointer is used most, and their
+        // cursor is drawn into the frame, so its update rate is the refresh
+        // rate. The 16 ms startup timer was previously its own hard floor, so
+        // a configured ceiling below it was ignored and the menu stayed at
+        // 62.5 Hz on any display. Apply the same divisor the game timer uses.
+        for mode in [AppMode::Menu, AppMode::Loading] {
+            // At or above the startup interval the divisor is the identity, so
+            // the native default keeps the menu byte-for-byte as it was.
+            for ceiling in [16, 30, 100] {
+                let schedule = frame_schedule_for_mode(mode, 28, 1, ceiling);
+                assert_eq!(schedule.simulation_interval, Duration::from_millis(16));
+                assert_eq!(schedule.refresh_interval, Duration::from_millis(16));
+                assert_eq!(schedule.running_revision, None);
+            }
+
+            // A lower ceiling subdivides the startup timer without touching the
+            // 16 ms logic tick that ages menu animations.
+            let smooth = frame_schedule_for_mode(mode, 28, 1, 8);
+            assert_eq!(smooth.simulation_interval, Duration::from_millis(16));
+            assert_eq!(smooth.refresh_interval, Duration::from_millis(8));
+            assert_eq!(smooth.running_revision, None);
+        }
     }
 
     #[test]
@@ -1086,9 +1259,11 @@
         assert_ne!(control(&app, 0).pressed_coms, 0);
         assert_ne!(control(&app, 1).pressed_coms, 0);
         app.handle_focus_lost()
-            .expect("focus loss clears every local player");
-        assert_eq!(control(&app, 0).pressed_coms, 0);
-        assert_eq!(control(&app, 1).pressed_coms, 0);
+            .expect("focus loss runs its nonfatal UI cleanup");
+        // No native backend clears player controls on focus loss
+        // (C4FullScreen.cpp:139-145,310-315,432-447).
+        assert_ne!(control(&app, 0).pressed_coms, 0);
+        assert_ne!(control(&app, 1).pressed_coms, 0);
 
         app.return_to_menu();
         fs::write(
@@ -5603,6 +5778,63 @@
         assert!(columns.left.contains("F1</c> - Hilfe"));
     }
 
+    /// `C4GraphicsSystem::DrawHelp` asks `GetKeyboardInputName` for each
+    /// registered key's *current* code, so a `KeyConfig` override changes the
+    /// displayed chord as well as the dispatch
+    /// (C4GraphicsSystem.cpp:692-724). The two columns keep their native draw
+    /// order and read the same process language table as the rest of the UI.
+    #[test]
+    fn runtime_f1_help_displays_live_remapped_key_names() {
+        let mut app = new_running_sandbox_app();
+        let default_columns = app
+            .runtime_help_columns()
+            .expect("shipped help columns")
+            .clone();
+        assert!(default_columns.left.contains("F1</c> - "));
+        assert!(default_columns.left.contains("Tab</c> - "));
+
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nToggleShowHelp=Shift+H\nScoreboardToggle=Escape,Return\n                  MusicToggle=Joy1A\nDbgModeToggle=Ctrl+Alt+D\n",
+            )
+            .expect("parse remapped help chords")))
+            .expect("install remapped help chords");
+        // The columns are rebuilt lazily, so drop the memoized text.
+        app.runtime_help_text_cache = OnceLock::new();
+        let columns = app
+            .runtime_help_columns()
+            .expect("remapped help columns")
+            .clone();
+
+        // Each remapped action shows its live ordered binding name.
+        assert!(
+            columns.left.contains("Shift+H</c> - "),
+            "{}",
+            columns.left
+        );
+        assert!(!columns.left.contains("F1</c> - "), "{}", columns.left);
+        // Only the first chord of an ordered list is shown for a single slot.
+        assert!(columns.left.contains("Escape</c> - "), "{}", columns.left);
+        assert!(!columns.left.contains("Tab</c> - "), "{}", columns.left);
+        // A gamepad override has no keyboard name, exactly like an
+        // unresolvable code.
+        assert!(columns.left.contains("<c ffff00></c> - "), "{}", columns.left);
+        // Modifier order follows C4KeyCodeEx::ToString.
+        assert!(
+            columns.right.contains("Ctrl+Alt+D</c> - "),
+            "{}",
+            columns.right
+        );
+
+        // Draw order and the localized right-hand column are untouched.
+        assert!(columns.left.starts_with('['));
+        assert_eq!(
+            columns.right.lines().count(),
+            default_columns.right.lines().count()
+        );
+    }
+
     #[test]
     fn runtime_language_table_loads_from_language_pack() {
         let _lock = env_lock().lock();
@@ -6692,3 +6924,311 @@
             assert!(!app.take_exit_request());
         }
     }
+
+    /// `StdCompilerINIRead::Boolean` (StdCompiler.cpp:692-715) accepts a
+    /// leading `1`/`0` not followed by another digit, or a case-sensitive
+    /// `true`/`false` prefix. Anything else signals not-found, so the field's
+    /// adapted default stays in force — it does not collapse to false.
+    #[test]
+    fn runtime_config_booleans_follow_stdcompiler_grammar_and_preserve_defaults() {
+        // The token grammar itself.
+        for (raw, expected) in [
+            ("1", Some(true)),
+            ("0", Some(false)),
+            ("true", Some(true)),
+            ("false", Some(false)),
+            // A prefix is enough: C++ advances pPos and ignores the rest.
+            ("1 ; trailing comment", Some(true)),
+            ("truely", Some(true)),
+            ("falsehood", Some(false)),
+            // A following digit rejects the numeric form.
+            ("10", None),
+            ("01", None),
+            // Case-sensitive, and no leading whitespace is skipped.
+            ("TRUE", None),
+            ("True", None),
+            ("FALSE", None),
+            (" 1", None),
+            ("\t0", None),
+            // Non-native aliases C++ never accepted.
+            ("yes", None),
+            ("on", None),
+            ("no", None),
+            ("off", None),
+            ("", None),
+            ("wobble", None),
+        ] {
+            assert_eq!(
+                parse_native_config_bool(raw),
+                expected,
+                "{raw:?} must follow the native Boolean grammar"
+            );
+        }
+
+        // Invalid input keeps each key's adapted default, in both directions.
+        let flags = |body: &str| {
+            let root = tempdir().expect("boolean config root");
+            let user_data = tempdir().expect("boolean user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            fs::write(paths.config_file(), body).expect("write fixture config");
+            load_display_flags(Some(&paths))
+        };
+
+        // ShowCrewNames adapts true, ShowClock adapts false.
+        let defaults = flags("[Graphics]\nName=Tester\n");
+        assert!(defaults.player_names);
+        assert!(!defaults.clock);
+
+        // Valid tokens flip both.
+        let flipped = flags("[Graphics]\nShowCrewNames=0\nShowClock=1\n");
+        assert!(!flipped.player_names);
+        assert!(flipped.clock);
+
+        // Invalid values leave both adapted defaults untouched. The old
+        // permissive parser collapsed these to false, silently disabling a
+        // default-true flag.
+        // `" 1"` is only reachable at the raw-value level above: the INI
+        // reader strips the whitespace after `=` before the Boolean field
+        // consumes it.
+        for invalid in ["TRUE", "yes", "on", "10", "wobble"] {
+            let kept = flags(&format!(
+                "[Graphics]\nShowCrewNames={invalid}\nShowClock={invalid}\n"
+            ));
+            assert!(
+                kept.player_names,
+                "{invalid:?} must leave the default-true ShowCrewNames alone"
+            );
+            assert!(
+                !kept.clock,
+                "{invalid:?} must leave the default-false ShowClock alone"
+            );
+        }
+    
+}
+
+    /// `StdCompilerINIRead::ReadNum` (StdCompiler.h:705-724) skips leading
+    /// whitespace, selects base 16 only for a leading `0x`/`0X`, consumes the
+    /// longest valid numeric prefix and ignores the rest. No digits is
+    /// not-found, so the field's adapted default survives.
+    #[test]
+    fn runtime_config_scalars_follow_stdcompiler_prefix_hex_and_narrowing() {
+        let parse = |raw: &str| parse_startup_config_integer(raw.as_bytes());
+
+        // Plain decimal, sign and surrounding whitespace.
+        assert_eq!(parse("42"), Some(42));
+        assert_eq!(parse("-7"), Some(-7));
+        assert_eq!(parse("+7"), Some(7));
+        assert_eq!(parse("   19"), Some(19));
+        assert_eq!(parse("\t\r\n5"), Some(5));
+
+        // Hex only with an explicit 0x/0X prefix; a bare leading zero is
+        // decimal, and `0x` with no digits is still the value zero because
+        // strtol consumed the leading `0`.
+        assert_eq!(parse("0x1f"), Some(31));
+        assert_eq!(parse("0X1F"), Some(31));
+        assert_eq!(parse("010"), Some(10));
+        assert_eq!(parse("0x"), Some(0));
+
+        // The longest valid prefix wins and trailing bytes are tolerated.
+        assert_eq!(parse("30ms"), Some(30));
+        assert_eq!(parse("12 ; comment"), Some(12));
+        assert_eq!(parse("0x1fg"), Some(31));
+        // A decimal parse stops at the first non-digit, so `1e3` is 1.
+        assert_eq!(parse("1e3"), Some(1));
+
+        // No digits at all is not-found.
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("wobble"), None);
+        assert_eq!(parse("-"), None);
+        assert_eq!(parse("   "), None);
+
+        // The live settings readers share that grammar and keep their adapted
+        // defaults when it yields nothing.
+        let audio = |body: &str| {
+            let root = tempdir().expect("scalar config root");
+            let user_data = tempdir().expect("scalar user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            fs::write(paths.config_file(), format!("[Sound]\n{body}\n"))
+                .expect("write fixture config");
+            AudioOptions::load(Some(&paths))
+        };
+        let defaults = AudioOptions::default();
+        // A hex volume is honoured, exactly as C++ would read it.
+        assert_eq!(audio("MusicVolume=0x40").music_volume, 64.0 / 100.0);
+        // A tolerated suffix keeps the numeric prefix.
+        assert_eq!(audio("SoundVolume=75%").sound_volume, 75.0 / 100.0);
+        // Digit-less input leaves the adapted default alone rather than
+        // clamping to the range floor.
+        for invalid in ["", "loud", "-", "   "] {
+            let kept = audio(&format!("MusicVolume={invalid}\nMaxChannels={invalid}"));
+            assert_eq!(kept.music_volume, defaults.music_volume, "{invalid:?}");
+            assert_eq!(kept.max_channels, defaults.max_channels, "{invalid:?}");
+        }
+    
+}
+
+    /// `C4FullScreen::Init` titles its carrier window with `STD_PRODUCT`,
+    /// which is `C4ENGINECAPTION` = "LegacyClonk" (C4FullScreen.cpp:474-480;
+    /// C4Version.h:19,24). The developer console keeps its own caption, and
+    /// neither may be confused with `PRODUCT_NAME`, which names the port's
+    /// user-data directories.
+    #[test]
+    fn startup_window_builder_uses_legacyclonk_product_title() {
+        assert_eq!(native_window_title(false), "LegacyClonk");
+        assert_eq!(native_window_title(true), "LegacyClonk Console");
+        assert_eq!(clonk_platform::ENGINE_CAPTION, "LegacyClonk");
+
+        // The user-data product name is a deliberate divergence and must not
+        // have been dragged along with the caption.
+        assert_eq!(clonk_platform::PRODUCT_NAME, "Clonk Rust");
+        assert_ne!(native_window_title(false), clonk_platform::PRODUCT_NAME);
+
+        // The console caption is distinct from the game one and derived from
+        // the same engine name.
+        assert_ne!(native_window_title(true), native_window_title(false));
+        assert!(native_window_title(true).starts_with(native_window_title(false)));
+    
+}
+
+    /// `C4GraphicsSystem::StartDrawing` refuses to draw while the application
+    /// is inactive unless `Graphics.RenderInactive` carries the *active
+    /// shell's* bit — Fullscreen `1 << 0`, Console `1 << 1`, adapted default
+    /// Console alone (C4Config.h:128-129; C4Config.cpp:481;
+    /// C4GraphicsSystem.cpp:96-106).
+    #[test]
+    fn render_inactive_bitmask_gates_unfocused_fullscreen_and_console_redraw() {
+        let mask = |body: Option<&str>| {
+            let root = tempdir().expect("render-inactive config root");
+            let user_data = tempdir().expect("render-inactive user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            if let Some(body) = body {
+                fs::write(paths.config_file(), body).expect("write fixture config");
+            }
+            load_render_inactive_mask(Some(&paths))
+        };
+
+        // The adapted default is Console alone, and survives an unparsable
+        // value or an absent key.
+        assert_eq!(mask(None), RENDER_INACTIVE_CONSOLE);
+        assert_eq!(mask(Some("[Graphics]\nName=Tester\n")), RENDER_INACTIVE_CONSOLE);
+        assert_eq!(
+            mask(Some("[Graphics]\nRenderInactive=always\n")),
+            RENDER_INACTIVE_CONSOLE
+        );
+        // Explicit masks, including hex, are honoured verbatim.
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=0\n")), 0);
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=1\n")), 1);
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=3\n")), 3);
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=0x3\n")), 3);
+
+        // An active window always draws, whatever the mask says.
+        for shell_is_console in [false, true] {
+            for configured in [0, 1, 2, 3] {
+                assert!(
+                    render_inactive_allows_drawing(configured, true, shell_is_console),
+                    "an active window always draws (mask={configured}, console={shell_is_console})"
+                );
+            }
+        }
+
+        // Inactive: each shell consults only its own bit.
+        let game = |mask| render_inactive_allows_drawing(mask, false, false);
+        let console = |mask| render_inactive_allows_drawing(mask, false, true);
+        assert!(!game(0) && !console(0), "an empty mask suppresses both");
+        assert!(game(RENDER_INACTIVE_FULLSCREEN));
+        assert!(!console(RENDER_INACTIVE_FULLSCREEN));
+        assert!(console(RENDER_INACTIVE_CONSOLE));
+        assert!(!game(RENDER_INACTIVE_CONSOLE));
+        let both = RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE;
+        assert!(game(both) && console(both));
+
+        // The shipped default therefore keeps an unfocused game window from
+        // drawing while the developer console still repaints.
+        assert!(!game(RENDER_INACTIVE_CONSOLE));
+        assert!(console(RENDER_INACTIVE_CONSOLE));
+    
+}
+
+    /// `C4ConfigLogging` (C4Config.cpp:699-718) carries a stdout level plus one
+    /// nested section per component, each with its own `LogLevel`. The port
+    /// projects them onto tracing filter directives so a shared config tunes
+    /// verbosity; `LC_LOG` keeps priority over it.
+    #[test]
+    fn logging_section_sets_stdout_level_and_per_component_overrides() {
+        let directive = |body: Option<&str>| {
+            let root = tempdir().expect("logging config root");
+            let user_data = tempdir().expect("logging user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            if let Some(body) = body {
+                fs::write(paths.config_file(), body).expect("write fixture config");
+            }
+            load_logging_config_directive(Some(&paths))
+        };
+
+        // Nothing configured leaves the caller's default in force.
+        assert_eq!(directive(None), None);
+        assert_eq!(directive(Some("[General]\nName=Tester\n")), None);
+        assert_eq!(directive(Some("[Logging]\nLogLevelStdout=nonsense\n")), None);
+
+        // LogLevelStdout raises the global level.
+        assert_eq!(
+            directive(Some("[Logging]\nLogLevelStdout=debug\n")),
+            Some("debug".to_string())
+        );
+        // spdlog spellings the port accepts.
+        assert_eq!(
+            directive(Some("[Logging]\nLogLevelStdout=warning\n")),
+            Some("warn".to_string())
+        );
+        assert_eq!(
+            directive(Some("[Logging]\nLogLevelStdout=off\n")),
+            Some("off".to_string())
+        );
+
+        // A per-component override changes only that component.
+        assert_eq!(
+            directive(Some("[Network]\nLogLevel=trace\n")),
+            Some("clonk_network=trace".to_string())
+        );
+        // With both, the global level leads and the component follows.
+        assert_eq!(
+            directive(Some(
+                "[Logging]\nLogLevelStdout=info\n[Network]\nLogLevel=trace\n"
+            )),
+            Some("info,clonk_network=trace".to_string())
+        );
+        // An unknown component name is ignored rather than pinning a target
+        // that does not exist.
+        assert_eq!(directive(Some("[Nonsense]\nLogLevel=trace\n")), None);
+
+        // Every component C++ compiles maps to a target.
+        assert_eq!(clonk_logging::LOGGING_COMPONENTS.len(), 11);
+        for (component, target) in clonk_logging::LOGGING_COMPONENTS {
+            assert!(!target.is_empty(), "{component} has no target");
+        }
+    
+}

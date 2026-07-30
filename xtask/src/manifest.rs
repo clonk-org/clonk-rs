@@ -28,10 +28,28 @@ use std::path::Path;
 /// Bumped only when an older client must refuse to read a newer manifest.
 pub const MANIFEST_SCHEMA: u32 = 1;
 
+/// The release an archive is published in, when that is not this repository's.
+///
+/// Mirrored by `clonk_update::ArchiveSource`, which the client reads, and
+/// resolved into a URL by `clonk_update_net::urls` — which refuses anything
+/// here that could leave the release it names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveSource {
+    /// `owner/name` of the GitHub repository holding the release.
+    pub repo: String,
+    /// The release tag inside `repo`.
+    pub tag: String,
+}
+
 /// What one target triple downloads for a component, and where it lands.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TargetArchive {
     pub archive: String,
+    /// Where `archive` was published, when that is not this release. Omitted
+    /// from the serialised document for everything this repository builds, so
+    /// its absence stays the instruction to look in the clonk-rs release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ArchiveSource>,
     pub sha256: String,
     pub size: u64,
     /// Destination relative to the install root. Empty for `engine`, whose
@@ -43,7 +61,7 @@ pub struct TargetArchive {
 ///
 /// Keyed by triple even for the shared components, which record the *same*
 /// archive under every triple. That redundancy is deliberate: `engine` ships
-/// four genuinely different archives, and a single `archive` field could not
+/// three genuinely different archives, and a single `archive` field could not
 /// express which one a given client should fetch — a Windows client would
 /// otherwise read whichever archive happened to be recorded last.
 ///
@@ -95,7 +113,27 @@ fn install_destination(component: ComponentId, triple: &str) -> String {
     }
 }
 
-/// Builds a manifest from every emitted archive across all platform passes.
+/// A component this repository references rather than builds.
+///
+/// `content` is the only one: its archive is published by the repository the
+/// game data lives in, and this records what that release declared. Nothing is
+/// recomputed here — the digest is the one the producer published, because
+/// recomputing it would require the very second builder this arrangement
+/// exists to avoid.
+///
+/// Referenced components are offered to every triple, which holds for anything
+/// prefix-free. A platform-specific one would need a `built_for` of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferencedComponent {
+    pub id: ComponentId,
+    pub source: ArchiveSource,
+    pub archive: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// Builds a manifest from every emitted archive across all platform passes,
+/// plus the components published elsewhere.
 ///
 /// `emitted` may contain several `engine` archives — one per triple, produced
 /// on different runners — each keyed by the triple it was built for.
@@ -104,9 +142,28 @@ pub fn build_manifest(
     engine_version: [i32; 5],
     released_at: &str,
     emitted: &[(String, EmittedComponent)],
+    referenced: &[ReferencedComponent],
     triples: &[&str],
 ) -> Manifest {
     let mut by_component: BTreeMap<String, BTreeMap<String, TargetArchive>> = BTreeMap::new();
+
+    for component in referenced {
+        for triple in triples {
+            by_component
+                .entry(component.id.name().to_string())
+                .or_default()
+                .insert(
+                    (*triple).to_string(),
+                    TargetArchive {
+                        archive: component.archive.clone(),
+                        source: Some(component.source.clone()),
+                        sha256: component.sha256.clone(),
+                        size: component.size,
+                        install: install_destination(component.id, triple),
+                    },
+                );
+        }
+    }
 
     for (built_for, component) in emitted {
         let archive = component
@@ -130,6 +187,9 @@ pub fn build_manifest(
                     triple.to_string(),
                     TargetArchive {
                         archive: archive.clone(),
+                        // Built and uploaded here, so the clonk-rs release this
+                        // manifest describes is where it resolves.
+                        source: None,
                         sha256: component.sha256.clone(),
                         size: component.size,
                         install: install_destination(component.id, triple),
@@ -174,36 +234,68 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    /// One engine archive, keyed by the triple it was built for.
+    fn engine(triple: &str, digest_byte: &str, size: u64) -> (String, EmittedComponent) {
+        (
+            triple.to_string(),
+            EmittedComponent {
+                id: ComponentId::Engine,
+                path: PathBuf::from(format!("clonk-rust-0.4.0-engine-{triple}.zip")),
+                sha256: digest_byte.repeat(32),
+                size,
+            },
+        )
+    }
+
+    /// A prefix-free archive that every triple is offered, exactly as
+    /// `scan_emitted_components` reports one.
+    fn shared(
+        id: ComponentId,
+        archive: &str,
+        digest_byte: &str,
+        size: u64,
+    ) -> (String, EmittedComponent) {
+        (
+            crate::SHARED_ARCHIVE_TRIPLE.to_string(),
+            EmittedComponent {
+                id,
+                path: PathBuf::from(archive),
+                sha256: digest_byte.repeat(32),
+                size,
+            },
+        )
+    }
+
+    /// The archives one release run uploads, expanded through the *real* alias
+    /// table rather than a hand-written approximation of it.
+    ///
+    /// Three engine builds for six shipped triples: macOS fuses one universal
+    /// archive that its two architecture triples resolve through, and Windows
+    /// serves its retired gnu triple from the msvc build. A fixture that still
+    /// listed a per-architecture macOS engine would bind the two crates to a
+    /// document no release can produce.
     fn emitted() -> Vec<(String, EmittedComponent)> {
-        vec![
-            (
-                "x86_64-unknown-linux-gnu".to_string(),
-                EmittedComponent {
-                    id: ComponentId::Engine,
-                    path: PathBuf::from("clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"),
-                    sha256: "aa".repeat(32),
-                    size: 24_000_000,
-                },
-            ),
-            (
-                "aarch64-apple-darwin".to_string(),
-                EmittedComponent {
-                    id: ComponentId::Engine,
-                    path: PathBuf::from("clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip"),
-                    sha256: "cc".repeat(32),
-                    size: 18_000_000,
-                },
-            ),
-            (
-                "x86_64-unknown-linux-gnu".to_string(),
-                EmittedComponent {
-                    id: ComponentId::Content,
-                    path: PathBuf::from("content-bb.zip"),
-                    sha256: "bb".repeat(32),
-                    size: 250_000_000,
-                },
-            ),
-        ]
+        crate::serve_aliased_triples(&[
+            engine("x86_64-unknown-linux-gnu", "aa", 24_000_000),
+            engine("x86_64-pc-windows-msvc", "dd", 26_000_000),
+            engine(crate::MACOS_UNIVERSAL_TRIPLE, "cc", 34_000_000),
+            shared(ComponentId::Planet, "planet-ee.zip", "ee", 49_000_000),
+        ])
+    }
+
+    /// `content`, which the content repository publishes and this one only
+    /// points at.
+    fn referenced() -> Vec<ReferencedComponent> {
+        vec![ReferencedComponent {
+            id: ComponentId::Content,
+            source: ArchiveSource {
+                repo: "syb0rg/clonk-rs-content".to_string(),
+                tag: "content-bb".to_string(),
+            },
+            archive: "content.zip".to_string(),
+            sha256: "bb".repeat(32),
+            size: 250_000_000,
+        }]
     }
 
     fn manifest() -> Manifest {
@@ -212,8 +304,39 @@ mod tests {
             [4, 9, 11, 0, 362],
             "2026-07-28T10:00:00Z",
             &emitted(),
-            &["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"],
+            &referenced(),
+            &crate::UPDATE_TARGET_TRIPLES,
         )
+    }
+
+    /// Path of the fixture that binds this producer to the client that reads it.
+    const SHARED_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../crates/clonk-update/tests/fixtures/manifest.json"
+    );
+
+    #[test]
+    fn the_producer_emits_the_shared_schema_fixture_byte_for_byte() {
+        // `xtask` writes manifests and `clonk-update` reads them, but the two
+        // types are hand-mirrored across crates. This fixture is the only thing
+        // binding them: a field renamed on either side fails here or in
+        // `clonk-update`'s counterpart test, instead of silently shipping a
+        // manifest no client can parse.
+        let expected = std::fs::read(SHARED_FIXTURE).expect("read shared fixture");
+        let actual = manifest().to_bytes().expect("serialise");
+        assert_eq!(
+            String::from_utf8_lossy(&actual),
+            String::from_utf8_lossy(&expected),
+            "producer output drifted from the shared fixture; if this change is \
+             intended, re-run the ignored regenerator and update the client test"
+        );
+    }
+
+    #[test]
+    #[ignore = "regenerates the shared schema fixture"]
+    fn regenerate_shared_schema_fixture() {
+        let bytes = manifest().to_bytes().expect("serialise");
+        std::fs::write(SHARED_FIXTURE, bytes).expect("write fixture");
     }
 
     #[test]
@@ -241,7 +364,7 @@ mod tests {
             .iter()
             .map(|entry| entry.name.clone())
             .collect();
-        assert_eq!(names, ["content", "engine"]);
+        assert_eq!(names, ["content", "planet", "engine"]);
     }
 
     #[test]
@@ -268,9 +391,9 @@ mod tests {
     }
 
     #[test]
-    fn each_triple_resolves_to_its_own_engine_archive() {
-        // A single `archive` field could not express four per-triple engine
-        // builds: a Windows client would fetch whichever was recorded last.
+    fn each_build_resolves_to_its_own_engine_archive() {
+        // A single `archive` field could not express three per-build engine
+        // archives: a Windows client would fetch whichever was recorded last.
         let manifest = manifest();
         let engine = manifest
             .components
@@ -278,18 +401,96 @@ mod tests {
             .find(|entry| entry.name == "engine")
             .expect("engine entry");
 
-        assert_eq!(
-            engine.targets["x86_64-unknown-linux-gnu"].archive,
-            "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"
-        );
-        assert_eq!(
-            engine.targets["aarch64-apple-darwin"].archive,
-            "clonk-rust-0.4.0-engine-aarch64-apple-darwin.zip"
+        for (triple, archive) in [
+            (
+                "x86_64-unknown-linux-gnu",
+                "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+            ),
+            (
+                "x86_64-pc-windows-msvc",
+                "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+            ),
+            (
+                "universal-apple-darwin",
+                "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+            ),
+        ] {
+            assert_eq!(engine.targets[triple].archive, archive);
+        }
+        let digests: BTreeMap<&str, &String> = engine
+            .targets
+            .iter()
+            .map(|(triple, target)| (triple.as_str(), &target.sha256))
+            .collect();
+        assert_ne!(
+            digests["x86_64-unknown-linux-gnu"], digests["universal-apple-darwin"],
+            "different builds must not share a digest"
         );
         assert_ne!(
-            engine.targets["x86_64-unknown-linux-gnu"].sha256,
-            engine.targets["aarch64-apple-darwin"].sha256,
+            digests["x86_64-unknown-linux-gnu"], digests["x86_64-pc-windows-msvc"],
             "different builds must not share a digest"
+        );
+    }
+
+    #[test]
+    fn a_referenced_component_records_the_release_that_publishes_it() {
+        // Without this the entry would resolve against the clonk-rs release,
+        // where the archive no longer is — a 404 for every client, with the
+        // manifest itself looking perfectly well-formed.
+        let manifest = manifest();
+        let content = manifest
+            .components
+            .iter()
+            .find(|entry| entry.name == "content")
+            .expect("content entry");
+        for target in content.targets.values() {
+            let source = target.source.as_ref().expect("content names its release");
+            assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+            assert_eq!(source.tag, "content-bb");
+            assert_eq!(target.archive, "content.zip");
+        }
+    }
+
+    #[test]
+    fn a_component_built_here_records_no_source() {
+        // Absence is what tells a client to look in the clonk-rs release.
+        let manifest = manifest();
+        let engine = manifest
+            .components
+            .iter()
+            .find(|entry| entry.name == "engine")
+            .expect("engine entry");
+        assert!(engine
+            .targets
+            .values()
+            .all(|target| target.source.is_none()));
+    }
+
+    #[test]
+    fn an_aliased_triple_resolves_to_the_archive_that_serves_it() {
+        // The macOS aliases are permanent, not a migration: a universal install
+        // still reports the architecture triple cargo compiled it for, so these
+        // two keys never drain away. Dropping either strands every Mac on that
+        // architecture on "no update available", for ever and silently.
+        let manifest = manifest();
+        let engine = manifest
+            .components
+            .iter()
+            .find(|entry| entry.name == "engine")
+            .expect("engine entry");
+
+        for triple in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            // The whole target, not just the name: a client verifies the digest
+            // it was handed, so an alias agreeing on the filename alone would
+            // fail at the integrity check instead of at the manifest.
+            assert_eq!(
+                engine.targets[triple], engine.targets["universal-apple-darwin"],
+                "{triple} must resolve to the universal build"
+            );
+        }
+        assert_eq!(
+            engine.targets["x86_64-pc-windows-gnu"], engine.targets["x86_64-pc-windows-msvc"],
+            "the retired gnu triple must resolve to the msvc build"
         );
     }
 
@@ -301,17 +502,25 @@ mod tests {
             .iter()
             .find(|entry| entry.name == "content")
             .expect("content entry");
-        assert_eq!(
-            content.targets["aarch64-apple-darwin"].install,
-            "Contents/Resources/content"
-        );
+        // Every macOS key, including the universal triple a fresh install
+        // reports: the bundle layout follows the platform, not the build.
+        for triple in [
+            "universal-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+        ] {
+            assert_eq!(
+                content.targets[triple].install, "Contents/Resources/content",
+                "{triple} keeps game data inside the bundle"
+            );
+        }
         assert_eq!(
             content.targets["x86_64-unknown-linux-gnu"].install,
             "content"
         );
         // Same bytes on both platforms; only the destination differs.
         assert_eq!(
-            content.targets["aarch64-apple-darwin"].sha256,
+            content.targets["universal-apple-darwin"].sha256,
             content.targets["x86_64-unknown-linux-gnu"].sha256
         );
     }

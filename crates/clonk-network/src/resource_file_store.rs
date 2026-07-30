@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use clonk_engine::NetworkResourceCore;
 
 const MAX_TEMP_SUFFIX: u32 = 999;
-const STOCK_CHUNK_DATA_SIZE: u64 = 100 * 1024;
 
 #[derive(Debug)]
 pub enum ResourceFileStoreError {
@@ -416,7 +415,14 @@ impl ResourceFileStore {
             });
         }
         let offset = u64::from(chunk) * u64::from(resource.core.chunk_size);
-        let length = (u64::from(resource.core.file_size) - offset).min(STOCK_CHUNK_DATA_SIZE);
+        // C4Network2ResChunk::Set caps this with the fixed `C4NetResChunkSize`
+        // literal (`src/C4Network2Res.cpp:1269`) rather than the core's own
+        // stride. The two are the same value for every core C++ publishes
+        // (`src/C4Network2Res.cpp:81`, `:89`), but this port publishes a smaller
+        // stride, and the literal would then serve each chunk overlapping the
+        // following ones -- the whole file many times over per delivery.
+        let length =
+            (u64::from(resource.core.file_size) - offset).min(u64::from(resource.core.chunk_size));
         let length =
             usize::try_from(length).map_err(|_| ResourceFileStoreError::ChunkOutOfRange {
                 resource_id,

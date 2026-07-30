@@ -21,6 +21,125 @@ pub const CONTROL_KEY_LABELS: [&str; CONTROL_KEY_COUNT] = [
     "Special 2",
 ];
 
+/// The `IDS_CTL_*` keys `C4StartupOptionsDlg` resolves for the twelve action
+/// labels, in its own order (`C4StartupOptionsDlg.cpp:166-169`). The built-in
+/// [`CONTROL_KEY_LABELS`] are the shipped US text and remain the fallback for a
+/// key the active language table does not carry.
+pub const CONTROL_KEY_LABEL_KEYS: [&str; CONTROL_KEY_COUNT] = [
+    "IDS_CTL_SELECTLEFT",
+    "IDS_CTL_SELECTTOGGLE",
+    "IDS_CTL_SELECTRIGHT",
+    "IDS_CTL_THROW",
+    "IDS_CTL_UPJUMP",
+    "IDS_CTL_DIG",
+    "IDS_CTL_LEFT",
+    "IDS_CTL_DOWNSTOP",
+    "IDS_CTL_RIGHT",
+    "IDS_CTL_PLAYERMENU",
+    "IDS_CTL_SPECIAL1",
+    "IDS_CTL_SPECIAL2",
+];
+
+/// The action label for `control`, resolved through the active language table
+/// and falling back to the shipped US text.
+pub fn control_key_label(control: usize, resources: &dyn Fn(&str) -> Option<String>) -> String {
+    CONTROL_KEY_LABEL_KEYS
+        .get(control)
+        .and_then(|key| resources(key))
+        .filter(|label| !label.is_empty())
+        .or_else(|| {
+            CONTROL_KEY_LABELS
+                .get(control)
+                .map(|label| (*label).to_owned())
+        })
+        .unwrap_or_default()
+}
+
+/// The four control facets and where they live in their source images
+/// (`C4GraphicsResource.cpp:200-203,229`). `fctKeyboard`, `fctCommand` and
+/// `fctKey` are sub-rects of one `Control.png`; `fctGamepad` is its own
+/// `Gamepad.png` loaded with an 80px phase width.
+pub mod control_facets {
+    use crate::classic_gui::IntRect;
+
+    /// `fctKeyboard.Set(&sfcControl, 0, 0, 80, 36)` — one phase per control set.
+    pub const KEYBOARD: IntRect = IntRect {
+        x: 0,
+        y: 0,
+        w: 80,
+        h: 36,
+    };
+    /// `fctCommand.Set(&sfcControl, 0, 36, 32, 32)` — one phase per command.
+    pub const COMMAND: IntRect = IntRect {
+        x: 0,
+        y: 36,
+        w: 32,
+        h: 32,
+    };
+    /// `fctKey.Set(&sfcControl, 0, 100, 64, 64)` — phase 0 idle, 1 pressed.
+    pub const KEY: IntRect = IntRect {
+        x: 0,
+        y: 100,
+        w: 64,
+        h: 64,
+    };
+    /// `LoadFile(fctGamepad, "Gamepad", Files, 80)` — phase width, own image.
+    pub const GAMEPAD_PHASE_WIDTH: i32 = 80;
+
+    /// The source rect of `phase` within a facet whose cells run left to right.
+    pub fn phase_rect(cell: IntRect, phase: usize) -> IntRect {
+        IntRect {
+            x: cell.x + cell.w * phase as i32,
+            ..cell
+        }
+    }
+}
+
+/// Which facet cell a device selector shows. `C4StartupOptionsDlg` draws
+/// `fctKeyboard`/`fctGamepad` phases rather than a text button
+/// (`C4StartupOptionsDlg.cpp:215-345`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceSelectorFacet {
+    /// `fctKeyboard` for a keyboard set, `fctGamepad` for a gamepad set.
+    pub device: ControlDevice,
+    /// Zero-based control-set index, which is the facet phase.
+    pub phase: usize,
+}
+
+/// The facets a key binding button composes, in draw order
+/// (`C4StartupOptionsDlg::KeySelButton::DrawElement`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyButtonFacets {
+    /// `fctKey.Draw(cgoDraw, true, fDown)` — the key cap, phase 1 while held.
+    pub key_phase: usize,
+    /// Where `fctCommand` is drawn, inset from the cap.
+    pub command_rect: IntRect,
+    /// `fctCommand.Draw(cgoDraw, true, iKeyID, 0)` — the command glyph's phase.
+    pub command_phase: usize,
+}
+
+/// `KeySelButton::DrawElement`'s inset: the command glyph sits a fifth of the
+/// button's width inside the key cap horizontally, three quarters of that
+/// above, and a held button nudges it down by half an indent so the glyph
+/// follows the cap.
+pub fn key_button_facets(bounds: IntRect, key_id: usize, down: bool) -> KeyButtonFacets {
+    let indent = bounds.w / 5;
+    let mut command = IntRect {
+        x: bounds.x + indent,
+        y: bounds.y + indent * 3 / 4,
+        w: bounds.w - 2 * indent,
+        h: bounds.h - 2 * indent,
+    };
+    if down {
+        command.y += indent / 2;
+    }
+    KeyButtonFacets {
+        key_phase: usize::from(down),
+        command_rect: command,
+        command_phase: key_id,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlDevice {
     Keyboard,
@@ -268,6 +387,113 @@ pub fn control_sheet_hit_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C4StartupOptionsDlg.cpp:215-345 — the device selectors are facet phases,
+    // the key buttons compose fctKey + an inset fctCommand, and the action
+    // labels come from the IDS_CTL_* table rather than baked English.
+    #[test]
+    fn startup_options_control_sheets_render_classic_facets_and_resource_text() {
+        // A selector names its device facet and takes the set index as phase.
+        for set in 0..CONTROL_SET_COUNT {
+            let keyboard = DeviceSelectorFacet {
+                device: ControlDevice::Keyboard,
+                phase: set,
+            };
+            assert_eq!(keyboard.phase, set);
+            assert_eq!(keyboard.device, ControlDevice::Keyboard);
+        }
+
+        // KeySelButton::DrawElement's inset: a fifth of the width either side,
+        // three quarters of that above, two indents off the height.
+        let bounds = IntRect {
+            x: 100,
+            y: 40,
+            w: 40,
+            h: 40,
+        };
+        let released = key_button_facets(bounds, 7, false);
+        assert_eq!(released.key_phase, 0, "an idle cap uses phase 0");
+        assert_eq!(released.command_phase, 7, "the command phase is the key id");
+        let indent = 40 / 5;
+        assert_eq!(
+            released.command_rect,
+            IntRect {
+                x: 100 + indent,
+                y: 40 + indent * 3 / 4,
+                w: 40 - 2 * indent,
+                h: 40 - 2 * indent,
+            }
+        );
+
+        // A held cap switches phase and nudges the glyph down half an indent,
+        // so it follows the pressed key.
+        let held = key_button_facets(bounds, 7, true);
+        assert_eq!(held.key_phase, 1);
+        assert_eq!(held.command_rect.y, released.command_rect.y + indent / 2);
+        assert_eq!(held.command_rect.x, released.command_rect.x);
+        assert_eq!(held.command_rect.w, released.command_rect.w);
+
+        // A button too narrow to indent degrades without inverting the rect.
+        let narrow = key_button_facets(
+            IntRect {
+                w: 3,
+                h: 3,
+                ..bounds
+            },
+            0,
+            false,
+        );
+        assert_eq!(narrow.command_rect.w, 3);
+        assert_eq!(narrow.command_rect.h, 3);
+
+        // Labels resolve through the language table in C++'s key order.
+        let table = |key: &str| match key {
+            "IDS_CTL_SELECTLEFT" => Some("Links wählen".to_owned()),
+            "IDS_CTL_THROW" => Some(String::new()),
+            _ => None,
+        };
+        assert_eq!(control_key_label(0, &table), "Links wählen");
+        // An empty or missing entry falls back to the shipped US text.
+        assert_eq!(control_key_label(3, &table), "Throw");
+        assert_eq!(control_key_label(5, &table), "Dig");
+        assert_eq!(CONTROL_KEY_LABEL_KEYS.len(), CONTROL_KEY_LABELS.len());
+        assert_eq!(CONTROL_KEY_LABEL_KEYS[11], "IDS_CTL_SPECIAL2");
+
+        // A selector's phase steps one cell per control set, and the gamepad
+        // facet is a separate image whose phase width is 80
+        // (C4StartupOptionsDlg.cpp:271; C4GraphicsResource.cpp:229).
+        let gamepad_cell = IntRect {
+            x: 0,
+            y: 0,
+            w: control_facets::GAMEPAD_PHASE_WIDTH,
+            h: 36,
+        };
+        assert_eq!(control_facets::phase_rect(gamepad_cell, 2).x, 160);
+        assert_eq!(
+            control_facets::phase_rect(control_facets::KEYBOARD, 2).x,
+            160,
+            "both selectors advance by their own phase width"
+        );
+
+        // The facet source rects come from one Control.png, except the gamepad
+        // selector which is its own image (C4GraphicsResource.cpp:200-203,229).
+        use control_facets::{phase_rect, COMMAND, GAMEPAD_PHASE_WIDTH, KEY, KEYBOARD};
+        assert_eq!(
+            (KEYBOARD.x, KEYBOARD.y, KEYBOARD.w, KEYBOARD.h),
+            (0, 0, 80, 36)
+        );
+        assert_eq!(
+            (COMMAND.x, COMMAND.y, COMMAND.w, COMMAND.h),
+            (0, 36, 32, 32)
+        );
+        assert_eq!((KEY.x, KEY.y, KEY.w, KEY.h), (0, 100, 64, 64));
+        assert_eq!(GAMEPAD_PHASE_WIDTH, 80);
+        // Phases run left to right from the cell's own origin.
+        assert_eq!(phase_rect(KEY, 0), KEY);
+        assert_eq!(phase_rect(KEY, 1).x, KEY.x + KEY.w);
+        assert_eq!(phase_rect(COMMAND, 3).x, COMMAND.x + 3 * COMMAND.w);
+        assert_eq!(phase_rect(COMMAND, 3).y, COMMAND.y);
+    }
 
     fn labels(prefix: &str) -> [[String; CONTROL_KEY_COUNT]; CONTROL_SET_COUNT] {
         std::array::from_fn(|set| {

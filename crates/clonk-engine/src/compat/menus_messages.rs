@@ -1,4 +1,5 @@
 use super::*;
+use clonk_core::log_target::{SCRIPT_LOG_TARGET, SCRIPT_PROFILER_TARGET, SCRIPT_TRACE_TARGET};
 
 /// `FnTestMessageBoard` (C4Script.cpp:3564-3573): invalid players return
 /// nil. The ordinary multi-query availability probe is always true for a
@@ -900,7 +901,7 @@ fn menu_selection_changed(menu_object: ObjectId, menu: &crate::ObjectMenuState) 
         None
     };
     if let Some(Err(error)) = result {
-        tracing::warn!(
+        tracing::debug!(
             %error,
             "script error in OnMenuSelection; continuing like the C++ fail-safe exec"
         );
@@ -1049,7 +1050,7 @@ fn build_frame_decoration_snapshot(deco_id: &str) -> Option<crate::ObjectMenuFra
         match call_scoped_script_function(Arc::clone(&script), &function, &[]) {
             Some(Ok(value)) => value.as_c4_int().unwrap_or(0),
             Some(Err(error)) => {
-                tracing::warn!(%error, function, "frame-decoration callback failed; using zero");
+                tracing::debug!(%error, function, "frame-decoration callback failed; using zero");
                 0
             }
             None => 0,
@@ -1360,8 +1361,10 @@ fn log_internal(function: &str, args: &[Value], level: LogLevel) -> Result<Value
     let formatted = format_script_string(function, &format_str, format_args)?;
 
     match level {
-        LogLevel::Info => info!(target: "clonk-script", "{}", formatted),
-        LogLevel::Debug => debug!(target: "clonk-script", "{}", formatted),
+        LogLevel::Info => info!(target: SCRIPT_LOG_TARGET, "{}", formatted),
+        LogLevel::Debug => {
+            debug!(target: clonk_core::log_target::SCRIPT_DEBUG_LOG_TARGET, "{}", formatted)
+        }
     }
 
     Ok(Value::Bool(true))
@@ -1394,7 +1397,7 @@ pub(crate) fn fatal_error(args: &[Value]) -> Result<Value, RuntimeError> {
 pub(crate) fn start_call_trace(_args: &[Value]) -> Result<Value, RuntimeError> {
     if clonk_script::caller_host_identity().is_some() {
         clonk_script::start_call_trace(|message| {
-            info!(target: "clonk-script-trace", "{message}");
+            info!(target: SCRIPT_TRACE_TARGET, "{message}");
         });
     }
     Ok(Value::Nil)
@@ -1424,8 +1427,8 @@ pub(crate) fn start_script_profiler(args: &[Value]) -> Result<Value, RuntimeErro
 
 pub(crate) fn stop_script_profiler(_args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(entries) = clonk_script::stop_script_profiler() {
-        info!(target: "clonk-script-profiler", "Profiler statistics:");
-        info!(target: "clonk-script-profiler", "==============================");
+        info!(target: SCRIPT_PROFILER_TARGET, "Profiler statistics:");
+        info!(target: SCRIPT_PROFILER_TARGET, "==============================");
         for entry in entries {
             let function = if entry.direct_exec {
                 entry.function
@@ -1452,13 +1455,13 @@ pub(crate) fn stop_script_profiler(_args: &[Value]) -> Result<Value, RuntimeErro
                 }
             };
             info!(
-                target: "clonk-script-profiler",
+                target: SCRIPT_PROFILER_TARGET,
                 "{:05}ms\t{}",
                 entry.elapsed.as_millis(),
                 function
             );
         }
-        info!(target: "clonk-script-profiler", "==============================");
+        info!(target: SCRIPT_PROFILER_TARGET, "==============================");
     }
     Ok(Value::Nil)
 }

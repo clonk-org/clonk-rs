@@ -22,14 +22,14 @@ where
     let exit = loop {
         let command = tokio::select! {
             biased;
-            _ = wait_for_route_retirement(&mut cancel_rx) => {
-                break ClientRouteWriterExit::Cancelled;
-            }
             command = outbound_rx.recv() => {
                 let Some(command) = command else {
                     break ClientRouteWriterExit::OutboundClosed;
                 };
                 command
+            }
+            _ = wait_for_route_retirement(&mut cancel_rx) => {
+                break ClientRouteWriterExit::Cancelled;
             }
         };
         let message = match command {
@@ -1389,6 +1389,15 @@ pub(crate) async fn run_client_loop_with_routes(
                         // stands.
                         peer_capabilities.record(HOST_CLIENT_ID as i32, capabilities);
                     }
+                    // Only the host restarts the session, so a notice relayed
+                    // by a peer client says nothing about the host's intent.
+                    Ok(ControlMessage::HostRestarting { .. })
+                        if ingress_peer_id != HOST_CLIENT_ID => {}
+                    Ok(ControlMessage::HostRestarting { rejoin_seconds }) => {
+                        let _ = event_tx
+                            .send(ClientEvent::HostRestarting { rejoin_seconds })
+                            .await;
+                    }
                     Ok(ControlMessage::Ping(packet)) => {
                         if let Err(error) = transport.send_message(ControlMessage::Pong(packet)).await {
                             let _ = event_tx
@@ -1692,9 +1701,18 @@ pub(crate) async fn run_client_loop_with_routes(
                             // its own ticks and, through lockstep, everybody
                             // else's. Narrow the window now that there is
                             // control to protect.
+                            // The backend's catalog is the one that schedules
+                            // whenever there is a backend, so narrowing only the
+                            // bare fallback would leave the lobby window in
+                            // force for the entire runtime join.
                             resource_state.catalog.set_max_loads_per_peer(
                                 crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME,
                             );
+                            if let Some(backend) = resource_state.backend.as_mut() {
+                                backend.set_max_loads_per_peer(
+                                    crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME,
+                                );
+                            }
                             let current_tick = Tick::try_from(status.target_tick).unwrap_or_else(
                                 |_| resource_state.control.coordinator.current_tick(),
                             );
@@ -2330,5 +2348,71 @@ fn apply_client_membership(
             ClientId::try_from(remove.client_id).ok()
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct RetireAfterFlushWriter {
+        retire: watch::Sender<bool>,
+    }
+
+    impl AsyncWrite for RetireAfterFlushWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buffer.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.retire.send_replace(true);
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_writer_completes_flushed_part_before_racing_route_retirement() {
+        // C++ handles a negative PID_ConnRe and immediately closes the route;
+        // a successful preceding send remains successful
+        // (oracle-src-pinned src/C4Network2.cpp:1459-1469;
+        // src/C4Network2Client.cpp:104-116).
+        let (retire, retire_rx) = watch::channel(false);
+        let (outbound, outbound_rx) = mpsc::unbounded_channel();
+        let (completion, completed) = oneshot::channel();
+        outbound
+            .send(ClientRouteCommand::Message(
+                ControlMessage::ConnectionReply(crate::ConnectionReply {
+                    ok: false,
+                    message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+                        .unwrap_or_default(),
+                    wrong_password: false,
+                }),
+            ))
+            .expect("queue graceful part");
+        outbound
+            .send(ClientRouteCommand::Flush(completion))
+            .expect("queue graceful-part flush");
+
+        let exit = run_client_route_writer(
+            crate::ControlTransport::new(RetireAfterFlushWriter { retire }),
+            outbound_rx,
+            retire_rx,
+        )
+        .await;
+
+        assert!(matches!(exit, ClientRouteWriterExit::Cancelled));
+        completed
+            .await
+            .expect("flushed graceful part must complete before route retirement");
     }
 }

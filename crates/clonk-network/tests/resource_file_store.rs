@@ -75,10 +75,13 @@ fn cpp_local_complete_registration_retains_non_temporary_file() {
 }
 
 #[test]
-fn cpp_chunk_reads_use_core_offset_but_fixed_100k_length_cap() {
-    // C4Network2ResChunk::Set offsets by Core.ChunkSize, but sizes with
-    // min(FileSize-offset, C4NetResChunkSize), the fixed 100 KiB constant
-    // (src/C4Network2Res.cpp:1230-1260; constant at C4Network2Res.h:27).
+fn cpp_chunk_reads_offset_and_size_by_the_core_chunk_size() {
+    // C4Network2ResChunk::Set offsets by Core.ChunkSize and sizes with
+    // min(FileSize-offset, C4NetResChunkSize) (src/C4Network2Res.cpp:1268-1269;
+    // constant at C4Network2Res.h:27). Both terms are the same value in C++,
+    // which only ever publishes ChunkSize = C4NetResChunkSize
+    // (src/C4Network2Res.cpp:81, :89), so sizing by the core's own stride is the
+    // form that stays correct once a smaller stride is published.
     let directory = TestDirectory::new();
     let path = directory.path().join("local.bin");
     fs::write(&path, b"0123456789").unwrap();
@@ -91,10 +94,22 @@ fn cpp_chunk_reads_use_core_offset_but_fixed_100k_length_cap() {
         )
         .unwrap();
 
-    assert_eq!(store.read_chunk(9, 0).unwrap(), b"0123456789");
-    assert_eq!(store.read_chunk(9, 1).unwrap(), b"456789");
+    assert_eq!(store.read_chunk(9, 0).unwrap(), b"0123");
+    assert_eq!(store.read_chunk(9, 1).unwrap(), b"4567");
     assert_eq!(store.read_chunk(9, 2).unwrap(), b"89");
     assert!(store.read_chunk(9, 3).is_err());
+
+    // At C++'s own chunk size the two forms coincide, so a stock peer sees the
+    // byte-identical single-chunk read it always did.
+    store
+        .register_local_complete(
+            &core_with_crc(10, b"stock.bin", 10, 100 * 1024, 0xa684_c7c6),
+            &path,
+            ResourceFileOwnership::Persistent,
+        )
+        .unwrap();
+    assert_eq!(store.read_chunk(10, 0).unwrap(), b"0123456789");
+    assert!(store.read_chunk(10, 1).is_err());
 }
 
 #[test]
@@ -387,4 +402,31 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+/// A full transfer has to move the file exactly once. `C4Network2ResChunk::Set`
+/// offsets by `Core.ChunkSize` but sizes with `min(FileSize - offset,
+/// C4NetResChunkSize)` (`src/C4Network2Res.cpp:1268-1269`). Those two forms
+/// agree only because every core C++ publishes carries `ChunkSize =
+/// C4NetResChunkSize` (`src/C4Network2Res.cpp:81`, `:89`). This port publishes
+/// 10 KiB cores, so copying the fixed cap literally overlaps each chunk with the
+/// next nine and puts ten times the file on the wire for one delivery.
+#[test]
+fn serving_every_chunk_moves_the_file_exactly_once() {
+    let directory = TestDirectory::new();
+    let path = directory.path().join("bulk.bin");
+    fs::write(&path, b"0123456789").unwrap();
+    let mut store = ResourceFileStore::new(directory.path()).unwrap();
+    store
+        .register_local_complete(
+            &core_with_crc(11, b"bulk.bin", 10, 4, 0xa684_c7c6),
+            &path,
+            ResourceFileOwnership::Persistent,
+        )
+        .unwrap();
+
+    let served: usize = (0..3)
+        .map(|chunk| store.read_chunk(11, chunk).unwrap().len())
+        .sum();
+    assert_eq!(served, 10);
 }

@@ -12,7 +12,9 @@
 
 #strict
 
-#appendto RL5B
+// `nowarn`: the rocket launcher ships with EkeReloaded, so every other
+// scenario links this script with the target absent (C4AulLink.cpp:42-49).
+#appendto RL5B nowarn
 
 func ControlLeftReleased()  { return(StopGuidedTurn("Left")); }
 func ControlRightReleased() { return(StopGuidedTurn("Right")); }

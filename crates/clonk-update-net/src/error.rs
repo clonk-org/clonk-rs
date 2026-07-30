@@ -14,6 +14,10 @@ pub enum TransportError {
     UnsafeReleaseVersion(String),
     #[error("component archive {0:?} is not a plain asset file name")]
     UnsafeArchiveName(String),
+    #[error("update release repository {0:?} is not a plain owner/name pair")]
+    UnsafeReleaseRepository(String),
+    #[error("update release tag {0:?} is not a plain tag name")]
+    UnsafeReleaseTag(String),
     #[error("update URL {url:?} cannot be parsed")]
     InvalidUrl { url: String },
     #[error("the update HTTP client could not be built: {0}")]

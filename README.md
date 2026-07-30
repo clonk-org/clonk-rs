@@ -70,6 +70,11 @@ To build a distributable package for the current platform:
 cargo xtask package
 ```
 
+On macOS a release ships one universal `.app`. That needs both architectures
+installed (`rustup target add aarch64-apple-darwin x86_64-apple-darwin`); with
+only the host one, the command logs a warning and packages a
+single-architecture build named after the host triple.
+
 Contributor documentation lives in [`AGENTS.md`](AGENTS.md) and
 [`PORT_STATUS.md`](PORT_STATUS.md).
 

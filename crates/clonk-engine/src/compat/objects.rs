@@ -2141,7 +2141,7 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
         match call_world_object_own_function(target, function, pars) {
             Some(Ok(value)) => value,
             Some(Err(error)) => {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     object = target.as_u64(),
                     callback = function,
@@ -3190,7 +3190,7 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         ) {
             Some(Ok(value)) => value.as_bool(),
             Some(Err(error)) => {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     "script error in ControlContents; continuing like the C++ fail-safe exec"
                 );
@@ -3234,7 +3234,7 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         ) {
             Some(Ok(value)) => value.as_bool(),
             Some(Err(error)) => {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     "script error in Selection; continuing like the C++ fail-safe exec"
                 );
@@ -4946,7 +4946,7 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
     if let Some(Err(error)) = call_world_object_own_function(target, "Construction", &[creator_arg])
     {
-        tracing::warn!(
+        tracing::debug!(
             id = target.as_u64(),
             callback = "Construction",
             %error,
@@ -5030,7 +5030,7 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     if crossed_full_con {
         for callback in ["Completion", "Initialize"] {
             if let Some(Err(error)) = call_world_object_own_function(target, callback, &[]) {
-                tracing::warn!(
+                tracing::debug!(
                     id = target.as_u64(),
                     callback,
                     %error,
@@ -5303,7 +5303,7 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(Err(error)) =
             call_world_object_own_function(target, "Construction", &[creator_arg])
         {
-            tracing::warn!(
+            tracing::debug!(
                 id = target.as_u64(),
                 callback = "Construction",
                 %error,
@@ -5366,7 +5366,7 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         });
         if crossed_full_con {
             if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
-                tracing::warn!(
+                tracing::debug!(
                     id = target.as_u64(),
                     callback = "Completion",
                     %error,
@@ -5378,7 +5378,7 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
             if !removed {
                 if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[])
                 {
-                    tracing::warn!(
+                    tracing::debug!(
                         id = target.as_u64(),
                         callback = "Initialize",
                         %error,
@@ -5647,7 +5647,7 @@ fn finish_placement_object_creation(
 
     if let Some(Err(error)) = call_world_object_own_function(target, "Construction", &[Value::Nil])
     {
-        tracing::warn!(
+        tracing::debug!(
             id = target.as_u64(),
             callback = "Construction",
             %error,
@@ -5702,7 +5702,7 @@ fn finish_placement_object_creation(
     });
     if crossed_full_con {
         if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
-            tracing::warn!(
+            tracing::debug!(
                 id = target.as_u64(),
                 callback = "Completion",
                 %error,
@@ -5712,7 +5712,7 @@ fn finish_placement_object_creation(
         let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
         if !removed {
             if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[]) {
-                tracing::warn!(
+                tracing::debug!(
                     id = target.as_u64(),
                     callback = "Initialize",
                     %error,
@@ -6284,7 +6284,7 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
     let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
     if let Some(Err(error)) = call_world_object_own_function(target, "Construction", &[creator_arg])
     {
-        tracing::warn!(
+        tracing::debug!(
             id = target.as_u64(),
             callback = "Construction",
             %error,
@@ -6375,7 +6375,7 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
     if crossed_full_con {
         for callback in ["Completion", "Initialize"] {
             if let Some(Err(error)) = call_world_object_own_function(target, callback, &[]) {
-                tracing::warn!(
+                tracing::debug!(
                     id = target.as_u64(),
                     callback,
                     %error,

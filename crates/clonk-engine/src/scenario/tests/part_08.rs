@@ -478,6 +478,47 @@
         assert!(!landscape.is_solid_at(2, 0));
     }
 
+    fn build_packed_material_enumeration_classifier(
+        mat_map: Option<&[u8]>,
+    ) -> Result<MapPixelClassifier, ScenarioError> {
+        let dir = tempdir().expect("tempdir");
+        // C4MaterialMap::Load enumerates the physical C4Group entry cores
+        // (src/C4Material.cpp:242-276). A packed fixture therefore pins the
+        // intended A, B, C order independently of host directory enumeration.
+        let mut materials = clonk_resources::MutableGroup::new("Material.c4g");
+        materials
+            .add_file("TexMap.txt", b"# dynamic slots only\n".to_vec())
+            .expect("add texmap");
+        for (name, density) in [("A", 60), ("B", 70), ("C", 80)] {
+            materials
+                .add_file(
+                    format!("{name}.c4m"),
+                    format!(
+                        "[Material]\nName={name}\nDensity={density}\nTextureOverlay=Smooth\n"
+                    )
+                    .into_bytes(),
+                )
+                .expect("add material");
+        }
+        materials
+            .add_file("Smooth.bmp", encode_indexed_bmp(&[&[0u8]]))
+            .expect("add texture");
+        std::fs::write(
+            dir.path().join("Material.c4g"),
+            materials.pack().expect("pack materials"),
+        )
+        .expect("write materials");
+        if let Some(mat_map) = mat_map {
+            std::fs::write(dir.path().join("MatMap.txt"), mat_map).expect("write MatMap");
+        }
+
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let resolver = FileSystemResolver { roots: Vec::new() };
+        build_map_pixel_classifier(&group, &resolver)?.ok_or_else(|| {
+            ScenarioError::InvalidLandscape("material classifier was not built".to_string())
+        })
+    }
+
     #[test]
     fn material_enumeration_pairwise_swaps_before_crossmap_like_cpp() {
         // Raw A,B,C plus the prefix enumeration C must become C,B,A: C++
@@ -485,7 +526,7 @@
         // it. The same order must drive both MaterialIds and dynamic texmap
         // allocation (before CrossMapMaterials).
         let classifier =
-            build_material_enumeration_classifier(Some(b"ignored [Enumeration]\r\nC\r\n"))
+            build_packed_material_enumeration_classifier(Some(b"ignored [Enumeration]\r\nC\r\n"))
                 .expect("enumerated classifier builds");
         let library = classifier.material_library().expect("materials loaded");
         assert_eq!(
@@ -544,8 +585,8 @@
 
     #[test]
     fn missing_material_enumeration_keeps_fresh_scenario_load_order() {
-        let classifier =
-            build_material_enumeration_classifier(None).expect("fresh classifier builds");
+        let classifier = build_packed_material_enumeration_classifier(None)
+            .expect("fresh classifier builds");
         assert_eq!(
             classifier
                 .material_library()

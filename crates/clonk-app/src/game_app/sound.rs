@@ -118,18 +118,14 @@ impl GameApp {
         Ok(())
     }
 
-    fn persist_audio_option(&self, key: &'static str, enabled: bool) {
-        let Some(paths) = self.app_paths.as_ref() else {
-            return;
-        };
+    fn persist_audio_option(&mut self, key: &'static str, enabled: bool) {
         // C4ConfigSound::CompileFunc serializes RXSound/RXMusic/FEMusic/
         // FESamples as the external [Sound] Sound/Music/MenuMusic/MenuSound
-        // keys. Rust saves eagerly; a write failure must not roll back the
-        // live toggle, just as C++ ignores a later Config.Save failure during
-        // normal application shutdown.
-        if let Err(error) = persist_config_value(paths, "Sound", key, enabled.to_string()) {
-            tracing::warn!(%error, key, "failed to persist audio option");
-        }
+        // keys. `C4SoundSystem::ToggleOnOff` changes only the in-memory flag;
+        // the file is written when the Options dialog closes or on a clean
+        // shutdown, so a toggle flipped back and forth costs no disk writes and
+        // an aborted run discards it.
+        self.deferred_config.set("Sound", key, enabled.to_string());
     }
 
     pub(crate) fn set_frontend_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {
@@ -861,12 +857,17 @@ impl GameApp {
                     self.handle_game_over()?;
                 }
                 self.refresh_object_menu();
-                // C4Menu::Execute refills permanent hostility pages whenever
+                // C4Menu::Execute refills every active menu whenever
                 // Game.iTick35 wraps, picking up joins, removals and changed
-                // visibility even when no hostility control just executed.
+                // visibility even when no control just executed.
                 if self.engine.frame().is_multiple_of(35) {
                     self.refresh_hostility_menus();
+                    self.refresh_team_menus();
                 }
+                // C4RoundResults::EvaluatePlayer runs inside the simulation
+                // when a player is evaluated, retired or eliminated, and
+                // copies its BigIcon then (src/C4RoundResults.cpp:338-344).
+                self.freeze_evaluated_player_big_icons();
                 // Tooltip delay counter (C4Menu::Draw, C4Menu.cpp:805).
                 for menu in self.ingame_menu.values_mut() {
                     menu.tick();

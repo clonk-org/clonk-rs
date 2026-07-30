@@ -1,4 +1,5 @@
 use super::*;
+use clonk_core::log_target::SCRIPT_LOG_TARGET;
 
 fn parse_player_type_filter(value: Option<&Value>, function: &str) -> Result<i32, RuntimeError> {
     match value {
@@ -882,7 +883,7 @@ pub(crate) fn get_team_config(args: &[Value]) -> Result<Value, RuntimeError> {
         "config value",
     )?;
     if !(1..=7).contains(&query) {
-        error!(target: "clonk-script", "GetTeamConfig: Unknown config value: {query}");
+        error!(target: SCRIPT_LOG_TARGET, "GetTeamConfig: Unknown config value: {query}");
         return Ok(Value::Nil);
     }
     Ok(HOST_CONTEXT.with(|cell| {
@@ -1309,7 +1310,7 @@ pub(crate) fn set_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError>
     if !is_extra_data_identifier(name) {
         let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
         tracing::error!(
-            target: "clonk-script",
+            target: SCRIPT_LOG_TARGET,
             "SetCrewExtraData: Ignoring invalid data name \"{}\"! Only alphanumerics, _ and - are allowed.",
             escaped_name
         );
@@ -3143,7 +3144,7 @@ pub(crate) fn get_mission_access(args: &[Value]) -> Result<Value, RuntimeError> 
         };
         if context.world.control_sync_mode {
             tracing::warn!(
-                target: "clonk-script",
+                target: SCRIPT_LOG_TARGET,
                 "using GetMissionAccess may cause desyncs when playing records!"
             );
         }
@@ -3152,16 +3153,24 @@ pub(crate) fn get_mission_access(args: &[Value]) -> Result<Value, RuntimeError> 
     })))
 }
 
-pub(crate) const DEFAULT_NEXT_MISSION_TEXT: &str = "&Next scenario";
-pub(crate) const DEFAULT_NEXT_MISSION_DESCRIPTION: &str = "Continue with the next scenario.";
+/// `LanguageUS.txt` values for `IDS_BTN_NEXTSCENARIO`/`IDS_DESC_NEXTSCENARIO`,
+/// which is what `C4ResStrTable` falls back to for a missing key. The host
+/// replaces them with the active language table through
+/// `Engine::set_next_mission_defaults`.
+pub const DEFAULT_NEXT_MISSION_TEXT: &str = "&Next scenario";
+pub const DEFAULT_NEXT_MISSION_DESCRIPTION: &str = "Continue with the next scenario.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[doc(hidden)]
 pub enum NextMissionCommand {
     Set {
         path: String,
-        text: String,
-        description: String,
+        /// `None` when the script omitted the argument, which is the case
+        /// `FnSetNextMission` answers with `LoadResStr`
+        /// (C4Script.cpp:6244-6259). An explicit empty string stays empty,
+        /// because `C4String::Data.getData()` is non-null for it.
+        text: Option<String>,
+        description: Option<String>,
     },
     Clear,
 }
@@ -3171,10 +3180,8 @@ pub(crate) fn set_next_mission(args: &[Value]) -> Result<Value, RuntimeError> {
     let command = match path.filter(|path| !path.is_empty()) {
         Some(path) => NextMissionCommand::Set {
             path,
-            text: parse_optional_string(args.get(1), "SetNextMission", "button text")?
-                .unwrap_or_else(|| DEFAULT_NEXT_MISSION_TEXT.to_string()),
-            description: parse_optional_string(args.get(2), "SetNextMission", "description")?
-                .unwrap_or_else(|| DEFAULT_NEXT_MISSION_DESCRIPTION.to_string()),
+            text: parse_optional_string(args.get(1), "SetNextMission", "button text")?,
+            description: parse_optional_string(args.get(2), "SetNextMission", "description")?,
         },
         None => NextMissionCommand::Clear,
     };
@@ -4041,7 +4048,7 @@ fn call_crew_selection_callback(target: ObjectId, unselect: bool, cursor: bool) 
         "CrewSelection",
         &[Value::Bool(unselect), Value::Bool(cursor)],
     ) {
-        tracing::warn!(
+        tracing::debug!(
             object = %target,
             error = %error,
             "script error in crew selection callback; continuing like the C++ fail-safe exec"

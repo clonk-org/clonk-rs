@@ -24,6 +24,18 @@ pub mod compat;
 mod control;
 mod control_execution;
 mod definition;
+pub mod developer_components;
+pub mod developer_cursor;
+pub mod developer_file_monitor;
+pub mod developer_inspection;
+pub mod developer_landscape;
+pub mod developer_locals;
+pub mod developer_overlay;
+pub mod developer_property_text;
+pub mod developer_reload;
+pub mod developer_selection;
+pub mod developer_tools;
+pub mod developer_viewport;
 mod direct_com;
 #[doc(hidden)]
 pub mod effect;
@@ -6769,7 +6781,7 @@ impl ScenarioScript {
                     None,
                 );
                 if let EngineError::Script { source, .. } = &error {
-                    tracing::warn!(
+                    tracing::debug!(
                         script = %script_name,
                         function,
                         %source,
@@ -7401,6 +7413,10 @@ struct HostRequestQueues {
 }
 
 pub struct Engine {
+    /// Active-language `IDS_BTN_NEXTSCENARIO`/`IDS_DESC_NEXTSCENARIO`, which
+    /// `FnSetNextMission` substitutes for omitted arguments. Presentation text
+    /// is host state, so it stays out of the serialized `EngineState`.
+    pub(crate) next_mission_defaults: (String, String),
     #[doc(hidden)]
     pub(crate) definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
@@ -9882,6 +9898,10 @@ impl Engine {
         let script_global_consts = clonk_script::new_global_variables();
         script_constants::register_script_constants_in_global_table(&script_global_consts);
         let mut engine = Self {
+            next_mission_defaults: (
+                compat::DEFAULT_NEXT_MISSION_TEXT.to_string(),
+                compat::DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
+            ),
             definitions: HashMap::new(),
             definition_load_order: Vec::new(),
             runtime_definition_order: Rc::new(Vec::new()),
@@ -10295,6 +10315,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
     let component_order =
         normalized_component_order(&snapshot.components, snapshot.component_order.clone(), &[]);
     ObjectState {
+        view_energy: 0,
         custom_name: snapshot.custom_name.clone(),
         script_fixed_position: None,
         script_fixed_velocity: None,
@@ -10773,7 +10794,7 @@ fn recover_effect_callback_error(
                     source,
                     recovery: _,
                 } => {
-                    tracing::warn!(
+                    tracing::debug!(
                         %definition,
                         function,
                         error = %source,

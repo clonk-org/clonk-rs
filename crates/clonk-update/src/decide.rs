@@ -28,7 +28,7 @@
 //! which is why it lives in [`should_check_for_updates`] — a separate function
 //! taking `now` explicitly — rather than in [`decide`].
 
-use crate::manifest::{Manifest, TargetArchive, SUPPORTED_SCHEMA};
+use crate::manifest::{ArchiveSource, Manifest, TargetArchive, SUPPORTED_SCHEMA};
 use crate::state::InstalledState;
 use semver::Version;
 use std::fmt;
@@ -50,6 +50,13 @@ pub struct PlannedComponent {
     /// the install root itself, which is how the engine component — whose
     /// archive already carries `bin/…` or `Contents/…` — is expressed.
     pub destination: PathBuf,
+    /// Which release holds the archive, when it is not this repository's own.
+    ///
+    /// `content` is built and published by the content repository, so its
+    /// archive lives in a different release entirely. Dropping this on the way
+    /// into the plan would send the fetcher to a clonk-rs release that has no
+    /// `content.zip` in it.
+    pub source: Option<ArchiveSource>,
 }
 
 /// Why an otherwise well-formed manifest will not be acted on.
@@ -224,6 +231,7 @@ pub fn decide(
             sha256: target.sha256.clone(),
             size: target.size,
             destination,
+            source: target.source.clone(),
         });
     }
 
@@ -278,6 +286,9 @@ mod tests {
     fn target(name: &str, sha: &str, install: &str) -> TargetArchive {
         TargetArchive {
             archive: format!("{name}-{sha}.zip"),
+            // Where a component is published does not enter the decision: what
+            // to fetch is decided by the digest, not by who hosts it.
+            source: None,
             sha256: sha.repeat(32),
             size: 1024,
             install: install.to_string(),
@@ -308,6 +319,49 @@ mod tests {
                 entry("engine", "ee", "", ""),
             ],
         }
+    }
+
+    #[test]
+    fn a_components_source_release_survives_into_the_plan() {
+        // `content` is built and published by the content repository, so its
+        // archive is in a different release. If the plan drops that, the
+        // fetcher resolves the name against a clonk-rs release which has no
+        // `content.zip` in it, and every content update 404s.
+        let mut manifest = manifest();
+        let content = manifest
+            .components
+            .iter_mut()
+            .find(|entry| entry.name == "content")
+            .expect("content entry");
+        for target in content.targets.values_mut() {
+            target.source = Some(ArchiveSource {
+                repo: "syb0rg/clonk-rs-content".to_string(),
+                tag: "content-d34d385".to_string(),
+            });
+        }
+
+        let Decision::Update { components, .. } = decide(&manifest, &None, "0.3.0", ENGINE, LINUX)
+        else {
+            panic!("a newer release with no recorded state is an update");
+        };
+
+        let planned = components
+            .iter()
+            .find(|component| component.name == "content")
+            .expect("content is planned");
+        let source = planned
+            .source
+            .as_ref()
+            .expect("the content source reached the plan");
+        assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+        assert_eq!(source.tag, "content-d34d385");
+
+        // Components published by this repository carry no source at all.
+        let engine = components
+            .iter()
+            .find(|component| component.name == "engine")
+            .expect("engine is planned");
+        assert!(engine.source.is_none());
     }
 
     fn installed_at(version: &str, content_sha: &str) -> InstalledState {

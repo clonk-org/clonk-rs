@@ -552,6 +552,24 @@ impl GameApp {
                     self.film_view_player = film_player;
                     self.physical_viewports_authoritative = true;
                 }
+                // Outside film mode ViewportCheck tells the user how to reach
+                // the observer menu the ownerless viewport just handed them
+                // (C4FullScreen.cpp:518-526). The key name follows the live
+                // registration, which C4Game::InitKeyboard put on K_SPACE
+                // (C4Game.cpp:3428).
+                if !self.engine.is_replay_film() {
+                    let key = format!(
+                        "<c ffff00><{}></c>",
+                        runtime_help_key_name(
+                            self.runtime_key_config().ok(),
+                            "FullscreenMenuOpen",
+                            0,
+                        )
+                    );
+                    self.runtime_flash_message = self.prepare_runtime_resource_flash(|resources| {
+                        format_resource_string(resources.observer_menu.clone(), &[&key])
+                    });
+                }
             }
             1 => {}
             _ => {
@@ -2554,6 +2572,8 @@ impl GameApp {
         defer_monitor_gamma: bool,
     ) -> Result<()> {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        self.graphics
+            .set_scroll_smooth(self.display_flags.scroll_smooth);
         self.graphics.set_renderer_config(
             self.display_flags.show_player_hud_always,
             self.display_flags.splitscreen_dividers,
@@ -2947,6 +2967,11 @@ impl GameApp {
                                     scroll_y: 0,
                                     scroll_selection: menu.selection,
                                     selection_needs_adjustment: true,
+                                    // A row count set before the first draw is
+                                    // discarded by that draw's InitLocation
+                                    // (C4Menu.cpp:713-721,796-797).
+                                    explicit_lines: None,
+                                    applied_menu_lines: menu.lines,
                                 },
                             );
                             time_on_selection
@@ -3008,11 +3033,19 @@ impl GameApp {
                 let hud_graphics = self.current_hud_graphics();
                 let allowed_blit_modes =
                     self.graphics.advanced_renderer_config().allowed_blit_modes;
+                // A Context ObjectRank facet is sized by the menu's resolved
+                // ItemHeight, which only the layout knows (C4Script.cpp:1721).
+                let context_item_height = (menu.style == 1).then(|| {
+                    // Without the classic set the row falls back to the
+                    // C4MN_SymbolSize floor, which is what the layout uses too.
+                    let line_height = fonts.as_deref().map_or(0, |fonts| fonts.text.line_height);
+                    clonk_app_menus::object_menu::classic_context_item_height(line_height)
+                });
                 let item_icons = menu
                     .items
                     .iter()
                     .map(|item| {
-                        object_menu_item_picture_with_renderer_modes(
+                        clonk_app_core::pictures::object_menu_item_picture_with_context_height(
                             &self.engine,
                             &self.snapshot,
                             item,
@@ -3021,6 +3054,7 @@ impl GameApp {
                             menu.style,
                             text_spec_resources,
                             allowed_blit_modes,
+                            context_item_height,
                         )
                     })
                     .collect::<Vec<_>>();
@@ -3059,19 +3093,37 @@ impl GameApp {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let (menu_location, retained_scroll_y, adjust_selection, initialize_location) =
-                    self.script_menu_presentations
-                        .get(&script_menu_owner)
-                        .filter(|state| same_script_menu_presentation(state, *target, menu))
-                        .map(|state| {
-                            (
-                                state.location,
-                                state.scroll_y,
-                                state.selection_needs_adjustment,
-                                state.location_needs_initialization,
-                            )
-                        })
-                        .unwrap_or((None, 0, true, false));
+                // C4Menu::SetSize assigns Lines without clearing LocationSet,
+                // so a SetMenuSize on an already-displayed menu keeps its
+                // explicit row count (C4Menu.cpp:635-640).
+                if let Some(state) = self
+                    .script_menu_presentations
+                    .get_mut(&script_menu_owner)
+                    .filter(|state| state.applied_menu_lines != menu.lines)
+                {
+                    state.explicit_lines = (menu.lines > 0).then_some(menu.lines);
+                    state.applied_menu_lines = menu.lines;
+                }
+                let (
+                    menu_location,
+                    retained_scroll_y,
+                    adjust_selection,
+                    initialize_location,
+                    explicit_lines,
+                ) = self
+                    .script_menu_presentations
+                    .get(&script_menu_owner)
+                    .filter(|state| same_script_menu_presentation(state, *target, menu))
+                    .map(|state| {
+                        (
+                            state.location,
+                            state.scroll_y,
+                            state.selection_needs_adjustment,
+                            state.location_needs_initialization,
+                            state.explicit_lines,
+                        )
+                    })
+                    .unwrap_or((None, 0, true, false, None));
                 let area = self
                     .graphics
                     .viewport_rect(script_menu_owner)
@@ -3092,6 +3144,7 @@ impl GameApp {
                             menu_location.expect("free anchor has a location"),
                             retained_scroll_y,
                             adjust_selection,
+                            explicit_lines,
                         )
                     } else {
                         engine_script_menu_layout_with_presentation(
@@ -3103,6 +3156,7 @@ impl GameApp {
                             menu_location,
                             retained_scroll_y,
                             adjust_selection,
+                            explicit_lines,
                         )
                     };
                     (
@@ -3121,6 +3175,7 @@ impl GameApp {
                         menu_location.expect("free anchor has a location"),
                         retained_scroll_y,
                         adjust_selection,
+                        explicit_lines,
                     )
                     .expect("supported dialog menu has presentation geometry");
                     (
@@ -3222,6 +3277,7 @@ impl GameApp {
                             script_menu_accepts_mouse,
                             script_menu_time,
                             Some(&frame_gamma),
+                            explicit_lines,
                         );
                         let modulation = Color::new(255, 255, 255, 0xaf);
                         surface.blit_region_modulated(
@@ -3253,6 +3309,7 @@ impl GameApp {
                             script_menu_accepts_mouse,
                             script_menu_time,
                             Some(&frame_gamma),
+                            explicit_lines,
                         );
                     }
                 }

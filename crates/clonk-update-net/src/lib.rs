@@ -28,5 +28,5 @@ pub use error::TransportError;
 pub use transport::{HttpTransport, UpdateTransport, MANIFEST_MAX_BYTES, MAX_REDIRECTS};
 pub use urls::{
     archive_url_for, component_archive_url, default_manifest_url, manifest_url,
-    ALLOWED_REDIRECT_HOSTS, DEFAULT_UPDATE_BASE_URL, MANIFEST_FILE_NAME,
+    published_archive_url, ALLOWED_REDIRECT_HOSTS, DEFAULT_UPDATE_BASE_URL, MANIFEST_FILE_NAME,
 };

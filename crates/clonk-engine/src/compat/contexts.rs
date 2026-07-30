@@ -1,4 +1,5 @@
 use super::*;
+use clonk_core::log_target::SCRIPT_LOG_TARGET;
 // `HostObjectContext::new` is the tests' positional constructor; the
 // engine builds scopes through `with_category`.
 #[cfg(test)]
@@ -290,7 +291,7 @@ pub(crate) fn call_object_own_fail_safe(target: ObjectId, function: &str, args: 
     match call_world_object_own_function(target, function, args) {
         Some(Ok(value)) => value,
         Some(Err(error)) => {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 object = target.as_u64(),
                 callback = function,
@@ -313,7 +314,7 @@ pub(crate) fn call_inflight_object_own_fail_safe(
     match call_world_object_own_function_inflight(target, function, args) {
         Some(Ok(value)) => value,
         Some(Err(error)) => {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 object = target.as_u64(),
                 callback = function,
@@ -1292,7 +1293,7 @@ pub(crate) fn locate_func(args: &[Value]) -> Result<Value, RuntimeError> {
     let definition = parse_native_c4id_argument(args.get(2), "LocateFunc")?;
 
     let Some(function) = function else {
-        error!(target: "clonk-script", "No func name");
+        error!(target: SCRIPT_LOG_TARGET, "No func name");
         return Ok(Value::Bool(false));
     };
 
@@ -1391,24 +1392,24 @@ pub(crate) fn locate_func(args: &[Value]) -> Result<Value, RuntimeError> {
     let (messages, found) = match lookup {
         Ok(result) => result,
         Err(LocateFuncContextError::InvalidDefinition) => {
-            error!(target: "clonk-script", "Invalid or unloaded def");
+            error!(target: SCRIPT_LOG_TARGET, "Invalid or unloaded def");
             return Ok(Value::Bool(false));
         }
         Err(LocateFuncContextError::NoValidContext) => {
-            error!(target: "clonk-script", "No valid script context");
+            error!(target: SCRIPT_LOG_TARGET, "No valid script context");
             return Ok(Value::Bool(false));
         }
     };
 
     if !found {
-        error!(target: "clonk-script", "Func {} not found", function);
+        error!(target: SCRIPT_LOG_TARGET, "Func {} not found", function);
         return Ok(Value::Bool(true));
     }
     for (index, message) in messages.into_iter().enumerate() {
         if index == 0 {
-            info!(target: "clonk-script", "{}", message);
+            info!(target: SCRIPT_LOG_TARGET, "{}", message);
         } else {
-            info!(target: "clonk-script", "overloads {}", message);
+            info!(target: SCRIPT_LOG_TARGET, "overloads {}", message);
         }
     }
     Ok(Value::Bool(true))

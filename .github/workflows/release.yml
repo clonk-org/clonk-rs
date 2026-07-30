@@ -74,26 +74,41 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       # Nothing here reviews the code, so refuse to release a tree whose own
-      # CI is failing. `Clonk Rust CI` runs on every push to main, so its
-      # latest conclusion is an accurate verdict on what is about to ship.
+      # CI is failing. Both workflows run on every push to main, so require
+      # their push verdicts for this exact commit rather than a nearby main tip.
+      #
+      # `Windows` is checked as well as `Clonk Rust CI` because the Windows
+      # binaries are built on their own runner and nothing else covers them:
+      # a shipped Windows build was once unable to start at all, and only that
+      # workflow would have caught it.
       - name: Require main's CI to be green
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force }}
+          CI_SHA: ${{ github.sha }}
         run: |
           # Tolerate a failing lookup: `set -e` would otherwise kill the step
           # here, before the force branch below could override anything — which
-          # is precisely when an override is wanted. An unknown conclusion is
+          # is precisely when an override is wanted. An unknown verdict is
           # treated as not-green, so it still blocks unless forced.
-          conclusion=$(gh run list --workflow "Clonk Rust CI" --branch main \
-            --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "none"' \
-            2>/dev/null || echo "unknown")
-          [[ -n "$conclusion" ]] || conclusion="unknown"
-          echo "latest Clonk Rust CI on main: $conclusion"
-          if [[ "$conclusion" == "success" ]]; then
+          conclusion=completed:success
+          for workflow in "Clonk Rust CI" "Windows"; do
+            latest=$(gh run list --workflow "$workflow" --branch main \
+              --commit "$CI_SHA" --event push \
+              --limit 1 --json status,conclusion \
+              --jq '[.[0].status // "none", .[0].conclusion // "none"] | join(":")' \
+              2>/dev/null || echo "unknown")
+            [[ -n "$latest" ]] || latest="unknown"
+            echo "$workflow push verdict for $CI_SHA: $latest"
+            if [[ "$latest" != "completed:success" ]]; then
+              conclusion="$latest"
+            fi
+          done
+          if [[ "$conclusion" == "completed:success" ]]; then
             exit 0
           fi
           if [[ "$FORCE" == "true" ]]; then
@@ -174,8 +189,40 @@ jobs:
               echo "prepared=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "v${version} was prepared earlier but never tagged; releasing it"
-            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            release_candidates=$(
+              git log --first-parent --format='%H%x09%s' |
+                awk -F '\t' -v expected="chore: release ${version}" \
+                  '$2 == expected { print $1 }'
+            )
+            release_candidate_count=$(
+              printf '%s\n' "$release_candidates" |
+                awk 'NF { count += 1 } END { print count + 0 }'
+            )
+            if [[ "$release_candidate_count" -eq 0 ]]; then
+              echo "v${version} is untagged, but no reachable 'chore: release ${version}' commit exists" >&2
+              exit 1
+            fi
+            if [[ "$release_candidate_count" -ne 1 ]]; then
+              echo "v${version} is untagged, but multiple reachable 'chore: release ${version}' commits exist" >&2
+              exit 1
+            fi
+            release_sha=$release_candidates
+            release_version=$(
+              git show "${release_sha}:Cargo.toml" |
+                python3 -c '
+          import re
+          import sys
+          text = sys.stdin.read()
+          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
+          print(re.search(r"""^version = "([^"]+)"$""", section.group(1), re.M).group(1))
+          '
+            )
+            if [[ "$release_version" != "$version" ]]; then
+              echo "${release_sha} contains workspace version ${release_version}, not ${version}" >&2
+              exit 1
+            fi
+            echo "v${version} was prepared earlier but never tagged; releasing ${release_sha}"
+            echo "sha=${release_sha}" >> "$GITHUB_OUTPUT"
             echo "prepared=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -263,7 +310,10 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.release == 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    # The Windows pass is the long pole: a native release build, a 299 MB
+    # submodule checkout and solid-LZMA compression of the whole payload, all
+    # on the slowest runner class.
+    timeout-minutes: 120
     permissions:
       contents: read
     defaults:
@@ -273,9 +323,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: linux and windows
+          - name: linux
             runner: ubuntu-latest
-            artifact: desktop-linux-windows
+            artifact: desktop-linux
+          # Windows used to be cross-compiled from the ubuntu pass with mingw,
+          # because this repository was private and Windows runners billed at
+          # 2x. It is public now, so they are free — and building natively
+          # means the toolchain that is tested (`windows.yml`) is finally the
+          # toolchain that ships.
+          - name: windows
+            runner: windows-latest
+            artifact: desktop-windows
           - name: macos
             runner: macos-latest
             artifact: desktop-macos
@@ -297,18 +355,33 @@ jobs:
           shared-key: release-${{ matrix.artifact }}
           cache-on-failure: true
 
-      - name: Install Linux and Windows build dependencies
+      - name: Install Linux build dependencies
         if: matrix.runner == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             libasound2-dev \
             libudev-dev \
-            pkg-config \
-            mingw-w64 \
-            nsis
-          rustup target add x86_64-pc-windows-gnu
+            pkg-config
 
+      # `makensis` is not on the Windows image. Chocolatey's `nsis` package
+      # runs the upstream installer rather than shimming a binary, so its
+      # directory goes on PATH by hand — which only affects *later* steps,
+      # hence the existence check here rather than a version probe.
+      - name: Install the Windows installer toolchain
+        if: matrix.runner == 'windows-latest'
+        run: |
+          choco install nsis --yes --no-progress
+          nsis_dir='/c/Program Files (x86)/NSIS'
+          if [[ ! -x "$nsis_dir/makensis.exe" ]]; then
+            echo "chocolatey installed nsis but $nsis_dir/makensis.exe is missing" >&2
+            exit 1
+          fi
+          echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
+
+      # The macOS pass ships one universal `.app`, so it builds both
+      # architectures and `lipo`s them together. The runner is arm64, so only
+      # the Intel half needs installing.
       - name: Install macOS cross target
         if: matrix.runner == 'macos-latest'
         run: rustup target add x86_64-apple-darwin
@@ -319,44 +392,105 @@ jobs:
       - name: Build the packaging tool
         run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
 
-      # The only pass that emits `planet` and `content`. Their archives are
-      # prefix-free and therefore byte-identical on every triple, so building
-      # them on all four passes would spend the time to produce three exact
-      # duplicates.
+      # The only pass that emits `planet`. Its archive is prefix-free and
+      # therefore byte-identical on every triple, so emitting it from every pass
+      # would spend the time to produce exact duplicates. `content` is not
+      # emitted by any pass — syb0rg/clonk-rs-content publishes it.
       - name: Package Linux
         if: matrix.runner == 'ubuntu-latest'
         run: ./target/release/xtask-engine-tools package --components=all
 
       - name: Package Windows installer
-        if: matrix.runner == 'ubuntu-latest'
+        if: matrix.runner == 'windows-latest'
         env:
-          CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
-          LIBZ_SYS_STATIC: '1'
+          # Named rather than left to the host, so the archive names and the
+          # manifest keys are decided here. It also confines RUSTFLAGS to the
+          # target's own artifacts: with a target requested, cargo does not
+          # pass them to build scripts or proc macros, which are host units
+          # and must keep the CRT their host toolchain expects.
+          CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+          # MSVC links the C runtime dynamically; the mingw cross-build linked
+          # it statically. Without this, a machine with no VC++ redistributable
+          # fails to start the game at all — the loader reports a missing
+          # `vcruntime140.dll` before `main` runs, so nothing is logged and the
+          # launcher never sees it. `windows.yml` builds the same configuration
+          # on every push, which is where the /MT-vs-/MD link is proven.
+          RUSTFLAGS: -C target-feature=+crt-static
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
           # does not exist in its published crate, so its bundled libpng only
-          # finds zlib.h where the host happens to ship one. mingw does not.
-          # Resolved dynamically rather than pinned to a libz-sys version.
+          # finds zlib.h where the host happens to ship one. No Windows
+          # toolchain does. Resolved dynamically rather than pinned to a
+          # libz-sys version.
+          cargo fetch --locked
           zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
           if [[ ! -f "$zlib_dir/zlib.h" ]]; then
             echo "could not locate the vendored zlib headers under $zlib_dir" >&2
             exit 1
           fi
-          export CFLAGS_x86_64_pc_windows_gnu="-I$zlib_dir"
-          ./target/release/xtask-engine-tools package --no-archive --components=engine
+          export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
+          ./target/release/xtask-engine-tools.exe package --no-archive --components=engine
 
+          # Native paths for a native tool: under Git Bash `$PWD` is a POSIX
+          # path makensis cannot resolve, and leaving it to MSYS's implicit
+          # argument rewriting would make the build depend on its heuristics.
+          # The switches keep their `-` prefix for the same reason — `/NOCD`
+          # would be rewritten as a path.
+          payload=$(cygpath -w "$PWD/target/dist/clonk-rust")
+          outfile=$(cygpath -w "$PWD/target/dist/clonk-rust-$VERSION-x86_64-windows-setup.exe")
           makensis -NOCD \
             -DVERSION="$VERSION" \
-            -DPAYLOAD="$PWD/target/dist/clonk-rust" \
-            -DOUTFILE="$PWD/target/dist/clonk-rust-$VERSION-x86_64-windows-setup.exe" \
+            -DPAYLOAD="$payload" \
+            -DOUTFILE="$outfile" \
             scripts/windows-installer.nsi
 
+      # One pass, not one per architecture: the two builds differ only in ~20 MB
+      # of executables, so a second disk image was ~340 MB of identical game
+      # data. `package` builds both arches and fuses them itself, so this emits
+      # one `.dmg` and one `engine` component for both macOS triples.
       - name: Package macOS
         if: matrix.runner == 'macos-latest'
+        env:
+          # Named rather than inferred. On a toolchain missing an architecture
+          # `package` falls back to a single-architecture build — right for a
+          # contributor running the README's command, wrong for a release — and
+          # an explicitly named target is never downgraded. So a runner whose
+          # `rustup target add` silently failed stops here, instead of
+          # publishing a thin `.app` under a name promising both. Every cargo
+          # invocation this triggers passes `--target` itself, which overrides
+          # this variable; nothing builds *for* the pseudo-triple.
+          CARGO_BUILD_TARGET: universal-apple-darwin
+        run: ./target/release/xtask-engine-tools package --components=engine
+
+      # `lipo` invalidates the signature of the slices it fuses, so the bundle
+      # is signed afterwards, on the universal binaries. `package` already fails
+      # if `codesign --verify --deep --strict` does; this is the other half —
+      # that the thing it signed is actually fat. A single-arch regression is
+      # invisible on an arm64 runner, and would ship a build no Intel Mac runs.
+      - name: Check the macOS build is universal
+        if: matrix.runner == 'macos-latest'
         run: |
-          ./target/release/xtask-engine-tools package --components=engine
-          CARGO_BUILD_TARGET=x86_64-apple-darwin ./target/release/xtask-engine-tools package --components=engine
+          shopt -s nullglob
+          engines=(target/dist/components/clonk-rust-*-engine-universal-apple-darwin.zip)
+          if [[ ${#engines[@]} -ne 1 ]]; then
+            echo "expected exactly one universal engine component, found ${#engines[@]}" >&2
+            exit 1
+          fi
+          rm -rf target/dist/universal-check
+          unzip -q "${engines[0]}" -d target/dist/universal-check
+          for binary in clonk-app clonk-game c4group; do
+            path="target/dist/universal-check/Contents/MacOS/$binary"
+            info=$(lipo -info "$path")
+            echo "$info"
+            for arch in arm64 x86_64; do
+              case "$info" in
+                *" $arch"*) ;;
+                *) echo "$binary is missing the $arch slice" >&2; exit 1 ;;
+              esac
+            done
+          done
+          rm -rf target/dist/universal-check
 
       - name: Check the artifacts look real
         run: |
@@ -378,7 +512,7 @@ jobs:
           done
 
       # A gate of its own, because the 100 MB floor above is a statement about
-      # whole-payload archives and would reject every component but `content`.
+      # whole-payload archives and would reject every update component.
       # These floors are per kind and deliberately far below the real sizes:
       # they catch an empty container, not a few megabytes of drift.
       - name: Check the update components look real
@@ -392,11 +526,17 @@ jobs:
           for component in "${components[@]}"; do
             name=$(basename "$component")
             case "$name" in
-              content-*)  floor=150000000 ;;
               planet-*)   floor=10000000 ;;
+              # The macOS engine carries two architectures, so its floor is
+              # twice the others'. Still only an empty-container check — that
+              # both slices are really present is what `lipo -info` proves, in
+              # the step above.
+              *-engine-universal-*) floor=10000000 ;;
               *-engine-*) floor=5000000 ;;
-              # An archive no rule here recognises is also one the manifest
-              # generator refuses, so fail where the log is about it.
+              # `content-*` is deliberately not here: that archive is built and
+              # published by syb0rg/clonk-rs-content, and a second builder of
+              # content-addressed bytes is exactly what must not exist. The
+              # manifest generator refuses one too.
               *) echo "$name matches no known update component" >&2; exit 1 ;;
             esac
             size=$(wc -c < "$component")
@@ -481,39 +621,186 @@ jobs:
           name: release-tool
           path: release-tool
 
+      # `content.zip` is built and published by the repository the game data
+      # lives in, so this release references that artifact instead of
+      # re-uploading 225 MB of unchanged bytes daily. Resolving it here — before
+      # the tag — is also the link check: a content release deleted across a
+      # repository boundary would otherwise be discovered by clients, one failed
+      # update at a time.
+      - name: Resolve the published content release
+        id: content
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTENT_REPOSITORY: syb0rg/clonk-rs-content
+        run: |
+          # The submodule is not checked out in this job; this reads the gitlink
+          # straight out of the commit's tree, which *is* the pin. The content
+          # repository tags one release per commit, so the pin resolves with no
+          # lookup table in between.
+          commit=$(git rev-parse "HEAD:content")
+          tag="content-${commit}"
+          echo "content is pinned at ${commit}"
+
+          # `gh api` exits non-zero for every failure alike, so the status it
+          # reports is what tells them apart. Only 404 means the release is
+          # genuinely absent; a bad token, a rate limit, a network blip or the
+          # content repository being made private are lookups that never
+          # happened, and reporting those as "no release" sends whoever reads
+          # the log to push a commit that is already pushed. Both still fail —
+          # the release cannot proceed either way — but they say which it was.
+          lookup_error="${RUNNER_TEMP}/content-lookup.err"
+          set +e
+          release=$(gh api "repos/${CONTENT_REPOSITORY}/releases/tags/${tag}" 2>"$lookup_error")
+          lookup_status=$?
+          set -e
+          if [[ "$lookup_status" -ne 0 ]]; then
+            cat "$lookup_error" >&2
+            if grep -q '(HTTP 404)' "$lookup_error"; then
+              echo "${CONTENT_REPOSITORY} has no ${tag} release" >&2
+              echo "push that content commit to its main branch so the publish workflow runs" >&2
+            else
+              # Deliberately not the message above: this is not a missing
+              # release, and an unrecognised failure must not be diagnosed as
+              # one.
+              echo "looking up ${tag} in ${CONTENT_REPOSITORY} failed" >&2
+            fi
+            exit 1
+          fi
+
+          size=$(jq -r '.assets[] | select(.name == "content.zip") | .size' <<<"$release")
+          if [[ ! "$size" =~ ^[0-9]+$ ]]; then
+            echo "${tag} exists but publishes no content.zip" >&2
+            exit 1
+          fi
+
+          base="https://github.com/${CONTENT_REPOSITORY}/releases/download/${tag}"
+          digest=$(curl -fsSL --retry 3 --retry-delay 5 "${base}/content.sha256" | cut -d' ' -f1)
+          # Lowercase, matching `is_sha256_hex` in xtask: the manifest records
+          # this verbatim and a client compares it as text.
+          if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "content.sha256 in ${tag} is not a lowercase digest: ${digest}" >&2
+            exit 1
+          fi
+
+          echo "resolved ${tag}: ${digest} (${size} bytes)"
+          {
+            echo "commit=${commit}"
+            echo "sha256=${digest}"
+            echo "size=${size}"
+            echo "base=${base}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Everything above is the producer's own account of its upload: the size
+      # comes from the release API and the digest from a sidecar written beside
+      # the archive. Nothing had ever compared either to the bytes, and with no
+      # manifest signature that digest is the whole integrity story for 225 MB —
+      # so a truncated, corrupted or mismatched content release would be
+      # recorded as authoritative and discovered by clients, each after a 225 MB
+      # download that then fails its own check.
+      #
+      # Downloading it here costs a couple of runner-minutes on a job that
+      # already pulls ~1 GB of build artifacts. It runs before the tag and
+      # before `gh release create`, so a bad content release fails the run
+      # instead of stranding `vX.Y.Z` on a commit that can never be released.
+      - name: Verify the published content archive
+        env:
+          CONTENT_BASE: ${{ steps.content.outputs.base }}
+          CONTENT_SHA256: ${{ steps.content.outputs.sha256 }}
+          CONTENT_SIZE: ${{ steps.content.outputs.size }}
+        run: |
+          # Into RUNNER_TEMP, not the workspace: `assets/` and `components/` are
+          # globbed wholesale into the release, and a stray 225 MB archive there
+          # would be published as one of this repository's own assets — exactly
+          # the duplicate upload that referencing the content release removed.
+          #
+          # The same URL and the same redirect a client follows, so this also
+          # subsumes the one-byte reachability probe that used to stand in for
+          # a real fetch.
+          archive="${RUNNER_TEMP}/content.zip"
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            --output "$archive" "${CONTENT_BASE}/content.zip"
+
+          # Numeric, not string: `wc` pads its output on some platforms, and the
+          # resolve step has already proved both sides are digits.
+          actual_size=$(wc -c < "$archive")
+          if [[ "$actual_size" -ne "$CONTENT_SIZE" ]]; then
+            echo "content.zip is ${actual_size} bytes but the release API says ${CONTENT_SIZE}" >&2
+            exit 1
+          fi
+
+          actual_sha256=$(sha256sum "$archive" | cut -d' ' -f1)
+          if [[ "$actual_sha256" != "$CONTENT_SHA256" ]]; then
+            echo "content.zip hashes to ${actual_sha256}" >&2
+            echo "but content.sha256 claims ${CONTENT_SHA256}" >&2
+            echo "refusing to publish a manifest pointing at unverified bytes" >&2
+            exit 1
+          fi
+
+          echo "verified content.zip: ${actual_sha256} (${actual_size} bytes)"
+          # The rest of the job has no use for it, and the runner still has to
+          # hold every platform's assets.
+          rm -f "$archive"
+
       # Before the tag: a manifest that cannot be generated must not strand
       # `vX.Y.Z` on a commit whose release can then never be completed.
       - name: Generate the update manifest
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
+          CONTENT_COMMIT: ${{ steps.content.outputs.commit }}
+          CONTENT_SHA256: ${{ steps.content.outputs.sha256 }}
+          CONTENT_SIZE: ${{ steps.content.outputs.size }}
         run: |
           # upload-artifact does not preserve the executable bit.
           chmod +x release-tool/xtask-engine-tools
           # Publish time, which is the client's replay guard: a manifest older
           # than the one already applied is refused.
           released_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          # Refuses to write anything unless all four triples can complete an
-          # install, so a build pass that uploaded nothing fails here.
+          # Refuses to write anything unless all six triples in
+          # UPDATE_TARGET_TRIPLES can complete an install, so a build pass that
+          # uploaded nothing fails here.
           ./release-tool/xtask-engine-tools update-manifest generate \
             --version "$VERSION" \
             --released-at "$released_at" \
             --components components \
-            --out-dir manifest
+            --out-dir manifest \
+            --content-commit "$CONTENT_COMMIT" \
+            --content-sha256 "$CONTENT_SHA256" \
+            --content-size "$CONTENT_SIZE"
           cat manifest/manifest.json
 
+      # Created through the API rather than `git push`. GITHUB_TOKEN is refused
+      # any ref push whose commits add or update a file under
+      # `.github/workflows/`, and there is no permission that grants it — so a
+      # release whose history happens to touch a workflow could never be
+      # tagged. The commit itself is already on main, pushed by a human token;
+      # this only points a ref at it, which the restriction does not cover.
       - name: Tag the built commit
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.resolve.outputs.version }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Idempotent: a re-run after a partial publish must not fail here.
-          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+          if gh api "repos/${REPOSITORY}/git/ref/tags/v${VERSION}" >/dev/null 2>&1; then
             echo "v${VERSION} is already tagged"
-          else
-            git tag -a "v${VERSION}" -m "v${VERSION}"
-            git push origin "v${VERSION}"
+            exit 0
           fi
+
+          # Annotated, matching what `git tag -a` produced before: a tag object
+          # first, then the ref that points at it.
+          tag_sha=$(gh api "repos/${REPOSITORY}/git/tags" \
+            -f tag="v${VERSION}" \
+            -f message="v${VERSION}" \
+            -f object="${SHA}" \
+            -f type=commit \
+            --jq '.sha')
+
+          gh api "repos/${REPOSITORY}/git/refs" \
+            -f ref="refs/tags/v${VERSION}" \
+            -f sha="${tag_sha}" >/dev/null
+
+          echo "tagged v${VERSION} at ${SHA}"
 
       - name: Publish the release
         env:

@@ -33,8 +33,8 @@
 use crate::clonk_fonts::ClonkFontSet;
 use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::startup_options_controls::{
-    control_sheet_hit_test, ControlCaptureTarget, ControlDevice, ControlSheetHit,
-    ControlSheetLayout, ControlSheetState, CONTROL_KEY_COUNT, CONTROL_KEY_LABELS,
+    control_facets, control_sheet_hit_test, key_button_facets, ControlCaptureTarget, ControlDevice,
+    ControlSheetHit, ControlSheetLayout, ControlSheetState, CONTROL_KEY_COUNT, CONTROL_KEY_LABELS,
 };
 use crate::startup_options_graphics::{
     graphics_hit_test, graphics_sheet_layout, GraphicsCheckboxId, GraphicsHitTarget,
@@ -80,6 +80,124 @@ pub(crate) const STARTUP_FONT_RGBA: [u8; 4] = [0, 0, 0, 255];
 const BTN_FONT_RGBA: [u8; 4] = [0x20, 0x20, 0x20, 255];
 /// `C4GUI_ButtonFontClr` / `C4GUI_FullscreenCaptionFontClr` 0xffffff00.
 const YELLOW_FONT_RGBA: [u8; 4] = [255, 255, 0, 255];
+
+/// Every string `C4StartupOptionsDlg` draws or measures, resolved through
+/// `LoadResStr` at construction (C4StartupOptionsDlg.cpp:107-125,160-200,
+/// 609-1033). `Default` reproduces the shipped `LanguageUS.txt` values, which
+/// is what `C4ResStrTable` falls back to for a missing key.
+///
+/// Trailing punctuation that C++ appends in code rather than storing in the
+/// table - the `':'` after the Language/Font/White Chat labels
+/// (C4StartupOptionsDlg.cpp:687) - is added at the draw site, so these fields
+/// hold the bare resource text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OptionsLabels {
+    /// `IDS_DLG_OPTIONS`, with its mnemonic marker stripped for the caption.
+    pub title: String,
+    /// `IDS_DLG_PROGRAM`/`GRAPHICS`/`SOUND`/`KEYBOARD`/`GAMEPAD`/`NETWORK`.
+    pub sheets: [String; 6],
+    /// `IDS_BTN_BACK`.
+    pub back: String,
+    /// The twelve `IDS_CTL_*` action labels, in
+    /// `startup_options_controls::CONTROL_KEY_LABEL_KEYS` order.
+    pub control_keys: [String; CONTROL_KEY_COUNT],
+    /// `IDS_CTL_LANGUAGE`.
+    pub language: String,
+    /// `IDS_CTL_FONT`.
+    pub font: String,
+    /// `IDS_MNU_WHITECHAT`.
+    pub white_chat: String,
+    /// `IDS_CTL_WHITECHAT_INGAME`.
+    pub white_chat_ingame: String,
+    /// `IDS_CTL_WHITECHAT_LOBBY`.
+    pub white_chat_lobby: String,
+    /// `IDS_CTL_TIMESTAMPS`.
+    pub timestamps: String,
+    /// `IDS_CTL_PRELOADING`.
+    pub preloading: String,
+    /// `IDS_BTN_RESETCONFIG`.
+    pub reset_config: String,
+    /// `IDS_DLG_ADVANCED_SETTINGS`.
+    pub advanced_settings: String,
+    /// `IDS_CTL_FAIRCREWSTRENGTH`.
+    pub fair_crew_strength: String,
+    /// `IDS_CTL_NOLANGINFO`.
+    pub no_language_info: String,
+    /// `IDS_CTL_MUSIC`.
+    pub music: String,
+    /// `IDS_CTL_SOUNDFX`.
+    pub sound_effects: String,
+    /// `IDS_CTL_DISPLAYMODE`.
+    pub display_mode: String,
+    /// `IDS_CTL_GRAPHICSSCALE`.
+    pub graphics_scale: String,
+    /// `IDS_CTL_SMOKELOW` / `IDS_CTL_SMOKEHI`.
+    pub effects_low: String,
+    pub effects_high: String,
+    /// `IDS_BTN_TESTGRAPHICSSCALE`.
+    pub apply_scale: String,
+    /// `IDS_BTN_RESETKEYBOARD`.
+    pub reset_keyboard: String,
+    /// `IDS_NET_PORT_REFERENCE` / `IDS_NET_PORT_DISCOVERY`.
+    pub port_reference: String,
+    pub port_discovery: String,
+    /// `IDS_CTL_ACTIVE`.
+    pub active: String,
+    /// `IDS_CTL_USEOTHERSERVER`.
+    pub use_other_server: String,
+    /// `IDS_CTL_AUTOMATICUPDATES`.
+    pub automatic_updates: String,
+    /// `IDS_CTL_UPNP`.
+    pub upnp: String,
+    /// `IDS_NET_COMPUTERNAME` / `IDS_NET_USERNAME`; both already carry `':'`.
+    pub computer_name: String,
+    pub chat_name: String,
+}
+
+impl Default for OptionsLabels {
+    fn default() -> Self {
+        Self {
+            title: "Options".into(),
+            control_keys: CONTROL_KEY_LABELS.map(Into::into),
+            sheets: [
+                "Program".into(),
+                "Graphics".into(),
+                "Sound".into(),
+                "Keyboard".into(),
+                "Gamepad".into(),
+                "Network".into(),
+            ],
+            back: "Back".into(),
+            language: "Language".into(),
+            font: "Font".into(),
+            white_chat: "White Chat".into(),
+            white_chat_ingame: "Ingame".into(),
+            white_chat_lobby: "Lobby".into(),
+            timestamps: "Timestamps".into(),
+            preloading: "Preload game data".into(),
+            reset_config: "Reset configuration".into(),
+            advanced_settings: "Advanced settings".into(),
+            fair_crew_strength: "Strength of \"Fair Crew\"".into(),
+            no_language_info: "Language pack not available.".into(),
+            music: "Music".into(),
+            sound_effects: "Sound effects".into(),
+            display_mode: "Display mode".into(),
+            graphics_scale: "Scale".into(),
+            effects_low: "Low".into(),
+            effects_high: "High".into(),
+            apply_scale: "Apply".into(),
+            reset_keyboard: "Reset all".into(),
+            port_reference: "Reference port".into(),
+            port_discovery: "Discovery port".into(),
+            active: "Active".into(),
+            use_other_server: "Use alternate internet server".into(),
+            automatic_updates: "Enable automatic updates".into(),
+            upnp: "Use UPnP".into(),
+            computer_name: "Computer name:".into(),
+            chat_name: "Chat name:".into(),
+        }
+    }
+}
 
 /// Sheet titles + icon phases, ctor order (C4StartupOptionsDlg.cpp:663-668;
 /// LanguageUS.txt). Program and Sound are pixel-implemented; the remaining
@@ -457,6 +575,19 @@ pub fn options_dlg_layout(
     gui: &ClonkFontSet,
     book: &BookFonts,
 ) -> OptionsDlgLayout {
+    options_dlg_layout_with_labels(w, h, gui, book, &OptionsLabels::default())
+}
+
+/// The measured widths of the Program sheet's labels and buttons come from the
+/// resolved resource text, so a longer translation widens its column exactly as
+/// `GetTextExtent` does in C++ (C4StartupOptionsDlg.cpp:687-697).
+pub fn options_dlg_layout_with_labels(
+    w: i32,
+    h: i32,
+    gui: &ClonkFontSet,
+    book: &BookFonts,
+    labels: &OptionsLabels,
+) -> OptionsDlgLayout {
     // FullscreenDialog margins (C4GuiDialogs.cpp:816-823).
     let margin_x = if w < 500 { 2 } else { w / 50 };
     let margin_y = if h < 320 { 2 } else { h * 2 / 75 };
@@ -478,7 +609,7 @@ pub fn options_dlg_layout(
         client.x + client.w / 2,
         client.y + 25 - gui.title.line_height / 2 - (50 + margin_y),
     );
-    let (title_width, title_height) = gui.title.measure("Options", true);
+    let (title_width, title_height) = gui.title.measure(&labels.title, true);
     let title_label = IntRect {
         x: title_center.0 - title_width / 2,
         y: title_center.1,
@@ -598,7 +729,8 @@ pub fn options_dlg_layout(
     let mut ca_language =
         Aligner::new(ca_sheet.get_grid_cell(0, 1, 0, 8, -1, -1, true, 1, 2), 0, 4);
     let mut ca_lang_box = Aligner::new(ca_language.get_from_top(26), 0, 0);
-    let lang_label_rect = ca_lang_box.get_from_left(book_w("Language:") + 4, -1);
+    let lang_label_rect =
+        ca_lang_box.get_from_left(book_w(&format!("{}:", labels.language)) + 4, -1);
     let language_label = (sheet.x + lang_label_rect.x, sheet.y + lang_label_rect.y);
     let lang_combo_w = book_w("XX: Top Secret Language").min(ca_lang_box.width());
     let language_combo = sheet_abs(ca_lang_box.get_from_left(lang_combo_w, -1));
@@ -607,7 +739,7 @@ pub fn options_dlg_layout(
 
     // Font row (700-723).
     let mut ca_font = Aligner::new(ca_sheet.get_grid_cell(0, 1, 2, 9, -1, 26, true, 1, 1), 0, 0);
-    let font_label_rect = ca_font.get_from_left(book_w("Font:") + 4, -1);
+    let font_label_rect = ca_font.get_from_left(book_w(&format!("{}:", labels.font)) + 4, -1);
     let font_label = (sheet.x + font_label_rect.x, sheet.y + font_label_rect.y);
     let comic_w = book_w("Comic Sans MS");
     let face_w = (ca_font.inner_width() * 3 / 4).min(comic_w * 3);
@@ -617,10 +749,13 @@ pub fn options_dlg_layout(
 
     // White chat row (726-747).
     let mut ca_chat = Aligner::new(ca_sheet.get_grid_cell(0, 1, 3, 9, -1, 26, true, 1, 1), 0, 0);
-    let chat_label_rect = ca_chat.get_from_left(book_w("White Chat:") + 4 + 26, -1);
+    let chat_label_rect =
+        ca_chat.get_from_left(book_w(&format!("{}:", labels.white_chat)) + 4 + 26, -1);
     let white_chat_label = (sheet.x + chat_label_rect.x, sheet.y + chat_label_rect.y);
-    let ingame_check = sheet_abs(ca_chat.get_from_left(book_w("Ingame") + 4 + 2 * 26, -1));
-    let lobby_check = sheet_abs(ca_chat.get_from_left(book_w("Lobby") + 4 + 2 * 26, -1));
+    let ingame_check =
+        sheet_abs(ca_chat.get_from_left(book_w(&labels.white_chat_ingame) + 4 + 2 * 26, -1));
+    let lobby_check =
+        sheet_abs(ca_chat.get_from_left(book_w(&labels.white_chat_lobby) + 4 + 2 * 26, -1));
 
     // Timestamps / preloading (750-759); iCheckHgt = book line height.
     let check_h = book.book.line_height;
@@ -681,7 +816,7 @@ pub fn options_dlg_layout(
         2,
         8,
         9,
-        btn_w("Reset configuration"),
+        btn_w(&labels.reset_config),
         small_btn_h,
         true,
         1,
@@ -692,7 +827,7 @@ pub fn options_dlg_layout(
         2,
         8,
         9,
-        btn_w("Advanced settings"),
+        btn_w(&labels.advanced_settings),
         small_btn_h,
         true,
         1,
@@ -893,6 +1028,12 @@ pub struct OptionsDlgAssets {
     pub button_highlight: ImageData,
     /// `GUIButton.png` 128x32 — 3-slice bar of the standard Back button.
     pub button: ImageData,
+    /// `Control.png` — source of `fctKeyboard`, `fctCommand` and `fctKey`
+    /// (`C4GraphicsResource.cpp:200-203`). Absent falls back to text buttons.
+    pub control: Option<ImageData>,
+    /// `Gamepad.png` — `fctGamepad`, its own image with an 80px phase width
+    /// (`C4GraphicsResource.cpp:229`).
+    pub gamepad: Option<ImageData>,
 }
 
 /// Mutable display state of the Program sheet. Defaults mirror a fresh US
@@ -1428,6 +1569,7 @@ pub struct OptionsDlgState {
     /// (`C4StartupOptionsDlg.cpp:1039`).
     focus: OptionsFocus,
     layout: Option<OptionsDlgLayout>,
+    labels: OptionsLabels,
     pointer_position: Option<GuiPoint>,
     hovered: Option<OptionsHit>,
     pressed_back: bool,
@@ -1485,6 +1627,7 @@ impl OptionsDlgState {
             active_sheet: OptionsSheet::Program,
             focus: OptionsFocus::Tabular,
             layout: None,
+            labels: OptionsLabels::default(),
             pointer_position: None,
             hovered: None,
             pressed_back: false,
@@ -1505,8 +1648,25 @@ impl OptionsDlgState {
     }
 
     /// Refreshes the cached C++ integer layout used for pointer hit-testing.
+    /// Installs the active language table's Options strings. C++ resolves them
+    /// once in the constructor, so the caller reinstalls them by rebuilding the
+    /// dialog - which is exactly what a language change does.
+    pub fn set_labels(&mut self, labels: OptionsLabels) {
+        self.labels = labels;
+    }
+
+    pub fn labels(&self) -> &OptionsLabels {
+        &self.labels
+    }
+
     pub fn resize(&mut self, width: i32, height: i32, gui: &ClonkFontSet, book: &BookFonts) {
-        self.layout = Some(options_dlg_layout(width.max(1), height.max(1), gui, book));
+        self.layout = Some(options_dlg_layout_with_labels(
+            width.max(1),
+            height.max(1),
+            gui,
+            book,
+            &self.labels,
+        ));
         self.captured_fair_crew_slider = false;
         self.pressed_fair_crew_arrow = None;
         self.pressed_program_button = None;
@@ -1669,6 +1829,7 @@ impl OptionsDlgState {
             self.active_sheet,
             &self.program,
             &self.controls,
+            &self.labels,
             book,
             point,
         )
@@ -3018,19 +3179,20 @@ const fn graphics_slider_range(id: GraphicsSliderId) -> (i32, i32) {
     }
 }
 
-const fn sound_checkbox_label(id: SoundCheckboxId) -> &'static str {
+fn sound_checkbox_label(labels: &OptionsLabels, id: SoundCheckboxId) -> &str {
     match id {
-        SoundCheckboxId::FrontendMusic | SoundCheckboxId::GameMusic => "Music",
+        SoundCheckboxId::FrontendMusic | SoundCheckboxId::GameMusic => &labels.music,
         SoundCheckboxId::FrontendSoundEffects | SoundCheckboxId::GameSoundEffects => {
-            "Sound effects"
+            &labels.sound_effects
         }
     }
 }
 
-const fn sound_volume_heading(id: SoundVolumeId) -> &'static str {
+/// The volume headings append `':'` in code, like the Program sheet's labels.
+fn sound_volume_heading(labels: &OptionsLabels, id: SoundVolumeId) -> String {
     match id {
-        SoundVolumeId::Music => "Music:",
-        SoundVolumeId::SoundEffects => "Sound effects:",
+        SoundVolumeId::Music => format!("{}:", labels.music),
+        SoundVolumeId::SoundEffects => format!("{}:", labels.sound_effects),
     }
 }
 
@@ -3121,6 +3283,7 @@ fn options_tooltip_at(
     active_sheet: OptionsSheet,
     program: &ProgramSheetState,
     controls: &ControlSheetState,
+    labels: &OptionsLabels,
     book: &BookFonts,
     point: GuiPoint,
 ) -> Option<StartupTooltip> {
@@ -3134,14 +3297,18 @@ fn options_tooltip_at(
             return resource("IDS_DLGTIP_BACKMAIN");
         }
         if rect_contains(&layout.title_label, point) {
-            return Some(StartupTooltip::text("Options"));
+            return Some(StartupTooltip::text(&labels.title));
         }
         return None;
     }
 
     match active_sheet {
         OptionsSheet::Program => {
-            let language_label = left_label_bounds(&book.book, layout.language_label, "Language:");
+            let language_label = left_label_bounds(
+                &book.book,
+                layout.language_label,
+                &format!("{}:", labels.language),
+            );
             let language_info =
                 left_label_bounds(&book.book, layout.language_info, &program.language_info);
             if rect_contains(&language_label, point)
@@ -3151,7 +3318,8 @@ fn options_tooltip_at(
                 return resource("IDS_MSG_SELECTLANG");
             }
 
-            let font_label = left_label_bounds(&book.book, layout.font_label, "Font:");
+            let font_label =
+                left_label_bounds(&book.book, layout.font_label, &format!("{}:", labels.font));
             if rect_contains(&font_label, point) || rect_contains(&layout.font_face_combo, point) {
                 return resource("IDS_DESC_SELECTFONT");
             }
@@ -3159,8 +3327,11 @@ fn options_tooltip_at(
                 return resource("IDS_DESC_FONTSIZE");
             }
 
-            let white_chat_label =
-                left_label_bounds(&book.book, layout.white_chat_label, "White Chat:");
+            let white_chat_label = left_label_bounds(
+                &book.book,
+                layout.white_chat_label,
+                &format!("{}:", labels.white_chat),
+            );
             if rect_contains(&white_chat_label, point) {
                 return resource("IDS_DESC_WHITECHAT");
             }
@@ -4233,7 +4404,7 @@ impl OptionsDlgScreen {
             surface,
             (b.x + b.x + b.w - 1) / 2 + pressed_offset,
             (b.y + b.y + b.h - 1 - font.line_height) / 2 + pressed_offset,
-            "Back",
+            &state.labels.back,
             YELLOW_FONT_RGBA,
             TextAlign::Center,
             true,
@@ -4244,9 +4415,9 @@ impl OptionsDlgScreen {
         // caption + focus highlight (Tabular::DrawElement, C4GuiTabular.cpp:
         // 388-458).
         let active_sheet = state.active_sheet().index();
-        for i in 0..SHEET_TITLES.len() {
+        for i in 0..state.labels.sheets.len() {
             if i != active_sheet {
-                Self::draw_tab_caption(surface, assets, book, &layout, i, gamma);
+                Self::draw_tab_caption(surface, assets, book, &layout, &state.labels, i, gamma);
             }
         }
         let p = layout.paper;
@@ -4256,7 +4427,15 @@ impl OptionsDlgScreen {
             &assets.paper,
             gamma,
         );
-        Self::draw_tab_caption(surface, assets, book, &layout, active_sheet, gamma);
+        Self::draw_tab_caption(
+            surface,
+            assets,
+            book,
+            &layout,
+            &state.labels,
+            active_sheet,
+            gamma,
+        );
         if draw_focus && state.tabular_focused() {
             let mut f = layout.focus_highlight;
             f.y += 72 * active_sheet as i32;
@@ -4350,7 +4529,11 @@ impl OptionsDlgScreen {
                 gamma,
             );
         };
-        draw_book_left(surface, layout.language_label, "Language:");
+        draw_book_left(
+            surface,
+            layout.language_label,
+            &format!("{}:", state.labels.language),
+        );
         Self::draw_combo(
             surface,
             assets,
@@ -4362,7 +4545,11 @@ impl OptionsDlgScreen {
             gamma,
         );
         draw_book_left(surface, layout.language_info, &program.language_info);
-        draw_book_left(surface, layout.font_label, "Font:");
+        draw_book_left(
+            surface,
+            layout.font_label,
+            &format!("{}:", state.labels.font),
+        );
         Self::draw_combo(
             surface,
             assets,
@@ -4383,13 +4570,17 @@ impl OptionsDlgScreen {
                 && state.program_control_highlighted(OptionsProgramFocusTarget::FontSizeCombo),
             gamma,
         );
-        draw_book_left(surface, layout.white_chat_label, "White Chat:");
+        draw_book_left(
+            surface,
+            layout.white_chat_label,
+            &format!("{}:", state.labels.white_chat),
+        );
         Self::draw_checkbox(
             surface,
             assets,
             book,
             &layout.ingame_check,
-            "Ingame",
+            &state.labels.white_chat_ingame,
             program.white_chat_ingame,
             draw_focus
                 && state.program_control_highlighted(OptionsProgramFocusTarget::WhiteChatIngame),
@@ -4400,7 +4591,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.lobby_check,
-            "Lobby",
+            &state.labels.white_chat_lobby,
             program.white_chat_lobby,
             draw_focus
                 && state.program_control_highlighted(OptionsProgramFocusTarget::WhiteChatLobby),
@@ -4411,7 +4602,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.timestamps_check,
-            "Timestamps",
+            &state.labels.timestamps,
             program.show_log_timestamps,
             draw_focus
                 && state.program_control_highlighted(OptionsProgramFocusTarget::ShowLogTimestamps),
@@ -4422,7 +4613,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.preloading_check,
-            "Preload game data",
+            &state.labels.preloading,
             program.preloading,
             draw_focus && state.program_control_highlighted(OptionsProgramFocusTarget::Preloading),
             gamma,
@@ -4433,7 +4624,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.reset_button,
-            "Reset configuration",
+            &state.labels.reset_config,
             draw_focus && state.program_control_highlighted(OptionsProgramFocusTarget::ResetButton),
             state.program_button_pressed(OptionsProgramFocusTarget::ResetButton),
             gamma,
@@ -4443,7 +4634,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.advanced_button,
-            "Advanced settings",
+            &state.labels.advanced_settings,
             draw_focus
                 && state.program_control_highlighted(OptionsProgramFocusTarget::AdvancedButton),
             state.program_button_pressed(OptionsProgramFocusTarget::AdvancedButton),
@@ -4458,6 +4649,7 @@ impl OptionsDlgScreen {
         assets: &OptionsDlgAssets,
         book: &BookFonts,
         layout: &OptionsDlgLayout,
+        labels: &OptionsLabels,
         index: usize,
         gamma: Option<&GammaRamp>,
     ) {
@@ -4480,7 +4672,7 @@ impl OptionsDlgScreen {
             surface,
             tx,
             ty,
-            SHEET_TITLES[index],
+            &labels.sheets[index],
             STARTUP_FONT_RGBA,
             TextAlign::Center,
             true,
@@ -4617,7 +4809,7 @@ impl OptionsDlgScreen {
                 assets,
                 book,
                 &layout.checkbox(id),
-                sound_checkbox_label(id),
+                sound_checkbox_label(&state.labels, id),
                 state.sound.checkbox(id),
                 draw_focus && state.sound_checkbox_highlighted(id),
                 gamma,
@@ -4634,7 +4826,7 @@ impl OptionsDlgScreen {
                 assets,
                 book,
                 &layout.checkbox(id),
-                sound_checkbox_label(id),
+                sound_checkbox_label(&state.labels, id),
                 state.sound.checkbox(id),
                 draw_focus && state.sound_checkbox_highlighted(id),
                 gamma,
@@ -4648,7 +4840,7 @@ impl OptionsDlgScreen {
                 surface,
                 layout.volume_headings[i].x,
                 layout.volume_headings[i].y,
-                sound_volume_heading(id),
+                &sound_volume_heading(&state.labels, id),
                 STARTUP_FONT_RGBA,
                 TextAlign::Left,
                 true,
@@ -4696,17 +4888,23 @@ impl OptionsDlgScreen {
         Self::draw_group_box(surface, book, &layout.options_group, "Options", gamma);
         Self::draw_group_box(surface, book, &layout.effects_group, "Effects Level", gamma);
         for (rect, text) in [
-            (&layout.display_mode_label, "Display mode:"),
-            (&layout.scale_label, "Scale:"),
-            (&layout.percent_label, "%"),
-            (&layout.low_label, "Low"),
-            (&layout.high_label, "High"),
+            (
+                &layout.display_mode_label,
+                format!("{}:", state.labels.display_mode),
+            ),
+            (
+                &layout.scale_label,
+                format!("{}:", state.labels.graphics_scale),
+            ),
+            (&layout.percent_label, "%".to_string()),
+            (&layout.low_label, state.labels.effects_low.clone()),
+            (&layout.high_label, state.labels.effects_high.clone()),
         ] {
             book.book.draw_with_gamma(
                 surface,
                 rect.x,
                 rect.y,
-                text,
+                &text,
                 STARTUP_FONT_RGBA,
                 TextAlign::Left,
                 true,
@@ -4740,7 +4938,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.apply_button,
-            "Apply",
+            &state.labels.apply_scale,
             draw_focus
                 && state.graphics_control_highlighted(OptionsGraphicsFocusTarget::ApplyScale),
             false,
@@ -4806,6 +5004,42 @@ impl OptionsDlgScreen {
                 ControlDevice::Keyboard => format!("Keyboard {}", set + 1),
                 ControlDevice::Gamepad => format!("Gamepad {}", set + 1),
             };
+            // `fctCtrlPic = fGamepad ? fctGamepad : fctKeyboard`, drawn with
+            // the set index as its phase (C4StartupOptionsDlg.cpp:271).
+            let selector = match device {
+                ControlDevice::Keyboard => assets
+                    .control
+                    .as_ref()
+                    .map(|image| (image, control_facets::KEYBOARD)),
+                ControlDevice::Gamepad => assets.gamepad.as_ref().map(|image| {
+                    (
+                        image,
+                        IntRect {
+                            x: 0,
+                            y: 0,
+                            w: control_facets::GAMEPAD_PHASE_WIDTH,
+                            h: image.height() as i32,
+                        },
+                    )
+                }),
+            };
+            if let Some((image, cell)) = selector {
+                let rect = layout.set_buttons[set];
+                let source = control_facets::phase_rect(cell, set);
+                crate::classic_gui::draw_facet_stretch(
+                    surface,
+                    image,
+                    (
+                        source.x as f32,
+                        source.y as f32,
+                        source.w as f32,
+                        source.h as f32,
+                    ),
+                    (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+                    gamma,
+                );
+                continue;
+            }
             Self::draw_small_button(
                 surface,
                 assets,
@@ -4817,7 +5051,9 @@ impl OptionsDlgScreen {
                 gamma,
             );
         }
-        for (control, label) in CONTROL_KEY_LABELS
+        for (control, label) in state
+            .labels()
+            .control_keys
             .iter()
             .enumerate()
             .take(CONTROL_KEY_COUNT)
@@ -4827,6 +5063,46 @@ impl OptionsDlgScreen {
                 .controls()
                 .visible_label(device, control)
                 .unwrap_or("Undefined");
+            // `KeySelButton::DrawElement` blits fctKey then an inset fctCommand
+            // (C4StartupOptionsDlg.cpp:215-240). Without the facet the sheet
+            // keeps its text button, which is what a headless run gets.
+            if let Some(control_facet) = assets.control.as_ref() {
+                let facets = key_button_facets(rect, control, false);
+                let key_cell = control_facets::phase_rect(control_facets::KEY, facets.key_phase);
+                crate::classic_gui::draw_facet_stretch(
+                    surface,
+                    control_facet,
+                    (
+                        key_cell.x as f32,
+                        key_cell.y as f32,
+                        key_cell.w as f32,
+                        key_cell.h as f32,
+                    ),
+                    (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+                    gamma,
+                );
+                let command_cell =
+                    control_facets::phase_rect(control_facets::COMMAND, facets.command_phase);
+                let target = facets.command_rect;
+                crate::classic_gui::draw_facet_stretch(
+                    surface,
+                    control_facet,
+                    (
+                        command_cell.x as f32,
+                        command_cell.y as f32,
+                        command_cell.w as f32,
+                        command_cell.h as f32,
+                    ),
+                    (
+                        target.x as f32,
+                        target.y as f32,
+                        target.w as f32,
+                        target.h as f32,
+                    ),
+                    gamma,
+                );
+                continue;
+            }
             Self::draw_small_button(
                 surface,
                 assets,
@@ -4854,7 +5130,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.reset_button,
-            "Reset",
+            &state.labels.reset_keyboard,
             draw_focus && state.control_sheet_control_highlighted(ControlSheetHit::Reset),
             false,
             gamma,
@@ -4887,8 +5163,8 @@ impl OptionsDlgScreen {
             let title = match id {
                 NetworkPortId::Tcp => "TCP port",
                 NetworkPortId::Udp => "UDP port",
-                NetworkPortId::Reference => "Reference server port",
-                NetworkPortId::Discovery => "Discovery port",
+                NetworkPortId::Reference => state.labels.port_reference.as_str(),
+                NetworkPortId::Discovery => state.labels.port_discovery.as_str(),
             };
             let group = layout.port_controls[id.index()];
             Self::draw_group_box(surface, book, &group, title, gamma);
@@ -4897,7 +5173,7 @@ impl OptionsDlgScreen {
                 assets,
                 book,
                 &layout.port_check(id),
-                "Enabled",
+                &state.labels.active,
                 network.port(id).enabled,
                 draw_focus && state.network_control_highlighted(NetworkSheetHit::PortCheck(id)),
                 gamma,
@@ -4924,7 +5200,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.alternate_check,
-            "Use alternate server",
+            &state.labels.use_other_server,
             network.use_alternate_server,
             draw_focus
                 && state.network_control_highlighted(NetworkSheetHit::Checkbox(
@@ -4953,7 +5229,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.automatic_update_check,
-            "Automatic update",
+            &state.labels.automatic_updates,
             network.automatic_update,
             draw_focus
                 && state.network_control_highlighted(NetworkSheetHit::Checkbox(
@@ -4966,7 +5242,7 @@ impl OptionsDlgScreen {
             assets,
             book,
             &layout.upnp_check,
-            "Enable UPnP",
+            &state.labels.upnp,
             network.enable_upnp,
             draw_focus
                 && state.network_control_highlighted(NetworkSheetHit::Checkbox(
@@ -4976,13 +5252,13 @@ impl OptionsDlgScreen {
         );
         for (label, rect, value, field) in [
             (
-                "Local name",
+                &state.labels.computer_name,
                 &layout.local_name_edit,
                 network.local_name.as_str(),
                 NetworkTextField::LocalName,
             ),
             (
-                "Nick",
+                &state.labels.chat_name,
                 &layout.nick_edit,
                 network.nick.as_str(),
                 NetworkTextField::Nick,
@@ -5159,7 +5435,7 @@ impl OptionsDlgScreen {
         gamma: Option<&GammaRamp>,
     ) {
         let g = layout.group;
-        let title = "Strength of \"Fair Crew\"";
+        let title = state.labels.fair_crew_strength.as_str();
         book.book.draw_with_gamma(
             surface,
             g.x + 7 + 2,
@@ -5349,6 +5625,8 @@ mod tests {
             checkbox: load_graphics_png("GUICheckBox.png"),
             button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             button: load_graphics_png("GUIButton.png"),
+            control: None,
+            gamepad: None,
         }
     }
 

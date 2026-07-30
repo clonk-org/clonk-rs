@@ -3003,6 +3003,7 @@ fn restored_section_object(engine: &Engine, persisted: &crate::PersistedObject) 
         snapshot.id,
         snapshot.definition_id.clone(),
         crate::ObjectState {
+            view_energy: 0,
             custom_name: snapshot.custom_name.clone(),
             position: snapshot.position,
             velocity: snapshot.velocity,
@@ -3189,6 +3190,7 @@ fn section_spawn_object(
         id,
         config.definition_id.clone(),
         crate::ObjectState {
+            view_energy: 0,
             custom_name: config.custom_name.clone(),
             position: config.position,
             velocity: config.velocity,

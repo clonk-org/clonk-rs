@@ -482,6 +482,7 @@ impl GameApp {
                     | StartupView::PlayerSelection
                     | StartupView::Options
                     | StartupView::About
+                    | StartupView::NetworkGame
             )
         {
             return Ok(false);
@@ -552,6 +553,17 @@ impl GameApp {
                 };
                 // See the Button::OnHotkey sound rule above.
                 self.process_about_dialog_actions_with_sound(actions, false)?;
+                true
+            }
+            StartupView::NetworkGame => {
+                let Some(actions) = self
+                    .startup_network_dialog
+                    .as_mut()
+                    .and_then(|dialog| dialog.handle_hotkey(character))
+                else {
+                    return Ok(suppress_plain_gui_key);
+                };
+                self.process_network_dialog_actions(actions)?;
                 true
             }
             _ => unreachable!("startup mnemonic view checked above"),
@@ -720,7 +732,10 @@ impl GameApp {
         }
         self.ingame_menu.replace(
             player,
-            IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
+            IngameMenuState::main_menu(
+                &self.main_menu_conditions_for(player),
+                &self.ingame_menu_labels(),
+            ),
         );
         Ok(())
     }
@@ -1882,6 +1897,7 @@ impl GameApp {
         } else {
             Some(encode(&login.channel)?)
         };
+        config.status_templates = self.localized_irc_status_templates();
         match clonk_network::IrcClientHandle::connect(config) {
             Ok(client) => {
                 self.startup_irc_initial_connect_pending = true;
@@ -2258,9 +2274,60 @@ impl GameApp {
         self.present_startup_restart_diagnostics()
     }
 
+    /// Issues the next reconnect to a restarting host, or ends the attempt when
+    /// the window it announced has closed.
+    pub(crate) fn poll_pending_host_rejoin(&mut self) -> Result<(), EngineError> {
+        // The notice is armed while the host is still connected, and a host
+        // that announces a restart it then abandons must cost this client
+        // nothing. Only the session actually going away starts the clock.
+        if self.network.is_some() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let Some(rejoin) = self.pending_host_rejoin.as_ref() else {
+            return Ok(());
+        };
+        if now >= rejoin.deadline {
+            let targets = startup_network_connect_targets(&rejoin.settings);
+            self.pending_host_rejoin = None;
+            return self.finish_startup_network_failure(
+                StartupNetworkPurpose::Join,
+                format!("The restarting host at {targets} did not come back in time"),
+            );
+        }
+        if rejoin.next_attempt_at.is_some_and(|next| now < next) {
+            return Ok(());
+        }
+        let settings = rejoin.settings.clone();
+        if let Some(rejoin) = self.pending_host_rejoin.as_mut() {
+            rejoin.next_attempt_at = Some(now + HOST_REJOIN_RETRY_INTERVAL);
+        }
+        self.pending_network_join = Some(settings);
+        self.launch_pending_network_join()
+    }
+
+    /// Absorbs a reconnect failure that a still-open rejoin window should
+    /// retry rather than report. Answers whether it did.
+    ///
+    /// A window that closed while this attempt was in flight is dropped here
+    /// rather than deferred, so the failure below is reported once instead of
+    /// being followed next frame by a second teardown from the expiry branch.
+    fn defer_pending_host_rejoin(&mut self) -> bool {
+        let now = Instant::now();
+        let Some(rejoin) = self.pending_host_rejoin.as_mut() else {
+            return false;
+        };
+        if now >= rejoin.deadline {
+            self.pending_host_rejoin = None;
+            return false;
+        }
+        rejoin.next_attempt_at = Some(now + HOST_REJOIN_RETRY_INTERVAL);
+        true
+    }
+
     pub(crate) fn poll_startup_network_connection(&mut self) -> Result<(), EngineError> {
         let Some(connection) = self.startup_network_connection.as_ref() else {
-            return Ok(());
+            return self.poll_pending_host_rejoin();
         };
         let selected_scenario = connection.selected_scenario.clone();
         let purpose = connection.purpose;
@@ -2288,6 +2355,13 @@ impl GameApp {
         self.mark_menu_dirty();
         let Some(result) = result else {
             let message = "network worker disconnected before reporting readiness";
+            if self.defer_pending_host_rejoin() {
+                tracing::info!(
+                    error = message,
+                    "reconnect to the restarting host ended; retrying"
+                );
+                return Ok(());
+            }
             tracing::error!(?purpose, error = message, "startup network session failed");
             self.startup_restart_diagnostics.add_log_entry(message);
             self.startup_restart_diagnostics.mark_quit_with_error();
@@ -2295,6 +2369,10 @@ impl GameApp {
         };
         match result {
             Ok((mut mode, mut manager)) => {
+                // Whatever this session turns out to be, the reconnect that a
+                // restart notice asked for is over. An armed window left
+                // running would later expire under a live lobby.
+                self.pending_host_rejoin = None;
                 if let Some(response) = manager.take_league_start_response() {
                     if let NetworkMode::Host(HostSettings {
                         prepared: Some(prepared),
@@ -2676,6 +2754,13 @@ impl GameApp {
                 }
             }
             Err(error) => {
+                // A host that is still re-binding refuses connections; that is
+                // the expected first answer to a restart notice, not a failure
+                // to show the player.
+                if self.defer_pending_host_rejoin() {
+                    tracing::info!(%error, "reconnect to the restarting host was refused; retrying");
+                    return Ok(());
+                }
                 return self.finish_startup_network_failure(
                     purpose,
                     format!("Unable to start network session: {error}"),
@@ -3659,6 +3744,17 @@ impl GameApp {
             .iter()
             .map(|player| (player.file_name.clone(), player.render_model.activated))
             .collect::<Vec<_>>();
+        // `C4StartupPlrSelDlg` rebuilds `Config.General.Participants` in memory
+        // and never saves — that file contains no `Config.Save()` at all, and
+        // `UpdateActivatedPlayers` (:824-833) just re-runs `SAddModule`. A memory
+        // rebuild cannot fail, so unlike the previous eager write there is no
+        // error to report here.
+        let forced_first_participant =
+            matches!(&origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer);
+        if forced_first_participant {
+            self.deferred_config
+                .set("General", "Participants", saved.file_name.clone());
+        }
         let Some(paths) = self.app_paths.as_ref() else {
             self.startup_tooltip.pointer_left();
             self.startup_player_properties_dialog = None;
@@ -3666,10 +3762,6 @@ impl GameApp {
             self.mark_menu_dirty();
             return;
         };
-        let forced_participant_persistence =
-            matches!(&origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer).then(|| {
-                persist_config_value(paths, "General", "Participants", saved.file_name.clone())
-            });
         let mut players = match discover_player_files(paths) {
             Ok(players) => players,
             Err(error) => {
@@ -3677,17 +3769,8 @@ impl GameApp {
                 self.startup_tooltip.pointer_left();
                 self.startup_player_properties_dialog = None;
                 self.refresh_participants_label();
-                if let Some(persistence_error) =
-                    forced_participant_persistence.and_then(Result::err)
-                {
-                    tracing::error!(%persistence_error, "failed to select the first saved player");
-                    self.status_text = format!(
-                        "Player saved, but participant selection failed: {persistence_error}"
-                    );
-                } else {
-                    self.status_text =
-                        format!("Player saved, but the list could not be refreshed: {error}");
-                }
+                self.status_text =
+                    format!("Player saved, but the list could not be refreshed: {error}");
                 self.mark_menu_dirty();
                 return;
             }
@@ -3717,9 +3800,10 @@ impl GameApp {
             };
             player.set_activated(activated);
         }
-        let persistence = match forced_participant_persistence {
-            Some(result) => result.map(|()| Vec::new()),
-            None => persist_activations(&paths.config_file(), &mut players),
+        let persistence = if forced_first_participant {
+            Ok(Vec::new())
+        } else {
+            persist_activations(&paths.config_file(), &mut players)
         };
         let (persistence_error, activation_refusals) = match persistence {
             Ok(refusals) => (None, refusals),
@@ -4958,6 +5042,10 @@ impl GameApp {
             return;
         };
         let (progress, log) = state.accept_loader_frame(progress, log);
+        // `C4Game::SetInitProgress` mirrors each increasing percentage to the
+        // window, which publishes it on the taskbar (C4Game.cpp:4102-4105).
+        self.taskbar_progress
+            .report(u32::try_from(progress).unwrap_or(0));
         if let Some(loader) = self.loader_screen.as_mut() {
             loader.update(LoaderUpdate::SetProgress(progress));
             if let Some(lines) = log {

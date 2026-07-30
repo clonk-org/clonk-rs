@@ -43,6 +43,57 @@
         assert!(boot.boot_loading.is_none());
     }
 
+    /// `CStdApp::Execute` abandons a deadline more than two seconds overdue -
+    /// `LastExecute = tv` - and then fires `pWindow->Sec1Timer()` at most once,
+    /// on a plain `seconds != LastExecute.tv_sec` comparison that cannot queue a
+    /// backlog (StdAppUnix.cpp:261-291). A long stall must therefore advance the
+    /// clock by one second, not by the whole gap.
+    #[test]
+    fn sec1_timer_coalesces_stalls_over_two_seconds_like_cpp() {
+        let mut app = new_menu_app(320, 200);
+        let mut seconds = Duration::ZERO;
+        app.engine.tick().expect("tick arms clock");
+
+        // Sub-second input accumulates without a pulse, and the phase is kept.
+        for _ in 0..3 {
+            advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(300))
+                .expect("sub-second accumulation");
+        }
+        assert_eq!(app.game_time_seconds(), 0);
+        assert_eq!(seconds, Duration::from_millis(900));
+
+        // The exact one-second boundary pulses once and keeps the remainder.
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(250))
+            .expect("boundary pulse");
+        assert_eq!(app.game_time_seconds(), 1);
+        assert_eq!(seconds, Duration::from_millis(150));
+
+        // A five-second stall is one pulse, not five, and the sub-second phase
+        // survives so the timer cannot drift.
+        app.engine.tick().expect("re-arm the clock");
+        let before = app.game_time_seconds();
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(5_400))
+            .expect("coalesced stall");
+        assert_eq!(
+            app.game_time_seconds() - before,
+            1,
+            "a stall beyond the C++ reset threshold dispatches exactly one Sec1 callback"
+        );
+        assert_eq!(
+            seconds,
+            Duration::from_millis(550),
+            "the accumulator reanchors to the sub-second phase instead of holding the backlog"
+        );
+
+        // The next ordinary second still pulses exactly once from there.
+        app.engine.tick().expect("re-arm the clock");
+        let before = app.game_time_seconds();
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(450))
+            .expect("post-stall pulse");
+        assert_eq!(app.game_time_seconds() - before, 1);
+        assert_eq!(seconds, Duration::ZERO);
+    }
+
     #[test]
     fn event_loop_second_accumulator_pulses_the_engine_clock() {
         // StdApp's one-second callback is independent from frame scheduling
@@ -236,7 +287,7 @@
         app.handle_focus_lost().expect("handle focus loss");
 
         assert!(app.pressed_engine_keys.is_empty());
-        assert_eq!(
+        assert_ne!(
             app.engine
                 .snapshot()
                 .players
@@ -246,7 +297,8 @@
                 .control
                 .pressed_coms,
             0,
-            "focus loss clears synchronized held controls"
+            "no native backend clears player controls on focus loss \
+             (C4FullScreen.cpp:139-145,310-315,432-447)"
         );
         assert_eq!(
             app.ingame_pointer, None,
@@ -4955,6 +5007,12 @@
             .expect("open in-game Options");
         app.apply_ingame_menu_action(MenuAction::ToggleSound)
             .expect("toggle in-game Sound");
+        // `C4SoundSystem::ToggleOnOff` flips the flag in memory alone
+        // (C4SoundSystem.cpp:138-142); the file is written when the Options
+        // dialog closes or at clean shutdown. This test's subject is the write
+        // *content*, so it flushes explicitly — the deferral itself is pinned by
+        // `runtime_config_mutations_remain_process_local_until_shutdown_save`.
+        app.flush_deferred_config();
         let after_sound = Config::load(paths.config_file()).expect("reload Sound toggle");
         assert_eq!(
             after_sound.get_in(Some("Sound"), "Sound"),
@@ -4968,6 +5026,7 @@
 
         app.apply_ingame_menu_action(MenuAction::ToggleMusic)
             .expect("toggle in-game Music");
+        app.flush_deferred_config();
         let after_music = Config::load(paths.config_file()).expect("reload Music toggle");
         assert_eq!(
             after_music.get_in(Some("Sound"), "Sound"),
@@ -5217,4 +5276,67 @@
         assert!(frame.iter().any(|byte| *byte != 0x7a));
     }
 
+    /// C++ resolves every path through the live selected configuration object
+    /// (C4Config.cpp:1351-1357,1612-1627), so an explicit `/config` selection
+    /// has to reach the sound and music resolvers. Neither may rediscover
+    /// ambient defaults and read a different tree than the running app.
+    #[test]
+    fn explicit_config_paths_feed_audio_and_live_user_root() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("audio provenance install root");
+        let selected = tempdir().expect("selected user root");
+        let ambient = tempdir().expect("ambient user root");
+        fs::create_dir_all(install.path().join("planet/System.c4g")).expect("System group");
 
+        // Two distinct trees: only the selected one holds the sample.
+        let selected_sound = selected.path().join("Sound.c4g");
+        let ambient_sound = ambient.path().join("Sound.c4g");
+        fs::create_dir_all(&selected_sound).expect("selected sound group");
+        fs::create_dir_all(&ambient_sound).expect("ambient sound group");
+        fs::write(selected_sound.join("Selected.wav"), silent_pcm_wav(1_000))
+            .expect("selected sample");
+        fs::write(ambient_sound.join("Ambient.wav"), silent_pcm_wav(1_000))
+            .expect("ambient sample");
+
+        let names = |root: &Path| {
+            let (libraries, _) = discover_global_sound_libraries_at(root);
+            let mut resolver = SoundResolver::empty();
+            resolver.global = libraries;
+            resolver.sample_names()
+        };
+        assert_eq!(names(selected.path()), vec!["selected.wav".to_string()]);
+        assert_eq!(names(ambient.path()), vec!["ambient.wav".to_string()]);
+
+        // An explicit config selection whose UserPath points at the selected
+        // tree must drive discovery, even while the ambient environment points
+        // somewhere else.
+        let config_file = install.path().join("explicit.ini");
+        fs::write(
+            &config_file,
+            format!(
+                "[General]\nUserPath={}\n",
+                selected.path().display()
+            ),
+        )
+        .expect("write explicit config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", None),
+            ("LC_CONFIG_FILE", None),
+            ("LC_CONTENT_DIR", Some(selected.path())),
+        ]);
+        let paths = AppPaths::discover_with_config_file(Some(&config_file))
+            .expect("discover from the explicit config");
+        assert_eq!(paths.config_file(), config_file);
+        assert_eq!(paths.user_data_dir(), selected.path());
+
+        // The resolver built from those paths sees the selected tree only.
+        let resolver = SoundResolver::discover_for_paths(Some(&paths));
+        assert_eq!(resolver.sample_names(), vec!["selected.wav".to_string()]);
+
+        // A pathless app walks no install media at all rather than guessing.
+        assert!(SoundResolver::discover_for_paths(None)
+            .sample_names()
+            .is_empty());
+    
+}

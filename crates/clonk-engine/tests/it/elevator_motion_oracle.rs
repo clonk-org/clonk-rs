@@ -130,6 +130,10 @@ fn expected_up_position(tick: u32) -> i32 {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "recording-host material order; required macOS CI job"
+)]
 fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
     // Oracle: the C++ engine's Surface8 after C4Landscape::Init for
     // Tutorial07 with LC_PIN_SEED=0. This covers all 680x480 pixels, not

@@ -1,4 +1,5 @@
 use super::*;
+use clonk_core::log_target::SCRIPT_LOG_TARGET;
 
 /// Which post-name script argument layout a command function uses.
 #[derive(Clone, Copy)]
@@ -2630,7 +2631,7 @@ fn preview_control_command_construction(
     let value = match call_world_object_function(caller, "~ControlCommandConstruction", &args) {
         Some(Ok(value)) => value,
         Some(Err(error)) => {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 "ControlCommandConstruction error; continuing like the C++ fail-safe exec"
             );
@@ -3639,7 +3640,7 @@ fn preview_control_transfer(
                 .c4_bool_raw()
                 .map_or_else(|| value.as_bool(), |raw| raw != 0),
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     "ControlTransfer error; continuing like the C++ fail-safe exec"
                 );
@@ -4012,7 +4013,7 @@ pub(crate) fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
             if let Some(Err(error)) =
                 call_world_object_function(target, "ControlCommandFinished", &callback_args)
             {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     "script error in ControlCommandFinished; continuing like the C++ fail-safe exec"
                 );
@@ -4099,7 +4100,7 @@ fn call_control_command_fail_safe(target: ObjectId, args: &[Value]) -> bool {
     match call_world_object_own_function(target, "ControlCommand", args) {
         Some(Ok(value)) => value_raw_truthy(&value),
         Some(Err(error)) => {
-            tracing::warn!(
+            tracing::debug!(
                 object = %target,
                 %error,
                 "script error in ControlCommand; continuing like the C++ fail-safe exec"
@@ -4313,7 +4314,7 @@ pub(crate) fn player_object_command_host(args: &[Value]) -> Result<Value, Runtim
         ) {
             return Err(RuntimeError::new(MESSAGE));
         }
-        tracing::warn!(target: "clonk-script", "{MESSAGE}");
+        tracing::warn!(target: SCRIPT_LOG_TARGET, "{MESSAGE}");
         // FnPlayerObjectCommand deliberately skips data.getIntOrID() for Call.
         0
     } else {

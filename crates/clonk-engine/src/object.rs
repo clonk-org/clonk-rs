@@ -4,6 +4,10 @@
 
 use super::*;
 
+/// `C4ViewDelay` (C4Constants.h:35): how many object ticks the cursor's
+/// energy/magic/breath bars stay visible after a relevant change.
+pub const C4_VIEW_DELAY: i32 = 100;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectState {
     /// C4Object::CustomName: Some overrides the crew-info/definition name;
@@ -41,6 +45,12 @@ pub struct ObjectState {
     #[serde(default)]
     pub rotation: i32,
     pub energy: i32,
+    /// `C4Object::ViewEnergy`, the `// NoSave //` presentation timer that
+    /// makes the cursor's energy/magic/breath bars visible for `C4ViewDelay`
+    /// object ticks after a relevant change (C4Object.h:145;
+    /// C4Constants.h:35). It is neither saved nor synchronized.
+    #[serde(skip)]
+    pub view_energy: i32,
     /// C4Object::NeedEnergy: the persistent insufficient-power marker set
     /// by EnergyCheck and energy-consuming actions (C4Object.cpp:118,
     /// 1478, 4739-4752; persisted at :2805).
@@ -298,6 +308,7 @@ pub(crate) fn preview_spawn_state(
 ) -> ObjectState {
     let shape_vertices = ShapeVertexBuffer::from_active(&vertices);
     ObjectState {
+        view_energy: 0,
         custom_name: None,
         script_fixed_position: None,
         script_fixed_velocity: None,
@@ -433,9 +444,15 @@ impl ObjectState {
             energy_died =
                 !delta.host_energy_death_checked && self.alive && self.energy != 0 && energy == 0;
             self.energy = energy;
+            // `DoEnergy` refreshes the bar timer after the change, whatever the
+            // outcome (C4Object.cpp:1398).
+            self.view_energy = C4_VIEW_DELAY;
         }
         if let Some(breath) = delta.breath {
             self.breath = breath;
+            // `DoBreath` (C4Object.cpp:1419) and the asphyxiation arm
+            // (C4Object.cpp:914) both refresh it.
+            self.view_energy = C4_VIEW_DELAY;
         }
         if let Some(need_energy) = delta.need_energy {
             self.need_energy = need_energy;
@@ -455,6 +472,9 @@ impl ObjectState {
         }
         if let Some(magic_energy) = delta.magic_energy {
             self.magic_energy = magic_energy.max(0);
+            // `FnDoMagicEnergy` refreshes it on a successful change
+            // (C4Script.cpp:552).
+            self.view_energy = C4_VIEW_DELAY;
         }
         if let Some(magic_capacity) = delta.magic_capacity {
             self.magic_capacity = magic_capacity.max(0);
@@ -4109,7 +4129,7 @@ pub(crate) fn tolerate_script_error<T>(
             // errors reaching here without a funnel carry none.
             recovery: _,
         }) => {
-            tracing::warn!(
+            tracing::debug!(
                 %definition,
                 function,
                 error = %source,

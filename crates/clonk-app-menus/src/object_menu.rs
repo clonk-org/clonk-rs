@@ -41,7 +41,14 @@ const MODE_HINT: &str = "Press ←/→ to switch menus";
 const CLASSIC_ITEM_SIZE: i32 = 35;
 const CLASSIC_FRAME_WIDTH: i32 = 2;
 const CLASSIC_COMMAND_HEIGHT: i32 = 16;
-const CLASSIC_SCROLLBAR_WIDTH: i32 = 16;
+
+/// `C4Menu::InitLocation`'s Context row height: `max(C4MN_SymbolSize,
+/// FontRegular.GetLineHeight())` (C4Menu.cpp:650-652). ObjectRank rows size
+/// their facet from it (C4Script.cpp:1721).
+pub fn classic_context_item_height(font_line_height: i32) -> i32 {
+    font_line_height.max(CLASSIC_COMMAND_HEIGHT).max(1)
+}
+use crate::scrollbar::SCROLLBAR_EXTENT as CLASSIC_SCROLLBAR_WIDTH;
 const CLASSIC_TITLE_HEIGHT: i32 = 23;
 const CLASSIC_INFO_DEFAULT_WIDTH: i32 = 270;
 const CLASSIC_PICTURE_SIZE: i32 = 64;
@@ -195,6 +202,10 @@ pub struct EngineScriptMenuLayout {
     /// Persistent logical-pixel `C4GUI::ScrollWindow::iScrollY`.
     pub scroll_y: i32,
     pub max_scroll_y: i32,
+    /// The overflow scrollbar's column, present only while the menu overflows
+    /// — `C4GUI::ScrollWindow` shows the bar on the same condition that
+    /// reserves its width (`C4GuiContainers.cpp:477-480`).
+    pub scrollbar: Option<Rect>,
     pub first_index: usize,
     /// Number of item slots which can intersect the client. A partial first
     /// row exposes one additional row at the bottom.
@@ -690,6 +701,10 @@ pub fn engine_script_menu_pointer_target_with_presentation(
     font_images: &HashMap<String, ImageData>,
     location: Option<(i32, i32)>,
     scroll_y: i32,
+    // `C4Menu::Lines` as last written by `C4Menu::SetSize` and not yet
+    // overwritten by `InitLocation` (C4Menu.cpp:635-640,713-721); `None`
+    // recomputes the row count from the item count.
+    explicit_lines: Option<i32>,
 ) -> Option<EngineScriptMenuPointerTarget> {
     if !rect_contains_point(area, point) {
         return None;
@@ -724,6 +739,7 @@ pub fn engine_script_menu_pointer_target_with_presentation(
         location,
         scroll_y,
         false,
+        explicit_lines,
     );
     engine_script_menu_pointer_target_for_layout(menu, layout, show_close_button, point)
 }
@@ -741,6 +757,10 @@ pub fn engine_script_menu_pointer_target_with_free_anchor(
     font_images: &HashMap<String, ImageData>,
     free_location: (i32, i32),
     scroll_y: i32,
+    // `C4Menu::Lines` as last written by `C4Menu::SetSize` and not yet
+    // overwritten by `InitLocation` (C4Menu.cpp:635-640,713-721); `None`
+    // recomputes the row count from the item count.
+    explicit_lines: Option<i32>,
 ) -> Option<EngineScriptMenuPointerTarget> {
     if !rect_contains_point(area, point) {
         return None;
@@ -776,6 +796,7 @@ pub fn engine_script_menu_pointer_target_with_free_anchor(
         free_location,
         scroll_y,
         false,
+        explicit_lines,
     );
     engine_script_menu_pointer_target_for_layout(menu, layout, show_close_button, point)
 }
@@ -793,6 +814,10 @@ pub fn engine_script_menu_presentation_geometry_with_free_anchor(
     free_location: (i32, i32),
     scroll_y: i32,
     adjust_selection: bool,
+    // `C4Menu::Lines` as last written by `C4Menu::SetSize` and not yet
+    // overwritten by `InitLocation` (C4Menu.cpp:635-640,713-721); `None`
+    // recomputes the row count from the item count.
+    explicit_lines: Option<i32>,
 ) -> Option<EngineScriptMenuPresentationGeometry> {
     if menu.style == 3 {
         let item_has_symbols = menu
@@ -831,6 +856,7 @@ pub fn engine_script_menu_presentation_geometry_with_free_anchor(
         free_location,
         scroll_y,
         adjust_selection,
+        explicit_lines,
     );
     Some(EngineScriptMenuPresentationGeometry {
         bounds: layout.bounds,
@@ -853,6 +879,10 @@ pub fn engine_script_menu_presentation_geometry(
     font_images: &HashMap<String, ImageData>,
     location: Option<(i32, i32)>,
     scroll_y: i32,
+    // `C4Menu::Lines` as last written by `C4Menu::SetSize` and not yet
+    // overwritten by `InitLocation` (C4Menu.cpp:635-640,713-721); `None`
+    // recomputes the row count from the item count.
+    explicit_lines: Option<i32>,
 ) -> Option<EngineScriptMenuPresentationGeometry> {
     if menu.style == 3 {
         let item_has_symbols = menu
@@ -890,6 +920,7 @@ pub fn engine_script_menu_presentation_geometry(
         location,
         scroll_y,
         false,
+        explicit_lines,
     );
     Some(EngineScriptMenuPresentationGeometry {
         bounds: layout.bounds,
@@ -1603,6 +1634,7 @@ fn engine_script_menu_layout_with_images(
         location,
         0,
         true,
+        None,
     )
 }
 
@@ -1622,6 +1654,7 @@ pub fn engine_script_menu_layout_with_presentation(
     location: Option<(i32, i32)>,
     scroll_y: i32,
     adjust_selection: bool,
+    explicit_lines: Option<i32>,
 ) -> EngineScriptMenuLayout {
     let location = location.map_or(EngineScriptMenuLocation::Aligned, |(x, y)| {
         EngineScriptMenuLocation::Exact(x, y)
@@ -1635,6 +1668,7 @@ pub fn engine_script_menu_layout_with_presentation(
         location,
         scroll_y,
         adjust_selection,
+        explicit_lines,
     )
 }
 
@@ -1651,6 +1685,7 @@ pub fn engine_script_menu_layout_with_free_anchor(
     free_location: (i32, i32),
     scroll_y: i32,
     adjust_selection: bool,
+    explicit_lines: Option<i32>,
 ) -> EngineScriptMenuLayout {
     engine_script_menu_layout_impl(
         area,
@@ -1661,6 +1696,7 @@ pub fn engine_script_menu_layout_with_free_anchor(
         EngineScriptMenuLocation::FreeAnchor(free_location.0, free_location.1),
         scroll_y,
         adjust_selection,
+        explicit_lines,
     )
 }
 
@@ -1674,6 +1710,7 @@ fn engine_script_menu_layout_impl(
     location: EngineScriptMenuLocation,
     scroll_y: i32,
     adjust_selection: bool,
+    explicit_lines: Option<i32>,
 ) -> EngineScriptMenuLayout {
     // Normal menus are a fixed 35px icon grid. Context menus are compact
     // captioned rows: height=max(C4MN_SymbolSize, FontRegular), width is
@@ -1682,7 +1719,7 @@ fn engine_script_menu_layout_impl(
     let columns = menu.columns.max(1);
     let (item_width, item_height) = match menu.style {
         1 => {
-            let item_height = font.line_height().max(CLASSIC_COMMAND_HEIGHT);
+            let item_height = classic_context_item_height(font.line_height());
             let title = engine_script_presentation_text(&menu.caption);
             let title_width = text_spec_width(font, &title, font_images)
                 .saturating_add(item_height)
@@ -1730,7 +1767,15 @@ fn engine_script_menu_layout_impl(
     let item_count = i32::try_from(menu.items.len()).unwrap_or(i32::MAX);
     let natural_lines = (item_count / columns) + i32::from(item_count % columns != 0);
     let max_lines = ((area.height as i32 - 100) / item_height).max(1);
-    let lines = natural_lines.max(1).min(max_lines);
+    // `InitLocation` derives Lines from the item count and clamps it to the
+    // viewport (C4Menu.cpp:713-719). `C4Menu::SetSize` instead assigns Lines
+    // outright and reruns only `InitSize`, which applies no viewport clamp
+    // (C4Menu.cpp:635-640,755-780), so an explicit row count from
+    // `SetMenuSize` is used as given.
+    let lines = explicit_lines
+        .filter(|lines| *lines > 0)
+        .unwrap_or_else(|| natural_lines.max(1).min(max_lines))
+        .max(1);
     let title_height = font.line_height().max(CLASSIC_TITLE_HEIGHT);
     let command_height =
         i32::from(show_commands || menu.extra != ObjectMenuExtra::None) * CLASSIC_COMMAND_HEIGHT;
@@ -1844,9 +1889,47 @@ fn engine_script_menu_layout_impl(
         item_height,
         scroll_y,
         max_scroll_y,
+        scrollbar: (scrollbar_width > 0).then(|| {
+            Rect::new(
+                client_x + columns * item_width,
+                client_y,
+                scrollbar_width as u32,
+                (lines * item_height) as u32,
+            )
+        }),
         first_index,
         visible,
     }
+}
+
+/// Which part of the engine object menu's overflow scrollbar `point` hits, if
+/// any. Routes through the shared `C4GUI::ScrollBar` model so the object menu,
+/// the evaluation dialog and the startup chat agree
+/// (`C4GuiContainers.cpp:477-623`).
+pub fn engine_menu_scrollbar_hit(
+    layout: &EngineScriptMenuLayout,
+    point: (i32, i32),
+) -> Option<crate::scrollbar::ScrollbarHit> {
+    let bar = layout.scrollbar?;
+    crate::scrollbar::hit(
+        crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
+        point,
+        layout.scroll_y,
+        layout.max_scroll_y,
+    )
+}
+
+/// The scroll a pin drag to `pointer_y` selects in the engine object menu.
+pub fn engine_menu_scroll_from_pointer(
+    layout: &EngineScriptMenuLayout,
+    pointer_y: i32,
+) -> Option<i32> {
+    let bar = layout.scrollbar?;
+    Some(crate::scrollbar::scroll_from_pointer(
+        crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
+        pointer_y,
+        layout.max_scroll_y,
+    ))
 }
 
 /// Draws a script-created `C4ObjectMenu` from the engine's live runtime
@@ -1883,6 +1966,7 @@ pub fn render_engine_script_menu(
         show_close_button,
         time_on_selection,
         None,
+        None,
     );
 }
 
@@ -1901,6 +1985,8 @@ pub fn render_engine_script_menu_with_gamma(
     show_close_button: bool,
     time_on_selection: u32,
     gamma: Option<&GammaRamp>,
+    // `C4Menu::Lines` from `C4Menu::SetSize`; see the layout helpers.
+    explicit_lines: Option<i32>,
 ) {
     if surface.width() == 0 || surface.height() == 0 || area.width == 0 || area.height == 0 {
         return;
@@ -1932,6 +2018,7 @@ pub fn render_engine_script_menu_with_gamma(
             show_close_button,
             time_on_selection,
             gamma,
+            explicit_lines,
         );
     } else if menu.style == 3 {
         render_engine_dialog_menu(
@@ -2362,6 +2449,10 @@ fn render_engine_normal_menu(
     show_close_button: bool,
     time_on_selection: u32,
     gamma: Option<&GammaRamp>,
+    // `C4Menu::Lines` as last written by `C4Menu::SetSize` and not yet
+    // overwritten by `InitLocation` (C4Menu.cpp:635-640,713-721); `None`
+    // recomputes the row count from the item count.
+    explicit_lines: Option<i32>,
 ) {
     let layout = engine_script_menu_layout_with_presentation(
         area,
@@ -2372,6 +2463,7 @@ fn render_engine_normal_menu(
         gfx.menu_location,
         gfx.menu_scroll_y,
         false,
+        explicit_lines,
     );
     let bounds = layout.bounds;
     let x = bounds.x;
@@ -2825,6 +2917,20 @@ fn render_engine_normal_menu(
                 gamma,
             );
         }
+    }
+
+    // `C4GUI::ScrollWindow` draws its bar after the client contents
+    // (C4GuiContainers.cpp:309-470). A missing facet leaves it undrawn, as a
+    // null `C4Facet` does in C++.
+    if let (Some(bar), Some(scroll)) = (layout.scrollbar, gfx.scroll.as_ref()) {
+        crate::scrollbar::draw_classic_scrollbar(
+            surface,
+            crate::scrollbar::bar_rect(bar.x, bar.y, bar.width as i32, bar.height as i32),
+            scroll,
+            crate::scrollbar::pin_offset(bar.height as i32, layout.scroll_y, layout.max_scroll_y),
+            layout.max_scroll_y,
+            gamma,
+        );
     }
 }
 
@@ -4441,6 +4547,189 @@ mod tests {
         }
     }
 
+    // C4GuiContainers.cpp:477-623 — an overflowing engine menu shows the bar in
+    // the column its layout already reserves, and routes pointer input through
+    // the shared C4GUI::ScrollBar model.
+    #[test]
+    fn engine_menu_overflow_scrollbar_routes_arrows_track_and_thumb() {
+        use crate::scrollbar::ScrollbarHit;
+
+        let fallback = clonk_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let images = HashMap::new();
+        let mut menu = engine_script_menu_fixture(1, 12);
+        menu.columns = 3;
+        // Two visible rows of four leaves the rest scrollable.
+        let layout = engine_script_menu_layout_with_presentation(
+            Rect::new(0, 0, 640, 480),
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((0, 0)),
+            0,
+            false,
+            Some(2),
+        );
+
+        let bar = layout
+            .scrollbar
+            .expect("an overflowing menu reserves the bar");
+        assert_eq!(
+            bar.width as i32,
+            crate::scrollbar::SCROLLBAR_EXTENT,
+            "the drawn bar must fill the reserved column"
+        );
+        assert_eq!(
+            bar.x,
+            layout.client_x + layout.columns * layout.item_width,
+            "the bar sits in the column the layout reserved, not over the items"
+        );
+        assert!(
+            layout.max_scroll_y > 0,
+            "the fixture must actually overflow"
+        );
+
+        let centre = bar.x + bar.width as i32 / 2;
+        let top = bar.y;
+        let bottom = bar.y + bar.height as i32 - 1;
+        assert_eq!(
+            engine_menu_scrollbar_hit(&layout, (centre, top)),
+            Some(ScrollbarHit::ScrollUp)
+        );
+        assert_eq!(
+            engine_menu_scrollbar_hit(&layout, (centre, bottom)),
+            Some(ScrollbarHit::ScrollDown)
+        );
+        // Outside the bar the menu items keep the pointer.
+        assert_eq!(engine_menu_scrollbar_hit(&layout, (bar.x - 1, top)), None);
+
+        // This menu's bar is two 16px rows tall, so the two arrows consume it
+        // entirely and the pin has nowhere to travel — `rect.h - 3 * extent` is
+        // negative. C++ behaves the same way for a bar this short, so a drag
+        // selects nothing; the shared model's own test covers a bar with travel.
+        assert_eq!(crate::scrollbar::pin_travel(bar.height as i32), 0);
+        assert_eq!(engine_menu_scroll_from_pointer(&layout, bottom), Some(0));
+        assert_eq!(engine_menu_scroll_from_pointer(&layout, top), Some(0));
+
+        // A menu that fits shows no bar at all and swallows no input.
+        let fits = engine_script_menu_layout_with_presentation(
+            Rect::new(0, 0, 640, 480),
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((0, 0)),
+            0,
+            false,
+            None,
+        );
+        assert_eq!(fits.max_scroll_y, 0);
+        assert!(fits.scrollbar.is_none());
+        assert_eq!(engine_menu_scrollbar_hit(&fits, (centre, top)), None);
+    }
+
+    // `C4Menu::SetSize` assigns Lines and reruns only `InitSize`, which applies
+    // no viewport clamp, while `InitLocation` recomputes Lines from the item
+    // count whenever it runs (C4Menu.cpp:635-640,713-721,755-780).
+    #[test]
+    fn set_menu_size_rows_control_visible_grid_and_scrollbar() {
+        let fallback = clonk_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let images = HashMap::new();
+        let area = Rect::new(0, 0, 640, 480);
+        let mut menu = engine_script_menu_fixture(1, 12);
+        menu.columns = 3;
+
+        let derived = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((0, 0)),
+            0,
+            false,
+            None,
+        );
+        assert_eq!(derived.columns, 3);
+        assert_eq!(derived.lines, 4, "12 items over 3 columns is four rows");
+
+        // An explicit two-row grid shrinks the client, leaves the remaining
+        // rows scrollable and reserves the native scrollbar.
+        let explicit = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((0, 0)),
+            0,
+            false,
+            Some(2),
+        );
+        assert_eq!(explicit.lines, 2);
+        assert_eq!(explicit.columns, 3);
+        assert_eq!(
+            explicit.client.height,
+            (2 * explicit.item_height).max(0) as u32
+        );
+        assert_eq!(
+            explicit.bounds.height + 2 * explicit.item_height as u32,
+            derived.bounds.height
+        );
+        assert_eq!(explicit.max_scroll_y, 2 * explicit.item_height);
+        assert_eq!(derived.max_scroll_y, 0);
+        assert_eq!(explicit.visible, 6);
+
+        // Item hit geometry follows the same grid: row three is scrolled out.
+        assert!(explicit.item_rect(0).is_some());
+        assert!(explicit.item_rect(5).is_some());
+        assert!(explicit.item_rect(6).is_none());
+
+        // InitSize applies no viewport clamp, so an oversized explicit grid is
+        // used as given while a derived one is capped.
+        let tall = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((0, 0)),
+            0,
+            false,
+            Some(40),
+        );
+        assert_eq!(tall.lines, 40);
+        let many = engine_script_menu_fixture(1, 400);
+        let capped = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &many,
+            false,
+            &images,
+            Some((0, 0)),
+            0,
+            false,
+            None,
+        );
+        assert_eq!(capped.lines, ((480 - 100) / capped.item_height).max(1));
+
+        // Zero keeps the derived axis (SetSize ignores a zero argument).
+        let zero = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((0, 0)),
+            0,
+            false,
+            Some(0),
+        );
+        assert_eq!(zero.lines, derived.lines);
+    }
+
     #[test]
     fn engine_script_menu_command_strip_uses_cpp_menu_symbol_height() {
         // DrawMenuControls reserves C4MN_SymbolSize (16px), not the
@@ -4467,6 +4756,7 @@ mod tests {
             Some((-25, -9)),
             0,
             false,
+            None,
         );
         assert_eq!((base.bounds.x, base.bounds.y), (-25, -9));
         assert_eq!(base.lines, 6);
@@ -4483,6 +4773,7 @@ mod tests {
             Some((-25, -9)),
             retained_scroll,
             true,
+            None,
         );
         assert_eq!(retained.scroll_y, retained_scroll);
         assert_eq!(retained.first_index, 2);
@@ -4498,18 +4789,19 @@ mod tests {
             None,
             retained_scroll,
             true,
+            None,
         );
         assert_eq!(above.scroll_y, base.item_height);
 
         menu.selection = (base.lines - 1) * menu.columns;
         let bottom_equality = engine_script_menu_layout_with_presentation(
-            area, &font, &menu, false, &images, None, 0, true,
+            area, &font, &menu, false, &images, None, 0, true, None,
         );
         assert_eq!(bottom_equality.scroll_y, 0);
 
         menu.selection = (base.lines + 1) * menu.columns + 1;
         let below = engine_script_menu_layout_with_presentation(
-            area, &font, &menu, false, &images, None, 0, true,
+            area, &font, &menu, false, &images, None, 0, true, None,
         );
         assert_eq!(below.scroll_y, 2 * base.item_height);
 
@@ -4522,6 +4814,7 @@ mod tests {
             None,
             i32::MIN,
             false,
+            None,
         );
         let high = engine_script_menu_layout_with_presentation(
             area,
@@ -4532,6 +4825,7 @@ mod tests {
             None,
             i32::MAX,
             false,
+            None,
         );
         assert_eq!(low.scroll_y, 0);
         assert_eq!(high.scroll_y, high.max_scroll_y);
@@ -4547,6 +4841,7 @@ mod tests {
             None,
             base.item_height + 3,
             true,
+            None,
         );
         assert_eq!(one_line.lines, 1);
         assert_eq!(one_line.scroll_y, base.item_height + 3);
@@ -4561,7 +4856,7 @@ mod tests {
         let menu = engine_script_menu_fixture(1, 20);
         let location = Some((40, 30));
         let layout = engine_script_menu_layout_with_presentation(
-            area, &font, &menu, false, &images, location, 5, false,
+            area, &font, &menu, false, &images, location, 5, false, None,
         );
 
         assert_eq!(layout.scroll_y, 5);
@@ -4588,7 +4883,7 @@ mod tests {
 
         let hit = |point| {
             engine_script_menu_pointer_target_with_presentation(
-                area, &font, &menu, false, true, point, &images, location, 5,
+                area, &font, &menu, false, true, point, &images, location, 5, None,
             )
         };
         assert_eq!(
@@ -4663,9 +4958,10 @@ mod tests {
         let images = HashMap::new();
         let area = Rect::new(0, 0, 640, 480);
         let menu = engine_script_menu_fixture(3, 2);
-        let natural =
-            engine_script_menu_presentation_geometry(area, &font, &menu, false, &images, None, 0)
-                .expect("dialog geometry");
+        let natural = engine_script_menu_presentation_geometry(
+            area, &font, &menu, false, &images, None, 0, None,
+        )
+        .expect("dialog geometry");
         let location = Some((-17, -23));
         let moved = engine_script_menu_presentation_geometry(
             area,
@@ -4675,6 +4971,7 @@ mod tests {
             &images,
             location,
             i32::MAX,
+            None,
         )
         .expect("moved dialog geometry");
 
@@ -4702,6 +4999,7 @@ mod tests {
                 &images,
                 location,
                 i32::MAX,
+                None,
             ),
             None,
             "external-dialog input is clipped to its owning viewport"
@@ -4723,6 +5021,7 @@ mod tests {
                 &images,
                 location,
                 i32::MAX,
+                None,
             ),
             None,
             "an off-viewport close button is not interactive"
@@ -4737,6 +5036,7 @@ mod tests {
             &images,
             visible_location,
             i32::MAX,
+            None,
         )
         .expect("visible moved dialog geometry");
         let visible_title = visible.title.expect("caption creates a title");
@@ -4751,6 +5051,7 @@ mod tests {
                 &images,
                 visible_location,
                 i32::MAX,
+                None,
             ),
             Some(EngineScriptMenuPointerTarget::Title)
         );
@@ -4771,6 +5072,7 @@ mod tests {
                 &images,
                 visible_location,
                 i32::MAX,
+                None,
             ),
             Some(EngineScriptMenuPointerTarget::Close)
         );
@@ -4832,6 +5134,7 @@ mod tests {
             (free_area.x + 12, free_area.y + 18),
             0,
             false,
+            None,
         );
         assert_eq!(
             (at_click.bounds.x, at_click.bounds.y),
@@ -4847,6 +5150,7 @@ mod tests {
             (free_area.x - 100, free_area.y - 100),
             0,
             false,
+            None,
         );
         assert_eq!(
             (above_left.bounds.x, above_left.bounds.y),
@@ -4862,6 +5166,7 @@ mod tests {
             (i32::MAX / 2, i32::MAX / 2),
             0,
             false,
+            None,
         );
         assert_eq!(
             (below_right.bounds.x, below_right.bounds.y),
@@ -4885,6 +5190,7 @@ mod tests {
             (i32::MAX / 2, free_area.y),
             0,
             false,
+            None,
         );
         assert_eq!(
             overflowing.bounds.width,
@@ -4909,6 +5215,7 @@ mod tests {
             dialog_click,
             0,
             false,
+            None,
         )
         .expect("dialog style has presentation geometry");
         assert_eq!(
@@ -4927,6 +5234,7 @@ mod tests {
                 &HashMap::new(),
                 dialog_click,
                 0,
+                None,
             ),
             Some(EngineScriptMenuPointerTarget::Title)
         );
@@ -7264,6 +7572,7 @@ mod tests {
             item_height: 35,
             scroll_y: 0,
             max_scroll_y: 0,
+            scrollbar: None,
             first_index: 0,
             visible: 5,
         };
@@ -7305,6 +7614,7 @@ mod tests {
                 false,
                 time_on_selection,
                 Some(&gamma),
+                None,
             );
             surface
         };

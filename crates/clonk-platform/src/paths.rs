@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub const PRODUCT_NAME: &str = "Clonk Rust";
+/// `C4ENGINECAPTION` / `STD_PRODUCT` (C4Version.h:19,24): the caption
+/// `C4FullScreen` gives its carrier window (C4FullScreen.cpp:474-480). This is
+/// deliberately *not* `PRODUCT_NAME`, which names the port's user-data
+/// directories and must keep identifying the Rust build.
+pub const ENGINE_CAPTION: &str = "LegacyClonk";
+/// `C4EDITORCAPTION` is "Clonk Editor"; the port's developer console is a
+/// different surface, so it keeps its own caption built from the engine one.
+pub const CONSOLE_CAPTION: &str = "LegacyClonk Console";
 pub const PRODUCT_SLUG: &str = "clonk-rust";
 pub const PRODUCT_COMPACT_NAME: &str = "ClonkRust";
 // Compatibility-only names for profiles created before the product rename.
@@ -118,6 +126,25 @@ impl AppPaths {
         &self.system_group
     }
 
+    /// `C4Config::AtUserPath` (`C4Config.cpp:1351-1357`): resolve `filename`
+    /// against `General.UserPath`, **re-reading and re-expanding it on every
+    /// call**. C++ never caches this, so a `UserPath` or environment change
+    /// made while the game runs moves later lookups.
+    ///
+    /// [`Self::user_data_dir`] is the cached counterpart, resolved once at
+    /// discovery — use it for anything that must stay put for the session
+    /// (the session log, the cache), and this for the paths C++ resolves
+    /// through `AtUserPath`.
+    pub fn at_user_path(&self, filename: &str) -> PathBuf {
+        let root = discover_configured_user_data_dir(&self.config_file, &self.install_root)
+            .unwrap_or_else(|| self.user_data_dir.clone());
+        if filename.is_empty() {
+            root
+        } else {
+            root.join(filename)
+        }
+    }
+
     pub fn user_data_dir(&self) -> &Path {
         &self.user_data_dir
     }
@@ -160,7 +187,9 @@ impl AppPaths {
     pub fn screenshot_dir(&self) -> PathBuf {
         let configured = configured_general_value(&self.config_file, "ScreenshotFolder")
             .unwrap_or_else(|| SCREENSHOT_FOLDER_NAME.to_string());
-        self.install_root.join(configured.trim())
+        // C4Config.cpp:1326-1332 appends `ScreenshotFolder` to ExePath verbatim;
+        // trimming it here would silently accept a value C++ keeps as written.
+        self.install_root.join(configured)
     }
 
     pub fn playlists_dir(&self) -> PathBuf {
@@ -221,6 +250,209 @@ fn build_paths(
     })
 }
 
+/// macOS Gatekeeper runs a freshly downloaded, quarantined bundle from a
+/// read-only `AppTranslocation` mount, so `current_exe` points at a copy whose
+/// siblings are gone. C++ recovers the original location by resolving
+/// `SecTranslocateIsTranslocatedURL`/`SecTranslocateCreateOriginalPathForURL`
+/// out of Security.framework at run time (MacAppTranslocation.cpp:27-63) —
+/// dynamically, so a system without those symbols simply reports "not
+/// translocated" instead of failing to launch.
+#[cfg(target_os = "macos")]
+mod translocation {
+    use std::ffi::{c_char, c_void, CString};
+    use std::path::{Path, PathBuf};
+
+    type CFTypeRef = *const c_void;
+    type CFStringRef = *const c_void;
+    type CFUrlRef = *const c_void;
+    type CFIndex = isize;
+
+    const RTLD_LAZY: i32 = 1;
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_CF_URL_POSIX_PATH_STYLE: CFIndex = 0;
+
+    extern "C" {
+        fn dlopen(filename: *const c_char, flag: i32) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> i32;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithBytes(
+            allocator: CFTypeRef,
+            bytes: *const u8,
+            num_bytes: CFIndex,
+            encoding: u32,
+            is_external_representation: u8,
+        ) -> CFStringRef;
+        fn CFURLCreateWithFileSystemPath(
+            allocator: CFTypeRef,
+            file_path: CFStringRef,
+            path_style: CFIndex,
+            is_directory: u8,
+        ) -> CFUrlRef;
+        fn CFURLCopyFileSystemPath(url: CFUrlRef, path_style: CFIndex) -> CFStringRef;
+        fn CFStringGetLength(string: CFStringRef) -> CFIndex;
+        fn CFStringGetCString(
+            string: CFStringRef,
+            buffer: *mut c_char,
+            buffer_size: CFIndex,
+            encoding: u32,
+        ) -> u8;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    type IsTranslocatedFn = unsafe extern "C" fn(CFUrlRef, *mut bool, *mut CFTypeRef) -> u8;
+    type OriginalPathFn = unsafe extern "C" fn(CFUrlRef, *mut CFTypeRef) -> CFUrlRef;
+
+    /// Returns the bundle's original executable path when the running copy is
+    /// translocated, and `None` in every other case — not translocated, the
+    /// symbols are unavailable, or any step fails. `None` means "carry on with
+    /// the path we already have", exactly like the C++ `std::optional`.
+    pub(super) fn original_executable_path(executable: &Path) -> Option<PathBuf> {
+        let path = executable.to_str()?;
+        let library =
+            CString::new("/System/Library/Frameworks/Security.framework/Security").ok()?;
+        let is_translocated_symbol = CString::new("SecTranslocateIsTranslocatedURL").ok()?;
+        let original_path_symbol = CString::new("SecTranslocateCreateOriginalPathForURL").ok()?;
+
+        // SAFETY: every raw pointer below is either checked against null before
+        // use or owned by this scope and released on the way out. The two
+        // resolved symbols are called with exactly the signatures Security.framework
+        // documents for them.
+        unsafe {
+            let handle = dlopen(library.as_ptr(), RTLD_LAZY);
+            if handle.is_null() {
+                return None;
+            }
+            let result = (|| {
+                let is_translocated: IsTranslocatedFn = {
+                    let symbol = dlsym(handle, is_translocated_symbol.as_ptr());
+                    if symbol.is_null() {
+                        return None;
+                    }
+                    std::mem::transmute(symbol)
+                };
+                let url = url_for_path(path)?;
+                let mut translocated = false;
+                let probed = is_translocated(url, &mut translocated, std::ptr::null_mut());
+                if probed == 0 || !translocated {
+                    CFRelease(url);
+                    return None;
+                }
+                let original_path: OriginalPathFn = {
+                    let symbol = dlsym(handle, original_path_symbol.as_ptr());
+                    if symbol.is_null() {
+                        CFRelease(url);
+                        return None;
+                    }
+                    std::mem::transmute(symbol)
+                };
+                let original = original_path(url, std::ptr::null_mut());
+                CFRelease(url);
+                if original.is_null() {
+                    return None;
+                }
+                let recovered = path_for_url(original);
+                CFRelease(original);
+                recovered.map(PathBuf::from)
+            })();
+            dlclose(handle);
+            result
+        }
+    }
+
+    /// SAFETY: the caller releases the returned URL.
+    unsafe fn url_for_path(path: &str) -> Option<CFUrlRef> {
+        let string = CFStringCreateWithBytes(
+            std::ptr::null(),
+            path.as_ptr(),
+            path.len() as CFIndex,
+            K_CF_STRING_ENCODING_UTF8,
+            0,
+        );
+        if string.is_null() {
+            return None;
+        }
+        let url =
+            CFURLCreateWithFileSystemPath(std::ptr::null(), string, K_CF_URL_POSIX_PATH_STYLE, 0);
+        CFRelease(string);
+        (!url.is_null()).then_some(url)
+    }
+
+    /// C++ reads the recovered URL with `CFStringGetCStringPtr`, which returns
+    /// null whenever the string is not already UTF-8 backed and throws there.
+    /// `CFStringGetCString` copies instead, so an unusual encoding recovers the
+    /// path rather than aborting startup.
+    unsafe fn path_for_url(url: CFUrlRef) -> Option<String> {
+        let string = CFURLCopyFileSystemPath(url, K_CF_URL_POSIX_PATH_STYLE);
+        if string.is_null() {
+            return None;
+        }
+        // Worst case UTF-8 is 3 bytes per UTF-16 unit, plus the terminator.
+        let capacity = CFStringGetLength(string)
+            .saturating_mul(3)
+            .saturating_add(1);
+        let mut buffer = vec![0 as c_char; capacity.max(1) as usize];
+        let copied = CFStringGetCString(
+            string,
+            buffer.as_mut_ptr(),
+            capacity.max(1),
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        CFRelease(string);
+        if copied == 0 {
+            return None;
+        }
+        let bytes = buffer
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        String::from_utf8(bytes).ok()
+    }
+}
+
+/// The executable path install discovery should use: the original bundle
+/// location when macOS translocated this copy, otherwise the path as given
+/// (MacAppTranslocation.cpp:27-63; C4WinMain.cpp:233-238).
+#[cfg(target_os = "macos")]
+pub fn non_translocated_executable(executable: &Path) -> PathBuf {
+    translocation::original_executable_path(executable).unwrap_or_else(|| executable.to_path_buf())
+}
+
+/// `main` chdirs before anything else runs (C4WinMain.cpp:233-238). Doing the
+/// same keeps relative classic paths resolving against the bundle's parent even
+/// when Finder launched the app with an unrelated working directory.
+#[cfg(target_os = "macos")]
+pub fn establish_macos_bundle_working_directory() {
+    let Ok(executable) = env::current_exe() else {
+        return;
+    };
+    let executable = non_translocated_executable(&executable);
+    let Some(directory) = macos_bundle_working_directory(&executable) else {
+        return;
+    };
+    if let Err(error) = env::set_current_dir(&directory) {
+        // C++ ignores the chdir result; discovery below still walks ancestors.
+        let _ = error;
+    }
+}
+
+/// The directory C++ makes current before startup: `dirname` four times over
+/// the (non-translocated) executable, i.e. the directory holding `X.app`
+/// (C4WinMain.cpp:238). Returns `None` when the path has fewer components,
+/// which is the case for a plain non-bundled binary.
+#[cfg(target_os = "macos")]
+pub fn macos_bundle_working_directory(executable: &Path) -> Option<PathBuf> {
+    let mut directory = executable;
+    for _ in 0..4 {
+        directory = directory.parent()?;
+    }
+    Some(directory.to_path_buf())
+}
+
 fn discover_install_root() -> Result<PathBuf, PathsError> {
     if let Some(path) = env_path("LC_INSTALL_ROOT") {
         return Ok(path);
@@ -234,6 +466,10 @@ fn discover_install_root() -> Result<PathBuf, PathsError> {
         }
     }
     if let Ok(exe) = env::current_exe() {
+        // A quarantined bundle runs from a read-only AppTranslocation mount
+        // whose siblings are absent, so recover the original path first.
+        #[cfg(target_os = "macos")]
+        let exe = non_translocated_executable(&exe);
         #[cfg(target_os = "macos")]
         if let Some(root) = macos_bundle_install_root(&exe) {
             return Ok(root);
@@ -773,6 +1009,59 @@ mod tests {
     }
 
     #[cfg(not(target_os = "windows"))]
+    // C4Config.cpp:1351-1357 — `AtUserPath` re-reads `General.UserPath` and
+    // re-expands the environment on every call, so a change made while the game
+    // runs moves later lookups. `user_data_dir()` stays where discovery put it.
+    #[test]
+    fn at_user_path_reexpands_live_user_path_and_environment() {
+        let install_dir = TempDir::new().unwrap();
+        touch_system_group(&install_dir);
+        let home_dir = TempDir::new().unwrap();
+        let config_dir = TempDir::new().unwrap();
+        let config_file = config_dir.path().join("clonk.config");
+        fs::write(&config_file, "[General]\nUserPath=\"$HOME/First\"\n").unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", None),
+            ("LC_CONFIG_FILE", Some(config_file.as_path())),
+            ("LC_CACHE_DIR", None),
+            ("LC_LOGS_DIR", None),
+            ("HOME", Some(home_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover_with_config_file(None).unwrap();
+        let first = home_dir.path().join("First");
+        assert_eq!(paths.user_data_dir(), first);
+        // An empty filename yields the root itself, like `AtUserPath("")`
+        // (C4Config.cpp:1337).
+        assert_eq!(paths.at_user_path(""), first);
+        assert_eq!(paths.at_user_path("Clonk.png"), first.join("Clonk.png"));
+
+        // The config changes while the game runs.
+        fs::write(&config_file, "[General]\nUserPath=\"$HOME/Second\"\n").unwrap();
+        let second = home_dir.path().join("Second");
+        assert_eq!(
+            paths.at_user_path("Clonk.png"),
+            second.join("Clonk.png"),
+            "AtUserPath must re-read UserPath rather than cache it"
+        );
+        // The cached root is deliberately unmoved: the session log and cache
+        // stay where discovery put them.
+        assert_eq!(paths.user_data_dir(), first);
+
+        // The environment is re-expanded too, not just the config text. The
+        // guard above already holds the env lock and captured HOME, so it is
+        // set directly here and restored on drop — a second EnvGuard would
+        // deadlock on the same static mutex.
+        let moved_home = TempDir::new().unwrap();
+        std::env::set_var("HOME", moved_home.path());
+        assert_eq!(
+            paths.at_user_path("Clonk.png"),
+            moved_home.path().join("Second").join("Clonk.png")
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn l016_selected_config_user_path_expands_without_relocating_config() {
         let install_dir = TempDir::new().unwrap();
@@ -877,5 +1166,56 @@ mod tests {
         let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(install_dir.path()))]);
         let paths = AppPaths::discover().unwrap();
         assert_eq!(paths.content_dir(), Some(content_dir.as_path()));
+    }
+
+    /// macOS Gatekeeper runs a quarantined bundle from a read-only
+    /// `AppTranslocation` mount. C++ recovers the original path through
+    /// Security.framework and chdirs four parents up from the executable
+    /// (MacAppTranslocation.cpp:27-63; C4WinMain.cpp:233-238).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_translocated_bundle_uses_original_root_and_cwd() {
+        use std::path::Path;
+
+        // `dirname` four times over `X.app/Contents/MacOS/exe` is the directory
+        // that holds the bundle.
+        assert_eq!(
+            macos_bundle_working_directory(Path::new(
+                "/Applications/Clonk.app/Contents/MacOS/clonk"
+            )),
+            Some(PathBuf::from("/Applications"))
+        );
+        assert_eq!(
+            macos_bundle_working_directory(Path::new("/a/b/c/Clonk.app/Contents/MacOS/clonk")),
+            Some(PathBuf::from("/a/b/c"))
+        );
+        // A plain binary has too few components, which C++'s repeated dirname
+        // would bottom out on; report nothing rather than chdir to `/`.
+        assert_eq!(
+            macos_bundle_working_directory(Path::new("/usr/bin/clonk")),
+            None
+        );
+        assert_eq!(macos_bundle_working_directory(Path::new("clonk")), None);
+
+        // A bundle that is *not* translocated keeps its own path: the probe
+        // returns None and the caller carries on unchanged. This is the branch
+        // every ordinary launch takes, and it must never fabricate a path.
+        let bundle = TempDir::new().expect("bundle root");
+        let executable = bundle.path().join("Clonk.app/Contents/MacOS/clonk");
+        fs::create_dir_all(executable.parent().expect("MacOS dir")).expect("bundle layout");
+        fs::write(&executable, b"#!/bin/sh\n").expect("bundle executable");
+        assert_eq!(non_translocated_executable(&executable), executable);
+        // A path that does not exist at all is still returned verbatim.
+        let missing = bundle.path().join("Gone.app/Contents/MacOS/clonk");
+        assert_eq!(non_translocated_executable(&missing), missing);
+
+        // Install discovery reads the bundle's Resources through whichever
+        // executable path survived that recovery.
+        let resources = bundle.path().join("Clonk.app/Contents/Resources");
+        fs::create_dir_all(resources.join("planet/System.c4g")).expect("bundle resources");
+        assert_eq!(
+            macos_bundle_install_root(&non_translocated_executable(&executable)),
+            Some(resources)
+        );
     }
 }

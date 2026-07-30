@@ -1370,6 +1370,19 @@ impl GameApp {
         (icon, (!local).then_some(state.wait_ms))
     }
 
+    /// `Game.Network.isHost() && pNetClient && !pNetClient->isReady()`
+    /// (src/C4Network2Dialogs.cpp:71). Only a network host sees the marker;
+    /// the local row has no `C4Network2Client` at all (`:62`), and every
+    /// status other than `NCS_Ready` counts as unacknowledged
+    /// (src/C4Network2Client.h:113).
+    pub(crate) fn runtime_client_row_unacknowledged(
+        network_host: bool,
+        state: Option<&network::RuntimeNetworkClientState>,
+    ) -> bool {
+        network_host
+            && state.is_some_and(|state| state.status != clonk_network::RemoteBarrierState::Ready)
+    }
+
     /// Compose the detailed `C4Network2::DrawStatus` text from live runtime
     /// diagnostics. Collection is skipped while its renderer flag is off so
     /// the normal frame path never blocks on worker inspection.
@@ -1499,10 +1512,19 @@ impl GameApp {
         let message_io = udp.or(tcp);
         let data_io = tcp.or(udp);
         if let (Some(message_io), Some(data_io)) = (message_io, data_io) {
-            // L066 supplies the C++ rate accumulator; the current session
-            // transport does not yet publish its snapshot to the app, so an
-            // unsampled bucket has the same zero values as native startup.
-            let rates = |_protocol| (0_u64, 0_u64, 0_u64);
+            // `getProtIRate`/`getProtORate`/`getProtBCRate` read the same
+            // cached per-protocol accumulator the network chart samples;
+            // reading here must not regenerate it (src/C4Network2.cpp:1171-1178).
+            let rates = |protocol| {
+                self.network.as_ref().map_or((0, 0, 0), |network| {
+                    let statistics = network.protocol_rate_statistics(protocol);
+                    (
+                        statistics.input_rate,
+                        statistics.output_rate,
+                        statistics.broadcast_rate,
+                    )
+                })
+            };
             let (msg_in, msg_out, msg_broadcast) = rates(message_io.protocol);
             let message_label = if message_io.protocol == data_io.protocol {
                 "Msg/Data"
@@ -1781,6 +1803,10 @@ impl GameApp {
                     wait_ms,
                     connections,
                     can_moderate: can_moderate && client.client_id != 0,
+                    unacknowledged: Self::runtime_client_row_unacknowledged(
+                        can_moderate,
+                        client_state,
+                    ),
                 }
             })
             .collect::<Vec<_>>();
@@ -3466,6 +3492,35 @@ impl GameApp {
         Ok(())
     }
 
+    /// `/netgetscen`'s body (src/C4MessageInput.cpp:530-543): resolve the
+    /// scenario's `C4Network2Res`, copy its transferred file to
+    /// `Config.AtExePath(GetFilename(Game.ScenarioFilename))` and return that
+    /// destination. Every missing link and the copy failure itself return
+    /// `None`, which is C++'s `return false`.
+    pub(crate) fn save_joined_scenario_resource(&self) -> Option<PathBuf> {
+        let join = self.pending_network_join_data.as_ref()?;
+        let source = self
+            .admission_resources
+            .complete_path(join.parameters.scenario.id)?
+            .to_path_buf();
+        // GetFilename(Game.ScenarioFilename) is the scenario's own base name,
+        // not the resource file's temporary transfer name.
+        let filename = path_from_group_name_bytes(join.parameters.scenario.filename.as_bytes());
+        let filename = filename.file_name()?;
+        let destination = self.app_paths.as_ref()?.install_root().join(filename);
+        // `C4Group_CopyItem` copies a packed group as a file and an unpacked
+        // one recursively, and `CreateItem` erases any existing target first
+        // (src/C4Group.cpp:133-147; src/StdFile.cpp:660-670), so a repeated
+        // command overwrites rather than failing.
+        erase_item(&destination);
+        copy_file_or_directory(&source, &destination)
+            .map_err(|error| {
+                tracing::warn!(%error, source = %source.display(), destination = %destination.display(), "netgetscen copy failed");
+            })
+            .ok()?;
+        Some(destination)
+    }
+
     pub(crate) fn append_running_command_resource(&mut self, key: &str, fallback: &str) {
         let message = self.runtime_resource_text(key, fallback);
         self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
@@ -3763,6 +3818,7 @@ impl GameApp {
                         NetworkEvent::PeerConnected { .. } => None,
                         NetworkEvent::PeerDisconnected { .. } => None,
                         NetworkEvent::PeerConnectionFailed { .. } => None,
+                        NetworkEvent::HostRestarting { .. } => None,
                         NetworkEvent::NetpuncherStateChanged { .. } => unreachable!(
                             "netpuncher state is applied before the classic-lobby boundary"
                         ),
@@ -4365,6 +4421,17 @@ impl GameApp {
                             // or changes an active round to local control
                             // (src/C4Network2.cpp:1825-1833).
                             self.record_network_error_round_result(&message);
+                            // Checked ahead of every native unwind: an
+                            // announced restart is unambiguous wherever this
+                            // client happens to be. Round, lobby and final
+                            // init all resolve to the same answer — the host
+                            // is coming back at this address, so wait for it
+                            // there rather than unwinding to the game list or
+                            // playing on alone.
+                            if self.pending_host_rejoin.is_some() {
+                                self.begin_pending_host_rejoin()?;
+                                break;
+                            }
                             if host_lost_in_lobby {
                                 // Clear makes an active DoLobby return false,
                                 // aborting C4Game::Init back through the
@@ -4416,6 +4483,12 @@ impl GameApp {
                                 clonk_network::LeagueDisconnectReason::ConnectionFailed,
                             );
                         }
+                    }
+                    // Only arms the intent. The round keeps running until the
+                    // host connection actually closes, which is both what
+                    // native does and the only proof the restart happened.
+                    NetworkEvent::HostRestarting { rejoin_seconds } => {
+                        self.arm_pending_host_rejoin(rejoin_seconds);
                     }
                     NetworkEvent::NetpuncherStateChanged {
                         game_ids,
@@ -5688,7 +5761,78 @@ impl GameApp {
         Ok(())
     }
 
+    /// Tells connected clients that this session is closing for a restart.
+    ///
+    /// Best-effort by design: a host with no live session, or one whose worker
+    /// has already failed, still restarts. Clients that miss the notice simply
+    /// keep the native dead-host behavior.
+    pub(crate) fn announce_network_round_restart(&mut self) {
+        if !matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
+            return;
+        }
+        if let Some(network) = self.network.as_ref() {
+            if let Err(error) = network
+                .broadcast_host_restarting(clonk_network::DEFAULT_HOST_RESTART_REJOIN_SECONDS)
+            {
+                tracing::warn!(%error, "failed to announce the round restart to clients");
+            }
+        }
+    }
+
+    /// Records that the imminent host loss is a restart to follow.
+    ///
+    /// A zero window is a host declining to be followed; it leaves the native
+    /// dead-host path in place. Longer windows are clamped: the value is a
+    /// remote peer's claim, and an unclamped one would hold this client in a
+    /// reconnect loop for as long as the sender liked.
+    pub(crate) fn arm_pending_host_rejoin(&mut self, rejoin_seconds: u16) {
+        if rejoin_seconds == 0 {
+            return;
+        }
+        let Some(NetworkMode::Client(settings)) = self.network_mode.as_ref() else {
+            return;
+        };
+        let window = rejoin_seconds.min(MAX_HOST_RESTART_REJOIN_SECONDS);
+        self.pending_host_rejoin = Some(PendingHostRejoin {
+            settings: settings.clone(),
+            deadline: Instant::now() + Duration::from_secs(u64::from(window)),
+            next_attempt_at: None,
+        });
+    }
+
+    /// Leaves the round the restarting host abandoned and reconnects to it.
+    ///
+    /// Uses the relaunch teardown rather than the ordinary one for the same
+    /// reason the host's own restart does: another connection opens
+    /// immediately, so the startup dialog and its music must not be rebuilt
+    /// behind it.
+    pub(crate) fn begin_pending_host_rejoin(&mut self) -> Result<(), EngineError> {
+        let Some(rejoin) = self.pending_host_rejoin.take() else {
+            return Ok(());
+        };
+        self.return_to_menu_for_relaunch();
+        // The host is gone, so its manager is dead regardless of which startup
+        // view the teardown above believed it was leaving.
+        self.network = None;
+        self.network_mode = None;
+        self.network_control_clock = None;
+        self.scenario_selector_mode = ScenarioSelectorMode::Local;
+        // Repeat the join itself, so the password, netpuncher brokerage and
+        // full route list survive. The teardown above cleared
+        // `pending_network_join`, which is also what the wrong-password
+        // recovery arm keys on.
+        self.pending_network_join = Some(rejoin.settings.clone());
+        self.pending_host_rejoin = Some(rejoin);
+        self.launch_pending_network_join()
+    }
+
     pub(crate) fn restart_current_network_scenario(&mut self) {
+        // Before anything is torn down: a restart re-hosts from scratch, and
+        // the only thing a client would otherwise observe is its connection
+        // closing — indistinguishable from a dead host
+        // (src/C4Network2.cpp:748-796,1826-1832). Announce the intent while
+        // there is still a session to announce it on.
+        self.announce_network_round_restart();
         let Some(scenario) = self.active_scenario.clone() else {
             self.return_to_menu();
             return;
@@ -5786,6 +5930,11 @@ impl GameApp {
         // Game.Parameters while changing only the cadence to ControlRate=1
         // (C4GameControl.cpp:93-127).
         let game_over_dialog_shown = self.game_over_dialog.is_some();
+        // Continuing the round alone is the opposite of following the host, and
+        // this path also leaves `self.network` empty — the very condition the
+        // rejoin poll waits for. Abandon it here or a worker-level failure
+        // would open a reconnect over a live, still-simulating round.
+        self.pending_host_rejoin = None;
         self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         let control_tick = self.engine.sync_check(local_client_id).control_tick;
@@ -6714,7 +6863,18 @@ impl GameApp {
                 let mut local_players = self.engine.snapshot().hud.local_players;
                 if !local_players.contains(&joined.number()) {
                     local_players.push(joined.number());
-                    self.engine.set_local_players(local_players);
+                    self.engine.set_local_players(local_players.clone());
+                }
+                // C4Game::JoinPlayer creates the local viewport for the number
+                // this join produced, and C4Player::FinalInit initializes
+                // C4MouseControl with it (C4Game.cpp:3552-3553;
+                // C4Player.cpp:788-791). The port's primary-local-player
+                // projection has to follow the same number: a network host is
+                // swept before every client, so its own player is
+                // C4PlayerList::GetFreeNumber's 0 while the projection still
+                // holds the process default.
+                if let Some(primary) = local_players.first().copied() {
+                    self.local_owner = primary;
                 }
                 if matches!(
                     joined,
@@ -7061,9 +7221,21 @@ impl GameApp {
             scenario_title.clone(),
             next_mission,
             |definition_id, fulfilled| {
-                let picture = self
-                    .engine
-                    .definition_picture_image(definition_id)
+                // `C4GoalDisplay::GoalPicture` looks the goal up as a live
+                // object first and hands it to `C4Def::Draw(.., pGoalObj)`, so
+                // the picture carries that object's current graphics rather
+                // than the bare definition picture
+                // (src/C4GameOverDlg.cpp:52-59; src/C4GameObjects.cpp:264-268
+                // -> C4ObjectList::Find, which takes the first live entry with
+                // that id).
+                let goal_object = self
+                    .snapshot
+                    .objects
+                    .iter()
+                    .find(|object| object.definition_id.as_str() == definition_id);
+                let picture = goal_object
+                    .and_then(|object| self.engine.object_picture_image(object))
+                    .or_else(|| self.engine.definition_picture_image(definition_id))
                     .map(definition_menu_picture);
                 let name = self
                     .engine
@@ -7086,6 +7258,33 @@ impl GameApp {
                 )
             },
             |player_info_id| self.runtime_player_big_icons.get(&player_info_id).cloned(),
+            |player_info_id| {
+                self.control_player_infos
+                    .get(player_info_id)
+                    .map(|info| info.league_score)
+            },
+            |player_info_id| {
+                // A row that *is* a free savegame player joins itself;
+                // otherwise the association names a RestorePlayerInfos entry
+                // (src/C4PlayerInfoListBox.cpp:701-716).
+                let info = self.control_player_infos.get(player_info_id)?;
+                let joined = if info.savegame_player == 0 {
+                    return None;
+                } else {
+                    self.classic_lobby_restore_player(info.savegame_player)?
+                };
+                Some(joined.color)
+            },
+            |icon_spec, color| {
+                let resources = self.script_text_spec_resources();
+                resolve_script_font_image(&self.engine, icon_spec, color, resources)
+            },
+            |player_info_id| {
+                self.control_player_infos
+                    .get(player_info_id)
+                    .map(|info| info.league_rank_symbol)
+            },
+            self.network_is_league,
         );
         let network_result = self.snapshot.round_results.network_result;
         let network_result_text =

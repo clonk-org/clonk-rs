@@ -821,6 +821,39 @@ impl Engine {
         self.initialize_scenario_script()
     }
 
+    /// `C4Console::EditScript` (`C4Console.cpp:1335-1342`) — commit an edited
+    /// scenario script body and relink the whole tree.
+    ///
+    /// Two details a from-scratch version loses:
+    ///
+    /// - **No `Initialize`.** C++ only replaces the host's `Data` and relinks;
+    ///   the scenario is already running, so re-running `Initialize` here would
+    ///   recreate its objects. That is why this uses the load-without-init path
+    ///   rather than [`Self::install_scenario_script`].
+    /// - **The relink is unconditional.** `Game.ScriptEngine.ReLink(&Game.Defs)`
+    ///   sits *outside* the `#ifdef _WIN32`, so it runs even where the dialog
+    ///   never opened and even when the user cancelled — see
+    ///   [`Self::relink_after_component_edit`] for that arm.
+    ///
+    /// Refusing the edit in a network game is the caller's gate
+    /// (`if (Game.Network.isEnabled()) return;`, `:1336`), modelled by
+    /// [`crate::developer_components::component_editor_available`].
+    pub fn apply_scenario_script_edit(
+        &mut self,
+        name: impl Into<String>,
+        source: &str,
+    ) -> Result<(), EngineError> {
+        self.load_scenario_script_with_convention(name, source, true)?;
+        self.relink_scripts()
+    }
+
+    /// The relink `C4Console::EditScript` performs when the editor changed
+    /// nothing — cancelled, or on a build where the dialog does not exist.
+    /// C++ still runs it (`C4Console.cpp:1341`).
+    pub fn relink_after_component_edit(&mut self) -> Result<(), EngineError> {
+        self.relink_scripts()
+    }
+
     /// Loads and registers a scenario script without calling Initialize.
     /// C++ performs this before loading the scenario-local System.c4g and
     /// linking, while Initialize runs later from InitGame.

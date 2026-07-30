@@ -2,6 +2,7 @@
 members = [
     "crates/clonk-core",
     "crates/clonk-logging",
+    "crates/clonk-c4group",
     "crates/clonk-resources",
     "crates/clonk-script",
     "crates/clonk-engine",
@@ -33,7 +34,7 @@ resolver = "2"
 default-members = ["crates/clonk-app"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.97.1"
 description = "Clonk Rust game engine and application"

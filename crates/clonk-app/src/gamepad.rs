@@ -5,14 +5,27 @@ use gilrs::ev::Code;
 use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs, GilrsBuilder};
 use winit::event::ElementState;
 
-use crate::input::{GamepadAxisCalibration, GamepadAxisCalibrations};
+use crate::input::{legacy_gamepad_axis_code, GamepadAxisCalibration, GamepadAxisCalibrations};
 
+/// `deadZone` from `C4GamePadControl::FeedEvent` (C4GamePadCon.cpp:323), kept
+/// in SDL's raw `int16` axis domain so `amplify` can reproduce its neighbours
+/// exactly.
+const LEGACY_AXIS_DEAD_ZONE_RAW: i16 = 13_337;
 /// Normalized equivalent of the strict +/-13337 comparison in
 /// `C4GamePadControl::FeedEvent`; gilrs exposes device axes in `[-1, 1]`.
-const LEGACY_AXIS_DEAD_ZONE: f32 = 13_337.0 / i16::MAX as f32;
-const LEGACY_AXIS_COUNT: usize = 8;
-const LEGACY_HAT_X_AXIS: u8 = 6;
-const LEGACY_HAT_Y_AXIS: u8 = 7;
+const LEGACY_AXIS_DEAD_ZONE: f32 = LEGACY_AXIS_DEAD_ZONE_RAW as f32 / i16::MAX as f32;
+/// The classic key space holds every axis ordinal whose minimum extent still
+/// encodes inside `KEY_JOY_Axis1Min ..= KEY_JOY_AxisMax`, i.e. 0..=16
+/// (src/C4KeyboardInput.h:67-68). SDL feeds arbitrary ordinals into that
+/// encoding without a cap of its own (C4GamePadCon.cpp:376-379).
+const LEGACY_AXIS_COUNT: usize = 17;
+/// Hats occupy the axis pair `hat * 2 + 6` (C4GamePadCon.cpp:344) and balls the
+/// pair `ball * 2 + 12` (C4GamePadCon.cpp:368); the two ranges overlap from
+/// hat 3 onwards exactly as they do in C++.
+const LEGACY_HAT_AXIS_BASE: u8 = 6;
+const LEGACY_BALL_AXIS_BASE: u8 = 12;
+const LEGACY_HAT_X_AXIS: u8 = LEGACY_HAT_AXIS_BASE;
+const LEGACY_HAT_Y_AXIS: u8 = LEGACY_HAT_AXIS_BASE + 1;
 const GAMEPAD_SLOT_COUNT: u8 = 4;
 const WINDOWS_CALIBRATED_AXIS_COUNT: u8 = 6;
 const WINDOWS_AXIS_RAW_MAX: f32 = u16::MAX as f32;
@@ -59,6 +72,58 @@ impl LegacyGamepadButton {
 
     pub(crate) const fn index(self) -> u8 {
         self.0
+    }
+}
+
+/// The raw joystick events `C4GamePadControl::FeedEvent` converts into the
+/// classic axis key space (C4GamePadCon.cpp:335-435).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RawJoystickEvent {
+    Axis { axis: u8, value: i16 },
+    Hat { hat: u8, value: LegacyHatValue },
+    Ball { ball: u8, xrel: i16, yrel: i16 },
+}
+
+/// SDL's `SDL_HAT_*` bitmask, the raw hat value `C4GamePadControl::FeedEvent`
+/// switches over (C4GamePadCon.cpp:348-358).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LegacyHatValue(u8);
+
+impl LegacyHatValue {
+    const UP_BIT: u8 = 0x01;
+    const RIGHT_BIT: u8 = 0x02;
+    const DOWN_BIT: u8 = 0x04;
+    const LEFT_BIT: u8 = 0x08;
+
+    pub(crate) const CENTERED: Self = Self(0);
+    pub(crate) const UP: Self = Self(Self::UP_BIT);
+    pub(crate) const RIGHT: Self = Self(Self::RIGHT_BIT);
+    pub(crate) const DOWN: Self = Self(Self::DOWN_BIT);
+    pub(crate) const LEFT: Self = Self(Self::LEFT_BIT);
+    pub(crate) const RIGHT_UP: Self = Self(Self::RIGHT_BIT | Self::UP_BIT);
+    pub(crate) const RIGHT_DOWN: Self = Self(Self::RIGHT_BIT | Self::DOWN_BIT);
+    pub(crate) const LEFT_UP: Self = Self(Self::LEFT_BIT | Self::UP_BIT);
+    pub(crate) const LEFT_DOWN: Self = Self(Self::LEFT_BIT | Self::DOWN_BIT);
+
+    pub(crate) const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    /// The `(x, y)` arguments C++ hands to `amplify`. Only the eight composite
+    /// values the switch lists deflect; every other bitmask falls through it
+    /// and leaves both synthetic axes centred.
+    const fn deflection(self) -> (i8, i8) {
+        match self {
+            Self::LEFT_UP => (-1, -1),
+            Self::LEFT => (-1, 0),
+            Self::LEFT_DOWN => (-1, 1),
+            Self::UP => (0, -1),
+            Self::DOWN => (0, 1),
+            Self::RIGHT_UP => (1, -1),
+            Self::RIGHT => (1, 0),
+            Self::RIGHT_DOWN => (1, 1),
+            _ => (0, 0),
+        }
     }
 }
 
@@ -201,6 +266,38 @@ impl GamepadManager {
         self.states.len()
     }
 
+    /// `C4GamePadControl::FeedEvent` (C4GamePadCon.cpp:335-435) is public
+    /// precisely so a host event pump can hand raw joystick events straight to
+    /// the gamepad layer. Buttons keep the gilrs route above, which needs the
+    /// semantic identity for GUI classification; everything the classic axis
+    /// key space covers arrives here.
+    pub(crate) fn feed_raw_event(
+        &mut self,
+        slot: GamepadSlot,
+        event: RawJoystickEvent,
+    ) -> Vec<SourcedGamepadEvent> {
+        let mut emitted = Vec::new();
+        match event {
+            RawJoystickEvent::Axis { axis, value } => {
+                self.feed_raw_axis(slot, axis, value, &mut emitted);
+            }
+            RawJoystickEvent::Hat { hat, value } => {
+                self.feed_raw_hat(slot, hat, value, &mut emitted);
+            }
+            RawJoystickEvent::Ball { ball, xrel, yrel } => {
+                self.feed_raw_ball(slot, ball, xrel, yrel, &mut emitted);
+            }
+        }
+        let mut output = Vec::new();
+        append_sourced_events(
+            usize::from(slot.index()),
+            emitted,
+            &mut self.next_cluster,
+            &mut output,
+        );
+        output
+    }
+
     fn process_event(&mut self, event: Event, output: &mut Vec<GamepadEvent>) {
         let Some(slot) = GamepadSlot::from_gamepad_id(event.id) else {
             return;
@@ -231,8 +328,8 @@ impl GamepadManager {
                     output,
                 );
             }
-            EventType::AxisChanged(axis, value, _) => {
-                self.handle_axis_for_slot(slot, axis, value, output);
+            EventType::AxisChanged(axis, value, code) => {
+                self.handle_gilrs_axis_for_slot(slot, axis, value, code, output);
             }
             _ => {}
         }
@@ -319,6 +416,10 @@ impl GamepadManager {
         }
     }
 
+    /// Gilrs reports a mapped controller's hat 0 as four D-pad buttons. C++
+    /// never sees buttons there: SDL delivers one `SDL_JOYHATMOTION` whose
+    /// bitmask `FeedEvent` splits into two synthetic axes. Rebuild that
+    /// bitmask so both representations go through the same C++ conversion.
     fn handle_dpad_button_for_slot(
         &mut self,
         slot: GamepadSlot,
@@ -326,7 +427,7 @@ impl GamepadManager {
         pressed: bool,
         output: &mut Vec<GamepadEvent>,
     ) {
-        let (axis, value) = {
+        let hat = {
             let pad_state = self.states.entry(slot).or_default();
             match button {
                 Button::DPadLeft => pad_state.hat.left = pressed,
@@ -335,19 +436,107 @@ impl GamepadManager {
                 Button::DPadDown => pad_state.hat.down = pressed,
                 _ => return,
             }
-            match button {
-                Button::DPadLeft | Button::DPadRight => (
-                    LEGACY_HAT_X_AXIS,
-                    f32::from(pad_state.hat.right as i8 - pad_state.hat.left as i8),
-                ),
-                Button::DPadUp | Button::DPadDown => (
-                    LEGACY_HAT_Y_AXIS,
-                    f32::from(pad_state.hat.down as i8 - pad_state.hat.up as i8),
-                ),
-                _ => unreachable!(),
-            }
+            pad_state.hat.to_legacy_value()
         };
-        self.handle_legacy_axis_for_slot(slot, axis, value, output);
+        self.feed_raw_hat(slot, 0, hat, output);
+    }
+
+    /// Port of the `SDL_JOYHATMOTION` branch of `C4GamePadControl::FeedEvent`
+    /// (C4GamePadCon.cpp:339-362).
+    fn feed_raw_hat(
+        &mut self,
+        slot: GamepadSlot,
+        hat: u8,
+        value: LegacyHatValue,
+        output: &mut Vec<GamepadEvent>,
+    ) {
+        let (x, y) = value.deflection();
+        self.feed_raw_axis_pair(
+            slot,
+            LEGACY_HAT_AXIS_BASE,
+            hat,
+            amplify(x),
+            amplify(y),
+            output,
+        );
+    }
+
+    /// Port of the `SDL_JOYBALLMOTION` branch of `C4GamePadControl::FeedEvent`
+    /// (C4GamePadCon.cpp:363-375).
+    ///
+    /// C++ builds the two synthetic axis events and then feeds the *original*
+    /// ball event back into `FeedEvent` twice instead of the replacements,
+    /// which recurses without bound. Only the intended conversion is ported;
+    /// reproducing the recursion would hang the input pump, and gamepad input
+    /// reaches the simulation as ordinary control keys, so nothing about the
+    /// lockstep state depends on it.
+    fn feed_raw_ball(
+        &mut self,
+        slot: GamepadSlot,
+        ball: u8,
+        xrel: i16,
+        yrel: i16,
+        output: &mut Vec<GamepadEvent>,
+    ) {
+        self.feed_raw_axis_pair(
+            slot,
+            LEGACY_BALL_AXIS_BASE,
+            ball,
+            amplify(xrel.signum() as i8),
+            amplify(yrel.signum() as i8),
+            output,
+        );
+    }
+
+    fn feed_raw_axis_pair(
+        &mut self,
+        slot: GamepadSlot,
+        base: u8,
+        device_index: u8,
+        x: i16,
+        y: i16,
+        output: &mut Vec<GamepadEvent>,
+    ) {
+        let Some(axis) = u16::from(device_index)
+            .checked_mul(2)
+            .and_then(|offset| offset.checked_add(u16::from(base)))
+            .and_then(|axis| u8::try_from(axis).ok())
+        else {
+            return;
+        };
+        self.feed_raw_axis(slot, axis, x, output);
+        if let Some(axis) = axis.checked_add(1) {
+            self.feed_raw_axis(slot, axis, y, output);
+        }
+    }
+
+    /// Port of the `SDL_JOYAXISMOTION` branch of `C4GamePadControl::FeedEvent`
+    /// (C4GamePadCon.cpp:376-423), which accepts any device axis ordinal.
+    fn feed_raw_axis(
+        &mut self,
+        slot: GamepadSlot,
+        axis: u8,
+        value: i16,
+        output: &mut Vec<GamepadEvent>,
+    ) {
+        self.handle_legacy_axis_for_slot(slot, axis, legacy_axis_value(value), output);
+    }
+
+    fn handle_gilrs_axis_for_slot(
+        &mut self,
+        slot: GamepadSlot,
+        axis: Axis,
+        value: f32,
+        code: Code,
+        output: &mut Vec<GamepadEvent>,
+    ) {
+        if axis == Axis::Unknown {
+            if let Some(index) = legacy_axis_from_gilrs_code(code) {
+                self.handle_legacy_axis_for_slot(slot, index, value, output);
+            }
+            return;
+        }
+        self.handle_axis_for_slot(slot, axis, value, output);
     }
 
     fn handle_axis_for_slot(
@@ -405,6 +594,13 @@ impl GamepadManager {
             };
         let pad_state = self.states.entry(slot).or_default();
         for (high, desired) in [(false, desired_min), (true, desired_max)] {
+            // An extent that leaves KEY_JOY_Axis1Min..=KEY_JOY_AxisMax is not a
+            // gamepad axis to `Key_IsGamepadAxis`, so C++ dispatches neither the
+            // exact key nor its Left/Up/Right/Down alias
+            // (src/C4KeyboardInput.cpp:731-741).
+            if legacy_gamepad_axis_code(index, high).is_none() {
+                continue;
+            }
             let axis = LegacyGamepadAxis::new(index, high);
             let direction = axis.direction();
             let direction_was_active = pad_state.direction_active(direction);
@@ -439,6 +635,82 @@ enum LegacyAxisPosition {
     Low,
     Mid,
     High,
+}
+
+/// `amplify` (C4GamePadCon.cpp:325-332): push a discrete hat or ball direction
+/// exactly one step past the dead zone the axis branch tests against.
+fn amplify(direction: i8) -> i16 {
+    match direction.signum() {
+        -1 => -(LEGACY_AXIS_DEAD_ZONE_RAW + 1),
+        1 => LEGACY_AXIS_DEAD_ZONE_RAW + 1,
+        _ => 0,
+    }
+}
+
+/// SDL reports axes as `int16`; the shared threshold below is normalized
+/// because gilrs reports `[-1, 1]`.
+fn legacy_axis_value(value: i16) -> f32 {
+    f32::from(value) / i16::MAX as f32
+}
+
+/// Recover the classic SDL axis ordinal behind a gilrs event code.
+///
+/// Gilrs surfaces every device axis it cannot name semantically as
+/// `Axis::Unknown` plus a platform code, which is where a joystick's extra
+/// axes and its second, third and fourth hats arrive. C++ sees SDL's own
+/// ordinals instead, so translate the well-known platform axis identities into
+/// them; hats land on `hat * 2 + 6` exactly as `FeedEvent` places them.
+/// Anything else has no stable classic identity and is dropped rather than
+/// aliased onto an unrelated ordinal.
+fn legacy_axis_from_gilrs_code(code: Code) -> Option<u8> {
+    let raw = code.into_u32();
+    let (kind, index) = ((raw >> 16) as u16, (raw & 0xffff) as u16);
+    #[cfg(target_os = "linux")]
+    {
+        // evdev: EV_ABS ABS_X..ABS_RZ are the first six axes and
+        // ABS_HAT0X..ABS_HAT3Y are the four hats.
+        const EV_ABS: u16 = 0x03;
+        const ABS_HAT0X: u16 = 0x10;
+        const ABS_HAT3Y: u16 = 0x17;
+        if kind == EV_ABS {
+            if index < u16::from(LEGACY_HAT_AXIS_BASE) {
+                return u8::try_from(index).ok();
+            }
+            if (ABS_HAT0X..=ABS_HAT3Y).contains(&index) {
+                return u8::try_from(index - ABS_HAT0X + u16::from(LEGACY_HAT_AXIS_BASE)).ok();
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // IOKit HID generic desktop usages: X..Rz are the first six axes, and
+        // gilrs synthesizes `usage + 1` for a hat switch's second axis.
+        const HID_GENERIC_DESKTOP_PAGE: u16 = 0x01;
+        const HID_USAGE_X: u16 = 0x30;
+        const HID_USAGE_RZ: u16 = 0x35;
+        const HID_USAGE_HAT_SWITCH: u16 = 0x39;
+        if kind == HID_GENERIC_DESKTOP_PAGE {
+            if (HID_USAGE_X..=HID_USAGE_RZ).contains(&index) {
+                return u8::try_from(index - HID_USAGE_X).ok();
+            }
+            if index == HID_USAGE_HAT_SWITCH {
+                return Some(LEGACY_HAT_X_AXIS);
+            }
+            if index == HID_USAGE_HAT_SWITCH + 1 {
+                return Some(LEGACY_HAT_Y_AXIS);
+            }
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        // The Windows backends expose XInput/WGI, which has no raw joystick
+        // ordinals at all; C++ uses the WinMM path there, whose six calibrated
+        // axes and coolie hat the semantic table above already covers.
+        let _ = (kind, index);
+        None
+    }
 }
 
 fn normalized_windows_axis_value(value: f32) -> u32 {
@@ -627,6 +899,25 @@ struct HatButtonState {
     right: bool,
     up: bool,
     down: bool,
+}
+
+impl HatButtonState {
+    /// Collapse the four held D-pad buttons back into the SDL bitmask a hat
+    /// would have reported. Opposite directions held together produce a value
+    /// outside the C++ switch, which centres the hat.
+    fn to_legacy_value(&self) -> LegacyHatValue {
+        LegacyHatValue::from_bits(
+            [
+                (self.up, LegacyHatValue::UP_BIT),
+                (self.right, LegacyHatValue::RIGHT_BIT),
+                (self.down, LegacyHatValue::DOWN_BIT),
+                (self.left, LegacyHatValue::LEFT_BIT),
+            ]
+            .into_iter()
+            .filter_map(|(held, bit)| held.then_some(bit))
+            .fold(0, |bits, bit| bits | bit),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -950,6 +1241,154 @@ mod tests {
                 (6, false),
                 (7, false),
             ]
+        );
+    }
+
+    #[test]
+    fn l163_raw_hats_and_balls_use_the_classic_magic_axis_numbers() {
+        // C4GamePadCon.cpp:339-375 turns every hat into the two synthetic axes
+        // `hat * 2 + 6` and every ball into `ball * 2 + 12`, amplified just
+        // past the dead zone. Ball 0 deliberately shares hat 3's axis pair.
+        let slot = GamepadSlot::new(0);
+        let mut manager = GamepadManager::disabled();
+        let mut output = Vec::new();
+
+        manager.feed_raw_hat(slot, 2, LegacyHatValue::LEFT_DOWN, &mut output);
+        assert_eq!(
+            output
+                .iter()
+                .filter_map(|event| match event {
+                    GamepadEvent::Axis { axis, state, .. } =>
+                        Some((axis.index(), axis.high(), *state)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                (10, false, ElementState::Pressed),
+                (11, true, ElementState::Pressed),
+            ],
+            "hat 2 drives axes 10/11 with X min and Y max"
+        );
+
+        output.clear();
+        manager.feed_raw_ball(slot, 1, -4, 0, &mut output);
+        assert_eq!(
+            output
+                .iter()
+                .filter_map(|event| match event {
+                    GamepadEvent::Axis { axis, state, .. } =>
+                        Some((axis.index(), axis.high(), *state)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [(14, false, ElementState::Pressed)],
+            "ball 1 drives axes 14/15 and a zero relative motion stays centred"
+        );
+
+        output.clear();
+        manager.feed_raw_axis(slot, 9, i16::MIN, &mut output);
+        assert!(
+            output.iter().any(|event| matches!(
+                event,
+                GamepadEvent::Axis { axis, .. } if *axis == LegacyGamepadAxis::new(9, false)
+            )),
+            "arbitrary SDL axis ordinals reach the classic key space"
+        );
+    }
+
+    #[test]
+    fn l163_axis_extents_outside_the_classic_key_range_are_dropped() {
+        // `Key_IsGamepadAxis` accepts KEY_JOY_Axis1Min..=KEY_JOY_AxisMax only
+        // (src/C4KeyboardInput.h:67-68,105-109), and that same test gates the
+        // synthetic Left/Up/Right/Down alias in DoInput
+        // (src/C4KeyboardInput.cpp:731-741). Ordinal 16 therefore has a
+        // minimum extent and no maximum extent.
+        let slot = GamepadSlot::new(0);
+        let mut manager = GamepadManager::disabled();
+        let mut output = Vec::new();
+
+        manager.feed_raw_axis(slot, 16, i16::MIN, &mut output);
+        assert_eq!(
+            output,
+            [
+                GamepadEvent::Axis {
+                    slot,
+                    axis: LegacyGamepadAxis::new(16, false),
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Direction {
+                    slot,
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                },
+            ]
+        );
+
+        output.clear();
+        manager.feed_raw_axis(slot, 16, i16::MAX, &mut output);
+        assert_eq!(
+            output,
+            [
+                GamepadEvent::Axis {
+                    slot,
+                    axis: LegacyGamepadAxis::new(16, false),
+                    state: ElementState::Released,
+                },
+                GamepadEvent::Direction {
+                    slot,
+                    button: ControlButton::Left,
+                    state: ElementState::Released,
+                },
+            ],
+            "the maximum extent of ordinal 16 has no classic key and no alias"
+        );
+
+        output.clear();
+        manager.feed_raw_axis(slot, 17, i16::MIN, &mut output);
+        assert!(output.is_empty(), "ordinal 17 is outside the classic space");
+    }
+
+    #[test]
+    fn l163_hat_amplification_matches_the_cpp_dead_zone_boundary() {
+        // `amplify` (C4GamePadCon.cpp:325-332) returns exactly deadZone + 1, so
+        // a hat deflection is the smallest value the axis branch accepts.
+        assert_eq!(amplify(-1), -(LEGACY_AXIS_DEAD_ZONE_RAW + 1));
+        assert_eq!(amplify(0), 0);
+        assert_eq!(amplify(1), LEGACY_AXIS_DEAD_ZONE_RAW + 1);
+        assert!(legacy_axis_value(LEGACY_AXIS_DEAD_ZONE_RAW) <= LEGACY_AXIS_DEAD_ZONE);
+        assert!(legacy_axis_value(amplify(1)) > LEGACY_AXIS_DEAD_ZONE);
+        assert!(legacy_axis_value(amplify(-1)) < -LEGACY_AXIS_DEAD_ZONE);
+    }
+
+    #[test]
+    fn l163_unrecognised_hat_bitmasks_centre_both_axes() {
+        // The C++ switch only lists the eight composite SDL_HAT_* values; any
+        // other bitmask leaves both fake axis values at zero
+        // (C4GamePadCon.cpp:348-358).
+        let slot = GamepadSlot::new(0);
+        let mut manager = GamepadManager::disabled();
+        let mut output = Vec::new();
+
+        manager.feed_raw_hat(slot, 0, LegacyHatValue::LEFT, &mut output);
+        assert!(!output.is_empty());
+
+        output.clear();
+        manager.feed_raw_hat(slot, 0, LegacyHatValue::from_bits(0b1111), &mut output);
+        assert_eq!(
+            output,
+            [
+                GamepadEvent::Axis {
+                    slot,
+                    axis: LegacyGamepadAxis::new(LEGACY_HAT_X_AXIS, false),
+                    state: ElementState::Released,
+                },
+                GamepadEvent::Direction {
+                    slot,
+                    button: ControlButton::Left,
+                    state: ElementState::Released,
+                },
+            ],
+            "an unlisted bitmask releases the previously deflected axis"
         );
     }
 

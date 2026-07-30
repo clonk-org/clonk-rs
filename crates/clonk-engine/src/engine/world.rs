@@ -348,6 +348,81 @@ impl Engine {
         self.landscape.as_ref()
     }
 
+    /// `C4EditCursor::ApplyToolPicker` (`C4EditCursor.cpp:698-731`) at a
+    /// landscape pixel: Static samples the retained map through `MapZoom`,
+    /// Exact reads the live material and IFT bit, and anything unresolved is
+    /// sky. Any other mode picks nothing.
+    pub fn developer_tool_pick(
+        &self,
+        x: i32,
+        y: i32,
+    ) -> Option<crate::developer_landscape::ToolPick> {
+        use crate::developer_landscape as tool;
+        let landscape = self.landscape.as_ref()?;
+        match landscape.mode() {
+            crate::landscape::LANDSCAPE_MODE_STATIC => {
+                let state = self.developer_landscape_tool_state()?;
+                let raster = landscape.raster_state()?;
+                let (map_x, map_y) = tool::static_pick_map_coordinates(x, y, raster.map_zoom())?;
+                let map = raster.map()?;
+                let byte = usize::try_from(map_y)
+                    .ok()
+                    .zip(usize::try_from(map_x).ok())
+                    .filter(|(row, column)| {
+                        *row < map.height as usize && *column < map.width as usize
+                    })
+                    .and_then(|(row, column)| {
+                        map.indices.get(row * map.width as usize + column).copied()
+                    })
+                    // Off-map coordinates read as sky, like an empty map byte.
+                    .unwrap_or(0);
+                Some(tool::static_tool_pick(state.texmap(), byte))
+            }
+            crate::landscape::LANDSCAPE_MODE_EXACT => {
+                let material = landscape
+                    .border_material_at(x, y)
+                    .and_then(|id| self.materials.get_by_id(id))
+                    .map(|material| material.name().to_owned());
+                Some(tool::exact_tool_pick(
+                    material.as_deref(),
+                    landscape.is_ift_at(x, y),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The read-only landscape-tool state the developer console populates its
+    /// material/texture controls from (`C4ToolsDlg.cpp:482-508,796-940`).
+    /// `None` when no landscape exists, which is when C++ disables the controls.
+    pub fn developer_landscape_tool_state(
+        &self,
+    ) -> Option<crate::developer_landscape::DeveloperLandscapeToolState> {
+        let landscape = self.landscape.as_ref()?;
+        let raster = landscape.raster_state();
+        let texmap = raster.map(|state| state.texmap());
+        Some(crate::developer_landscape::DeveloperLandscapeToolState {
+            mode: landscape.mode(),
+            map_zoom: raster.map(|state| state.map_zoom()),
+            has_map: raster.is_some_and(|state| state.map().is_some()),
+            material_map_names: self
+                .materials
+                .materials()
+                .iter()
+                .map(|material| material.name().to_owned())
+                .collect(),
+            material_names: texmap
+                .map(|texmap| texmap.material_names.clone())
+                .unwrap_or_default(),
+            texture_names: texmap
+                .map(|texmap| texmap.texture_names.clone())
+                .unwrap_or_default(),
+            texture_inventory: texmap
+                .map(|texmap| texmap.texture_inventory.clone())
+                .unwrap_or_default(),
+        })
+    }
+
     pub(crate) fn reset_sectors_from_landscape(&mut self) {
         let Some(landscape) = self.landscape.as_ref() else {
             self.sectors = None;
@@ -733,6 +808,9 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_debug_mode(&mut self, debug_mode: bool) {
         self.debug_mode = debug_mode;
+        // `DebugLog` reaches the message board and developer console only while
+        // the round has debug mode on (C4Game.cpp:447-454).
+        clonk_core::log_target::set_debug_mode_presentation(debug_mode);
     }
 
     pub fn debug_mode(&self) -> bool {
@@ -748,6 +826,7 @@ impl Engine {
         }
         self.debug_mode = false;
         self.allow_debug = false;
+        clonk_core::log_target::set_debug_mode_presentation(false);
     }
 
     /// Install the live C4GameControl rate without disturbing ControlTick or

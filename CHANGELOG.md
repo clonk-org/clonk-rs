@@ -4,6 +4,93 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-28
+
+### Bug fixes
+
+- Replay lobby chat history for late joiners
+- Resolve every component archive per target triple
+- Check only pushed commits in the pre-push rustfmt hook
+- Scope the scheduler test clock imports to unix
+- Pin archive timestamps instead of inheriting the wall clock
+- Clear the Windows-only lints in the launcher crates
+- Run handle-less scheduler procs once on Windows
+- Area-average save thumbnails instead of two-tap sampling
+- Lay the launcher out in logical units and draw it with a vector face
+- Read MODE_Action overlay facets through the source definition scale
+- Honour --no-archive when packaging for macOS
+- Decode MP3 through symphonia instead of the unsound minimp3 stack
+- Update bytes and rand past their security advisories
+
+### Continuous integration
+
+- Publish the update components and their manifest with the release
+- Check pushed files on rustfmt stdin so absent modules do not read as drift
+- Run workspace tests through nextest
+- Check formatting in a separate job
+- Report every Windows suite instead of stopping at the first
+- Test the launcher on a Windows runner
+
+### Dependencies
+
+- Lock file maintenance
+
+### Documentation
+
+- Record the host-order material slot gap blocking Linux replay goldens
+- Simplify the issue templates down to a single bug form
+- Record the high-DPI presentation divergences
+- Record that point raster width does not track world zoom
+
+### Features
+
+- Check for updates from the startup menu
+- Apply an update by swapping components with rollback and resume
+- Download update components with cancellable progress
+- Generate the update manifest from the emitted component archives
+- Fetch update manifests over guarded https
+- Journal an update apply so an interruption is recoverable
+- Resolve update manifest and component archive urls
+- Reject component archives whose entry names collide case-insensitively
+- Add the client-side update core crate
+- Search the full scenario catalog live
+- Emit update components from the package command
+- Emit content-addressed component archives and a signed manifest
+- Map the staged layout onto update components
+- Add a fragment-shader landscape material composer
+- Blit HD definition art at one texel per device pixel
+- Serve any font recipe natively and honour higher-resolution GUI sheets
+- Add opt-in fog-of-war grid subdivision
+- Raise the application scale ceiling to 400 percent
+- Add opt-in aspect-filled loader backgrounds
+- Add opt-in alpha-weighted landscape magnification
+- Add opt-in mipmapped minification behind a remaster switch
+- Add opt-in sub-LSB dithering for the sky gradient
+- Seed the first-run application scale from the display density
+- Add an opt-in high-DPI cursor tier ladder
+- Turn guided missiles only while a turn key is held
+- Synchronize key releases in classic control
+
+### Performance
+
+- Avoid redundant effect state clones
+
+### Refactoring
+
+- Apply rustfmt to files that drifted from the gate
+- Drop manifest signing in favour of TLS and content hashes
+- Extract a reusable deterministic zip writer
+- Carry solid-primitive fragment options in one style value
+- Build the event loop before resolving the initial window size
+- Track incoming and requested updates separately
+- Resolve the binaries directory from the install root
+
+### Testing
+
+- Pin that the update transport trait can be faked as an object
+- Read back bundle-root groups only on macOS
+- Make launcher and path assertions portable to Windows
+
 ## [0.3.0] - 2026-07-28
 
 ### Bug fixes

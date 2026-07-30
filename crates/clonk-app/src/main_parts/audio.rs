@@ -748,20 +748,11 @@ pub(crate) fn handle_window_event(
                 },
             ..
         } => {
-            if state == ElementState::Pressed
-                && keycode == VirtualKeyCode::F11
-                && !app.options_keyboard_control_capture_active()
-            {
-                app.startup_tooltip.note_non_pointer_input();
-                app.note_classic_lobby_non_pointer_input();
-                if app.mode == AppMode::Menu {
-                    app.menu_frame_cache = None;
-                }
-                app.reject_classic_global_gui_bootstrap()?;
-                toggle_fullscreen(window, display_options);
-                app.set_display_mode(display_options.mode);
-                return Ok(());
-            }
+            // F11 is an ordinary physical key in C++: `C4KeyboardInput` maps
+            // its name (C4KeyboardInput.cpp:185-197) and `C4Game::InitKeyboard`
+            // registers no fullscreen action for it (C4Game.cpp:3371-3448), so
+            // it reaches classic dispatch like every other key. Display mode is
+            // changed only through the Options combo.
             app.handle_key(keycode, state)
                 .context("failed to process key input")?;
             if !app.pending_screenshots.is_empty() {
@@ -809,18 +800,6 @@ pub(crate) fn classic_platform_cursor_visible(
     pointer_inside_window: bool,
 ) -> bool {
     !(window_active && pointer_inside_window)
-}
-
-fn toggle_fullscreen(window: &Window, display_options: &mut DisplayOptions) {
-    if window.fullscreen().is_some() {
-        window.set_fullscreen(None);
-        display_options.record_mode(DisplayMode::Window);
-        display_options.record_maximized(window.is_maximized());
-    } else {
-        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
-        display_options.record_mode(DisplayMode::Fullscreen);
-        display_options.record_maximized(false);
-    }
 }
 
 #[derive(Debug)]
@@ -996,7 +975,7 @@ impl AudioContext {
         #[cfg(test)]
         let (resolver, music_resolver) = if audio_resources_enabled {
             (
-                SoundResolver::new(),
+                SoundResolver::discover_for_paths(paths),
                 MusicResolver::discover_for_paths(paths),
             )
         } else {
@@ -1007,7 +986,7 @@ impl AudioContext {
         };
         #[cfg(not(test))]
         let (resolver, music_resolver) = (
-            SoundResolver::new(),
+            SoundResolver::discover_for_paths(paths),
             MusicResolver::discover_for_paths(paths),
         );
         let mut context = Self {
@@ -2537,8 +2516,12 @@ impl SoundResolver {
         }
     }
 
-    fn new() -> Self {
-        let (global, base_sample_loads) = discover_global_sound_libraries();
+    /// C++ resolves every path through the live selected configuration
+    /// (C4Config.cpp:1351-1357,1612-1627), so sound discovery uses the same
+    /// `AppPaths` the application was started with rather than rediscovering
+    /// ambient defaults — an explicit `/config` selection must not be lost.
+    pub(crate) fn discover_for_paths(paths: Option<&AppPaths>) -> Self {
+        let (global, base_sample_loads) = discover_global_sound_libraries_for(paths);
         let mut resolver = Self::empty();
         resolver.global = global;
         resolver.base_sample_loads = base_sample_loads;
@@ -2967,16 +2950,15 @@ fn sound_name_has_extension(name: &str) -> bool {
         .is_some_and(|index| component_start + index + 1 < name.len())
 }
 
-fn discover_global_sound_libraries() -> (Vec<SoundLibrary>, Vec<String>) {
-    match AppPaths::discover() {
-        Ok(paths) => {
-            discover_global_sound_libraries_at(paths.content_dir().unwrap_or(paths.install_root()))
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "sound asset discovery skipped");
-            (Vec::new(), Vec::new())
-        }
-    }
+fn discover_global_sound_libraries_for(
+    paths: Option<&AppPaths>,
+) -> (Vec<SoundLibrary>, Vec<String>) {
+    let Some(paths) = paths else {
+        // A pathless app has no install media to walk; C++ has no equivalent
+        // state, so this stays empty rather than guessing a root.
+        return (Vec::new(), Vec::new());
+    };
+    discover_global_sound_libraries_at(paths.content_dir().unwrap_or(paths.install_root()))
 }
 
 pub(crate) fn discover_global_sound_libraries_at(
@@ -3592,6 +3574,21 @@ pub(crate) struct ScriptMenuPresentationState {
     /// C4Menu::AdjustPosition runs after a selection/location update, not on
     /// every draw (otherwise wheel scrolling would immediately be undone).
     pub(crate) selection_needs_adjustment: bool,
+    /// `C4Menu::Lines` as last written by `C4Menu::SetSize`.
+    ///
+    /// `InitLocation` recomputes `Lines` from the item count, but only while
+    /// `LocationSet` is false, and `Draw` sets `LocationSet` on the first
+    /// frame (C4Menu.cpp:713-721,796-797). `SetSize` writes `Lines` directly
+    /// and does *not* clear `LocationSet` (C4Menu.cpp:635-640), so a
+    /// `SetMenuSize` row count issued while the menu is already on screen
+    /// survives until something invalidates the location. A row count set
+    /// before the first draw is discarded by that first `InitLocation`,
+    /// which is why this starts as `None`.
+    pub(crate) explicit_lines: Option<i32>,
+    /// The `menu.lines` value already folded into `explicit_lines`, so a
+    /// later `SetMenuSize` is recognised by the change rather than by the
+    /// value alone.
+    pub(crate) applied_menu_lines: i32,
 }
 
 pub(crate) fn reset_script_menu_presentation_location(state: &mut ScriptMenuPresentationState) {
@@ -3633,6 +3630,10 @@ pub(crate) enum MessageDialogContinuation {
     DeveloperConsoleNotice {
         follow_up: Option<String>,
     },
+    /// One wild savegame-player takeover warning. Its checkbox persists
+    /// `Config.Startup.HideMsgPlrTakeOver` (C4PlayerInfo.cpp:1390;
+    /// C4Config.cpp:1514) and the dialog itself changes no assignment.
+    SavegamePlayerTakeoverWarning,
     StartupNetworkConnectProgress,
     StartupIrcConnectWarning {
         login: clonk_frontend::startup_netdlg::NetDlgChatLogin,
@@ -5763,8 +5764,12 @@ pub(crate) fn extract_default_startup_portraits_once(paths: &AppPaths) {
         return;
     }
 
-    if let Err(error) = fs::create_dir_all(paths.user_data_dir()) {
-        tracing::warn!(%error, path = %paths.user_data_dir().display(), "failed to create portrait directory");
+    // `C4FileSelDlg` extracts these through `Config.AtUserPath`
+    // (C4FileSelDlg.cpp:614-622), which re-expands `General.UserPath` on every
+    // call rather than using a root cached at startup.
+    let user_root = paths.at_user_path("");
+    if let Err(error) = fs::create_dir_all(&user_root) {
+        tracing::warn!(%error, path = %user_root.display(), "failed to create portrait directory");
     } else {
         match main_graphics_group(paths) {
             Ok(graphics) => {
@@ -5773,7 +5778,7 @@ pub(crate) fn extract_default_startup_portraits_once(paths: &AppPaths) {
                         .read_file(source)
                         .map_err(|error| error.to_string())
                         .and_then(|bytes| {
-                            fs::write(paths.user_data_dir().join(destination), bytes)
+                            fs::write(paths.at_user_path(destination), bytes)
                                 .map_err(|error| error.to_string())
                         });
                     if let Err(error) = result {

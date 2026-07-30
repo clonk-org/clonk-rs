@@ -278,7 +278,7 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     ) {
         Some(Ok(value)) => value.as_bool(),
         Some(Err(error)) => {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 "script error in QueryCatchBlow; continuing like the C++ fail-safe exec"
             );
@@ -385,7 +385,7 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
             "CatchBlow",
             &[Value::Int(punch), object_reference_value(attacker)],
         ) {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 "script error in CatchBlow; continuing like the C++ fail-safe exec"
             );
@@ -2369,7 +2369,7 @@ pub(crate) fn do_damage_with_cause_override(
         "Damage",
         &[Value::Int(change), Value::Int(caused_by)],
     ) {
-        tracing::warn!(
+        tracing::debug!(
             %error,
             "script error in Damage; continuing like the C++ fail-safe exec"
         );
@@ -2595,7 +2595,7 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         ];
         for (callback, args) in callbacks.into_iter().flatten() {
             if let Some(Err(error)) = call_world_object_script_callback(id, &callback, &args) {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     callback = callback.function_name(),
                     "SetAction callback error; continuing like the C++ fail-safe exec"
@@ -3502,7 +3502,7 @@ pub(crate) fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
     ) {
         Some(Ok(value)) => value_raw_truthy(&value),
         Some(Err(error)) => {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 "OnActionJump error; continuing like the C++ fail-safe exec"
             );
@@ -4013,7 +4013,7 @@ pub(crate) fn native_set_action_by_name_with_target(
     };
     if let Some(callback) = start_call {
         if let Some(Err(error)) = call_world_object_script_callback(target, &callback, &[]) {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 callback = callback.function_name(),
                 "native SetAction callback error; continuing like the C++ fail-safe exec"
@@ -4040,7 +4040,7 @@ pub(crate) fn native_set_action_by_name_with_target(
             if let Some(Err(error)) =
                 call_world_object_script_callback(target, &callback, &[Value::Int(previous_phase)])
             {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     callback = callback.function_name(),
                     "native SetAction callback error; continuing like the C++ fail-safe exec"
@@ -4188,7 +4188,7 @@ pub(crate) fn native_fling(
     ) {
         Some(Ok(value)) => value.as_bool(),
         Some(Err(error)) => {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 "OnActionJump error; continuing like the C++ fail-safe exec"
             );

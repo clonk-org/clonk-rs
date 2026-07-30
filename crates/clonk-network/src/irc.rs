@@ -159,6 +159,10 @@ pub struct IrcConnectConfig {
     pub auto_join: Option<Vec<u8>>,
     /// Payload following the CTCP `VERSION` tag, without CTCP delimiters.
     pub ctcp_version: Vec<u8>,
+    /// Status-line templates from the active language table. C++ resolves each
+    /// one through `LoadResStr` inside `C4Network2IRCClient`, which the port
+    /// projects onto the connection the transport is started with.
+    pub status_templates: IrcStatusTemplates,
 }
 
 impl IrcConnectConfig {
@@ -171,6 +175,7 @@ impl IrcConnectConfig {
             auto_join: None,
             ctcp_version: format!("Clonk Rust:{}:{}", IRC_CTCP_ENGINE_VERSION, c4_os_tag())
                 .into_bytes(),
+            status_templates: IrcStatusTemplates::default(),
         }
     }
 }
@@ -243,6 +248,98 @@ pub struct IrcReduceResult {
     pub notifications: usize,
 }
 
+/// Every `LoadResStr` template `C4Network2IRC` uses for player-visible status
+/// text, plus `C4ChatDlg`'s connecting line
+/// (src/C4Network2IRC.cpp:254-259,438-558,584-595; src/C4ChatDlg.cpp:643).
+///
+/// `Default` reproduces the shipped `LanguageUS.txt` values, which is what
+/// C4ResStrTable falls back to for a missing key, so the transport stays usable
+/// without a language table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrcStatusTemplates {
+    /// `IDS_MSG_DISCONNECTEDFROMSERVER` — `(reason)`.
+    pub disconnected_from_server: Vec<u8>,
+    /// `IDS_MSG_YOUHAVEJOINEDCHANNEL` — `(channel)`.
+    pub you_joined_channel: Vec<u8>,
+    /// `IDS_MSG_HASJOINEDTHECHANNEL` — `(nick)`.
+    pub has_joined_channel: Vec<u8>,
+    /// `IDS_MSG_YOUHAVELEFTCHANNEL` — `(channel, comment)`.
+    pub you_left_channel: Vec<u8>,
+    /// `IDS_MSG_HASLEFTTHECHANNEL` — `(nick, comment)`.
+    pub has_left_channel: Vec<u8>,
+    /// `IDS_MSG_YOUWEREKICKEDFROMCHANNEL` — `(channel, comment)`.
+    pub you_were_kicked: Vec<u8>,
+    /// `IDS_MSG_WASKICKEDFROMTHECHANNEL` — `(kicked, comment)`.
+    pub was_kicked: Vec<u8>,
+    /// `IDS_MSG_HASDISCONNECTED` — `(nick, comment)`.
+    pub has_disconnected: Vec<u8>,
+    /// `IDS_MSG_CHANGESTHETOPICTO` — `(nick, topic)`.
+    pub changes_topic: Vec<u8>,
+    /// `IDS_MSG_SETSMODE` — `(nick, flags, what)`.
+    pub sets_mode: Vec<u8>,
+    /// `IDS_MSG_ISNOWKNOWNAS` — `(nick, new nick)`.
+    pub is_now_known_as: Vec<u8>,
+    /// `IDS_MSG_TOPICIN` — `(channel, topic)`.
+    pub topic_in: Vec<u8>,
+}
+
+impl Default for IrcStatusTemplates {
+    fn default() -> Self {
+        Self {
+            disconnected_from_server: b"Disconnected from server (%s).".to_vec(),
+            you_joined_channel: b"You have joined channel %s.".to_vec(),
+            has_joined_channel: b"%s has joined the channel.".to_vec(),
+            you_left_channel: b"You have left channel %s (%s).".to_vec(),
+            has_left_channel: b"%s has left the channel (%s)".to_vec(),
+            you_were_kicked: b"You were kicked from channel %s (%s).".to_vec(),
+            was_kicked: b"%s was kicked from the channel (%s).".to_vec(),
+            has_disconnected: b"%s has disconnected (%s).".to_vec(),
+            changes_topic: b"%s changes the topic to: %s".to_vec(),
+            sets_mode: b"%s sets mode %s %s".to_vec(),
+            is_now_known_as: b"%s is now known as %s".to_vec(),
+            topic_in: b"Topic in %s: %s".to_vec(),
+        }
+    }
+}
+
+/// C4ResStrTable substitutes positional `%s` arguments in order over raw
+/// legacy bytes. Arguments are inserted verbatim, so a literal placeholder
+/// inside a nick, channel or topic cannot consume the next slot.
+pub(crate) fn format_irc_status(template: &[u8], arguments: &[&[u8]]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(template.len());
+    let mut arguments = arguments.iter();
+    let mut index = 0;
+    while index < template.len() {
+        if template[index] != b'%' {
+            output.push(template[index]);
+            index += 1;
+            continue;
+        }
+        match template.get(index + 1).copied() {
+            Some(b'%') => {
+                output.push(b'%');
+                index += 2;
+            }
+            Some(b's' | b'd' | b'i') => {
+                match arguments.next() {
+                    Some(argument) => output.extend_from_slice(argument),
+                    None => output.extend_from_slice(&template[index..index + 2]),
+                }
+                index += 2;
+            }
+            Some(_) => {
+                output.extend_from_slice(&template[index..index + 2]);
+                index += 2;
+            }
+            None => {
+                output.push(b'%');
+                index += 1;
+            }
+        }
+    }
+    output
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrcClientSnapshot {
     pub connection_state: IrcConnectionState,
@@ -269,6 +366,7 @@ pub struct IrcClientState {
     max_log_length: usize,
     max_read_log_length: usize,
     last_error: Option<String>,
+    status_templates: IrcStatusTemplates,
 }
 
 impl Default for IrcClientState {
@@ -280,6 +378,13 @@ impl Default for IrcClientState {
 impl IrcClientState {
     pub fn new() -> Self {
         Self::with_log_limits(IRC_MAX_LOG_LENGTH, IRC_MAX_READ_LOG_LENGTH)
+    }
+
+    /// Install the active language table's IRC status templates. C++ resolves
+    /// each one through `LoadResStr` at the moment it pushes the message, so a
+    /// language change reaches later status lines only.
+    pub fn set_status_templates(&mut self, templates: IrcStatusTemplates) {
+        self.status_templates = templates;
     }
 
     fn with_log_limits(max_log_length: usize, max_read_log_length: usize) -> Self {
@@ -297,6 +402,7 @@ impl IrcClientState {
             max_log_length,
             max_read_log_length,
             last_error: None,
+            status_templates: IrcStatusTemplates::default(),
         }
     }
 
@@ -381,6 +487,7 @@ impl IrcClientState {
         self.password = config.password;
         self.auto_join = config.auto_join;
         self.ctcp_version = config.ctcp_version;
+        self.status_templates = config.status_templates;
         self.prefixes = b"(ov)@+".to_vec();
         self.last_error = None;
     }
@@ -416,7 +523,10 @@ impl IrcClientState {
             IrcMessageType::Status,
             b"",
             &target,
-            &join_bytes(&[b"Disconnected from server (", reason.as_bytes(), b")."]),
+            &format_irc_status(
+                &self.status_templates.disconnected_from_server,
+                &[reason.as_bytes()],
+            ),
         );
         IrcReduceResult {
             outbound: Vec::new(),
@@ -550,9 +660,9 @@ impl IrcClientState {
             let channel_index = self.add_channel(&channel);
             self.channels[channel_index].add_user(&sender_nick);
             let text = if sender_nick == self.nick {
-                join_bytes(&[b"You have joined channel ", &channel, b"."])
+                format_irc_status(&self.status_templates.you_joined_channel, &[&channel])
             } else {
-                join_bytes(&[&sender_nick, b" has joined the channel."])
+                format_irc_status(&self.status_templates.has_joined_channel, &[&sender_nick])
             };
             result.notifications +=
                 self.push_message(IrcMessageType::Status, sender, &channel, &text);
@@ -571,14 +681,20 @@ impl IrcClientState {
                     IrcMessageType::Status,
                     sender,
                     &nick,
-                    &join_bytes(&[b"You have left channel ", &channel, b" (", &comment, b")."]),
+                    &format_irc_status(
+                        &self.status_templates.you_left_channel,
+                        &[&channel, &comment],
+                    ),
                 );
             } else {
                 result.notifications += self.push_message(
                     IrcMessageType::Status,
                     sender,
                     &channel,
-                    &join_bytes(&[&sender_nick, b" has left the channel (", &comment, b")"]),
+                    &format_irc_status(
+                        &self.status_templates.has_left_channel,
+                        &[&sender_nick, &comment],
+                    ),
                 );
             }
         }
@@ -597,20 +713,17 @@ impl IrcClientState {
                     IrcMessageType::Status,
                     sender,
                     &nick,
-                    &join_bytes(&[
-                        b"You were kicked from channel ",
-                        &channel,
-                        b" (",
-                        &comment,
-                        b").",
-                    ]),
+                    &format_irc_status(
+                        &self.status_templates.you_were_kicked,
+                        &[&channel, &comment],
+                    ),
                 );
             } else {
                 result.notifications += self.push_message(
                     IrcMessageType::Status,
                     sender,
                     &channel,
-                    &join_bytes(&[&kicked, b" was kicked from the channel (", &comment, b")."]),
+                    &format_irc_status(&self.status_templates.was_kicked, &[&kicked, &comment]),
                 );
             }
         }
@@ -618,7 +731,10 @@ impl IrcClientState {
         if irc_eq(command, b"QUIT") {
             let mut parameters = Some(raw_parameters);
             let comment = extract_parameter(&mut parameters);
-            let text = join_bytes(&[&sender_nick, b" has disconnected (", &comment, b")."]);
+            let text = format_irc_status(
+                &self.status_templates.has_disconnected,
+                &[&sender_nick, &comment],
+            );
             let affected = self
                 .channels
                 .iter()
@@ -645,7 +761,10 @@ impl IrcClientState {
                 IrcMessageType::Status,
                 sender,
                 &channel,
-                &join_bytes(&[&sender_nick, b" changes the topic to: ", &topic]),
+                &format_irc_status(
+                    &self.status_templates.changes_topic,
+                    &[&sender_nick, &topic],
+                ),
             );
         }
 
@@ -663,7 +782,10 @@ impl IrcClientState {
                 IrcMessageType::Status,
                 sender,
                 &channel,
-                &join_bytes(&[&sender_nick, b" sets mode ", &flags, b" ", &what]),
+                &format_irc_status(
+                    &self.status_templates.sets_mode,
+                    &[&sender_nick, &flags, &what],
+                ),
             );
         }
 
@@ -678,7 +800,10 @@ impl IrcClientState {
         if irc_eq(command, b"NICK") {
             let mut parameters = Some(raw_parameters);
             let new_nick = extract_parameter(&mut parameters);
-            let text = join_bytes(&[&sender_nick, b" is now known as ", &new_nick]);
+            let text = format_irc_status(
+                &self.status_templates.is_now_known_as,
+                &[&sender_nick, &new_nick],
+            );
             let affected = self
                 .channels
                 .iter()
@@ -744,7 +869,7 @@ impl IrcClientState {
                         IrcMessageType::Status,
                         sender,
                         &channel,
-                        &join_bytes(&[b"Topic in ", &channel, b": ", &topic]),
+                        &format_irc_status(&self.status_templates.topic_in, &[&channel, &topic]),
                     );
                 }
             }
@@ -1598,6 +1723,7 @@ mod tests {
             password: None,
             auto_join: Some(b"#clonken,#legacyclonk".to_vec()),
             ctcp_version: b"Clonk Rust:test:unit".to_vec(),
+            status_templates: IrcStatusTemplates::default(),
         }
     }
 
@@ -1714,6 +1840,99 @@ mod tests {
             ]
         );
         assert!(irc_eq(b"#r\xe4um", b"#R\xc4UM"));
+    }
+
+    /// C4Network2IRCClient resolves every status line through `LoadResStr`
+    /// (C4Network2IRC.cpp:224-421), so a German table must reach the transcript
+    /// with the C++ argument order and channel/server routing intact. The
+    /// templates below are `LanguageDE.txt` verbatim.
+    #[test]
+    fn irc_status_transcript_uses_active_language_resources() {
+        let mut config = test_config();
+        config.auto_join = None;
+        config.status_templates = IrcStatusTemplates {
+            disconnected_from_server: "Verbindung beendet (%s).".as_bytes().to_vec(),
+            you_joined_channel: "Du bist Chat-Kanal %s beigetreten.".as_bytes().to_vec(),
+            has_joined_channel: "%s ist dem Chat-Kanal beigetreten.".as_bytes().to_vec(),
+            you_left_channel: "Du hast Chat-Kanal %s verlassen (%s).".as_bytes().to_vec(),
+            has_left_channel: "%s hat den Chat-Kanal verlassen (%s)".as_bytes().to_vec(),
+            you_were_kicked: "Du wurdest aus dem Chat-Kanal %s geworfen (%s)."
+                .as_bytes()
+                .to_vec(),
+            was_kicked: "%s wurde aus dem Chat-Kanal geworfen (%s)."
+                .as_bytes()
+                .to_vec(),
+            has_disconnected: "%s hat die Verbindung beendet (%s).".as_bytes().to_vec(),
+            changes_topic: "%s \u{e4}ndert das Thema zu: %s".as_bytes().to_vec(),
+            sets_mode: "%s setzt Modus %s %s".as_bytes().to_vec(),
+            is_now_known_as: "%s hei\u{df}t jetzt %s".as_bytes().to_vec(),
+            topic_in: "Thema in %s: %s".as_bytes().to_vec(),
+        };
+        let mut state = IrcClientState::new();
+        state.begin_connect(config);
+        state.on_tcp_connected().expect("connect reducer");
+        state.receive_line(":server 376 Me :End of MOTD");
+
+        // Own JOIN targets the channel; a foreign JOIN keeps the same routing.
+        state.receive_line(":Me!i@h JOIN #clonken");
+        state.receive_line(":Keeper!i@h JOIN #clonken");
+        // 332 routes to the channel with (channel, topic) in that order.
+        state.receive_line(":server 332 Me #clonken :Clonk Rust");
+        state.receive_line(":Keeper!i@h TOPIC #clonken :Neues Thema");
+        state.receive_line(":Keeper!i@h MODE #clonken +o Me");
+        state.receive_line(":Keeper!i@h NICK Wache");
+        state.receive_line(":Wache!i@h KICK #clonken Me :raus");
+        state.receive_line(":Wache!i@h QUIT :tsch\u{fc}ss");
+        state.on_disconnected("Netzwerkfehler");
+
+        let transcript: Vec<(Vec<u8>, Vec<u8>)> = state
+            .messages()
+            .filter(|message| message.message_type == IrcMessageType::Status)
+            .map(|message| (message.target.clone(), message.data.clone()))
+            .collect();
+        let rendered: Vec<(String, String)> = transcript
+            .iter()
+            .map(|(target, data)| {
+                (
+                    String::from_utf8_lossy(target).into_owned(),
+                    String::from_utf8_lossy(data).into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                (
+                    "#clonken".to_owned(),
+                    "Du bist Chat-Kanal #clonken beigetreten.".to_owned()
+                ),
+                (
+                    "#clonken".to_owned(),
+                    "Keeper ist dem Chat-Kanal beigetreten.".to_owned()
+                ),
+                (
+                    "#clonken".to_owned(),
+                    "Thema in #clonken: Clonk Rust".to_owned()
+                ),
+                (
+                    "#clonken".to_owned(),
+                    "Keeper \u{e4}ndert das Thema zu: Neues Thema".to_owned()
+                ),
+                ("#clonken".to_owned(), "Keeper setzt Modus +o Me".to_owned()),
+                (
+                    "#clonken".to_owned(),
+                    "Keeper hei\u{df}t jetzt Wache".to_owned()
+                ),
+                (
+                    "Me".to_owned(),
+                    "Du wurdest aus dem Chat-Kanal #clonken geworfen (raus).".to_owned()
+                ),
+                (
+                    "Me".to_owned(),
+                    "Verbindung beendet (Netzwerkfehler).".to_owned()
+                ),
+            ]
+        );
     }
 
     #[test]

@@ -6,6 +6,36 @@
 
 use super::*;
 
+/// Whether this platform's C++ counterpart turns an operating-system key-repeat
+/// into `C4KeyCodeEx::IsRepeated()`.
+///
+/// C++ decides this per *windowing backend*, chosen at build time, and the port
+/// runs winit everywhere — so the equivalent choice is by target:
+///
+/// - **Win32** reads the real hardware bit: `DoKeyboardInput(..., !!(lParam &
+///   0x40000000), ...)` (`C4Viewport.cpp:89,100`, `C4FullScreen.cpp:59,64`,
+///   `C4GuiDialogs.cpp:231,240`). Repeats are repeats.
+/// - **X11** passes `false` and `C4Game::DoKeyboardInput` re-derives the flag
+///   from its own `PressedKeys` map — but only inside `#ifdef USE_X11`
+///   (`C4Game.cpp:2153-2166`). Same answer as Win32, synthesized.
+/// - **SDL** passes a literal `false` for *every* keydown and keyup
+///   (`C4FullScreen.cpp:388-400`) and gets no synthesis, because `USE_X11` is
+///   off. SDL is the default main loop on Apple and `USE_X11` is explicitly
+///   excluded there (`CMakeLists.txt:191-197`), so on macOS an auto-repeat down
+///   is a **fresh press**.
+///
+/// This is observable: `C4Game::LocalControlKey` swallows a repeat for
+/// AutoStopControl players (`C4Game.cpp:3580-3583`) and
+/// `C4Player::CountControl` turns a second identical com into `COM_Double`
+/// (`C4Player.cpp:1568`). Neither happens on macOS, where the flag is never set.
+pub(crate) const BACKEND_SYNTHESIZES_KEY_REPEAT: bool = !cfg!(target_os = "macos");
+
+/// The repeated-key flag handed to `C4KeyCodeEx`, given whether the key was
+/// already down and whether this backend reports repeats at all.
+pub(crate) const fn engine_key_repeated(already_pressed: bool, backend_repeats: bool) -> bool {
+    backend_repeats && already_pressed
+}
+
 impl GameApp {
     pub(crate) fn current_cursor_atlas(&self) -> Arc<CursorAtlas> {
         self.active_game_graphics
@@ -2066,11 +2096,33 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if matches!(self.mode, AppMode::Running) || key != VirtualKeyCode::F3 {
+        if matches!(self.mode, AppMode::Running)
+            || !matches!(key, VirtualKeyCode::F3 | VirtualKeyCode::F9)
+        {
             return Ok(false);
         }
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if key == VirtualKeyCode::F9 {
+            // `Screenshot` is registered `KEYSCOPE_Fullscreen | KEYSCOPE_Gui`,
+            // so bare F9 also captures the startup screens; `ScreenshotEx` is
+            // Fullscreen-only and stays inert here (C4Game.cpp:3387-3388).
+            let screenshot =
+                self.runtime_keyboard_binding_matches("Screenshot", key, c4_modifiers.is_empty());
+            if !screenshot {
+                return Ok(false);
+            }
+            if state == ElementState::Pressed {
+                let gamma = self
+                    .graphics
+                    .active_gamma_ramp(&self.snapshot.environment.gamma);
+                self.pending_screenshots.push_back(ScreenshotRequest {
+                    kind: ScreenshotKind::PresentedFrame,
+                    gamma,
+                });
+            }
+            return Ok(true);
+        }
         if c4_modifiers.is_empty() {
             if state == ElementState::Pressed {
                 let enabled = self.toggle_frontend_music_option()?;
@@ -3056,7 +3108,10 @@ impl GameApp {
         if state == ElementState::Pressed {
             self.ingame_menu.replace(
                 OWNER_NONE,
-                IngameMenuState::main_menu(&self.main_menu_conditions_for(OWNER_NONE)),
+                IngameMenuState::main_menu(
+                    &self.main_menu_conditions_for(OWNER_NONE),
+                    &self.ingame_menu_labels(),
+                ),
             );
         }
         Ok(true)
@@ -3176,7 +3231,10 @@ impl GameApp {
             RuntimeCustomGamepadAction::MenuOpen => {
                 self.ingame_menu.replace(
                     OWNER_NONE,
-                    IngameMenuState::main_menu(&self.main_menu_conditions_for(OWNER_NONE)),
+                    IngameMenuState::main_menu(
+                        &self.main_menu_conditions_for(OWNER_NONE),
+                        &self.ingame_menu_labels(),
+                    ),
                 );
             }
         }
@@ -4209,6 +4267,20 @@ impl GameApp {
                     self.request_exit();
                     return Ok(());
                 }
+                // `C4StartupMainDlg` registers bare F6 at control-override
+                // priority within its own dialog scope
+                // (C4StartupMainDlg.cpp:95-100). `SwitchToEditor` returning
+                // false leaves the key unconsumed.
+                if self.startup_view == StartupView::MainMenu
+                    && state == ElementState::Pressed
+                    && key == VirtualKeyCode::F6
+                    && (self.keyboard_modifiers
+                        & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
+                        .is_empty()
+                    && self.switch_to_editor()
+                {
+                    return Ok(());
+                }
                 if let Some(gui_key) = map_key_code(key) {
                     if self.handle_startup_dialog_key(gui_key, state)? {
                         return Ok(());
@@ -4372,17 +4444,18 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        let repeated = match state {
+        let already_pressed = match state {
             ElementState::Pressed => !self.pressed_engine_keys.insert(key),
             ElementState::Released => {
                 self.pressed_engine_keys.remove(&key);
                 false
             }
         };
+        let repeated = engine_key_repeated(already_pressed, BACKEND_SYNTHESIZES_KEY_REPEAT);
         self.dispatch_engine_key_binding(key, state, repeated)
     }
 
-    fn dispatch_engine_key_binding(
+    pub(crate) fn dispatch_engine_key_binding(
         &mut self,
         key: VirtualKeyCode,
         state: ElementState,
@@ -4494,7 +4567,7 @@ impl GameApp {
     fn handle_runtime_debug_key(&mut self, key: RuntimeDebugKey) -> Result<bool, EngineError> {
         if key != RuntimeDebugKey::Mode && !self.engine.debug_mode() {
             let flash =
-                self.prepare_runtime_debug_flash(|resources| resources.no_debug_mode.clone());
+                self.prepare_runtime_resource_flash(|resources| resources.no_debug_mode.clone());
             self.runtime_flash_message = flash;
             return Ok(false);
         }
@@ -4503,15 +4576,16 @@ impl GameApp {
             RuntimeDebugKey::Mode => {
                 let enabled = self.engine.debug_mode();
                 if !self.engine.allow_debug() && !enabled {
-                    let flash = self.prepare_runtime_debug_flash(|resources| {
+                    let flash = self.prepare_runtime_resource_flash(|resources| {
                         resources.debug_mode_not_allowed.clone()
                     });
                     self.runtime_flash_message = flash;
                     return Ok(false);
                 }
                 let enabled = !enabled;
-                let flash = self
-                    .prepare_runtime_debug_flash(|resources| resources.debug_mode_on_off(enabled));
+                let flash = self.prepare_runtime_resource_flash(|resources| {
+                    resources.debug_mode_on_off(enabled)
+                });
                 self.engine.set_debug_mode(enabled);
                 if !enabled {
                     self.graphics
@@ -4524,7 +4598,7 @@ impl GameApp {
                 flags.show_vertices = !flags.show_vertices;
                 flags.show_entrance = !flags.show_entrance;
                 let enabled = flags.show_vertices || flags.show_entrance;
-                let flash = self.prepare_runtime_debug_flash(|resources| {
+                let flash = self.prepare_runtime_resource_flash(|resources| {
                     resources.on_off("Entrance+Vertices", enabled)
                 });
                 self.graphics.set_debug_draw_flags(flags);
@@ -4534,18 +4608,18 @@ impl GameApp {
                 let mut flags = self.graphics.debug_draw_flags();
                 let flash = if !(flags.show_action || flags.show_command || flags.show_pathfinder) {
                     flags.show_action = true;
-                    self.prepare_runtime_debug_flash(|_| "Actions".to_string())
+                    self.prepare_runtime_resource_flash(|_| "Actions".to_string())
                 } else if flags.show_action {
                     flags.show_action = false;
                     flags.show_command = true;
-                    self.prepare_runtime_debug_flash(|_| "Commands".to_string())
+                    self.prepare_runtime_resource_flash(|_| "Commands".to_string())
                 } else if flags.show_command {
                     flags.show_command = false;
                     flags.show_pathfinder = true;
-                    self.prepare_runtime_debug_flash(|_| "Pathfinder".to_string())
+                    self.prepare_runtime_resource_flash(|_| "Pathfinder".to_string())
                 } else {
                     flags.show_pathfinder = false;
-                    self.prepare_runtime_debug_flash(|resources| {
+                    self.prepare_runtime_resource_flash(|resources| {
                         resources.on_off("Actions/Commands/Pathfinder", false)
                     })
                 };
@@ -4556,7 +4630,7 @@ impl GameApp {
                 let mut flags = self.graphics.debug_draw_flags();
                 flags.show_solid_mask = !flags.show_solid_mask;
                 let enabled = flags.show_solid_mask;
-                let flash = self.prepare_runtime_debug_flash(|resources| {
+                let flash = self.prepare_runtime_resource_flash(|resources| {
                     resources.on_off("SolidMasks", enabled)
                 });
                 self.graphics.set_debug_draw_flags(flags);
@@ -9449,6 +9523,7 @@ impl GameApp {
             .and_then(|state| state.location)
             .or_else(|| self.script_menu_free_location(owner, menu));
         let scroll_y = presentation.map_or(0, |state| state.scroll_y);
+        let explicit_lines = presentation.and_then(|state| state.explicit_lines);
         let use_free_anchor = presentation.map_or(location.is_some(), |state| {
             state.location_needs_initialization
         });
@@ -9464,6 +9539,7 @@ impl GameApp {
                     &font_images,
                     free_location,
                     scroll_y,
+                    explicit_lines,
                 )
             })
         } else {
@@ -9477,6 +9553,7 @@ impl GameApp {
                 &font_images,
                 location,
                 scroll_y,
+                explicit_lines,
             )
         })
     }

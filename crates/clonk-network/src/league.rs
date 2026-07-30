@@ -45,6 +45,8 @@ pub struct LeagueHttpTransportConfig {
     pub language_charset: String,
     /// `Config.General.LanguageEx`, preserved byte-for-byte as a header value.
     pub language_sequence: String,
+    /// `Config.Network.UseCurl` (`C4Network2Reference.cpp:410-413`).
+    pub http_backend: crate::HttpBackend,
 }
 
 impl LeagueHttpTransportConfig {
@@ -88,13 +90,15 @@ impl LeagueHttpPostTransport {
     /// redirects and cookies persist for the lifetime of this client
     /// (`src/C4HTTPClient.cpp:183-229`).
     pub fn cpp_default() -> Result<Self, LeagueHttpTransportError> {
-        let client = reqwest::Client::builder()
-            .cookie_store(true)
-            .gzip(true)
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                attempt.follow()
-            }))
-            .build()?;
+        Self::for_backend(crate::HttpBackend::default())
+    }
+
+    /// Builds the transport for the `Network.UseCurl` backend
+    /// (`C4Network2Reference.cpp:410-413`). The NetIO implementation follows no
+    /// redirects, keeps no cookies and bounds the whole query at 20 seconds —
+    /// see [`crate::HttpBackend`].
+    pub fn for_backend(backend: crate::HttpBackend) -> Result<Self, LeagueHttpTransportError> {
+        let client = backend.apply(reqwest::Client::builder()).build()?;
         Ok(Self { client })
     }
 
@@ -2589,6 +2593,7 @@ Name=\"P\\200\"\r\n"
         let config = LeagueHttpTransportConfig {
             language_charset: "RUSSIAN".to_owned(),
             language_sequence: "US,DE".to_owned(),
+            http_backend: Default::default(),
         };
 
         assert_eq!(

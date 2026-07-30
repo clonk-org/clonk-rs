@@ -1014,9 +1014,9 @@ impl Engine {
             // and Execs Def->TimerCall. C++ resolves the name at link time
             // (missing -> nullptr, no call); the Exec itself is fail-safe.
             if self.objects[idx].state.status.is_active() && !self.objects[idx].destroyed {
-                if std::env::var("LC_RUST_RNG_TRACE").is_ok()
-                    && self.objects[idx].id.as_u64() == 569
+                if self.objects[idx].id.as_u64() == 569
                     && (16..=18).contains(&self.frame)
+                    && std::env::var("LC_RUST_RNG_TRACE").is_ok()
                 {
                     tracing::warn!(
                         frame = self.frame,
@@ -1057,6 +1057,13 @@ impl Engine {
                 .filter(|menu| menu.text_progressing)
             {
                 let _ = menu.set_text_progress(1, true);
+            }
+
+            // View delays: the last thing C4Object::Execute does
+            // (C4Object.cpp:1126-1127).
+            let view_energy = &mut self.objects[idx].state.view_energy;
+            if *view_energy > 0 {
+                *view_energy -= 1;
             }
 
             let object_id = self.objects[idx].id;

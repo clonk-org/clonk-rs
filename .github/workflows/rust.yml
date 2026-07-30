@@ -41,7 +41,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -62,7 +62,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -74,8 +74,10 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             libasound2-dev \
             libfreetype6-dev \
+            libvulkan1 \
             libxmp4 \
             libudev-dev \
+            mesa-vulkan-drivers \
             pkg-config
 
       - name: Install Rust toolchain
@@ -126,10 +128,158 @@ jobs:
 
       - name: Upload developer-feedback artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rust-dev-check-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/dev-check
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Unpacked C4Groups intentionally expose the host filesystem's native entry
+  # order, exactly like C++. The checked-in raw material-index oracles were
+  # recorded on APFS, so they cannot be compared to an ext4 enumeration. Keep
+  # those oracle values as a visible required job instead of silently sorting
+  # the engine or accepting Linux-specific replacements. Ubuntu still runs the
+  # same real scenarios through host-repeatability and semantic assertions.
+  recording-host-oracles:
+    name: Recording-host material-order oracles (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
+        with:
+          tool: cargo-nextest@0.9.91
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: . -> target
+          shared-key: recording-host-oracles
+          cache-on-failure: true
+
+      # scripts/tests/test_rust_ci_recording_host_gate.py requires every test
+      # carrying the recording-host ignore marker to appear in this block.
+      - name: Run recording-host material-order oracles
+        run: |
+          cargo nextest run -p clonk-app --bin clonk-app --locked -- \
+            tests::app_virtual_keyboard_completes_real_tutorial02_route --exact
+          cargo nextest run -p clonk-engine-integration-tests --test engine_it --locked -- \
+            real_tutorial02_virtual_play::tutorial02_virtual_player_completes_the_real_tutorial_route --exact
+          cargo nextest run -p clonk-engine-integration-tests --test engine_it --locked -- \
+            dev_feedback_replay::committed_real_scenario_replays_are_deterministic --exact
+          cargo nextest run -p clonk-engine-integration-tests --test engine_it --locked -- \
+            elevator_motion_oracle::tutorial07_seed_zero_landscape_matches_cpp_surface8 --exact
+          cargo nextest run -p clonk-engine-integration-tests --test engine_it --locked -- \
+            real_scenario_harness::alchemy_real_scenario_subcases_batch_4 --exact
+          cargo nextest run -p clonk-frontend-unit-tests --test frontend_inline --locked -- \
+            tests::real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence --exact
+
+  coverage:
+    name: Rust code coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      # The clean Ubuntu baseline on the pinned toolchain is 79.72%.
+      # A whole-number floor leaves limited runner headroom while still
+      # rejecting regressions.
+      COVERAGE_MIN_LINE_PERCENT: '79'
+      # cargo-llvm-cov already ignores conventional tests/ and *_tests.rs
+      # paths. These are this workspace's additional test-only source paths.
+      COVERAGE_IGNORE_REGEX: '/(main_tests|lib_tests)/|/(parity_differential|test_game_call_ex|test_support)\.rs$'
+      # Nextest launches one process per test. LLVM's online merge pool keeps
+      # that from producing about 21 GiB of redundant per-process profiles.
+      LLVM_PROFILE_FILE_NAME: 'clonk-%8m.profraw'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install native Rust dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libfreetype6-dev \
+            libvulkan1 \
+            libxmp4 \
+            libudev-dev \
+            mesa-vulkan-drivers \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-nextest@0.9.91
+          fallback: none
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-llvm-cov@0.8.7
+          fallback: none
+
+      # Instrumented artifacts live under target/llvm-cov-target and are both
+      # large and incompatible with normal builds. Cache only Cargo downloads.
+      - name: Restore Cargo registry cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-targets: false
+          shared-key: coverage-registry
+
+      # --no-report lets the same profile data produce the gate, LCOV, and
+      # browsable HTML without running the workspace three times. It disables
+      # cargo-llvm-cov's implicit clean, so keep the explicit clean first.
+      - name: Collect instrumented workspace coverage
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report nextest \
+            --workspace \
+            --no-fail-fast \
+            --features xtask/engine-tools \
+            --locked
+
+      - name: Generate Rust coverage reports
+        run: |
+          mkdir -p target/coverage
+          cargo llvm-cov report --lcov --output-path target/coverage/lcov.info \
+            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+          cargo llvm-cov report --html --output-dir target/coverage \
+            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+
+      - name: Enforce line coverage floor
+        run: |
+          cargo llvm-cov report --fail-under-lines "$COVERAGE_MIN_LINE_PERCENT" \
+            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+
+      - name: Upload Rust coverage reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/coverage
           if-no-files-found: warn
           retention-days: 14
 
@@ -145,7 +295,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -157,8 +307,10 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             libasound2-dev \
             libfreetype6-dev \
+            libvulkan1 \
             libxmp4 \
             libudev-dev \
+            mesa-vulkan-drivers \
             pkg-config
 
       - name: Install Rust toolchain

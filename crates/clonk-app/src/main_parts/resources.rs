@@ -2383,29 +2383,23 @@ pub(crate) fn encode_screenshot_png(width: u32, height: u32, rgba: &[u8]) -> Res
 
 pub(crate) fn prepare_numbered_screenshot_path(paths: Option<&AppPaths>) -> (PathBuf, Result<()>) {
     let (preferred, fallback) = screenshot_directories(paths);
-    let (directory, result) = match fs::create_dir_all(&preferred) {
-        Ok(()) => (preferred, Ok(())),
-        Err(error) if preferred != fallback => {
-            tracing::warn!(
-                path = %preferred.display(),
-                %error,
-                "failed to create screenshot folder; falling back to install root"
-            );
-            let result = fs::create_dir_all(&fallback).with_context(|| {
-                format!(
-                    "failed to create screenshot fallback at {}",
-                    fallback.display()
-                )
-            });
-            (fallback, result)
-        }
-        Err(error) => {
-            let error = anyhow::Error::new(error).context(format!(
-                "failed to create screenshot folder at {}",
-                preferred.display()
-            ));
-            (preferred, Err(error))
-        }
+    // `C4Config::AtScreenshotPath` attempts one directory creation and falls
+    // back to ExePath when it fails, rather than building a tree
+    // (C4Config.cpp:1381-1390).
+    let directory = crate::output_folders::resolve_screenshot_directory(&preferred, &fallback);
+    let result = if directory == fallback && preferred != fallback {
+        tracing::warn!(
+            path = %preferred.display(),
+            "could not create the screenshot folder; falling back to the install root"
+        );
+        fs::create_dir_all(&fallback).with_context(|| {
+            format!(
+                "failed to create screenshot fallback at {}",
+                fallback.display()
+            )
+        })
+    } else {
+        Ok(())
     };
     let path = next_screenshot_path(&directory);
     (path, result)
@@ -2464,11 +2458,30 @@ pub(crate) fn load_save_entry(path: &Path) -> Result<SaveEntry> {
     })
 }
 
+/// `StdCompilerINIRead::Boolean` (StdCompiler.cpp:692-715): a leading `1`/`0`
+/// not followed by another digit, or a case-sensitive `true`/`false` prefix.
+/// Anything else signals not-found, so the caller keeps the field's adapted
+/// default. No trimming, no case folding, and no `yes`/`on` aliases — C++ reads
+/// the raw value in place.
+pub(crate) fn parse_native_config_bool(raw: &str) -> Option<bool> {
+    let value = raw.as_bytes();
+    if value.first() == Some(&b'1') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(true)
+    } else if value.first() == Some(&b'0') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(false)
+    } else if value.starts_with(b"true") {
+        Some(true)
+    } else if value.starts_with(b"false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Callers that have no adapted default of their own. C4Config's own fields
+/// keep theirs through [`parse_native_config_bool`].
 pub(crate) fn parse_config_bool(raw: &str) -> bool {
-    matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    parse_native_config_bool(raw).unwrap_or(false)
 }
 
 const DEFAULT_IRC_SERVER: &str = "irc.euirc.net";
@@ -2560,7 +2573,7 @@ pub(crate) fn load_startup_alphabetical_sorting(paths: Option<&AppPaths>) -> boo
         .and_then(|config| {
             config
                 .get_in(Some("Startup"), "AlphabeticalSorting")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(false)
 }
@@ -2602,13 +2615,13 @@ pub(crate) fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
     let graphics_bool = |key: &str, fallback: bool| {
         config
             .get_in(Some("Graphics"), key)
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(fallback)
     };
     let general_bool = |key: &str, fallback: bool| {
         config
             .get_in(Some("General"), key)
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(fallback)
     };
     flags.player_names = graphics_bool("ShowCrewNames", flags.player_names);
@@ -2626,6 +2639,12 @@ pub(crate) fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
     flags.fire_particles = graphics_bool("FireParticles", flags.fire_particles);
     flags.clock = graphics_bool("ShowClock", flags.clock);
     flags.fps = general_bool("FPS", flags.fps);
+    // C++ keeps the raw configured value and clamps it only where the camera
+    // divides by it (C4Config.cpp:381-388; C4Viewport.cpp:1195-1207).
+    flags.scroll_smooth = config
+        .get_in(Some("General"), "ScrollSmooth")
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(flags.scroll_smooth);
     flags.white_chat = general_bool("UseWhiteIngameChat", flags.white_chat);
     if let Some(mode) = config.get_in(Some("Graphics"), "UpperBoard") {
         flags.upper_board = match mode.trim().to_ascii_lowercase().as_str() {
@@ -2655,7 +2674,7 @@ pub(crate) fn load_white_lobby_chat(paths: Option<&AppPaths>) -> bool {
         .and_then(|config| {
             config
                 .get_in(Some("General"), "UseWhiteLobbyChat")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(false)
 }
@@ -2678,7 +2697,7 @@ pub(crate) fn load_graphics_color_animation(paths: Option<&AppPaths>) -> bool {
     ["ColorAnimation", "Shader"].into_iter().all(|key| {
         config
             .get_in(Some("Graphics"), key)
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(false)
     })
 }
@@ -2689,7 +2708,7 @@ pub(crate) fn load_show_folder_maps(paths: Option<&AppPaths>) -> bool {
         .and_then(|config| {
             config
                 .get_in(Some("Graphics"), "ShowFolderMaps")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(true)
 }
@@ -2702,7 +2721,7 @@ pub(crate) fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
     match Config::load(&config_path) {
         Ok(config) => config
             .get_in(Some("General"), "Record")
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(false),
         Err(err) => {
             if err.kind() != io::ErrorKind::NotFound {
@@ -3215,22 +3234,22 @@ pub(crate) fn load_options_program_state(
     state.white_chat_ingame = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "UseWhiteIngameChat"))
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(false);
     state.white_chat_lobby = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "UseWhiteLobbyChat"))
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(false);
     state.show_log_timestamps = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "ShowLogTimestamps"))
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(false);
     state.preloading = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "Preloading"))
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(!cfg!(target_os = "macos"));
     let fair_crew_strength = config
         .as_ref()
@@ -3275,7 +3294,7 @@ pub(crate) fn load_show_log_timestamps(paths: Option<&AppPaths>) -> bool {
         .and_then(|config| {
             config
                 .get_in(Some("General"), "ShowLogTimestamps")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(false)
 }
@@ -3286,7 +3305,7 @@ pub(crate) fn load_message_board_enabled(paths: Option<&AppPaths>) -> bool {
         .and_then(|config| {
             config
                 .get_in(Some("Graphics"), "MsgBoard")
-                .map(parse_config_bool)
+                .and_then(parse_native_config_bool)
         })
         .unwrap_or(true)
 }
@@ -3317,7 +3336,7 @@ pub(crate) fn load_options_graphics_state(
         config
             .as_ref()
             .and_then(|config| config.get_in(Some("Graphics"), key))
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(fallback)
     };
     let integer = |key: &str, fallback: i32| {
@@ -3358,7 +3377,7 @@ pub(crate) fn load_options_network_state(
     let ports = load_network_ports(paths);
     let boolean = |section: &str, key: &str, fallback: bool| {
         value(section, key)
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(fallback)
     };
     NetworkSheetState::new(
@@ -3710,6 +3729,159 @@ pub(crate) fn sanitized_network_ports(config: &[u8]) -> NetworkPorts {
     ports
 }
 
+/// The directory `C4Network2Res` stages network resources in: dynamic groups,
+/// received files and temporary download artifacts all live beneath
+/// `Config.Network.WorkPath` (C4Config.cpp:527-533,1369-1374;
+/// C4Network2Res.cpp:1709-1775), which defaults to `Network`.
+///
+/// The configured value is a *relative* name under the network cache. An empty,
+/// absolute, root-anchored, non-ASCII or parent-traversing value cannot address
+/// a directory outside the cache, so it falls back to the native default rather
+/// than staging somewhere the user did not ask for.
+pub(crate) fn network_work_directory_name(paths: Option<&AppPaths>) -> String {
+    let configured = native_config_text(&load_native_config_bytes(paths), "Network", "WorkPath")
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    let candidate = Path::new(&configured);
+    let safe = !configured.is_empty()
+        && configured.is_ascii()
+        && !candidate.is_absolute()
+        && candidate
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+    if safe {
+        configured
+    } else {
+        "Network".to_string()
+    }
+}
+
+pub(crate) fn network_work_directory(paths: Option<&AppPaths>) -> Option<PathBuf> {
+    paths.map(|paths| {
+        paths
+            .cache_dir()
+            .join(network_work_directory_name(Some(paths)))
+    })
+}
+
+/// `Config.General.ThreadPoolThreadCount`, default 8 (C4Config.cpp:406-408).
+/// Windows builds its pool from the system default instead, so the key is
+/// non-Windows only (C4Application.cpp:152-159).
+#[cfg(not(windows))]
+pub(crate) fn load_thread_pool_thread_count(paths: Option<&AppPaths>) -> usize {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        "General",
+        "ThreadPoolThreadCount",
+    )
+    .as_deref()
+    .and_then(|value| crate::parse_startup_config_integer(value.as_bytes()))
+    .and_then(|value| usize::try_from(value).ok())
+    .filter(|workers| *workers > 0)
+    .unwrap_or(clonk_app_netplay::network::DEFAULT_NETWORK_RUNTIME_WORKER_THREADS)
+}
+
+/// The developer console's own remembered position (`C4Console.cpp:1278-1284`).
+/// Read from the `Console` section, never from the game window's geometry keys.
+pub(crate) fn load_console_window_position(
+    paths: Option<&AppPaths>,
+) -> Option<crate::console_window_position::ConsoleWindowPlacement> {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        crate::console_window_position::CONSOLE_POSITION_SECTION,
+        crate::console_window_position::CONSOLE_POSITION_KEY,
+    )
+    .as_deref()
+    .and_then(crate::console_window_position::parse_console_position)
+}
+
+/// `C4Console::StorePosition` (`C4Console.cpp:154-159`): the position alone,
+/// because `GetPositionData` sets `storeSize = false`.
+pub(crate) fn store_console_window_position(paths: &AppPaths, x: i32, y: i32) -> io::Result<()> {
+    let value = crate::console_window_position::format_console_position(x, y);
+    persist_native_config_values(
+        paths,
+        crate::console_window_position::CONSOLE_POSITION_SECTION,
+        &[(
+            crate::console_window_position::CONSOLE_POSITION_KEY,
+            clonk_app_netplay::NativeConfigValue::RawAscii(&value),
+        )],
+    )
+}
+
+/// `Graphics.VerboseObjectLoading`, default 0 (C4Config.cpp:453). Gates the
+/// definition and particle loading diagnostics in `clonk-engine`.
+pub(crate) fn load_verbose_object_loading(paths: Option<&AppPaths>) -> i32 {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        "Graphics",
+        "VerboseObjectLoading",
+    )
+    .as_deref()
+    .and_then(|value| crate::parse_startup_config_integer(value.as_bytes()))
+    .unwrap_or(0)
+}
+
+/// `C4ConfigGraphics::RenderInactive` bits (C4Config.h:128-129).
+pub(crate) const RENDER_INACTIVE_FULLSCREEN: u32 = 1 << 0;
+pub(crate) const RENDER_INACTIVE_CONSOLE: u32 = 1 << 1;
+
+/// `Graphics.RenderInactive`, a bitmask whose adapted default is `Console`
+/// alone (C4Config.cpp:481). `StartDrawing` refuses to draw while the
+/// application is inactive unless the bit for the *active shell* is set
+/// (C4GraphicsSystem.cpp:96-106).
+pub(crate) fn load_render_inactive_mask(paths: Option<&AppPaths>) -> u32 {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        "Graphics",
+        "RenderInactive",
+    )
+    .as_deref()
+    .and_then(|value| crate::parse_startup_config_integer(value.as_bytes()))
+    .map_or(RENDER_INACTIVE_CONSOLE, |value| value as u32)
+}
+
+/// `C4GraphicsSystem::StartDrawing`'s inactive gate: an active window always
+/// draws; an inactive one only when its own shell's bit is set.
+pub(crate) fn render_inactive_allows_drawing(
+    mask: u32,
+    window_active: bool,
+    console_shell: bool,
+) -> bool {
+    if window_active {
+        return true;
+    }
+    let bit = if console_shell {
+        RENDER_INACTIVE_CONSOLE
+    } else {
+        RENDER_INACTIVE_FULLSCREEN
+    };
+    mask & bit != 0
+}
+
+/// `C4ConfigLogging` (C4Config.cpp:699-718): the `[Logging]` stdout level plus
+/// one nested section per component, each holding a `LogLevel`. Returns the
+/// `EnvFilter` directive they describe, or `None` when nothing is configured.
+pub(crate) fn load_logging_config_directive(paths: Option<&AppPaths>) -> Option<String> {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok())?;
+    let stdout_level = config
+        .get_in(Some("Logging"), "LogLevelStdout")
+        .map(str::to_string);
+    let component_levels = clonk_logging::LOGGING_COMPONENTS
+        .iter()
+        .filter_map(|(component, _)| {
+            config
+                .get_in(Some(component), "LogLevel")
+                .map(|level| (*component, level.to_string()))
+        })
+        .collect::<Vec<_>>();
+    let borrowed = component_levels
+        .iter()
+        .map(|(component, level)| (*component, level.as_str()))
+        .collect::<Vec<_>>();
+    clonk_logging::logging_config_directive(stdout_level.as_deref(), &borrowed)
+}
+
 pub(crate) fn load_network_ports(paths: Option<&AppPaths>) -> NetworkPorts {
     sanitized_network_ports(&load_native_config_bytes(paths))
 }
@@ -3718,10 +3890,25 @@ pub(crate) fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, 
     let config = load_native_config_bytes(paths);
     let masterserver_signup = native_config_text(&config, "Network", "MasterServerSignUp")
         .as_deref()
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(true);
     let ports = sanitized_network_ports(&config);
     (masterserver_signup, ports.tcp)
+}
+
+/// `Config.Network.MaxResSearchRecursion`, default 1 (C4Config.cpp:527-533).
+/// `C4Network2Res::SearchLocal` uses it both for the first basename lookup and
+/// as the hard recursion limit while walking candidate folders
+/// (C4Network2Res.cpp:460-490). A missing or unparsable value keeps the native
+/// default of one folder; a negative value cannot deepen the search.
+pub(crate) fn load_max_resource_search_recursion(paths: Option<&AppPaths>) -> usize {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        "Network",
+        "MaxResSearchRecursion",
+    )
+    .and_then(|value| value.trim().parse::<i32>().ok())
+    .map_or(1, |value| usize::try_from(value.max(0)).unwrap_or(1))
 }
 
 pub(crate) fn load_network_reference_port(paths: Option<&AppPaths>) -> u16 {
@@ -3750,6 +3937,10 @@ pub(crate) fn load_prepared_league_host_config(
                 .or_else(|| raw_value("General", "LanguageEx"))
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| startup_language_sequence(paths).join(",")),
+            // C++ defaults Network.UseCurl to true (C4Config.cpp:561).
+            http_backend: clonk_network::HttpBackend::from_use_curl(
+                integer("Network", "UseCurl", 1) != 0,
+            ),
         },
         update_period_secs: i64::from(integer("Network", "MasterReferencePeriod", 120)),
         league_server_signup,
@@ -3816,7 +4007,7 @@ pub(crate) fn build_network_host_preparation(
     };
     let boolean = |section: &str, key: &str, default: bool| {
         value(section, key)
-            .map(|value| parse_config_bool(&value))
+            .and_then(|value| parse_native_config_bool(&value))
             .unwrap_or(default)
     };
     let (definition_executable_path, definition_path) = staged_definition_paths
@@ -3868,13 +4059,9 @@ pub(crate) fn build_network_host_preparation(
     let network_work_path = value("Network", "WorkPath")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "Network".to_string());
-    let network_directory = app
-        .app_paths
-        .as_ref()
-        .map(|paths| paths.cache_dir().join("Network"))
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("clonk-rust-network-{}", std::process::id()))
-        });
+    let network_directory = network_work_directory(app.app_paths.as_ref()).unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("clonk-rust-network-{}", std::process::id()))
+    });
     let (host_name, host_nick) = if let Some((name, nick)) = staged_identity {
         (name.to_owned(), nick.to_owned())
     } else if let Some(paths) = app.app_paths.as_ref() {
@@ -4046,11 +4233,11 @@ pub(crate) fn load_network_search_settings(
     let value = |key| native_config_text(&config, "Network", key);
     let internet_enabled = value("MasterServerSignUp")
         .as_deref()
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(true);
     let use_alternate = value("UseAlternateServer")
         .as_deref()
-        .map(parse_config_bool)
+        .and_then(parse_native_config_bool)
         .unwrap_or(false);
     let server_key = if use_alternate {
         "AlternateServerAddress"
@@ -4087,9 +4274,19 @@ pub(crate) fn load_reference_query_settings(
         .or_else(|| value("LanguageEx"))
         .filter(|sequence| !sequence.is_empty())
         .unwrap_or_else(|| startup_language_sequence(paths).join(","));
+    // Network.UseCurl picks the HTTP client implementation
+    // (C4Network2Reference.cpp:410-413). C++ defaults it to true
+    // (C4Config.cpp:561), so an absent or unparsable key keeps the curl policy.
+    let http_backend = clonk_network::HttpBackend::from_use_curl(
+        native_config_text(&config, "Network", "UseCurl")
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .map(|value| value != 0)
+            .unwrap_or(true),
+    );
     clonk_network::ReferenceQueryConfig {
         language_charset,
         language_sequence,
+        http_backend,
     }
 }
 
@@ -4113,7 +4310,7 @@ pub(crate) fn load_league_auth_settings(
 pub(crate) fn load_league_auto_login(paths: Option<&AppPaths>) -> bool {
     let config = load_native_config_bytes(paths);
     clonk_app_netplay::configured_native_value(&config, "Network", "LeagueAutoLogin")
-        .map(|value| parse_config_bool(&legacy_presentation_text(value.as_bytes())))
+        .and_then(|value| parse_native_config_bool(&legacy_presentation_text(value.as_bytes())))
         .unwrap_or(true)
 }
 
@@ -4331,7 +4528,7 @@ pub(crate) fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> Game
     let bool_value = |section: &str, key: &str, default| {
         native_config_text(&config, section, key)
             .as_deref()
-            .map(parse_config_bool)
+            .and_then(parse_native_config_bool)
             .unwrap_or(default)
     };
     let string_value = |section: &str, key: &str, default: &str| {
@@ -4638,6 +4835,20 @@ pub(crate) fn persist_startup_options_config(
 }
 
 pub(crate) fn load_participants_label(paths: Option<&AppPaths>) -> String {
+    participants_label_with_pending(paths, None)
+}
+
+/// As [`load_participants_label`], but `pending` — an unflushed
+/// `General.Participants` — wins over the file.
+///
+/// `C4StartupMainDlg::UpdateParticipants` reads the in-memory
+/// `Config.General.Participants` (`C4StartupMainDlg.cpp:174-200`), so a
+/// concurrent writer to the config file cannot change what it displays. Any
+/// reader of a deferred key has to consult memory first for that to hold.
+pub(crate) fn participants_label_with_pending(
+    paths: Option<&AppPaths>,
+    pending: Option<&str>,
+) -> String {
     // C++ C4StartupMainDlg::UpdateParticipants (C4StartupMainDlg.cpp:174-200):
     // IDS_DESC_PLRS ("Players: ") + comma-separated player file basenames
     // without extension, or IDS_DLG_NOPLAYERSSELECTED ("none selected").
@@ -4650,9 +4861,14 @@ pub(crate) fn load_participants_label(paths: Option<&AppPaths>) -> String {
     let config_path = paths.config_file();
     match Config::load(&config_path) {
         Ok(config) => {
-            let entries = config
-                .get_in(Some("General"), "Participants")
-                .map(|raw| raw.split(';').collect::<Vec<_>>())
+            let entries = pending
+                .map(|raw| raw.to_owned())
+                .or_else(|| {
+                    config
+                        .get_in(Some("General"), "Participants")
+                        .map(str::to_owned)
+                })
+                .map(|raw| raw.split(';').map(str::to_owned).collect::<Vec<_>>())
                 .unwrap_or_default();
             let mut names = Vec::new();
             for entry in entries {
@@ -5937,6 +6153,22 @@ pub(crate) fn build_game_over_dialog(
     next_mission: &clonk_engine::NextMissionState,
     mut goal_presentation: impl FnMut(&str, bool) -> (Option<ImageData>, String),
     mut player_big_icon: impl FnMut(i32) -> Option<ImageData>,
+    // `C4PlayerInfo::getLeagueScore()` per PlayerInfo ID: the score carried
+    // into this round, which UpdateScoreLabel reads from the live info rather
+    // than from the frozen result (src/C4PlayerInfoListBox.cpp:380-401).
+    mut player_league_score: impl FnMut(i32) -> Option<i32>,
+    // `GetJoinedInfo()`'s lobby colour (src/C4PlayerInfoListBox.cpp:701-716):
+    // the row's own colour for a free savegame player, otherwise the colour of
+    // the `Game.RestorePlayerInfos` entry it took over, and `None` when the
+    // row is not a savegame join at all.
+    mut player_joined_color: impl FnMut(i32) -> Option<u32>,
+    // `Game.DrawTextSpecImage(icon, IconSpec, team colour)` for a declared
+    // team `IconSpec` (src/C4PlayerInfoListBox.cpp:1028-1031).
+    mut team_icon: impl FnMut(&str, u32) -> Option<ImageData>,
+    // `C4PlayerInfo::getLeagueRankSymbol()`.
+    mut player_league_rank_symbol: impl FnMut(i32) -> Option<i32>,
+    // `Game.Parameters.isLeague()`.
+    league: bool,
 ) -> GameOverState {
     // C4GameOverDlg freezes C4RoundResults into presentation state; player
     // results are joined through C4PlayerInfo::ID, not the runtime player
@@ -6009,16 +6241,55 @@ pub(crate) fn build_game_over_dialog(
                 .flatten(),
             custom_evaluation_strings: c4_presentation_text(&result.custom_evaluation_strings),
             big_icon: player_big_icon(state.player_info_id),
+            // C++ treats a zero league score as absent (`pInfo->getLeagueScore()`
+            // is used as a boolean at src/C4PlayerInfoListBox.cpp:380).
+            league_score_old: player_league_score(state.player_info_id).filter(|score| *score != 0),
+            league_score_gain: (result.league_score_gain >= 0).then_some(result.league_score_gain),
+            league_score_new: (result.league_score_new >= 0).then_some(result.league_score_new),
+            joined_color_dw: player_joined_color(state.player_info_id),
+            // The frozen result's rank wins while its league score is valid;
+            // otherwise the live info's rank symbol, and zero hides the icon
+            // (src/C4PlayerInfoListBox.cpp:439-456).
+            league_rank_symbol: u8::try_from(
+                (result.league_score_new >= 0)
+                    .then_some(result.league_rank_symbol_new)
+                    .filter(|symbol| *symbol != 0)
+                    .or_else(|| player_league_rank_symbol(state.player_info_id))
+                    .unwrap_or(0),
+            )
+            .ok()
+            .filter(|symbol| *symbol != 0),
         });
     }
     let separate_team_ids =
         (teams.len() == 2 && !auto_generate_teams).then(|| [teams[0].id, teams[1].id]);
+    // `C4Team::HasWon()` is what recolours a TeamListItem's caption
+    // (src/C4PlayerInfoListBox.cpp:1100-1115). A team has won when any of its
+    // players did, which is the same rule the per-player `won` projection
+    // above already applies in the other direction.
+    let evaluation_teams = teams
+        .iter()
+        .map(|team| clonk_app_menus::game_over::EvaluationTeam {
+            id: team.id,
+            name: c4_presentation_text(&team.name),
+            color_dw: team.color,
+            icon: team
+                .icon_spec
+                .as_deref()
+                .and_then(|spec| team_icon(spec, team.color)),
+            won: snapshot
+                .players
+                .iter()
+                .any(|player| player.team == Some(team.id) && player.won),
+        });
     let evaluation = EvaluationViewModel::new(goals, players)
         .with_dialog_context(
             c4_presentation_text(&snapshot.round_results.custom_evaluation_strings),
             separate_team_ids,
         )
-        .with_team_order(teams.iter().map(|team| team.id));
+        .with_team_order(teams.iter().map(|team| team.id))
+        .with_teams(evaluation_teams)
+        .with_league(league);
 
     // Keep the asset-less fallback usable, but derive it from the same frozen
     // evaluation instead of treating every still-Active player as a winner or

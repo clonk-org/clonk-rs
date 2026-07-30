@@ -162,6 +162,9 @@ pub struct ClientSettings {
     pub resource_directory: PathBuf,
     pub local_system_path: Option<PathBuf>,
     pub local_resource_roots: Vec<PathBuf>,
+    /// `Config.Network.MaxResSearchRecursion` (C4Config.cpp:527-533), the depth
+    /// `SearchLocal` walks candidate folders to (C4Network2Res.cpp:460-490).
+    pub max_resource_search_recursion: usize,
     pub league_transport: clonk_network::LeagueHttpTransportConfig,
     pub league_auth: clonk_network::LeagueAuthRequestHead,
     /// League HTTP host retained from accepted JoinData for later local-player
@@ -198,6 +201,7 @@ impl ClientSettings {
             resource_directory: PathBuf::from("Network"),
             local_system_path: None,
             local_resource_roots: Vec::new(),
+            max_resource_search_recursion: 1,
             league_transport: clonk_network::LeagueHttpTransportConfig::default(),
             league_auth: clonk_network::LeagueAuthRequestHead::default(),
             league_server_name: String::new(),
@@ -848,7 +852,7 @@ fn spawn_league_record_runtime(
     endpoint: String,
     config: clonk_network::LeagueHttpTransportConfig,
 ) -> std::result::Result<LeagueRecordRuntimeHandle, clonk_network::LeagueHttpTransportError> {
-    let transport = clonk_network::LeagueHttpPostTransport::cpp_default()?;
+    let transport = clonk_network::LeagueHttpPostTransport::for_backend(config.http_backend)?;
     let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
     let status = Arc::new(Mutex::new(LeagueRecordStreamStatus::default()));
     tokio::spawn(run_league_record_runtime(
@@ -918,7 +922,7 @@ async fn run_league_record_runtime(
                 publish_league_record_stream_status(&status, Some(&*stream));
                 if let Some(result) = shutdown_result {
                     if let Some(completion) = shutdown_completion.take() {
-                        let _ = completion.send(result);
+                        complete_league_record_runtime_shutdown(&status, completion, result);
                     }
                     break;
                 }
@@ -993,8 +997,11 @@ async fn run_league_record_runtime(
                                 .as_ref()
                                 .is_some_and(clonk_network::LeagueRecordStream::is_streaming);
                         if !needs_drain {
-                            publish_league_record_stream_status(&status, None);
-                            let _ = completion.send(Ok(()));
+                            complete_league_record_runtime_shutdown(
+                                &status,
+                                completion,
+                                Ok(()),
+                            );
                             break;
                         }
                         shutdown_completion = Some(completion);
@@ -1009,7 +1016,11 @@ async fn run_league_record_runtime(
                         match dispatch_result {
                             Err(error) => {
                                 if let Some(completion) = shutdown_completion.take() {
-                                    let _ = completion.send(Err(error.to_string()));
+                                    complete_league_record_runtime_shutdown(
+                                        &status,
+                                        completion,
+                                        Err(error.to_string()),
+                                    );
                                 }
                                 break;
                             }
@@ -1019,7 +1030,11 @@ async fn run_league_record_runtime(
                                     .is_some_and(|stream| !stream.is_streaming()) =>
                             {
                                 if let Some(completion) = shutdown_completion.take() {
-                                    let _ = completion.send(Ok(()));
+                                    complete_league_record_runtime_shutdown(
+                                        &status,
+                                        completion,
+                                        Ok(()),
+                                    );
                                 }
                                 break;
                             }
@@ -1032,6 +1047,15 @@ async fn run_league_record_runtime(
     }
 
     publish_league_record_stream_status(&status, None);
+}
+
+fn complete_league_record_runtime_shutdown(
+    status: &Mutex<LeagueRecordStreamStatus>,
+    completion: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+    result: std::result::Result<(), String>,
+) {
+    publish_league_record_stream_status(status, None);
+    let _ = completion.send(result);
 }
 
 fn publish_league_record_stream_status(
@@ -1616,6 +1640,16 @@ impl TestNetworkCommands {
             }
         }
         ticks
+    }
+
+    pub fn take_host_restart_broadcasts(&mut self) -> Vec<u16> {
+        let mut observed = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::BroadcastHostRestarting { rejoin_seconds } = command {
+                observed.push(rejoin_seconds);
+            }
+        }
+        observed
     }
 
     pub fn take_lobby_start_commands(&mut self) -> Vec<TestLobbyStartCommand> {
@@ -2543,6 +2577,12 @@ pub enum NetworkEvent {
     PeerConnectionFailed {
         client_id: ClientId,
     },
+    /// The host is closing this session to restart the round and expects to be
+    /// reachable again at the same address. Always precedes the matching
+    /// `PeerDisconnected`. See [`clonk_network::host_restart`].
+    HostRestarting {
+        rejoin_seconds: u16,
+    },
     NetpuncherStateChanged {
         game_ids: clonk_network::NetpuncherGameIds,
         local_addresses: Vec<NetworkAddress>,
@@ -2802,6 +2842,9 @@ enum NetworkCommand {
     SubmitVoteEnd(clonk_engine::VoteControlData),
     SubmitReadyCheck(clonk_network::ReadyCheckPacket),
     SubmitLobbyCountdown(clonk_network::LobbyCountdownPacket),
+    BroadcastHostRestarting {
+        rejoin_seconds: u16,
+    },
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -2945,11 +2988,38 @@ impl ControlFrameAccumulator {
     }
 }
 
-const NETWORK_RUNTIME_WORKER_THREADS: usize = 4;
+/// `Config.General.ThreadPoolThreadCount` defaults to 8 and sizes the global
+/// asynchronous pool on every non-Windows target (C4Config.cpp:406-408;
+/// C4Application.cpp:152-159). Windows builds the pool from the system default
+/// instead, so the port keeps its own worker count there.
+#[cfg(not(windows))]
+pub const DEFAULT_NETWORK_RUNTIME_WORKER_THREADS: usize = 8;
+#[cfg(windows)]
+pub const DEFAULT_NETWORK_RUNTIME_WORKER_THREADS: usize = 4;
+
+/// Set once at startup, before any worker thread builds its runtime. C++ keeps
+/// the equivalent in `C4ThreadPool::Global`.
+static NETWORK_RUNTIME_WORKER_THREADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_NETWORK_RUNTIME_WORKER_THREADS);
+
+/// Sizes the asynchronous worker runtime. A zero or absent configuration keeps
+/// the native default rather than asking tokio for an invalid pool.
+pub fn set_network_runtime_worker_threads(workers: usize) {
+    let workers = if workers == 0 {
+        DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
+    } else {
+        workers
+    };
+    NETWORK_RUNTIME_WORKER_THREADS.store(workers, std::sync::atomic::Ordering::Release);
+}
+
+pub fn network_runtime_worker_threads() -> usize {
+    NETWORK_RUNTIME_WORKER_THREADS.load(std::sync::atomic::Ordering::Acquire)
+}
 
 fn build_network_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     RuntimeBuilder::new_multi_thread()
-        .worker_threads(NETWORK_RUNTIME_WORKER_THREADS)
+        .worker_threads(network_runtime_worker_threads())
         .enable_all()
         .build()
 }
@@ -3115,6 +3185,18 @@ impl NetworkManager {
 
     /// Returns the most recently completed C++-cadence input/output samples,
     /// generating a due one-second edge from the live socket accounting first.
+    /// `C4Network2IO::getProtIRate/getProtORate/getProtBCRate` read the
+    /// cached interval values; only `GenerateStatistics` recomputes them. The
+    /// status overlay must therefore *read* the accumulator rather than
+    /// regenerate it, which would steal the interval the per-second chart
+    /// sampling owns (src/C4Network2.cpp:1171-1178).
+    pub fn protocol_rate_statistics(
+        &self,
+        protocol: clonk_network::NetworkProtocol,
+    ) -> clonk_network::ProtocolRateStatistics {
+        self.network_io_statistics.protocol_statistics(protocol)
+    }
+
     pub fn protocol_rate_samples(
         &self,
     ) -> (
@@ -3207,6 +3289,41 @@ impl NetworkManager {
             .recv()
             .map_err(|_| anyhow!("network worker ended before returning live client states"))?
             .map_err(|message| anyhow!(message))
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    /// Seed the shared per-protocol accumulator the way live traffic would,
+    /// so the status overlay and the chart can be exercised against the same
+    /// sample without a real transport.
+    pub fn record_test_protocol_traffic(
+        &self,
+        connection_id: u32,
+        protocol: clonk_network::NetworkProtocol,
+        input_bytes: usize,
+        output_bytes: usize,
+        broadcast_bytes: usize,
+    ) {
+        let recorder = self
+            .network_io_statistics
+            .open_connection(connection_id, protocol);
+        recorder.record_input(input_bytes);
+        recorder.record_output(output_bytes);
+        self.network_io_statistics
+            .record_broadcast_datagram(protocol, broadcast_bytes);
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    /// Seed the bound local addresses the status overlay reads to decide which
+    /// NetIO backs the message and data protocols.
+    pub fn set_test_local_addresses(&self, addresses: impl IntoIterator<Item = NetworkAddress>) {
+        self.netpuncher_state.lock().local_addresses = addresses.into_iter().collect();
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    /// `C4Network2IO::GenerateStatistics`'s interval boundary, exposed so a
+    /// test can close one sample deterministically.
+    pub fn generate_test_statistics(&self, now_ms: u64) {
+        self.network_io_statistics.generate_statistics(now_ms);
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
@@ -3644,6 +3761,25 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitLobbyCountdown(packet))
             .map_err(|_| anyhow!("network worker is not accepting lobby countdowns"))
+    }
+
+    /// Announces that this session is closing to restart the round, so clients
+    /// follow the host into the new lobby instead of reading the imminent
+    /// disconnect as a dead host.
+    ///
+    /// Deliberately does not wait for the notice to reach the wire: the app
+    /// tears the manager down immediately afterwards, and `Drop` queues
+    /// `Shutdown` behind this on the same channel. The worker's own await of
+    /// the session broadcast is what orders the bytes ahead of the teardown.
+    pub fn broadcast_host_restarting(&self, rejoin_seconds: u16) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may announce a round restart"
+            ));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::BroadcastHostRestarting { rejoin_seconds })
+            .map_err(|_| anyhow!("network worker is not accepting a restart notice"))
     }
 
     pub fn publish_runtime_dynamic(
@@ -4827,8 +4963,9 @@ fn spawn_league_client(
     transport_config: clonk_network::LeagueHttpTransportConfig,
     event_tx: NetworkEventSender,
 ) -> Result<LeagueRuntimeHandle> {
-    let transport = clonk_network::LeagueHttpPostTransport::cpp_default()
-        .map_err(|error| anyhow!("cannot initialise league HTTP transport: {error}"))?;
+    let transport =
+        clonk_network::LeagueHttpPostTransport::for_backend(transport_config.http_backend)
+            .map_err(|error| anyhow!("cannot initialise league HTTP transport: {error}"))?;
     let (runtime, command_rx, gate) = league_runtime_channels();
     tokio::spawn(run_league_runtime(
         LeagueRuntimeState {
@@ -6505,6 +6642,15 @@ async fn run_host_worker(
                             .await
                             .map_err(|error| anyhow!("host lobby-countdown submission failed: {error}"))?;
                     }
+                    // Awaited, not fired and forgotten: the app queues Shutdown
+                    // directly behind this, and only the resolved broadcast
+                    // guarantees the notice is on every route before the host
+                    // loop is torn down.
+                    NetworkCommand::BroadcastHostRestarting { rejoin_seconds } => {
+                        host.broadcast_host_restarting(rejoin_seconds)
+                            .await
+                            .map_err(|error| anyhow!("host restart notice failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -6951,6 +7097,7 @@ async fn run_client_worker(
         .with_password(settings.password)
         .with_resource_directory(settings.resource_directory)
         .with_local_resource_roots(settings.local_resource_roots)
+        .with_max_resource_search_recursion(settings.max_resource_search_recursion)
         .with_mesh_punchers(mesh_punchers);
     if let Some(bind_address) = settings.mesh_tcp_bind_address {
         client_config = client_config.with_mesh_tcp_bind_address(bind_address);
@@ -7519,6 +7666,11 @@ async fn run_client_worker(
                             "client attempted to submit an authoritative vote result".to_string(),
                         ));
                     }
+                    NetworkCommand::BroadcastHostRestarting { .. } => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to announce a host round restart".to_string(),
+                        ));
+                    }
                     NetworkCommand::SubmitReadyCheck(packet) => {
                         client
                             .submit_ready_check(packet)
@@ -7913,6 +8065,9 @@ async fn handle_client_event(
         ClientEvent::LobbyCountdown { packet } => {
             let _ = event_tx.send(NetworkEvent::LobbyCountdown(packet));
         }
+        ClientEvent::HostRestarting { rejoin_seconds } => {
+            let _ = event_tx.send(NetworkEvent::HostRestarting { rejoin_seconds });
+        }
         ClientEvent::ReadyCheck { packet } => {
             let _ = event_tx.send(NetworkEvent::ReadyCheck(packet));
         }
@@ -8254,10 +8409,31 @@ mod tests {
         // StdSchedulerThread (oracle-src-pinned src/C4InteractiveThread.cpp:48-67;
         // src/StdScheduler.cpp:229-244; src/C4Network2IO.cpp:71-88). Rust keeps
         // enough parallel service capacity for the per-peer UDP tasks without
-        // scaling every game process to the host's CPU count.
+        // scaling every game process to the host's CPU count. The budget is
+        // `Config.General.ThreadPoolThreadCount` on non-Windows targets, which
+        // C++ defaults to 8 (C4Config.cpp:406-408; C4Application.cpp:152-159).
+        let restore = network_runtime_worker_threads();
         let runtime = build_network_runtime().expect("build production network runtime");
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
+        );
+        drop(runtime);
 
-        assert_eq!(runtime.metrics().num_workers(), 4);
+        // A configured count sizes the pool; zero keeps the default so tokio is
+        // never asked for an invalid worker count.
+        set_network_runtime_worker_threads(2);
+        let configured = build_network_runtime().expect("build a configured runtime");
+        assert_eq!(configured.metrics().num_workers(), 2);
+        drop(configured);
+        set_network_runtime_worker_threads(0);
+        let fallback = build_network_runtime().expect("build the fallback runtime");
+        assert_eq!(
+            fallback.metrics().num_workers(),
+            DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
+        );
+        drop(fallback);
+        set_network_runtime_worker_threads(restore);
     }
 
     #[test]
@@ -8754,6 +8930,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        // C++ clears the stream synchronously before returning from
+        // `StopStreaming` (`src/C4Network2.cpp:3099-3112`).
         assert_eq!(runtime.status(), LeagueRecordStreamStatus::default());
 
         let request = request.join().unwrap();
@@ -13200,6 +13378,48 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(
             event_rx.recv().expect("status event"),
             NetworkEvent::StatusCommitted(status)
+        );
+    }
+
+    /// The notice is queued on the same command channel the teardown uses, so
+    /// FIFO ordering — not a completion the app would have to block on — is
+    /// what keeps `Shutdown` behind it.
+    #[test]
+    fn only_a_host_broadcasts_a_restart_notice() {
+        let (host, _host_events, mut host_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        let (client, _client_events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+
+        host.broadcast_host_restarting(30)
+            .expect("host queues the restart notice");
+        assert!(client.broadcast_host_restarting(30).is_err());
+
+        assert_eq!(host_commands.take_host_restart_broadcasts(), vec![30]);
+        assert!(client_commands.take_host_restart_broadcasts().is_empty());
+    }
+
+    /// The app is the only layer that can act on a restart notice — it owns the
+    /// round teardown and the rejoin — so the worker must surface it verbatim
+    /// rather than folding it into the disconnect that follows.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_host_restart_notice_is_forwarded_to_the_app() {
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+
+        handle_client_event(
+            ClientEvent::HostRestarting { rejoin_seconds: 30 },
+            0,
+            7,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward host restart notice");
+
+        assert_eq!(
+            event_rx.recv().expect("restart notice event"),
+            NetworkEvent::HostRestarting { rejoin_seconds: 30 }
         );
     }
 

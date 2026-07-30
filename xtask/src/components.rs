@@ -11,11 +11,18 @@
 //!
 //! 1. Every entry of the staged layout belongs to exactly one component. A
 //!    seventh top-level entry appearing without a component mapping is a hard
-//!    error, not a file that silently stops shipping.
-//! 2. `content` and `planet` archives are **prefix-free**, so their bytes are
-//!    identical on every platform. Their names are their own digests, so a
-//!    platform-dependent prefix would produce four different hashes for
-//!    identical data and defeat deduplication entirely.
+//!    error, not a file that silently stops shipping. This is checked over
+//!    [`ComponentId`], every component a *client* resolves — not over the ones
+//!    built here, or `content/` would stop being covered by it.
+//! 2. The `planet` archive is **prefix-free**, so its bytes are identical on
+//!    every platform. Its name is its own digest, so a platform-dependent
+//!    prefix would produce a different hash per shipped triple for identical
+//!    data and defeat deduplication entirely.
+//!
+//! `content` is a component a client fetches but this repository does **not**
+//! build — see [`BuiltComponent`]. It is published by the repository the game
+//! data lives in, so 225 MB of unchanged bytes stop being re-uploaded on every
+//! daily release.
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -33,6 +40,7 @@ pub enum ComponentId {
 }
 
 impl ComponentId {
+    /// Every component a client resolves, whoever produced it.
     pub const ALL: [ComponentId; 3] = [
         ComponentId::Engine,
         ComponentId::Planet,
@@ -71,6 +79,39 @@ impl ComponentId {
             // tiny, and would otherwise belong to no component at all.
             ComponentId::Engine => matches!(entry, "bin" | "COPYING" | "README.md" | "credits.txt"),
             other => other.owned_directory() == Some(entry),
+        }
+    }
+}
+
+/// A component this repository builds, which is every one but `content`.
+///
+/// A type of its own rather than a filter over [`ComponentId`], because the
+/// distinction is not advisory. `content.zip` is content-addressed, so two
+/// "deterministic zip" implementations would have to agree byte for byte
+/// forever — the day they drifted, the digest would move without the content
+/// moving and every install would re-fetch 225 MB. There is therefore exactly
+/// one builder, and it is `clonk-rs-content`, beside the files it is made of.
+/// This repository *references* what that release published: see
+/// `CONTENT_REPOSITORY` in `main.rs`.
+///
+/// [`component_sources`] and [`emit_component`] take this type, so the second
+/// builder is not something a later change can add back by overlooking a
+/// filter: there is no variant to pass them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BuiltComponent {
+    Engine,
+    Planet,
+}
+
+impl BuiltComponent {
+    /// Every component a packaging run can emit.
+    pub const ALL: [BuiltComponent; 2] = [BuiltComponent::Engine, BuiltComponent::Planet];
+
+    /// The client-facing component this builds.
+    pub fn id(self) -> ComponentId {
+        match self {
+            BuiltComponent::Engine => ComponentId::Engine,
+            BuiltComponent::Planet => ComponentId::Planet,
         }
     }
 }
@@ -118,9 +159,13 @@ pub fn verify_components_cover_layout(package_dir: &Path) -> Result<()> {
 /// The files a component contributes, keyed by their path inside the archive.
 ///
 /// `engine` keeps the platform layout it was staged with (`bin/…`), because it
-/// *is* the platform skeleton. `planet` and `content` drop their own directory
-/// name so the archive is prefix-free and byte-identical across triples.
-pub fn component_sources(component: ComponentId, package_dir: &Path) -> Result<ComponentSources> {
+/// *is* the platform skeleton. `planet` drops its own directory name so the
+/// archive is prefix-free and byte-identical across triples.
+pub fn component_sources(
+    component: BuiltComponent,
+    package_dir: &Path,
+) -> Result<ComponentSources> {
+    let component = component.id();
     match component.owned_directory() {
         Some(directory) => {
             let root = package_dir.join(directory);
@@ -215,16 +260,17 @@ pub struct EmittedComponent {
 
 /// The archive filename for a component.
 ///
-/// Shared components are named after their own digest so an unchanged
-/// `content` keeps the same name across releases and needs no re-upload.
-/// `engine` changes every release and is versioned instead, which also keeps
-/// the four per-triple archives distinguishable.
+/// Shared components are named after their own digest so an unchanged `planet`
+/// keeps the same name across releases and needs no re-upload. `engine` changes
+/// every release and is versioned instead, which also keeps the three per-build
+/// archives distinguishable.
 pub fn component_archive_name(
-    component: ComponentId,
+    component: BuiltComponent,
     digest: &[u8],
     version: &str,
     target_triple: &str,
 ) -> String {
+    let component = component.id();
     if component.is_platform_independent() {
         format!("{}-{}.zip", component.name(), short_digest(digest))
     } else {
@@ -244,7 +290,7 @@ pub type ArchiveWriter<'a> = &'a dyn Fn(&Path, &Path, &dyn Fn(&Path) -> bool) ->
 /// The archive is written to a scratch name first because its final name
 /// depends on the digest of the bytes just written.
 pub fn emit_component(
-    component: ComponentId,
+    component: BuiltComponent,
     package_dir: &Path,
     output_dir: &Path,
     version: &str,
@@ -254,6 +300,7 @@ pub fn emit_component(
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
 
+    let id = component.id();
     let sources = component_sources(component, package_dir)?;
     let owned = sources.entries.is_some();
     let include = move |relative: &Path| -> bool {
@@ -263,11 +310,11 @@ pub fn emit_component(
         relative
             .components()
             .next()
-            .map(|first| component.claims_top_level(&first.as_os_str().to_string_lossy()))
+            .map(|first| id.claims_top_level(&first.as_os_str().to_string_lossy()))
             .unwrap_or(false)
     };
 
-    let scratch = output_dir.join(format!(".{}-staging.zip", component.name()));
+    let scratch = output_dir.join(format!(".{}-staging.zip", id.name()));
     write_archive(&scratch, &sources.root, &include)?;
 
     let digest = sha256_file(&scratch)?;
@@ -289,7 +336,7 @@ pub fn emit_component(
         .with_context(|| format!("failed to name {} from its digest", final_path.display()))?;
 
     Ok(EmittedComponent {
-        id: component,
+        id,
         path: final_path,
         sha256: hex_digest(&digest),
         size,
@@ -309,7 +356,13 @@ mod tests {
             fs::write(root.join(name), name.as_bytes()).expect("write document");
         }
         fs::create_dir_all(root.join("bin")).expect("create bin");
-        fs::write(root.join("bin").join("clonk-app"), b"runtime").expect("write runtime");
+        for binary in crate::RUNTIME_BINARIES {
+            fs::write(
+                root.join("bin").join(binary.executable),
+                binary.executable.as_bytes(),
+            )
+            .expect("write runtime executable");
+        }
         fs::create_dir_all(root.join("planet/System.c4g")).expect("create planet");
         fs::write(root.join("planet/System.c4g/C4.c"), b"system").expect("write system");
         fs::create_dir_all(root.join("content/Objects.c4d")).expect("create content");
@@ -357,6 +410,54 @@ mod tests {
     }
 
     #[test]
+    fn content_is_referenced_rather_than_built_here() {
+        // There must be exactly one builder of `content.zip`, and it is the
+        // repository the game data lives in. Two deterministic-zip
+        // implementations would have to agree byte for byte forever; the day
+        // they drifted, the digest would move without the content moving and
+        // every install would re-fetch 225 MB.
+        //
+        // Enforced by the type rather than by a filter over `ComponentId`:
+        // `emit_component` takes a `BuiltComponent`, and there is no
+        // `BuiltComponent::Content` to hand it. The second builder cannot be
+        // written back by accident.
+        assert_eq!(
+            BuiltComponent::ALL.map(BuiltComponent::id),
+            [ComponentId::Engine, ComponentId::Planet],
+            "content is published by the content repository"
+        );
+        // Still a component a client downloads and applies — only the building
+        // moved, so dropping it from `ALL` would stop shipping game data.
+        assert!(ComponentId::ALL.contains(&ComponentId::Content));
+        // And it still ships in the installer, so it must still be claimed.
+        assert!(ComponentId::Content.claims_top_level("content"));
+    }
+
+    #[test]
+    fn the_staged_layout_stays_covered_although_content_is_never_emitted() {
+        // The cross-check is over every component a client resolves, not over
+        // the ones this repository builds: `content/` is staged, shipped in the
+        // installer and applied by an updating client, so it must still be
+        // claimed by exactly one component even though nothing here zips it.
+        //
+        // Scoping the check to the built components instead would be the
+        // tempting way to keep it passing, and would silently re-admit the very
+        // thing it exists to catch — a staged directory that reaches no client.
+        let staged = staged_layout();
+        assert!(
+            staged.path().join("content").is_dir(),
+            "the fixture must still stage the directory nobody builds"
+        );
+        verify_components_cover_layout(staged.path())
+            .expect("content is claimed although it is never emitted");
+
+        // The same check still fails on an entry no component claims, so it has
+        // not been weakened into a no-op.
+        fs::write(staged.path().join("music"), b"packs").expect("write unmapped entry");
+        assert!(verify_components_cover_layout(staged.path()).is_err());
+    }
+
+    #[test]
     fn only_the_engine_component_varies_by_target_triple() {
         assert!(!ComponentId::Engine.is_platform_independent());
         assert!(ComponentId::Planet.is_platform_independent());
@@ -369,7 +470,7 @@ mod tests {
         // prefix-free, and therefore identical on every platform.
         let staged = staged_layout();
         let sources =
-            component_sources(ComponentId::Planet, staged.path()).expect("planet sources");
+            component_sources(BuiltComponent::Planet, staged.path()).expect("planet sources");
         assert_eq!(sources.root, staged.path().join("planet"));
         assert!(sources.entries.is_none(), "planet is a whole subtree");
     }
@@ -378,7 +479,7 @@ mod tests {
     fn engine_component_sources_name_the_entries_it_owns() {
         let staged = staged_layout();
         let sources =
-            component_sources(ComponentId::Engine, staged.path()).expect("engine sources");
+            component_sources(BuiltComponent::Engine, staged.path()).expect("engine sources");
         assert_eq!(sources.root, staged.path());
         let entries = sources.entries.expect("engine is a subset of the layout");
         let mut names: Vec<_> = entries
@@ -425,7 +526,12 @@ mod tests {
         Ok(())
     }
 
-    fn emit(component: ComponentId, staged: &Path, out: &Path, triple: &str) -> EmittedComponent {
+    fn emit(
+        component: BuiltComponent,
+        staged: &Path,
+        out: &Path,
+        triple: &str,
+    ) -> EmittedComponent {
         emit_component(
             component,
             staged,
@@ -439,26 +545,26 @@ mod tests {
 
     #[test]
     fn shared_components_are_byte_identical_across_target_triples() {
-        // The property the entire component store rests on: if `content`
-        // hashed differently per platform there would be four copies of
-        // identical data and no deduplication at all.
+        // The property the entire component store rests on: if `planet` hashed
+        // differently per platform there would be six copies of identical data
+        // — one per shipped triple — and no deduplication at all.
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
         let arm = emit(
-            ComponentId::Content,
+            BuiltComponent::Planet,
             staged.path(),
             out.path(),
             "aarch64-apple-darwin",
         );
         let win = emit(
-            ComponentId::Content,
+            BuiltComponent::Planet,
             staged.path(),
             out.path(),
             "x86_64-pc-windows-gnu",
         );
         assert_eq!(
             arm.sha256, win.sha256,
-            "content must hash the same everywhere"
+            "planet must hash the same everywhere"
         );
         assert_eq!(arm.path, win.path, "and therefore carry the same name");
     }
@@ -468,7 +574,7 @@ mod tests {
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
         let emitted = emit(
-            ComponentId::Content,
+            BuiltComponent::Planet,
             staged.path(),
             out.path(),
             "x86_64-unknown-linux-gnu",
@@ -480,7 +586,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        assert_eq!(name, format!("content-{}.zip", &emitted.sha256[..32]));
+        assert_eq!(name, format!("planet-{}.zip", &emitted.sha256[..32]));
         assert!(emitted.path.exists(), "the digest-named archive exists");
     }
 
@@ -489,19 +595,15 @@ mod tests {
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
         let before = emit(
-            ComponentId::Content,
+            BuiltComponent::Planet,
             staged.path(),
             out.path(),
             "x86_64-unknown-linux-gnu",
         );
 
-        fs::write(
-            staged.path().join("content/Objects.c4d/DefCore.txt"),
-            b"edited",
-        )
-        .expect("edit content");
+        fs::write(staged.path().join("planet/System.c4g/C4.c"), b"edited").expect("edit planet");
         let after = emit(
-            ComponentId::Content,
+            BuiltComponent::Planet,
             staged.path(),
             out.path(),
             "x86_64-unknown-linux-gnu",
@@ -517,17 +619,17 @@ mod tests {
     #[test]
     fn the_engine_component_is_versioned_per_triple_not_content_addressed() {
         // Engine changes every release, so digest naming would only churn the
-        // store; the four per-triple archives must also stay distinguishable.
+        // store; the three per-build archives must also stay distinguishable.
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
         let linux = emit(
-            ComponentId::Engine,
+            BuiltComponent::Engine,
             staged.path(),
             out.path(),
             "x86_64-unknown-linux-gnu",
         );
         let windows = emit(
-            ComponentId::Engine,
+            BuiltComponent::Engine,
             staged.path(),
             out.path(),
             "x86_64-pc-windows-gnu",
@@ -548,14 +650,20 @@ mod tests {
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
         let emitted = emit(
-            ComponentId::Engine,
+            BuiltComponent::Engine,
             staged.path(),
             out.path(),
             "x86_64-unknown-linux-gnu",
         );
 
         let body = fs::read_to_string(&emitted.path).expect("read emitted");
-        assert!(body.contains("bin/clonk-app"), "engine ships the binaries");
+        for binary in crate::RUNTIME_BINARIES {
+            assert!(
+                body.contains(&format!("bin/{}", binary.executable)),
+                "engine ships {}",
+                binary.executable
+            );
+        }
         assert!(body.contains("COPYING"), "engine ships the documents");
         assert!(
             !body.contains("planet/"),
@@ -572,7 +680,7 @@ mod tests {
         let staged = staged_layout();
         let out = TempDir::new().expect("output");
         emit(
-            ComponentId::Planet,
+            BuiltComponent::Planet,
             staged.path(),
             out.path(),
             "x86_64-unknown-linux-gnu",

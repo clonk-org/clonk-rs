@@ -311,8 +311,7 @@ impl GameApp {
         mode: &NetworkMode,
         control_rate: i32,
         runtime_join_allowed: bool,
-        active_player_count: i32,
-        teams: Option<&clonk_engine::InitialNetworkTeamMetadata>,
+        teams: Option<LobbyTeamOptionState>,
     ) -> Vec<LobbyOptionRow> {
         let (role, control_mode) = match mode {
             NetworkMode::Host(HostSettings {
@@ -339,21 +338,42 @@ impl GameApp {
             runtime_join_allowed,
         );
         if let Some(teams) = teams {
-            rows.extend(team_lobby_option_rows(
-                role,
-                &labels,
-                LobbyTeamOptionState {
-                    active: teams.active,
-                    auto_generate_teams: teams.auto_generate_teams,
-                    distribution: teams.team_distribution as i32,
-                    team_colors: teams.team_colors,
-                    random_team_count: teams.random_team_count,
-                    active_player_count,
-                    team_count: i32::try_from(teams.teams.len()).unwrap_or(i32::MAX),
-                },
-            ));
+            rows.extend(team_lobby_option_rows(role, &labels, teams));
         }
         rows
+    }
+
+    fn engine_team_option_state(
+        teams: &clonk_engine::InitialNetworkTeamMetadata,
+        active_player_count: i32,
+    ) -> LobbyTeamOptionState {
+        LobbyTeamOptionState {
+            active: teams.active,
+            auto_generate_teams: teams.auto_generate_teams,
+            distribution: teams.team_distribution as i32,
+            team_colors: teams.team_colors,
+            random_team_count: teams.random_team_count,
+            active_player_count,
+            team_count: i32::try_from(teams.teams.len()).unwrap_or(i32::MAX),
+        }
+    }
+
+    /// `C4TeamList` reaches every client verbatim through JoinData, and
+    /// `C4GameOptionsList` reads that same live list rather than a host-only
+    /// projection (src/C4GameOptions.cpp:203-231; src/C4Teams.cpp:560-590).
+    fn joined_team_option_state(
+        teams: &clonk_network::JoinTeamListSnapshot,
+        active_player_count: i32,
+    ) -> LobbyTeamOptionState {
+        LobbyTeamOptionState {
+            active: teams.active != 0,
+            auto_generate_teams: teams.auto_generate_teams != 0,
+            distribution: i32::from(teams.team_distribution),
+            team_colors: teams.team_colors != 0,
+            random_team_count: teams.random_team_count,
+            active_player_count,
+            team_count: i32::try_from(teams.teams.len()).unwrap_or(i32::MAX),
+        }
     }
 
     fn current_classic_lobby_option_rows(&self) -> Option<Vec<LobbyOptionRow>> {
@@ -380,38 +400,55 @@ impl GameApp {
             NetworkMode::Host(_) => self
                 .network_team_assignment
                 .as_ref()
-                .map(NetworkTeamAssignmentState::teams),
-            NetworkMode::Client(_) => None,
+                .map(NetworkTeamAssignmentState::teams)
+                .map(|teams| Self::engine_team_option_state(teams, active_player_count)),
+            NetworkMode::Client(_) => self.pending_network_join_data.as_ref().map(|join| {
+                Self::joined_team_option_state(&join.parameters.teams, active_player_count)
+            }),
         };
-        Some(self.classic_lobby_option_rows_for(
-            mode,
-            control_rate,
-            runtime_join_allowed,
-            active_player_count,
-            teams,
-        ))
+        Some(self.classic_lobby_option_rows_for(mode, control_rate, runtime_join_allowed, teams))
     }
 
     /// Mirrors `C4GameOptionsList::Activate`/its one-second callback. An
     /// activation calls through even when values compare equal; inactive
     /// sheets retain their last projection and do no periodic work.
+    ///
+    /// `C4GameLobby::MainDlg` builds one options list per participant
+    /// (src/C4GameLobby.cpp:223,247), so the joined adapter's retained
+    /// controller is refreshed on exactly the same cadence as the host's.
     pub(crate) fn refresh_classic_lobby_options(&mut self, force: bool) -> bool {
-        if !self
+        let host_active = self
             .classic_host_lobby
             .as_ref()
-            .is_some_and(|lobby| lobby.controller.active_sheet() == LobbySheet::Options)
-        {
+            .is_some_and(|lobby| lobby.controller.active_sheet() == LobbySheet::Options);
+        let joined_active = self
+            .network_lobby
+            .as_ref()
+            .is_some_and(|lobby| lobby.active_sheet == LobbySheet::Options);
+        if !host_active && !joined_active {
             return false;
         }
         let Some(rows) = self.current_classic_lobby_option_rows() else {
             return false;
         };
-        let Some(lobby) = self.classic_host_lobby.as_mut() else {
-            return false;
-        };
-        let changed = lobby.controller.option_rows() != rows;
-        if force || changed {
-            lobby.controller.set_option_rows(rows);
+        let mut changed = false;
+        if host_active {
+            if let Some(lobby) = self.classic_host_lobby.as_mut() {
+                let host_changed = lobby.controller.option_rows() != rows;
+                if force || host_changed {
+                    lobby.controller.set_option_rows(rows.clone());
+                }
+                changed |= host_changed;
+            }
+        }
+        if joined_active {
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                let joined_changed = lobby.controller.option_rows() != rows;
+                if force || joined_changed {
+                    lobby.controller.set_option_rows(rows);
+                }
+                changed |= joined_changed;
+            }
         }
         if changed {
             self.close_stale_classic_lobby_team_combo();
@@ -826,14 +863,16 @@ impl GameApp {
             NetworkMode::Host(HostSettings {
                 prepared: Some(prepared),
                 ..
-            }) => Some(prepared.runtime_team_metadata()),
+            }) => Some(Self::engine_team_option_state(
+                prepared.runtime_team_metadata(),
+                active_players,
+            )),
             NetworkMode::Host(_) | NetworkMode::Client(_) => None,
         };
         controller.set_option_rows(self.classic_lobby_option_rows_for(
             mode,
             control_rate,
             runtime_join_allowed,
-            active_players,
             teams,
         ));
         controller.set_league_mode(initial_network_is_league(Some(mode)));
@@ -915,7 +954,7 @@ impl GameApp {
             })
     }
 
-    fn classic_lobby_restore_player(
+    pub(crate) fn classic_lobby_restore_player(
         &self,
         player_id: i32,
     ) -> Option<&clonk_engine::ControlPlayerInfoEntry> {
@@ -1342,16 +1381,9 @@ impl GameApp {
                 .prepared
                 .as_ref()
                 .and_then(|prepared| prepared.host_config().resource_directory.clone())
-                .or_else(|| {
-                    self.app_paths
-                        .as_ref()
-                        .map(|paths| paths.cache_dir().join("Network"))
-                })
+                .or_else(|| network_work_directory(self.app_paths.as_ref()))
                 .unwrap_or_else(|| PathBuf::from("Network")),
-            None => self
-                .app_paths
-                .as_ref()
-                .map(|paths| paths.cache_dir().join("Network"))
+            None => network_work_directory(self.app_paths.as_ref())
                 .unwrap_or_else(|| PathBuf::from("Network")),
         }
     }
@@ -1804,10 +1836,8 @@ impl GameApp {
                 true,
             )
         } else if let Some(lobby) = self.network_lobby.as_ref() {
-            // C++ always offers Options. Until the joined read-only Options
-            // sheet is available, expose only actions this adapter can
-            // dispatch instead of opening a typed child boundary.
-            (lobby.has_teams, false)
+            // C++ offers Options to every participant (src/C4GameLobby.cpp:223).
+            (lobby.has_teams, true)
         } else {
             return Ok(false);
         };
@@ -2121,10 +2151,7 @@ impl GameApp {
         &mut self,
         client_id: i32,
     ) -> Result<bool, EngineError> {
-        if self.network.is_none()
-            || self.visible_lobby_client_is_local(client_id).is_none()
-            || !self.control_clients.contains(client_id)
-        {
+        if self.network.is_none() {
             return Ok(false);
         }
         Self::guard_gui_overlay_result(
@@ -2134,15 +2161,18 @@ impl GameApp {
                 .context("exact C4Network2ClientDlg resource set is absent")
                 .and_then(|resources| resources.validate()),
         )?;
+        // C4Network2ClientDlg is constructed from the id alone and resolves the
+        // client inside UpdateText, so a stale context entry opens the dialog on
+        // its unknown-id text instead of doing nothing
+        // (src/C4Network2Dialogs.cpp:42-59).
         let (_, rows, _) = self.runtime_client_list_snapshot();
-        let Some(row) = rows.into_iter().find(|row| row.client_id == client_id) else {
-            return Ok(false);
-        };
+        let row = rows.into_iter().find(|row| row.client_id == client_id);
         self.cancel_underlying_interaction();
         self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list = Some(
             clonk_frontend::runtime_client_list::RuntimeClientListDialog::new_info(
                 self.runtime_resource_string("IDS_NET_CLIENT_INFO"),
+                client_id,
                 row,
             ),
         );
@@ -3662,7 +3692,10 @@ impl GameApp {
                 let selected = self.network_lobby.as_mut().is_some_and(|lobby| {
                     let supported = matches!(
                         sheet,
-                        LobbySheet::Players | LobbySheet::Resources | LobbySheet::Scenario
+                        LobbySheet::Players
+                            | LobbySheet::Resources
+                            | LobbySheet::Options
+                            | LobbySheet::Scenario
                     ) || sheet == LobbySheet::Teams && lobby.has_teams;
                     if supported {
                         lobby.active_sheet = sheet;
@@ -3680,6 +3713,11 @@ impl GameApp {
                     return Err(classic_game_lobby_child_error(
                         ClassicGameLobbyChild::Sheet(sheet),
                     ));
+                }
+                if sheet == LobbySheet::Options {
+                    // C4GameOptionsList::Activate forces one Update before the
+                    // Sec1 timer takes over (src/C4GameOptions.cpp:302-308).
+                    let _ = self.refresh_classic_lobby_options(true);
                 }
                 if sheet == LobbySheet::Scenario {
                     let _ = self.refresh_lobby_scenario_description();
