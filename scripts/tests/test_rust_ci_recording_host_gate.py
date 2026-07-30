@@ -72,9 +72,18 @@ class RecordingHostGateTests(unittest.TestCase):
         self.assertIn("runs-on: macos-latest", block)
 
         script = step_script("Run recording-host material-order oracles")
+        self.assertEqual(script.count("cargo nextest run"), 1)
+        for package in (
+            "clonk-app",
+            "clonk-engine-integration-tests",
+            "clonk-frontend-unit-tests",
+        ):
+            with self.subTest(package=package):
+                self.assertRegex(script, rf"(?:^|\s)-p\s+{re.escape(package)}\b")
+        self.assertRegex(script, r"\s-E\s+")
         for oracle in recording_host_oracles():
             with self.subTest(oracle=oracle):
-                self.assertRegex(script, rf"\b{re.escape(oracle)}\s+--exact\b")
+                self.assertIn(oracle, script)
 
 
 if __name__ == "__main__":
