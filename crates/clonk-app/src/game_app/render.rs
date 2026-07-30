@@ -332,7 +332,15 @@ impl GameApp {
     /// `C4GraphicsSystem::RecalculateViewports` sorts the physical list by
     /// the currently displayed player's control layout. `SetFilmView` itself
     /// deliberately does not call this; create/close do.
+    ///
+    /// It is fullscreen-only: the function's first statement is
+    /// `if (!Application.isFullScreen) return;` (C4GraphicsSystem.cpp:335-336)
+    /// and the sort follows at `:339`, so in console mode every viewport keeps
+    /// the position it was created at.
     fn sort_physical_viewports_by_player_control(&mut self) {
+        if self.console_mode {
+            return;
+        }
         let engine = &self.engine;
         self.physical_viewports.sort_by_key(|viewport| {
             engine

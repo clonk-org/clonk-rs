@@ -4886,6 +4886,76 @@
         assert!(app.physical_viewports[0].is_no_owner_viewport);
     }
 
+    // Two console/fullscreen asymmetries that a port loses by sharing one
+    // creation helper between them.
+    //
+    // `C4Console::ViewportNew` is just `Game.CreateViewport(NO_OWNER)`
+    // (C4Console.cpp:1203-1206), and `fSilent` defaults to false
+    // (C4Game.h:222) — so the console's *ownerless* viewport announces itself,
+    // where `C4FullScreen::ViewportCheck` explicitly passes
+    // `iPlrNum == NO_OWNER` to silence exactly that case
+    // (C4FullScreen.cpp:517). The per-player console rows default the same way
+    // (C4Console.cpp:223, :1828).
+    //
+    // And `C4GraphicsSystem::RecalculateViewports` opens with
+    // `if (!Application.isFullScreen) return;` (C4GraphicsSystem.cpp:335-336),
+    // before `SortViewportsByPlayerControl()` at :339 — so a console viewport
+    // never reorders the list it joins, however the players are controlled.
+    #[test]
+    fn console_viewport_creation_announces_itself_and_keeps_list_order() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        // Layout order 3 then 1 (C4Console-side control sets 1 and 2), so a
+        // fullscreen sort would swap them and a console one must not.
+        let late_layout = app.local_owner + 1;
+        let early_layout = app.local_owner + 2;
+        for (player, name, control_set) in
+            [(late_layout, "Late layout", 1), (early_layout, "Early layout", 2)]
+        {
+            app.engine
+                .register_player(PlayerConfig::new(player, name))
+                .expect("register console viewport player");
+            app.engine
+                .set_player_runtime_control(
+                    player,
+                    clonk_engine::PlayerRuntimeControl::new(control_set, 0),
+                )
+                .expect("install console viewport control");
+        }
+
+        app.ui_sound_log.clear();
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        assert_eq!(
+            app.ui_sound_log,
+            ["CloseViewport"],
+            "the console's ownerless viewport is not silent"
+        );
+
+        let before = app
+            .physical_viewports
+            .iter()
+            .map(|viewport| viewport.displayed_player)
+            .collect::<Vec<_>>();
+        // One menu activation per dispatch, as the console produces them.
+        for player in [late_layout, early_layout] {
+            app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(
+                Some(player),
+            )])
+            .expect("console player viewport");
+        }
+        let mut expected = before;
+        expected.extend([late_layout, early_layout]);
+        assert_eq!(
+            app.physical_viewports
+                .iter()
+                .map(|viewport| viewport.displayed_player)
+                .collect::<Vec<_>>(),
+            expected,
+            "console mode never runs SortViewportsByPlayerControl"
+        );
+    }
+
     #[test]
     fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
         // FinishDerive returns on the main thread before its forwarded
