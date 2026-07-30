@@ -325,31 +325,31 @@ fn build_shadowless_font(face: &freetype::Face, px_height: u32) -> Result<ClonkF
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-struct Aligner {
+pub(crate) struct Aligner {
     area: IntRect,
     mx: i32,
     my: i32,
 }
 
 impl Aligner {
-    fn new(area: IntRect, mx: i32, my: i32) -> Self {
+    pub(crate) fn new(area: IntRect, mx: i32, my: i32) -> Self {
         Self { area, mx, my }
     }
 
-    fn width(&self) -> i32 {
+    pub(crate) fn width(&self) -> i32 {
         self.area.w
     }
 
-    fn height(&self) -> i32 {
+    pub(crate) fn height(&self) -> i32 {
         self.area.h
     }
 
-    fn inner_width(&self) -> i32 {
+    pub(crate) fn inner_width(&self) -> i32 {
         self.area.w - 2 * self.mx
     }
 
     /// C4Gui.cpp:975-990.
-    fn get_from_top(&mut self, hgt: i32) -> IntRect {
+    pub(crate) fn get_from_top(&mut self, hgt: i32) -> IntRect {
         let out = IntRect {
             x: self.area.x + self.mx,
             y: self.area.y + self.my,
@@ -363,7 +363,7 @@ impl Aligner {
     }
 
     /// C4Gui.cpp:992-1007 (`iHgt = -1` keeps the full height).
-    fn get_from_left(&mut self, wdt: i32, hgt: i32) -> IntRect {
+    pub(crate) fn get_from_left(&mut self, wdt: i32, hgt: i32) -> IntRect {
         let mut out = IntRect {
             x: self.area.x + self.mx,
             y: self.area.y + self.my,
@@ -381,7 +381,7 @@ impl Aligner {
     }
 
     /// C4Gui.cpp:1009-1023.
-    fn get_from_right(&mut self, wdt: i32, hgt: i32) -> IntRect {
+    pub(crate) fn get_from_right(&mut self, wdt: i32, hgt: i32) -> IntRect {
         let mut out = IntRect {
             x: self.area.x + self.area.w - wdt - self.mx,
             y: self.area.y + self.my,
@@ -397,7 +397,7 @@ impl Aligner {
     }
 
     /// C4Gui.cpp:1025-1041.
-    fn get_from_bottom(&mut self, hgt: i32) -> IntRect {
+    pub(crate) fn get_from_bottom(&mut self, hgt: i32) -> IntRect {
         let out = IntRect {
             x: self.area.x + self.mx,
             y: self.area.y + self.area.h - hgt - self.my,
@@ -409,7 +409,7 @@ impl Aligner {
     }
 
     /// C4Gui.cpp:1043-1049.
-    fn get_all(&self) -> IntRect {
+    pub(crate) fn get_all(&self) -> IntRect {
         IntRect {
             x: self.area.x + self.mx,
             y: self.area.y + self.my,
@@ -419,7 +419,7 @@ impl Aligner {
     }
 
     /// C4Gui.cpp:1051-1060 (`GetMiddleX/Y` = origin + extent/2).
-    fn get_centered(&self, wdt: i32, hgt: i32) -> IntRect {
+    pub(crate) fn get_centered(&self, wdt: i32, hgt: i32) -> IntRect {
         IntRect {
             x: self.area.x + self.area.w / 2 - wdt / 2,
             y: self.area.y + self.area.h / 2 - hgt / 2,
@@ -429,14 +429,14 @@ impl Aligner {
     }
 
     /// C4Gui.h:1909 (`ExpandLeft`).
-    fn expand_left(&mut self, by: i32) {
+    pub(crate) fn expand_left(&mut self, by: i32) {
         self.area.x -= by;
         self.area.w += by;
     }
 
     /// C4Gui.cpp:1062-1085.
     #[allow(clippy::too_many_arguments)] // mirrors the C++ signature
-    fn get_grid_cell(
+    pub(crate) fn get_grid_cell(
         &self,
         sect_x: i32,
         sect_x_max: i32,
