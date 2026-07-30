@@ -8868,9 +8868,18 @@ pub(crate) fn startup_window_builder(
         .with_title(native_window_title(false))
         // Both shells share this builder, matching C++ assigning one icon
         // resource to the fullscreen and console window classes alike
-        // (C4FullScreen.cpp:196-211; C4Console.cpp:297-310).
+        // (C4FullScreen.cpp:196-211; C4Console.cpp:297-310). Inert on macOS,
+        // where winit discards the attribute and the Dock tile comes from the
+        // bundle or from `dock_icon`.
         .with_window_icon(crate::window_icon::window_icon())
         .with_inner_size(initial_size);
+    // `with_window_icon` fills `ICON_SMALL` only, so the taskbar button would
+    // otherwise stretch the title-bar image (winit-0.28.7/src/window.rs:987).
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::WindowBuilderExtWindows;
+        window_builder = window_builder.with_taskbar_icon(crate::window_icon::taskbar_icon());
+    }
     if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
         if let Some((x, y)) = display_options.position {
             window_builder = window_builder.with_position(PhysicalPosition::new(x, y));

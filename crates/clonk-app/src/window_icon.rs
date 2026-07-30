@@ -10,10 +10,14 @@
 //! the window chrome, the macOS bundle `.icns` and the Windows executable
 //! resource are cut from one image — see that crate for the rationale.
 
-/// Side length of the decoded icon. Windows asks for a large and a small
-/// variant and downsamples the rest itself; winit takes one RGBA image and
-/// lets each platform pick.
+/// Side length of the title-bar icon. This is what winit's `with_window_icon`
+/// carries, and on Windows it lands in `ICON_SMALL`, whose base size is 16 —
+/// a multiple of it keeps display scaling from having to interpolate.
 pub(crate) const WINDOW_ICON_SIDE: u32 = 64;
+
+/// Side length of the taskbar icon. `ICON_BIG` is a separate slot from
+/// `ICON_SMALL`, and 256 is the ceiling winit documents for it.
+pub(crate) const TASKBAR_ICON_SIDE: u32 = 256;
 
 /// A decoded icon: `side * side` RGBA pixels.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,21 +26,37 @@ pub(crate) struct WindowIconImage {
     pub(crate) side: u32,
 }
 
-/// Decodes the product logo into a square RGBA icon.
-pub(crate) fn window_icon_image() -> Option<WindowIconImage> {
+/// Decodes the product logo into a square RGBA icon of the given side.
+pub(crate) fn window_icon_image_at(side: u32) -> Option<WindowIconImage> {
     let square = clonk_icon::square_source(clonk_icon::LOGO_PNG)?;
     Some(WindowIconImage {
-        rgba: clonk_icon::resize_square(&square, WINDOW_ICON_SIDE).into_raw(),
-        side: WINDOW_ICON_SIDE,
+        rgba: clonk_icon::resize_square(&square, side).into_raw(),
+        side,
     })
+}
+
+/// Decodes the product logo into the title-bar icon.
+pub(crate) fn window_icon_image() -> Option<WindowIconImage> {
+    window_icon_image_at(WINDOW_ICON_SIDE)
+}
+
+fn icon_at(side: u32) -> Option<winit::window::Icon> {
+    let image = window_icon_image_at(side)?;
+    winit::window::Icon::from_rgba(image.rgba, image.side, image.side).ok()
 }
 
 /// The icon both shells attach to their window. `None` leaves the platform
 /// default in place, which is what C++ does when the resource fails to load
 /// (`C4FullScreen.cpp:196-211` ignores a null `HICON`).
 pub(crate) fn window_icon() -> Option<winit::window::Icon> {
-    let image = window_icon_image()?;
-    winit::window::Icon::from_rgba(image.rgba, image.side, image.side).ok()
+    icon_at(WINDOW_ICON_SIDE)
+}
+
+/// The larger image Windows draws on the taskbar button. Nothing else has a
+/// second slot to fill: winit only reads this on Windows.
+#[cfg(windows)]
+pub(crate) fn taskbar_icon() -> Option<winit::window::Icon> {
+    icon_at(TASKBAR_ICON_SIDE)
 }
 
 #[cfg(test)]
@@ -66,5 +86,26 @@ mod tests {
         // Both shells take the same image, as C++ assigns one resource to the
         // fullscreen and console window classes alike.
         assert_eq!(window_icon_image(), Some(image));
+    }
+
+    // `with_window_icon` sets `ICON_SMALL` only (winit-0.28.7/src/window.rs:987),
+    // which is the title-bar slot. The taskbar button reads `ICON_BIG`, so
+    // without a second image Windows stretches the 64px one across a button
+    // drawn at up to 256.
+    #[test]
+    fn the_windows_taskbar_gets_its_own_larger_image() {
+        let small = window_icon_image_at(WINDOW_ICON_SIDE).expect("the product logo decodes");
+        let big = window_icon_image_at(TASKBAR_ICON_SIDE).expect("the product logo decodes");
+
+        assert_eq!(small.side, 64, "ICON_SMALL is a 16px slot's base multiple");
+        assert_eq!(
+            big.side, 256,
+            "256 is winit's documented ceiling for ICON_BIG"
+        );
+        assert!(
+            big.side > small.side,
+            "the taskbar image must not be an upscale of the title-bar one"
+        );
+        assert_eq!(big.rgba.len(), (big.side * big.side * 4) as usize);
     }
 }

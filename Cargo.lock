@@ -1060,6 +1060,7 @@ dependencies = [
  "arboard",
  "clonk-graphics",
  "clonk-gui",
+ "clonk-icon",
  "clonk-launcher",
  "clonk-launcher-ui",
  "clonk-logging",

@@ -44,6 +44,9 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("Clonk Rust Launcher")
+        // The launcher is a product window like any other; without this it
+        // carried whatever default the platform hands an iconless window.
+        .with_window_icon(window_icon())
         .with_inner_size(LogicalSize::new(960.0, 640.0))
         .build(&event_loop)
         .context("failed to create launcher window")?;
@@ -83,6 +86,17 @@ fn main() -> Result<()> {
         Event::LoopDestroyed => {}
         _ => {}
     })
+}
+
+/// Side length of the launcher's window icon, matching the game window's
+/// title-bar slot (`clonk-app`'s `window_icon`).
+const WINDOW_ICON_SIDE: u32 = 64;
+
+/// The product icon, or `None` to leave the platform default in place.
+fn window_icon() -> Option<winit::window::Icon> {
+    let square = clonk_icon::square_source(clonk_icon::LOGO_PNG)?;
+    let icon = clonk_icon::resize_square(&square, WINDOW_ICON_SIDE);
+    winit::window::Icon::from_rgba(icon.into_raw(), WINDOW_ICON_SIDE, WINDOW_ICON_SIDE).ok()
 }
 
 fn enforce_min_size(size: PhysicalSize<u32>) -> (u32, u32) {
@@ -3551,6 +3565,16 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    // The launcher window used to be built with no icon at all, on every
+    // platform, so it showed whatever default the window manager hands out.
+    #[test]
+    fn the_launcher_window_carries_the_product_icon() {
+        assert!(
+            window_icon().is_some(),
+            "winit rejected the launcher's product icon"
+        );
     }
 
     struct DummyLog;
