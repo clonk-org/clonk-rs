@@ -857,6 +857,47 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   than a wild coordinate. Pinned by
   `detached_viewport_pointer_projection_uses_window_identity_and_scale`.
 
+- **Console viewport windows now open (M10-P4-L047 criteria 1-3).** The
+  console's Viewport menu already created the *logical* physical viewport; it
+  now materialises as a real OS window. `clonk-app::console_viewport_windows`
+  reconciles the open windows against the physical list each pass and
+  `viewport_window_host` is the port's `C4ViewportWindow`. C++ has no
+  reconciliation step — `CreateViewport` builds the window inside the same call
+  that appends the viewport (`C4GraphicsSystem.cpp:229-240`) — but winit can
+  only create a window from the event loop's target, so the same decisions are
+  taken once per pass instead. Details worth keeping:
+  - **Identity is the C++ pointer.** Opens and closes address one viewport by
+    `physical_identity`, never by owner, so two windows on the same player stay
+    distinct. `GameApp::close_physical_viewport_identity` is
+    `CloseViewport(C4Viewport *)` (`:205-224`): it erases exactly one, and it
+    has no `fSilent` parameter at all, so it always plays — unlike the
+    player-keyed overload (`:314-331`) that erases every match.
+  - **Redraws ride the graphics tick**, the way `C4GraphicsSystem::Execute`
+    runs `cvp->Execute()` for every viewport inside one pass (`:167-169`).
+    Redrawing per event-loop pass instead ignores the frame schedule, the
+    automatic frame skip and the repaint floor, and spins — that was written
+    and fixed before landing.
+  - **The window is not a child.** `C4Viewport::Init` passes the console shell
+    as `pParent` (`C4Viewport.cpp:1351`), and the reference `CStdWindow::Init`
+    accepts it and ignores it entirely (`StdSDLWindow.cpp:52-66`).
+  - The buffer extent is `ceilf(drawable / scale)` (`C4Viewport.cpp:798`),
+    pinned by
+    `viewport_logical_extent_is_a_ceiling_division_by_the_application_scale`;
+    the open/close decision is pinned by
+    `console_viewport_windows_open_per_identity_and_close_only_their_own`; the
+    draw by `console_viewport_render_uses_the_windows_own_extent_and_identity`.
+  Verified live: `--sandbox /console` opens a window titled after the player at
+  exactly 400x250 and presents a full-extent frame every graphics tick. **What
+  a live run could not confirm** is the drawn *content*: the sandbox player has
+  no crew, so the frame is a uniform `fow_color` fill — correct for an
+  unexplored map, but it means a viewport window showing real revealed world
+  has not been observed. Confirming that needs a scenario started with a real
+  player file, which this environment has none of.
+  **Still open on this card:** routing the window's pointer and key input into
+  the edit-cursor sink. The window delivers events and
+  `ActiveViewportProjection::pointer_projection` converts them, but nothing
+  consumes them yet — see the next entry.
+
 - **The whole edit-cursor interaction layer has no production caller.** Worth
   stating on its own, because every card above reads as "landed" and the
   editor still cannot edit. `grep` for the modules outside their own files
