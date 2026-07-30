@@ -1623,9 +1623,18 @@ mod tests {
         assert_eq!(legacy_gamepad_key_label(Some(0x0042_0031)), "[1] Max");
         assert_eq!(legacy_gamepad_key_label(Some(0x0042_0104)), "Joy2Down");
 
-        // A non-gamepad code names its scancode instead of a sentinel; SDL
-        // scancode 20 is Q (verified against the installed SDL2).
+        // A non-gamepad code is named by the *platform* branch rather than by a
+        // sentinel, exactly as `KeyCode2String` picks one of `KeyCodeMap`,
+        // `XKeysymToString` and `SDL_GetScancodeName` per target
+        // (`C4KeyboardInput.cpp:366-384`). Only the SDL branch reads 20 as Q, so
+        // that is the only branch that can assert the name.
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         assert_eq!(legacy_gamepad_key_label(Some(20)), "Q");
+        assert_ne!(
+            legacy_gamepad_key_label(Some(20)),
+            "invalid",
+            "no sentinel survives on any target",
+        );
     }
 
     #[test]
