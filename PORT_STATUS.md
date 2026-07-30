@@ -927,17 +927,27 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
     a multi-object selection be dragged as a unit; and the whole Ctrl branch is
     inside `if (Target)`, so Ctrl-clicking empty space neither clears nor starts
     a rubber band where a plain click there does both.
-  - **The hit test is the missing bridge.** `edit_target` takes a
-    `find_next(after)` closure that is exactly
-    `Game.FindObject(0, X, Y, 0, 0, OCF_NotContained, …, ANY_OWNER, after)`
-    (`C4EditCursor.cpp:150`), and the port already implements that query
-    faithfully — `compat::objects::find_object_linear` with
-    `FindObjectParams`, including the `find_next` cursor and the OCF mask.
-    What is missing is a way to run it *outside* the script host: it takes a
-    `WorldAccessor`, which today only `with_host_context` supplies. An
-    `Engine::edit_cursor_object_at(x, y, after)` needs that accessor reachable
-    from a plain `&Engine`. That is the next step, and it is a design decision
-    rather than a transcription — do not reimplement the query.
+  - **The hit test now reaches outside the script host.**
+    `EditCursorHitTest::new(&snapshot).object_at(x, y, after)` supplies
+    `edit_target`'s `find_next`, which C++ writes as
+    `Game.FindObject(0, X, Y, 0, 0, OCF_NotContained, …, ANY_OWNER, Target)`
+    (`C4EditCursor.cpp:150`). It runs the **same** query script content calls
+    — `compat::objects::find_object_linear` with `FindObjectParams` — rather
+    than a second hit test that could disagree with it. The blocker was that
+    `find_object_linear` needs a `WorldAccessor` and only `with_host_context`
+    supplied one; `HostWorldContext` is itself a `WorldAccessor`, and
+    `host_world_context_from_snapshot` builds one without entering the script
+    host, which is correct because the console hit-tests *between* ticks, not
+    during a script call. It is a struct rather than a bare function on
+    purpose: `edit_target` calls `find_next` repeatedly to walk a shift-click
+    stack, so the world view is built once per gesture. Pinned against a live
+    fixture world by
+    `edit_target_walks_the_live_object_stack_through_the_hit_test`, which also
+    covers the no-wrap-around rule — a fully selected stack ends at `None`.
+    **Still open:** the app-side glue — a viewport window's pointer events
+    projected through `pointer_projection`, fed to `edit_press`/`edit_target`,
+    applied to `DeveloperSelection`, and emitted as `EMMO_Move`/`EMMO_Enter`.
+    Every piece it needs now exists and is tested; none of them are called yet.
 
 - **Frame-selection membership landed; three editor gaps remain untracked.**
   `DeveloperSelection::select_frame` took the framed objects *from its caller*
