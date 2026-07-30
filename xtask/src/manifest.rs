@@ -289,7 +289,7 @@ mod tests {
         vec![ReferencedComponent {
             id: ComponentId::Content,
             source: ArchiveSource {
-                repo: "syb0rg/clonk-rs-content".to_string(),
+                repo: "clonk-org/clonk-rs-content".to_string(),
                 tag: "content-bb".to_string(),
             },
             archive: "content.zip".to_string(),
@@ -445,7 +445,7 @@ mod tests {
             .expect("content entry");
         for target in content.targets.values() {
             let source = target.source.as_ref().expect("content names its release");
-            assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+            assert_eq!(source.repo, "clonk-org/clonk-rs-content");
             assert_eq!(source.tag, "content-bb");
             assert_eq!(target.archive, "content.zip");
         }

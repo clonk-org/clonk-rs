@@ -160,12 +160,12 @@ mod tests {
         // repository stops re-uploading 225 MB of unchanged bytes daily. The
         // tag names the exact content commit the submodule pins.
         let source = ArchiveSource {
-            repo: "syb0rg/clonk-rs-content".to_string(),
+            repo: "clonk-org/clonk-rs-content".to_string(),
             tag: "content-9ce95af4359ce564bf7b4ef515c94f69091b0201".to_string(),
         };
         assert_eq!(
             published_archive_url(&source, "content.zip").expect("plain names"),
-            "https://github.com/syb0rg/clonk-rs-content/releases/download/\
+            "https://github.com/clonk-org/clonk-rs-content/releases/download/\
              content-9ce95af4359ce564bf7b4ef515c94f69091b0201/content.zip"
         );
     }
@@ -177,16 +177,16 @@ mod tests {
         // cannot catch any of these — they all still resolve to github.com.
         for (repo, tag) in [
             ("syb0rg", "content-1"),
-            ("syb0rg/clonk-rs-content/extra", "content-1"),
+            ("clonk-org/clonk-rs-content/extra", "content-1"),
             ("syb0rg/../../evil", "content-1"),
             ("syb0rg/clonk rs", "content-1"),
             (
-                "syb0rg/clonk-rs-content",
+                "clonk-org/clonk-rs-content",
                 "../../../../other/releases/download/v1",
             ),
-            ("syb0rg/clonk-rs-content", "tag?query"),
+            ("clonk-org/clonk-rs-content", "tag?query"),
             ("", "content-1"),
-            ("syb0rg/clonk-rs-content", ""),
+            ("clonk-org/clonk-rs-content", ""),
         ] {
             let source = ArchiveSource {
                 repo: repo.to_string(),
@@ -205,7 +205,7 @@ mod tests {
         // repository's download URL is github.com, which answers 302 towards
         // release-assets.githubusercontent.com — both already allowlisted.
         let source = ArchiveSource {
-            repo: "syb0rg/clonk-rs-content".to_string(),
+            repo: "clonk-org/clonk-rs-content".to_string(),
             tag: "content-abc".to_string(),
         };
         let url = published_archive_url(&source, "content.zip").expect("plain names");
@@ -227,7 +227,7 @@ mod tests {
 
         assert_eq!(
             archive_url_for(&manifest, target).expect("plain names"),
-            "https://github.com/syb0rg/clonk-rs-content/releases/download/\
+            "https://github.com/clonk-org/clonk-rs-content/releases/download/\
              content-abc/content.zip"
         );
     }
@@ -324,7 +324,7 @@ mod tests {
             "x86_64-unknown-linux-gnu": {
               "archive": "content.zip",
               "source": {
-                "repo": "syb0rg/clonk-rs-content",
+                "repo": "clonk-org/clonk-rs-content",
                 "tag": "content-abc"
               },
               "sha256": "bb00112233445566778899aabbccddeeff00112233445566778899aabbccddee",

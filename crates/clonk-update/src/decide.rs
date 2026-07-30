@@ -335,7 +335,7 @@ mod tests {
             .expect("content entry");
         for target in content.targets.values_mut() {
             target.source = Some(ArchiveSource {
-                repo: "syb0rg/clonk-rs-content".to_string(),
+                repo: "clonk-org/clonk-rs-content".to_string(),
                 tag: "content-d34d385".to_string(),
             });
         }
@@ -353,7 +353,7 @@ mod tests {
             .source
             .as_ref()
             .expect("the content source reached the plan");
-        assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+        assert_eq!(source.repo, "clonk-org/clonk-rs-content");
         assert_eq!(source.tag, "content-d34d385");
 
         // Components published by this repository carry no source at all.

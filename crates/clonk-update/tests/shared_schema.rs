@@ -146,7 +146,7 @@ fn content_is_resolved_from_the_repository_that_publishes_it() {
             .source
             .as_ref()
             .unwrap_or_else(|| panic!("content/{triple} must name its release"));
-        assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+        assert_eq!(source.repo, "clonk-org/clonk-rs-content");
         assert!(source.tag.starts_with("content-"), "{}", source.tag);
         assert_eq!(target.archive, "content.zip");
     }
