@@ -382,11 +382,11 @@ jobs:
       # inert. `--no-fail-fast` reports every failure instead of stopping at the
       # first failing binary, which is what CLAUDE.md documents as the gate.
       - name: Run workspace tests
-        run: cargo nextest run --workspace --no-fail-fast --features xtask/engine-tools --locked
+        run: cargo nextest run --workspace --no-fail-fast --locked
 
       # Keep this immediately after the workspace test graph. The differential
-      # lives in that graph, so the named command can reuse it before the
-      # engine-tools-only commands select their narrower feature set.
+      # lives in that default-feature graph, and the lightweight xtask
+      # dispatcher selects it without linking the release-tool binary first.
       - name: Verify pinned C++ oracle parity
         run: cargo xtask parity verify
 

@@ -28,12 +28,16 @@ class CiLatencyTests(unittest.TestCase):
                     source,
                 )
 
-    def test_full_parity_reuses_the_engine_tools_test_graph(self):
+    def test_full_parity_preserves_the_default_workspace_test_graph(self):
         workflow = WORKFLOWS[0].read_text(encoding="utf-8")
         full_parity = workflow[workflow.index("  full-parity:") :]
         workspace = full_parity.index(
-            "run: cargo nextest run --workspace --no-fail-fast "
-            "--features xtask/engine-tools --locked"
+            "run: cargo nextest run --workspace --no-fail-fast --locked"
+        )
+        self.assertNotIn(
+            "cargo nextest run --workspace --no-fail-fast "
+            "--features xtask/engine-tools",
+            full_parity,
         )
         packaging = full_parity.index(
             "run: cargo test -p xtask --features engine-tools "
