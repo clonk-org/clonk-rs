@@ -2903,6 +2903,81 @@ impl GameApp {
         }
     }
 
+    /// `Config.Developer.AutoFileReload`, defaulting true (`C4Config.cpp:434`).
+    pub(crate) fn configured_auto_file_reload(&self) -> bool {
+        crate::configured_auto_file_reload(&crate::load_native_config_bytes(
+            self.app_paths.as_ref(),
+        ))
+    }
+
+    /// `C4Game::InitGame`'s monitor arming plus `InitGameFinal`'s start
+    /// (`C4Game.cpp:2413-2424`, `:2738`).
+    ///
+    /// The ordering is the whole contract: create the monitor, register every
+    /// unpacked definition group, *then* start it. `C4FileMonitor::AddDirectory`
+    /// on the reference backend is `if (!started) paths.emplace_back(...)`
+    /// (`C4FileMonitor.cpp:299-305`), so a directory registered after the start
+    /// is silently dropped — which is safe only because C++ registers during
+    /// definition loading and starts afterwards.
+    pub(crate) fn arm_developer_file_monitor(&mut self, auto_file_reload: bool) {
+        use clonk_engine::developer_file_monitor::should_arm_file_monitor;
+
+        // `Application.isFullScreen` is the negation of console mode: a
+        // fullscreen session never watches, however the key is set.
+        if !should_arm_file_monitor(
+            auto_file_reload,
+            !self.console_mode,
+            self.file_monitor.is_some(),
+        ) {
+            return;
+        }
+        let mut monitor = clonk_platform::file_monitor::DirectoryMonitor::new();
+        for directory in self.engine.monitored_definition_directories() {
+            monitor.add_directory(directory);
+        }
+        monitor.start();
+        tracing::debug!(
+            watched = monitor.watched().len(),
+            "armed the developer file monitor"
+        );
+        self.file_monitor = Some(monitor);
+    }
+
+    /// Deliver whatever the monitor saw to `C4Game::ReloadFile`'s dispatcher.
+    ///
+    /// `C4FileMonitor`'s callback is bound straight to `C4Game::ReloadFile`
+    /// (`C4Game.cpp:2418`), which refuses in a network game, routes a matched
+    /// definition to `ReloadDef`, and offers everything else to the script
+    /// host — the fallback, not a sibling branch.
+    pub(crate) fn poll_developer_file_monitor(&mut self) {
+        use clonk_engine::developer_reload::{changed_file_route, ChangedFileRoute};
+
+        let Some(monitor) = self.file_monitor.as_mut() else {
+            return;
+        };
+        let changed = monitor.poll();
+        if changed.is_empty() {
+            return;
+        }
+        let network_game = self.network.is_some();
+        for path in changed {
+            let path = path.to_string_lossy().into_owned();
+            let route = changed_file_route(network_game, &path, |candidate| {
+                self.engine.definition_id_for_source_path(candidate)
+            });
+            match route {
+                ChangedFileRoute::RefusedInNetwork => return,
+                ChangedFileRoute::Definition { definition } => {
+                    let reloaded = self.engine.reload_definition(&definition, network_game);
+                    tracing::debug!(%definition, reloaded, "developer reload dispatched");
+                }
+                ChangedFileRoute::Script { relative_path } => {
+                    tracing::debug!(%relative_path, "developer reload found no definition");
+                }
+            }
+        }
+    }
+
     /// Draw one console viewport window's frame.
     ///
     /// This is `C4Viewport::Execute` (`C4Viewport.cpp:1126-1155`) for a

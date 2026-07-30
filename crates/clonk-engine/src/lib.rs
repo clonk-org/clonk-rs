@@ -10473,6 +10473,51 @@ impl Engine {
         true
     }
 
+    /// The definition directories a file monitor should watch.
+    ///
+    /// `C4Def::Load` registers a definition's group with
+    /// `Game.AddDirectoryForMonitoring` only when the group is **unpacked**
+    /// (`C4Def.cpp:547-560`) — a packed `.c4d` has no directory to observe, so
+    /// a packed installation watches nothing however `Developer.AutoFileReload`
+    /// is set. `definition_registers_for_monitoring` carries that rule; here
+    /// "unpacked" is simply the stored path being a directory.
+    pub fn monitored_definition_directories(&self) -> Vec<std::path::PathBuf> {
+        let mut directories = Vec::new();
+        for id in self.definition_load_order.iter() {
+            let Some(path) = self
+                .definitions
+                .get(id.as_str())
+                .and_then(|definition| definition.source_path())
+            else {
+                continue;
+            };
+            if !path.is_dir() {
+                continue;
+            }
+            // C++ registers each group once; a definition reloaded from the
+            // path it already has re-registers nothing.
+            if !directories.iter().any(|entry| entry == path) {
+                directories.push(path.to_path_buf());
+            }
+        }
+        directories
+    }
+
+    /// The definition whose stored group is exactly this path.
+    ///
+    /// `C4DefList::GetByPath` matches the definition **root** or one immediate
+    /// child (`C4Def.cpp:1137-1152`), but on the reference build only the root
+    /// can ever match: the immediate-child arm tests a literal `\\`, and macOS
+    /// paths use `/`. The watcher reports directories, so a root match is the
+    /// only case that arises.
+    pub fn definition_id_for_source_path(&self, path: &str) -> Option<String> {
+        let candidate = std::path::Path::new(path);
+        self.definition_load_order.iter().find_map(|id| {
+            let definition = self.definitions.get(id.as_str())?;
+            (definition.source_path()? == candidate).then(|| id.as_str().to_string())
+        })
+    }
+
     /// Every live object of one definition, in master order — the set both
     /// `C4Game::ReloadDef` sweeps operate on. It filters on the id **alone**:
     /// C++ does not check `Status` here, unlike `C4ObjectList::UpdateFaces`.

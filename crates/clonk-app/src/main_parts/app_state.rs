@@ -351,6 +351,10 @@ pub(crate) struct GameApp {
     /// application tick; the port's event loop wakes far more often than
     /// that, and emitting per wake would flood the control queue.
     pub(crate) edit_cursor_tick_frame: Option<u64>,
+    /// `C4Game::FileMonitor`. Armed once per game when
+    /// `Developer.AutoFileReload` is set and the app is windowed
+    /// (`C4Game.cpp:2413-2424`), started after definitions have loaded.
+    pub(crate) file_monitor: Option<clonk_platform::file_monitor::DirectoryMonitor>,
     /// `C4EditCursor::Hold` — set by a press, cleared by the release.
     pub(crate) edit_cursor_hold: bool,
     /// `C4EditCursor::DragFrame` with its `(X, Y)` press anchor and live

@@ -5008,6 +5008,70 @@
     // ViewX/ViewY (C4Viewport.cpp:181), C4EditCursor::Move picks the target
     // with Game.FindObject (C4EditCursor.cpp:150), and LeftButtonDown edits
     // the selection (:201-229).
+    // C4Game.cpp:2413-2424,2738 + :2306-2320 — the monitor arms only in a
+    // windowed dev session, registers before it starts, and its callback is
+    // bound straight to ReloadFile's dispatcher.
+    #[test]
+    fn developer_file_monitor_arms_registers_then_dispatches_definition_reloads() {
+        let dir = tempfile::tempdir().expect("temp group root");
+        let group = dir.path().join("Rock.c4d");
+        std::fs::create_dir_all(&group).expect("create definition group");
+        std::fs::write(
+            group.join("DefCore.txt"),
+            "[DefCore]\nid=ROCK\nVersion=4,9,8\nName=Rock\n",
+        )
+        .expect("write DefCore");
+
+        let mut app = new_lightweight_running_sandbox_app();
+        let mut definition =
+            clonk_engine::Definition::from_script("ROCK".to_string(), "Rock".to_string(), "")
+                .expect("script definition compiles");
+        definition.set_source_path(Some(group.clone()));
+        app.engine
+            .register_definition(definition)
+            .expect("register definition");
+
+        // A fullscreen session never watches, however the key is set.
+        app.console_mode = false;
+        app.arm_developer_file_monitor(true);
+        assert!(app.file_monitor.is_none());
+
+        // Nor does a console session with the key off.
+        app.console_mode = true;
+        app.arm_developer_file_monitor(false);
+        assert!(app.file_monitor.is_none());
+
+        app.arm_developer_file_monitor(true);
+        let monitor = app.file_monitor.as_ref().expect("the monitor armed");
+        assert_eq!(monitor.watched(), std::slice::from_ref(&group));
+        assert!(
+            monitor.started(),
+            "registration closes before the first poll"
+        );
+
+        // Arming twice does not replace a running monitor.
+        app.arm_developer_file_monitor(true);
+        assert_eq!(
+            app.file_monitor.as_ref().expect("still armed").watched(),
+            std::slice::from_ref(&group)
+        );
+
+        // A quiet tree dispatches nothing.
+        app.poll_developer_file_monitor();
+        assert!(app.engine.definition("ROCK").is_some());
+
+        // Breaking the group and touching it routes to ReloadDef, whose
+        // failure arm removes the definition.
+        std::fs::write(group.join("DefCore.txt"), "not a defcore").expect("corrupt DefCore");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        let _ = std::fs::File::open(group.join("DefCore.txt")).map(|file| file.set_modified(later));
+        app.poll_developer_file_monitor();
+        assert!(
+            app.engine.definition("ROCK").is_none(),
+            "a watched change reached ReloadDef and its failure arm"
+        );
+    }
+
     #[test]
     fn console_viewport_pointer_gestures_select_move_and_frame() {
         let mut app = new_lightweight_running_sandbox_app();

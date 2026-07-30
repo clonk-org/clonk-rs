@@ -1,6 +1,50 @@
 // Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    // C4Def.cpp:547-560 — only unpacked definition groups are watched, and
+    // each group is registered once.
+    #[test]
+    fn only_unpacked_definition_groups_are_offered_to_the_file_monitor() {
+        let dir = tempfile::tempdir().expect("temp root");
+        let unpacked = dir.path().join("Rock.c4d");
+        std::fs::create_dir_all(&unpacked).expect("create unpacked group");
+        let packed = dir.path().join("Packed.c4d");
+        std::fs::write(&packed, b"packed group bytes").expect("write packed group");
+
+        let mut engine = crate::Engine::new();
+        for (id, path) in [
+            ("ROCK", Some(unpacked.clone())),
+            ("PACK", Some(packed.clone())),
+            ("SCRP", None),
+        ] {
+            let mut definition =
+                crate::Definition::from_script(id.to_string(), id.to_string(), "")
+                    .expect("script definition compiles");
+            definition.set_source_path(path);
+            engine
+                .register_definition(definition)
+                .expect("register definition");
+        }
+
+        // A packed group has no directory to observe, and a script-only
+        // definition has no group at all.
+        assert_eq!(
+            engine.monitored_definition_directories(),
+            vec![unpacked.clone()]
+        );
+
+        // Two definitions sharing one group register it once — C++ skips a
+        // location it already has.
+        let mut sibling =
+            crate::Definition::from_script("ROK2".to_string(), "Rock 2".to_string(), "")
+                .expect("script definition compiles");
+        sibling.set_source_path(Some(unpacked.clone()));
+        engine
+            .register_definition(sibling)
+            .expect("register sibling definition");
+        assert_eq!(engine.monitored_definition_directories(), vec![unpacked]);
+    }
+
     // C4Def.cpp:1191-1213 + C4Game.cpp:2322-2367 — the reload re-opens the
     // definition's own stored group, and a failed load removes it outright.
     #[test]

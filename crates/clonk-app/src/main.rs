@@ -916,6 +916,7 @@ fn run() -> Result<()> {
                     console_commands = None;
                 }
                 app.console_edit_cursor_tick();
+                app.poll_developer_file_monitor();
                 app.drain_console_log_capture();
                 app.drain_game_log_capture();
                 if app.sync_developer_console_view() {
@@ -2011,6 +2012,7 @@ impl GameApp {
             console_viewport_projections: Default::default(),
             edit_cursor_drop_target: None,
             edit_cursor_tick_frame: None,
+            file_monitor: None,
             edit_cursor_hold: false,
             edit_cursor_last_world: None,
             edit_cursor_drag_frame: None,

@@ -669,9 +669,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   the callback skips the `UserDropped|KernelDropped` flags and does nothing
   else (`:256-273`), so adding a rescan would be stricter than C++. Pinned by
   `file_monitor_reports_directories_and_refuses_late_registration`.
-  **Still open, and the dependency here is real.** Nothing calls
-  `add_directory` from definition loading, so the monitor watches nothing in a
-  running game — and that is not a wiring oversight. `C4Def::Load` registers
+  **Now wired end to end.** `GameApp::arm_developer_file_monitor` runs as
+  `C4Game::InitGameFinal`'s last act — after viewports exist and definitions
+  have loaded (`C4Game.cpp:2738`) — because registration closes at the start.
+  It arms only when `Config.Developer.AutoFileReload` (default **true**,
+  `C4Config.cpp:434`) is set, the app is windowed, and no monitor is already
+  running; `Engine::monitored_definition_directories` supplies only **unpacked**
+  groups, each once. `poll_developer_file_monitor` then feeds
+  `changed_file_route`, which refuses in a network game, routes a matched
+  definition to `reload_definition`, and offers everything else to the script
+  host. Pinned end to end by
+  `developer_file_monitor_arms_registers_then_dispatches_definition_reloads`,
+  which corrupts a real group on disk and watches the definition disappear
+  through the failure arm.
+  The dependency this note previously recorded was real and is now discharged: `C4Def::Load` registers
   `Filename`, the group's own full name (`C4Def.cpp:547-560`), which is exactly
   the source provenance **M10-P4-L086** exists to retain: the port resolves a
   definition group to a `Group`, builds the runtime definition and drops the
