@@ -33,6 +33,7 @@ class ReleasePrepareWorkflowTests(unittest.TestCase):
         self.assertNotIn("workflow_dispatch:", publish)
 
     def test_publish_resolver_does_not_depend_on_the_skipped_legacy_job(self):
+        # A skipped ancestor makes downstream implicit success() evaluate false.
         workflow = PUBLISH.read_text(encoding="utf-8")
         resolve = workflow.split("\n  resolve:\n", 1)[1].split(
             "\n  build:\n", 1
