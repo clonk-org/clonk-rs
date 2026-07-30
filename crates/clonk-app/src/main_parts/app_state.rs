@@ -2043,6 +2043,10 @@ pub(crate) struct RuntimeFlashResources {
     pub(crate) no_debug_mode: String,
     pub(crate) on: String,
     pub(crate) off: String,
+    /// `C4FullScreen::ViewportCheck` flashes this when the last owned viewport
+    /// closes and the ownerless observer viewport takes over
+    /// (C4FullScreen.cpp:519-526).
+    pub(crate) observer_menu: String,
 }
 
 impl RuntimeFlashResources {
@@ -2057,6 +2061,7 @@ impl RuntimeFlashResources {
             no_debug_mode: text("IDS_MSG_NODEBUGMODE"),
             on: text("IDS_CTL_ON"),
             off: text("IDS_CTL_OFF"),
+            observer_menu: text("IDS_MSG_PRESSORPUSHANYGAMEPADBUTT"),
         }
     }
 

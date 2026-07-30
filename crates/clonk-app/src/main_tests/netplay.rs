@@ -19997,3 +19997,38 @@ fn network_host_own_join_binds_the_local_presentation_to_its_player() {
         "local presentation must follow the host's own joined player number"
     );
 }
+
+#[test]
+fn losing_the_last_local_viewport_flashes_the_native_observer_hint() {
+    // C4FullScreen::ViewportCheck's no-viewport case creates the ownerless
+    // observer viewport and then, outside film mode, flashes
+    // IDS_MSG_PRESSORPUSHANYGAMEPADBUTT with the FullscreenMenuOpen key name
+    // wrapped in the yellow markup (pristine 9ffa0a5d
+    // src/C4FullScreen.cpp:499-527). C4Game::InitKeyboard registers that key
+    // on K_SPACE (src/C4Game.cpp:3428). Without the hint an eliminated player
+    // only sees their controls stop working.
+    let mut app = new_running_sandbox_app();
+    let owner = app.local_owner;
+    let expected = format_resource_string(
+        app.runtime_flash_resources()
+            .expect("process-start flash resources")
+            .observer_menu
+            .clone(),
+        &["<c ffff00><Space></c>"],
+    );
+    app.runtime_flash_message = None;
+
+    assert!(app.close_physical_viewports(owner, false, true));
+    app.check_fullscreen_physical_viewports(true);
+
+    assert!(
+        app.primary_physical_viewport_is_no_owner(),
+        "the fullscreen fallback owns an ownerless observer viewport"
+    );
+    assert_eq!(
+        app.runtime_flash_message
+            .as_ref()
+            .map(|message| message.text.clone()),
+        Some(expected)
+    );
+}
