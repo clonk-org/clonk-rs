@@ -125,6 +125,13 @@ pub(crate) fn reconcile_console_viewport_windows(
                     Ok(host) => {
                         let key = WindowId(*next_key);
                         *next_key += 1;
+                        tracing::debug!(
+                            identity,
+                            player,
+                            width = spec.width,
+                            height = spec.height,
+                            "opened a console viewport window"
+                        );
                         windows.insert(
                             key,
                             HostPurpose::Viewport {

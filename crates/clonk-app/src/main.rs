@@ -783,6 +783,9 @@ fn run() -> Result<()> {
     // The next viewport window's key. `SHELL_WINDOW` is 0, so console windows
     // start above it; the value is a registry key, not a viewport identity.
     let mut next_developer_window_key = 1u64;
+    // Set when the shell takes a graphics pass; consumed on the next event
+    // loop entry, before the shell record is borrowed.
+    let mut viewport_redraw_pending = false;
 
     let mut dock_tile_attached = false;
     event_loop.run(move |event, event_target, control_flow| {
@@ -809,9 +812,13 @@ fn run() -> Result<()> {
                 scale,
                 event_target,
             );
-            // Every viewport window redraws with the shell, the way
-            // `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
-            // viewport in one pass (`:167-169`).
+        }
+        // Every viewport window redraws with the shell and only with it, the
+        // way `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
+        // viewport inside one graphics pass (`:167-169`). Redrawing them per
+        // event-loop pass instead would ignore the frame schedule, the
+        // automatic frame skip and the repaint floor, and spin.
+        if std::mem::take(&mut viewport_redraw_pending) {
             for key in developer_windows.keys().collect::<Vec<_>>() {
                 if developer_windows
                     .host(key)
@@ -1054,6 +1061,7 @@ fn run() -> Result<()> {
                             app.frames_since_redraw = 0;
                         }
                         window.request_redraw();
+                        viewport_redraw_pending = true;
                     }
                 }
                 if app.mode != AppMode::Running {
