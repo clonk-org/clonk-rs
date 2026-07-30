@@ -1254,6 +1254,9 @@ impl SoundVolumeId {
 pub enum SoundSheetSound {
     ArrowHit,
     Command,
+    /// `Button::SetUp(true)` — the sample a button plays on the release that
+    /// actually activates it (`C4GuiButton.cpp:193-200`).
+    Click,
 }
 
 /// GUI feedback shared by non-Sound sheets. This alias keeps the existing
@@ -2383,11 +2386,35 @@ impl OptionsDlgState {
                 let OptionsFocus::Control(target) = self.focus else {
                     unreachable!()
                 };
-                self.pressed_control = Some(target);
-                Vec::new()
+                self.press_control(target)
             }
             _ => Vec::new(),
         }
+    }
+
+    /// `Button::SetDown` — latch `fDown` and play `ArrowHit`
+    /// (`C4GuiButton.cpp:183-191`).
+    fn press_control(&mut self, target: ControlSheetHit) -> Vec<OptionsDlgAction> {
+        if self.pressed_control == Some(target) {
+            return Vec::new();
+        }
+        self.pressed_control = Some(target);
+        vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+    }
+
+    /// `Button::SetUp(fPress)` and then, for a real press, `OnPress`
+    /// (`C4GuiButton.cpp:121-128,193-200`). Releasing away from the button still
+    /// sounds, but with `ArrowHit`, and does not activate.
+    fn release_control(&mut self) -> Vec<OptionsDlgAction> {
+        let Some(target) = self.pressed_control.take() else {
+            return Vec::new();
+        };
+        if self.focus != OptionsFocus::Control(target) {
+            return vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)];
+        }
+        let mut actions = vec![OptionsDlgAction::ProgramGuiSound(GuiSound::Click)];
+        actions.extend(self.activate_control_hit(target));
+        actions
     }
 
     /// Dispatches the digit mnemonics assigned to the visible Keyboard or
@@ -2414,10 +2441,8 @@ impl OptionsDlgState {
                     return self.activate_program_button(target);
                 }
             }
-            if let Some(target) = self.pressed_control.take() {
-                if self.focus == OptionsFocus::Control(target) {
-                    return self.activate_control_hit(target);
-                }
+            if self.pressed_control.is_some() {
+                return self.release_control();
             }
         }
         if matches!(key, KeyCode::Enter | KeyCode::Space)
@@ -2613,8 +2638,7 @@ impl OptionsDlgState {
             OptionsFocus::Control(target)
                 if target != ControlSheetHit::GamepadGui && self.focus_is_visible(self.focus) =>
             {
-                self.pressed_control = Some(target);
-                Vec::new()
+                self.press_control(target)
             }
             OptionsFocus::None
             | OptionsFocus::Tabular
@@ -2630,10 +2654,8 @@ impl OptionsDlgState {
                 return self.activate_program_button(target);
             }
         }
-        if let Some(target) = self.pressed_control.take() {
-            if self.focus == OptionsFocus::Control(target) {
-                return self.activate_control_hit(target);
-            }
+        if self.pressed_control.is_some() {
+            return self.release_control();
         }
         if self.focus == OptionsFocus::Back && self.pressed_back {
             self.pressed_back = false;
@@ -7146,7 +7168,7 @@ mod tests {
         let mut state = gamepad_control_state();
 
         state.focus = OptionsFocus::Control(ControlSheetHit::Key(5));
-        assert!(state.handle_key_down(KeyCode::Space).is_empty());
+        state.handle_key_down(KeyCode::Space);
         assert!(
             state.control_sheet_pressed(ControlSheetHit::Key(5)),
             "fDown latches so the cap draws its pressed phase",
@@ -7154,35 +7176,93 @@ mod tests {
         let released = state.handle_key_up(KeyCode::Space);
         assert!(matches!(
             released.as_slice(),
-            [OptionsDlgAction::BeginControlCapture(target)]
+            [_, OptionsDlgAction::BeginControlCapture(target)]
                 if target.control == 5 && target.device == ControlDevice::Gamepad
         ));
         assert!(!state.control_sheet_pressed(ControlSheetHit::Key(5)));
 
         // Enter is bound alongside Space, and the selector emits its own action.
         state.focus = OptionsFocus::Control(ControlSheetHit::Set(2));
-        assert!(state.handle_key_down(KeyCode::Enter).is_empty());
+        state.handle_key_down(KeyCode::Enter);
         assert_eq!(
-            state.handle_key_up(KeyCode::Enter),
-            vec![OptionsDlgAction::GamepadDeviceSelected(2)]
+            state.handle_key_up(KeyCode::Enter).last(),
+            Some(&OptionsDlgAction::GamepadDeviceSelected(2))
         );
         assert_eq!(state.controls().selected_set(ControlDevice::Gamepad), 2);
 
         state.focus = OptionsFocus::Control(ControlSheetHit::Reset);
-        assert!(state.handle_key_down(KeyCode::Space).is_empty());
+        state.handle_key_down(KeyCode::Space);
         assert_eq!(
-            state.handle_key_up(KeyCode::Space),
-            vec![OptionsDlgAction::ResetControlBindings(
+            state.handle_key_up(KeyCode::Space).last(),
+            Some(&OptionsDlgAction::ResetControlBindings(
                 ControlDevice::Gamepad
-            )]
+            ))
         );
 
         // Moving the focus away between press and release cancels, exactly as
         // the Program sheet's buttons already do.
         state.focus = OptionsFocus::Control(ControlSheetHit::Key(1));
-        assert!(state.handle_key_down(KeyCode::Space).is_empty());
+        state.handle_key_down(KeyCode::Space);
         state.focus = OptionsFocus::Control(ControlSheetHit::Key(2));
-        assert!(state.handle_key_up(KeyCode::Space).is_empty());
+        assert!(
+            !state
+                .handle_key_up(KeyCode::Space)
+                .iter()
+                .any(|action| !matches!(action, OptionsDlgAction::ProgramGuiSound(_))),
+            "releasing off the button sounds but does not activate",
+        );
+    }
+
+    // `Button::SetDown` plays `ArrowHit` and `SetUp(true)` plays `Click`
+    // (C4GuiButton.cpp:183-200), for every selector, key cap and the reset
+    // button alike; none of the `OnPress` callbacks adds a sound of its own.
+    #[test]
+    fn control_sheet_buttons_play_arrowhit_on_press_and_click_on_release() {
+        let mut state = gamepad_control_state();
+
+        state.focus = OptionsFocus::Control(ControlSheetHit::Key(3));
+        assert_eq!(
+            state.handle_key_down(KeyCode::Space),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
+        let released = state.handle_key_up(KeyCode::Space);
+        assert_eq!(
+            released[0],
+            OptionsDlgAction::ProgramGuiSound(GuiSound::Click),
+            "the release sound precedes OnPress",
+        );
+        assert!(matches!(
+            released[1],
+            OptionsDlgAction::BeginControlCapture(target) if target.control == 3
+        ));
+
+        // The reset button follows the same sequence; `OnResetKeysBtn` itself is
+        // silent, so the port's invented `Command` sample has no C++ source.
+        state.focus = OptionsFocus::Control(ControlSheetHit::Reset);
+        assert_eq!(
+            state.handle_key_down(KeyCode::Enter),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
+        assert_eq!(
+            state.handle_key_up(KeyCode::Enter),
+            vec![
+                OptionsDlgAction::ProgramGuiSound(GuiSound::Click),
+                OptionsDlgAction::ResetControlBindings(ControlDevice::Gamepad),
+            ]
+        );
+
+        // Dragging off a held button releases it with `ArrowHit`, not `Click`,
+        // and does not activate (`MouseLeave` -> `SetUp(false)`, :169-176).
+        state.focus = OptionsFocus::Control(ControlSheetHit::Set(1));
+        assert_eq!(
+            state.handle_key_down(KeyCode::Space),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
+        state.focus = OptionsFocus::Control(ControlSheetHit::Set(2));
+        assert_eq!(
+            state.handle_key_up(KeyCode::Space),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
     }
 
     // `CheckBox` binds K_SPACE only, and as the *down* callback
@@ -7212,11 +7292,11 @@ mod tests {
         let mut state = gamepad_control_state();
 
         state.focus = OptionsFocus::Control(ControlSheetHit::Key(11));
-        assert!(state.handle_gamepad_low_down().is_empty());
+        state.handle_gamepad_low_down();
         assert!(state.control_sheet_pressed(ControlSheetHit::Key(11)));
         assert!(matches!(
             state.handle_gamepad_low_up().as_slice(),
-            [OptionsDlgAction::BeginControlCapture(target)] if target.control == 11
+            [_, OptionsDlgAction::BeginControlCapture(target)] if target.control == 11
         ));
 
         state.focus = OptionsFocus::Control(ControlSheetHit::GamepadGui);

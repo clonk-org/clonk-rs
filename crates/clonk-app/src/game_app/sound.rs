@@ -436,6 +436,7 @@ impl GameApp {
         self.play_ui_sound(match sound {
             clonk_frontend::startup_options_dlg::SoundSheetSound::ArrowHit => "ArrowHit",
             clonk_frontend::startup_options_dlg::SoundSheetSound::Command => "Command",
+            clonk_frontend::startup_options_dlg::SoundSheetSound::Click => "Click",
         });
     }
 
@@ -446,6 +447,7 @@ impl GameApp {
         self.play_global_sound_effect(match sound {
             clonk_frontend::startup_options_dlg::SoundSheetSound::ArrowHit => "ArrowHit",
             clonk_frontend::startup_options_dlg::SoundSheetSound::Command => "Command",
+            clonk_frontend::startup_options_dlg::SoundSheetSound::Click => "Click",
         });
     }
 
