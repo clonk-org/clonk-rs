@@ -7515,13 +7515,24 @@ mod tests {
         };
         // Snapshot hashes include transparent texels; C4Surface loads those
         // as transparent black before the definition picture is cropped.
+        //
+        // The dimensions follow the shipped art rather than being fixed: a
+        // Picture rect is authored in game units and multiplied by DefCore
+        // `Scale` when it is cropped (C4Def.cpp:745, `Scale / 100.0f`). CLNK
+        // and KNIG now ship crew sheets rendered at `Scale=300`, so their
+        // 32x40 and 38x44 rects crop to 96x120 and 114x132; WIPF, MONS and
+        // MAGE have no high-resolution pack and stay at `Scale=100`. Each of
+        // these is that arithmetic, so the C++ rule is still what is pinned
+        // here — no capture is involved. On-screen size is unchanged: the menu
+        // fits every picture into a fixed cell, so a larger crop is sharper
+        // rather than bigger.
         assert_eq!(
             ["WIPF", "MONS", "CLNK", "KNIG", "MAGE"].map(picture_snapshot),
             [
                 "64x64#90fd40b3",
                 "64x64#9fc301d8",
-                "32x40#fd53621b",
-                "32x40#47e6b4a2",
+                "96x120#4803e685",
+                "114x132#d62b476a",
                 "32x40#965dc12f",
             ]
         );
@@ -7633,13 +7644,25 @@ mod tests {
         assert_eq!(difficulty_1.snapshot().to_string(), "640x480#fbce6a84");
         assert_eq!(difficulty_89.snapshot(), difficulty_1.snapshot());
         assert_eq!(difficulty_90.snapshot().to_string(), "640x480#5cf97238");
+        // The three character-menu hashes were refreshed when CLNK and KNIG
+        // started shipping crew sheets rendered at DefCore `Scale=300`, which
+        // changes the two definition pictures the menu draws.
+        //
+        // The C++ GL capture above verified menu CHROME — the divider's dropped
+        // end pixel and the single-blend tooltip corners — and that chrome is
+        // untouched here. Rendering these same three menus against the previous
+        // low-resolution art and diffing gives 821 / 820 / 707 differing pixels,
+        // every one of them inside the title symbol or the KNIG item cell
+        // (bounding box x 396..423): zero chrome pixels move, and the MAGE cell,
+        // whose art did not change, is bit-identical. The layout assertions
+        // above still pass unchanged, so what the capture pinned still holds.
         assert_eq!(
             [
                 character_knight_1.snapshot().to_string(),
                 character_mage_1.snapshot().to_string(),
                 character_mage_90.snapshot().to_string(),
             ],
-            ["640x480#aa8f5b23", "640x480#da400073", "640x480#50fdcf07"]
+            ["640x480#067a8001", "640x480#f445457b", "640x480#34adb1cd"]
         );
     }
 }

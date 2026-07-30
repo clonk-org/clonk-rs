@@ -1835,9 +1835,26 @@ impl GameApp {
         self.close_options_menu_with_persist_result(save_result)
     }
 
+    /// `Config.Save()` writes the whole live config, so a `GainMissionAccess`
+    /// password the engine added straight to the shared list
+    /// (C4Script.cpp:2466-2471) has to join the pending writes at every save
+    /// surface (C4Application.cpp:367; C4StartupOptionsDlg.cpp:1189).
+    ///
+    /// An empty live list is skipped: C++ suppresses `Save()` entirely when the
+    /// config never loaded (C4Application.cpp:367), which is the same state a
+    /// failed read leaves here, and an explicit Alt+M removal has already queued
+    /// its own value.
+    pub(crate) fn queue_live_mission_access(&mut self) {
+        let access = self.mission_access.snapshot();
+        if !access.is_empty() {
+            self.deferred_config.set("General", "MissionAccess", access);
+        }
+    }
+
     /// Writes every pending runtime config change now. Used by the explicit
     /// save surfaces; the clean-shutdown path flushes the same store.
     pub(crate) fn flush_deferred_config(&mut self) {
+        self.queue_live_mission_access();
         let Some(paths) = self.app_paths.clone() else {
             return;
         };

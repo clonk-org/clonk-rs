@@ -2144,7 +2144,12 @@ func Probe(object other)
     }
 
     #[test]
-    fn set_position_clamps_coordinates_when_requested() {
+    fn set_position_bounds_check_is_inert_without_border_bound() {
+        // fCheckBounds runs C4Object::BoundsCheck (C4Script.cpp:470-476) =
+        // SideBounds + VerticalBounds (C4Movement.cpp:185-229). Every arm is
+        // gated on a BorderBound bit (Def->BorderBound, or the layer's
+        // C4D_Border_Layer), so an object with none is never clamped — and the
+        // landscape's solid surface never enters the calculation at all.
         let landscape = Landscape::flat(4, 6);
         let world = world_with(
             Vec::<HostWorldObject>::new(),
@@ -2169,7 +2174,7 @@ func Probe(object other)
         let value = result.expect("SetPosition returns bool");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("position update recorded");
-        assert_eq!(update.position, Some(Vector2::new(3, 6)));
+        assert_eq!(update.position, Some(Vector2::new(10, 20)));
     }
 
     #[test]

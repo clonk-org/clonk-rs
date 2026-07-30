@@ -4171,6 +4171,11 @@ impl GameApp {
                     let connection = self.startup_network_connection.take();
                     drop(connection);
                     self.pending_network_join = None;
+                    // Cancelling a reconnect to a restarting host abandons the
+                    // whole rejoin. Without this the retry loop would reopen
+                    // this very dialog on the next frame and Cancel would do
+                    // nothing until the window expired.
+                    self.pending_host_rejoin = None;
                     self.status_text.clear();
                     self.resume_startup_music_after_failed_open_game();
                 }
@@ -4715,6 +4720,10 @@ impl GameApp {
         self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         self.restart_restore_roster_items.clear();
+        // Leaving the round abandons any host restart this client was going to
+        // follow. `begin_pending_host_rejoin` re-arms it across this teardown
+        // precisely because the default is to drop it.
+        self.pending_host_rejoin = None;
         // C4Game::Clear starts the fade before tearing down game state.
         self.fade_out_game_music();
         if let Some(audio) = self.audio.as_mut() {

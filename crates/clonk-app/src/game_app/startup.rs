@@ -2274,9 +2274,60 @@ impl GameApp {
         self.present_startup_restart_diagnostics()
     }
 
+    /// Issues the next reconnect to a restarting host, or ends the attempt when
+    /// the window it announced has closed.
+    pub(crate) fn poll_pending_host_rejoin(&mut self) -> Result<(), EngineError> {
+        // The notice is armed while the host is still connected, and a host
+        // that announces a restart it then abandons must cost this client
+        // nothing. Only the session actually going away starts the clock.
+        if self.network.is_some() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let Some(rejoin) = self.pending_host_rejoin.as_ref() else {
+            return Ok(());
+        };
+        if now >= rejoin.deadline {
+            let targets = startup_network_connect_targets(&rejoin.settings);
+            self.pending_host_rejoin = None;
+            return self.finish_startup_network_failure(
+                StartupNetworkPurpose::Join,
+                format!("The restarting host at {targets} did not come back in time"),
+            );
+        }
+        if rejoin.next_attempt_at.is_some_and(|next| now < next) {
+            return Ok(());
+        }
+        let settings = rejoin.settings.clone();
+        if let Some(rejoin) = self.pending_host_rejoin.as_mut() {
+            rejoin.next_attempt_at = Some(now + HOST_REJOIN_RETRY_INTERVAL);
+        }
+        self.pending_network_join = Some(settings);
+        self.launch_pending_network_join()
+    }
+
+    /// Absorbs a reconnect failure that a still-open rejoin window should
+    /// retry rather than report. Answers whether it did.
+    ///
+    /// A window that closed while this attempt was in flight is dropped here
+    /// rather than deferred, so the failure below is reported once instead of
+    /// being followed next frame by a second teardown from the expiry branch.
+    fn defer_pending_host_rejoin(&mut self) -> bool {
+        let now = Instant::now();
+        let Some(rejoin) = self.pending_host_rejoin.as_mut() else {
+            return false;
+        };
+        if now >= rejoin.deadline {
+            self.pending_host_rejoin = None;
+            return false;
+        }
+        rejoin.next_attempt_at = Some(now + HOST_REJOIN_RETRY_INTERVAL);
+        true
+    }
+
     pub(crate) fn poll_startup_network_connection(&mut self) -> Result<(), EngineError> {
         let Some(connection) = self.startup_network_connection.as_ref() else {
-            return Ok(());
+            return self.poll_pending_host_rejoin();
         };
         let selected_scenario = connection.selected_scenario.clone();
         let purpose = connection.purpose;
@@ -2304,6 +2355,13 @@ impl GameApp {
         self.mark_menu_dirty();
         let Some(result) = result else {
             let message = "network worker disconnected before reporting readiness";
+            if self.defer_pending_host_rejoin() {
+                tracing::info!(
+                    error = message,
+                    "reconnect to the restarting host ended; retrying"
+                );
+                return Ok(());
+            }
             tracing::error!(?purpose, error = message, "startup network session failed");
             self.startup_restart_diagnostics.add_log_entry(message);
             self.startup_restart_diagnostics.mark_quit_with_error();
@@ -2311,6 +2369,10 @@ impl GameApp {
         };
         match result {
             Ok((mut mode, mut manager)) => {
+                // Whatever this session turns out to be, the reconnect that a
+                // restart notice asked for is over. An armed window left
+                // running would later expire under a live lobby.
+                self.pending_host_rejoin = None;
                 if let Some(response) = manager.take_league_start_response() {
                     if let NetworkMode::Host(HostSettings {
                         prepared: Some(prepared),
@@ -2692,6 +2754,13 @@ impl GameApp {
                 }
             }
             Err(error) => {
+                // A host that is still re-binding refuses connections; that is
+                // the expected first answer to a restart notice, not a failure
+                // to show the player.
+                if self.defer_pending_host_rejoin() {
+                    tracing::info!(%error, "reconnect to the restarting host was refused; retrying");
+                    return Ok(());
+                }
                 return self.finish_startup_network_failure(
                     purpose,
                     format!("Unable to start network session: {error}"),

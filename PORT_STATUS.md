@@ -745,6 +745,17 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `FnGainMissionAccess` (`C4Script.cpp:2466-2471`) and the cheat-code
   add/remove (`C4StartupScenSelDlg.cpp:1838-1856`), change the string in memory
   and return; `C4StartupScenSelDlg.cpp` contains no `Config.Save()` at all.
+  Only the cheat-code site could *queue* that write, though — `GainMissionAccess`
+  grows the list inside the engine, through the store both share — so both flush
+  points now snapshot the live `General.MissionAccess`, exactly as `Config.Save()`
+  writes the whole in-memory config. An empty list is skipped: C++ suppresses
+  `Save()` when the config never loaded (`C4Application.cpp:367`), which is the
+  state a failed read leaves here. The same list is what `CanOpen` tests
+  (`C4StartupScenSelDlg.cpp:743`); the network branch used to re-read the config
+  *file* instead, so every password earned this session stayed locked in the
+  network selector while the local selector already honoured it. Pinned by
+  `script_earned_mission_access_reaches_the_saved_config` and
+  `network_mission_access_gate_honours_memory_only_grant`.
   The four `[Sound]` toggles defer too: `C4SoundSystem::ToggleOnOff` is
   `enabled = !enabled` with no save (`C4SoundSystem.cpp:138-142`), and neither
   `C4SoundSystem.cpp` nor `C4MainMenu.cpp` contains a `Config.Save()`.
@@ -1657,6 +1668,33 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   bit-exact over all 37 161 lines. This is independent of the FindObject
   ordering fix landed the same day — every `Find`-driven event (all `Bite`s)
   matches on both seeds.
+- Open gap (found 2026-07-29, not closed): script `SetPosition` stops after
+  `ForcePosition` and never runs C++'s trailing `pObj->UpdateInLiquid()`
+  (`C4Script.cpp:479`), so a force-positioned object keeps a stale `InLiquid`
+  flag and skips the entry `Splash` that `C4Object::UpdateInLiquid`
+  (`C4Object.cpp:6132-6149`) makes for an `OCF_HitSpeed2` object of `Mass > 3`.
+  `crates/clonk-engine/src/compat/` has no `update_in_liquid` at all — only
+  read-only `in_liquid` readers — so closing this means porting
+  `IsInLiquidCheck` (`C4Object.cpp:5669-5672`, which samples
+  `y + Float * Con / FullCon - 1`, not the object centre) along with the splash,
+  rather than flipping a flag. Found while replacing the same function's
+  invented landscape clamp with the real `BoundsCheck`.
+- Open gap (found 2026-07-29, not closed): `Landscape::resolve_collision`
+  (`crates/clonk-engine/src/landscape.rs:6312`) is an invented column-surface
+  snap with no C++ counterpart — it lifts any object whose `y` is below
+  `surface_height(x)` onto that surface and zeroes downward velocity, where C++
+  resolves contact per vertex and per pixel in `C4Object::ContactCheck` /
+  `C4Object::DoMovement` (`C4Movement.cpp:165-181`, `:231`) and `C4Landscape`
+  has no per-column surface array at all. It self-disables once a pixel grid
+  exists (`landscape.rs:6317-6324`) and every real scenario installs one
+  (`scenario/map.rs:802,864`), so shipped content is unaffected; but on a
+  pixel-less fixture landscape it runs for every object every frame
+  (`engine/procedures.rs:3859`, reached from `engine/tick.rs:930,1420`) and also
+  from `Engine::apply_object_update` (`engine/tick.rs:2178`) and
+  `Object::execute_command_queue` (`object.rs:3802`). Consequence for test
+  design: a tick-driven fixture test can still show the surface teleport that
+  script `SetPosition` no longer causes, so the column model must be retired
+  (or the fixtures given pixel grids) before such a test means anything.
 - Intentional divergence from C++ (2026-07-24), not a gap to close: the port
   ships **no trademark notice**. C++ draws `FANPROJECTTEXT " " TRADEMARKTEXT`
   (`C4Version.h:21-22`) in the main-menu and About footers
@@ -2558,6 +2596,48 @@ an ordered-map model gap.
   (quiet inside the window, strictly higher holes continue immediately, the
   first ask's deadline survives continuations) remains C++'s and is still
   asserted.
+
+- **Restarting a network round returns every client to the lobby**
+  (`clonk-network/src/host_restart.rs` PID `0x71`,
+  `GameApp::announce_network_round_restart`,
+  `GameApp::begin_pending_host_rejoin`,
+  `GameApp::poll_pending_host_rejoin`; C++ `C4Application::QuitGame`
+  src/C4Application.cpp:373-405, `C4Network2::Clear` src/C4Network2.cpp:748-796,
+  `C4Network2::OnClientDisconnect` src/C4Network2.cpp:1802-1834). Approved
+  2026-07-29. A restart re-hosts from scratch — C++ backs up only
+  `NetworkActive` and the password, runs `Game.Clear()` (which closes `NetIO`
+  and drops every connection), then re-enters `Game::Init` with `fLobby` set.
+  Clients therefore observe nothing but a closed socket, which
+  `OnClientDisconnect` reads as a dead host: it records `NR_NetError` and calls
+  `Clear()`, so each client is left alone in the abandoned round with
+  `ChangeToLocal` while the host's new lobby comes up empty. Nothing in C++ can
+  distinguish this from a crash — there is no restart packet, and `C4Game::Clear`
+  zeroes `DirectJoinAddress` (src/C4Game.cpp:648-651), so a native client can
+  only rejoin by hand. The port states the intent on the wire instead: the host
+  broadcasts `PID_PortHostRestarting` before tearing down, and a client that
+  receives it leaves the round and reconnects to the address it already joined,
+  retrying once a second across the host's re-bind window (30 s by default,
+  carried in the packet and clamped locally to 120 s) before falling back to the
+  ordinary join failure. The reconnect repeats the *same join* — the retained
+  `ClientSettings`, so the password, netpuncher brokerage and full route list
+  survive — rather than rebuilding one from config. This is a
+  lobby/session-lifecycle change only: the notice never enters the control
+  queue, so control ticks, `RandomCount` and simulation state are untouched.
+  **Note on the port-only ID range:** the rationale in
+  `crates/clonk-network/src/capabilities.rs` — that C++ silently ignores an
+  unknown packet ID — is wrong. `C4IDPacket::CompileFunc` `excCorrupt`s on an ID
+  with no `FnUnpack` and `C4Network2IO::HandlePacket` catches that and closes
+  the connection in a release build (src/C4Network2IO.cpp:820-834,
+  src/C4Packet2.cpp:210-217). That is harmless for *this* packet, because the
+  host sends it immediately before closing the session anyway, so a C++ client
+  loses the connection it was about to lose and keeps native behavior. It is not
+  a general licence, and `capabilities.rs`'s own claim should be revisited.
+  Because a relayed `PID_FwdReq` reaches its target on the host's route and is
+  indistinguishable from a host-authored packet, the host refuses to relay the
+  whole `0x7x` port-only range
+  (`a_client_cannot_forge_a_restart_notice_through_the_forward_relay`).
+  Without the notice the client path is byte-identical to today's, pinned by
+  `client_host_socket_loss_continues_the_running_round_locally`.
 
 ## Preserve
 

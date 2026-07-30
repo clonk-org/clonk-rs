@@ -642,6 +642,10 @@ where
             // Announced after the handshake completes; nothing to do with one
             // that arrives early beyond not treating it as a protocol error.
             ControlMessage::PortCapabilities(_) => continue,
+            // A host restarting mid-handshake is about to close this
+            // connection anyway. The join fails on its own; the notice is only
+            // actionable once there is a round to leave.
+            ControlMessage::HostRestarting { .. } => continue,
             ControlMessage::JoinData(join_data) => {
                 let remote_connection_id = connection.remote_connection_id().ok_or(
                     ConnectionHandshakeError::ReducerInvariant(
@@ -832,6 +836,7 @@ fn record_admitted_pong(
 fn packet_type(message: &ControlMessage) -> u8 {
     match message {
         ControlMessage::PortCapabilities(_) => crate::PID_PORT_CAPABILITIES,
+        ControlMessage::HostRestarting { .. } => crate::PID_PORT_HOST_RESTARTING,
         ControlMessage::Ping(_) => 0x00,
         ControlMessage::Pong(_) => 0x01,
         ControlMessage::ConnectionRequest(_) => 0x02,
@@ -1224,6 +1229,7 @@ fn handle_peer_reply(
 fn packet_name(message: &ControlMessage) -> &'static str {
     match message {
         ControlMessage::PortCapabilities(_) => "PID_PortCapabilities",
+        ControlMessage::HostRestarting { .. } => "PID_PortHostRestarting",
         ControlMessage::Ping(_) => "PID_Ping",
         ControlMessage::Pong(_) => "PID_Pong",
         ControlMessage::ConnectionRequest(_) => "PID_Conn",

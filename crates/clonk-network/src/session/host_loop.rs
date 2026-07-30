@@ -654,6 +654,10 @@ pub(crate) async fn run_host(
                     HostCommand::BroadcastLeagueRoundResults(packet) => {
                         broadcast_league_round_results(packet, &mut state).await;
                     }
+                    HostCommand::BroadcastHostRestarting { rejoin_seconds, completion } => {
+                        broadcast_host_restarting(rejoin_seconds, &mut state).await;
+                        let _ = completion.send(());
+                    }
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
                     HostCommand::PublishJoinSnapshot(snapshot) => {

@@ -509,6 +509,169 @@
     }
 
     #[test]
+    fn script_set_position_bounds_check_never_moves_vertically_like_cpp() {
+        // FnSetPosition's fCheckBounds runs C4Object::BoundsCheck
+        // (C4Script.cpp:470-476 -> C4Object.h:392-395), which is only
+        // SideBounds + VerticalBounds (C4Movement.cpp:185-229): pLayer and
+        // map-border clamping gated on Def->BorderBound. Landscape solidity
+        // never enters it, so a Clonk (BorderBound=1, sides only) keeps its y
+        // when EkeReloaded's bullet shoves it a pixel sideways:
+        //   SetPosition(GetX(victim) + direction, GetY(victim), victim, 1)
+        // (content/EkeReloaded.c4d/Ammo.c4d/Cartridges.c4d/Bullet.c4d
+        // func HitCreature).
+        let script = r#"#strict 3
+func Shove(victim) {
+    var before = GetY(victim);
+    SetPosition(GetX(victim) + 1, GetY(victim), victim, 1);
+    return GetY(victim) - before;
+}
+"#;
+        let mut definition =
+            Definition::from_script("BPOS", "Bounds probe", script).expect("probe compiles");
+        // The shipped Clonk shape and vertices
+        // (content/Objects.c4d/Crew.c4d/Clonk.c4d/DefCore.txt: Width=16
+        // Height=20 Offset=-8,-10 VertexX/Y/CNAT).
+        definition.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        definition.set_shape_vertices(vec![
+            ObjectVertex::new(0, 2),
+            ObjectVertex::new(0, -7).with_cnat(CNAT_TOP),
+            ObjectVertex::new(0, 9).with_cnat(CNAT_BOTTOM),
+            ObjectVertex::new(-2, -3).with_cnat(CNAT_LEFT),
+            ObjectVertex::new(2, -3).with_cnat(CNAT_RIGHT),
+            ObjectVertex::new(-4, 3).with_cnat(CNAT_LEFT),
+            ObjectVertex::new(4, 3).with_cnat(CNAT_RIGHT),
+        ]);
+        definition.set_border_bound(C4D_BORDER_SIDES);
+
+        let mut engine = Engine::with_seed(58);
+        // Ground at y=30, with a full-height wall in column 17 — one pixel to
+        // the right of where the victim stands, so a surface-height clamp
+        // would yank it up to the top of the map.
+        let mut surface = vec![30; 40];
+        surface[17] = 0;
+        engine.set_landscape(
+            Landscape::new_with_material(40, surface, None).expect("landscape constructs"),
+        );
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let spawn = |engine: &mut Engine, at: Vector2| -> ObjectId {
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new("BPOS")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(at)
+                        .with_construction(FULL_CON),
+                )
+                .expect("object spawns");
+            // Place exactly, so the spawn's own bottom-edge convention stays
+            // out of the assertions below.
+            engine
+                .apply_object_update(id, ObjectUpdate::new().with_position(at))
+                .expect("placement applies");
+            id
+        };
+        let victim = spawn(&mut engine, Vector2::new(16, 20));
+        let shooter = spawn(&mut engine, Vector2::new(30, 20));
+
+        let idx = engine.find_object_index(shooter).expect("shooter exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Shove", vec![Value::Object(victim.as_u64())])
+                .expect("the shove runs"),
+            Value::Int(0),
+            "a sides-only BorderBound has no vertical term in BoundsCheck"
+        );
+        let object = engine.object_snapshot(victim).expect("victim survives");
+        assert_eq!(object.position, Vector2::new(17, 20));
+    }
+
+    #[test]
+    fn script_set_position_bounds_check_clamps_to_the_map_border_like_cpp() {
+        // SideBounds' landscape arm is
+        // TargetBounds(x, 0 - Shape.x, GBackWdt + Shape.x, CNAT_Left,
+        // CNAT_Right) (C4Movement.cpp:202-204), and TargetBounds zeroes xdir
+        // and runs Contact() at each limit it hits (C4Movement.cpp:128-163).
+        // Shape.x is negative, so a 16-wide Clonk stops with its centre eight
+        // pixels inside either edge — not at the vertex extents.
+        let script = r#"#strict 3
+local left_calls, right_calls;
+func Yank(victim, x) {
+    SetPosition(x, GetY(victim), victim, 1);
+    return GetX(victim);
+}
+protected func ContactLeft() { left_calls = 1; return 0; }
+protected func ContactRight() { right_calls = 1; return 0; }
+"#;
+        let mut definition =
+            Definition::from_script("BPSX", "Border probe", script).expect("probe compiles");
+        definition.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        definition.set_border_bound(C4D_BORDER_SIDES);
+        definition.set_contact_function_calls(true);
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(59);
+        engine.set_landscape(Landscape::flat(40, 60));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("BPSX")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 20))
+                    .with_construction(FULL_CON),
+            )
+            .expect("victim spawns");
+        let shooter = engine
+            .spawn_object(
+                SpawnConfig::new("BPSX")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 20))
+                    .with_construction(FULL_CON),
+            )
+            .expect("shooter spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].set_fixed_velocity(FixedVec2::new(itofix(3), itofix(2)));
+
+        let shooter_idx = engine.find_object_index(shooter).expect("shooter exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    shooter_idx,
+                    "Yank",
+                    vec![Value::Object(victim.as_u64()), Value::Int(-50)],
+                )
+                .expect("the yank runs"),
+            Value::Int(8),
+            "low limit is 0 - Shape.x"
+        );
+        let victim_idx = engine.find_object_index(victim).expect("victim survives");
+        // Only the contacted axis stops (C4Movement.cpp:135-142).
+        assert_eq!(engine.objects[victim_idx].fixed_velocity.x, C4Fixed::ZERO);
+        assert_eq!(engine.objects[victim_idx].fixed_velocity.y, itofix(2));
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    shooter_idx,
+                    "Yank",
+                    vec![Value::Object(victim.as_u64()), Value::Int(999)],
+                )
+                .expect("the yank runs"),
+            Value::Int(32),
+            "high limit is GBackWdt + Shape.x"
+        );
+
+        let object = engine.object_snapshot(victim).expect("victim survives");
+        assert_eq!(object.local_vars.get("left_calls"), Some(&Value::Int(1)));
+        assert_eq!(object.local_vars.get("right_calls"), Some(&Value::Int(1)));
+    }
+
+    #[test]
     fn layer_border_bound_clamps_horizontal_target_like_cpp() {
         use std::sync::{Arc, Mutex};
 

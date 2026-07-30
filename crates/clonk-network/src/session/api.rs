@@ -789,6 +789,10 @@ pub enum HostCommand {
     SubmitLobbyCountdown(LobbyCountdownPacket),
     SubmitReadyCheck(ReadyCheckPacket),
     BroadcastLeagueRoundResults(crate::LeagueRoundResultsPacket),
+    BroadcastHostRestarting {
+        rejoin_seconds: u16,
+        completion: oneshot::Sender<()>,
+    },
     SubmitPacket {
         delivery: ControlDelivery,
         data: Vec<u8>,
@@ -936,6 +940,22 @@ impl HostHandle {
             .send(HostCommand::BroadcastLeagueRoundResults(packet))
             .await
             .map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Tells every connected client that this session is closing to restart
+    /// the round, not because the host died. Resolves only once the notice has
+    /// been queued on each route, so the caller may tear the host down
+    /// immediately afterwards. See [`crate::host_restart`].
+    pub async fn broadcast_host_restarting(&self, rejoin_seconds: u16) -> Result<(), HostError> {
+        let (completion, broadcast) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::BroadcastHostRestarting {
+                rejoin_seconds,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        broadcast.await.map_err(|_| HostError::HostLoopGone)
     }
 
     pub async fn change_status(&self, status: NetworkStatus) -> Result<(), HostError> {
@@ -1449,6 +1469,12 @@ pub enum ClientEvent {
     },
     LeagueRoundResults {
         packet: crate::LeagueRoundResultsPacket,
+    },
+    /// The host is tearing this session down to restart the round, and expects
+    /// to be reachable again at the same address within `rejoin_seconds`.
+    /// Arrives *before* the disconnect it predicts. See [`crate::host_restart`].
+    HostRestarting {
+        rejoin_seconds: u16,
     },
     UnhandledPacket {
         packet_type: u8,

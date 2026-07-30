@@ -1017,7 +1017,13 @@ fn run() -> Result<()> {
                         render_inactive_mask,
                         app.window_active,
                         app.console_mode,
-                    ) => {}
+                    ) =>
+            {
+                // The opportunity was still consumed. Leaving the repaint floor
+                // armed would make every later event-loop pass take one, which
+                // both spins and banks graphics-deadline debt.
+                render_floor.note_refused_presentation(Instant::now());
+            }
             Event::RedrawRequested(id)
                 if id == window.id()
                     && automatic_frame_skip.begin_graphics_pass(
@@ -1374,6 +1380,7 @@ fn run() -> Result<()> {
         ) && !app.configuration_reset_requested
         {
             if let Some(paths) = app_paths.as_ref() {
+                app.queue_live_mission_access();
                 for (section, entries) in app.deferred_config.take_by_section() {
                     let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
                         .iter()
@@ -1997,6 +2004,7 @@ impl GameApp {
             restart_restore_infos: RestartRestoreInfos::default(),
             abort_restart_pending: false,
             restart_restore_roster_items: HashSet::new(),
+            pending_host_rejoin: None,
             host_local_alternate_colors_by_resource,
             host_local_player_info_ids,
             deferred_network_savegame_recreation: Vec::new(),
