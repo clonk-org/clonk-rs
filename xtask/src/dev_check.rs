@@ -575,6 +575,13 @@ fn plan_test_path(plan: &mut CheckPlan, path: &str, reason: &str) -> bool {
     let Some((prefix, tail)) = path.split_once("/tests/") else {
         return false;
     };
+    // Only `<crate>/tests/` is a Cargo integration-test directory. A `tests/`
+    // under `src/` holds inline `#[cfg(test)]` modules, which have no target of
+    // their own — `crate_package` walks up to the crate anyway, so without this
+    // the caller never reaches the handler that knows where they actually run.
+    if prefix.ends_with("/src") || prefix.contains("/src/") {
+        return false;
+    }
     let Some(package) = crate_package(&format!("{prefix}/src/lib.rs")) else {
         return false;
     };
@@ -1914,6 +1921,32 @@ mod tests {
             "real_alchemy_revision::",
         ]));
         assert_eq!(plan.commands.len(), 2, "hygiene plus the focused module");
+    }
+
+    #[test]
+    fn an_inline_test_module_under_src_is_not_an_integration_target() {
+        // `crates/clonk-engine/src/scenario/tests/part_01.rs` is an inline
+        // `#[cfg(test)]` module, not a Cargo integration test: `clonk-engine`
+        // sets `[lib] test = false`, so it has no test targets at all and
+        // `--test part_01` cannot resolve. Splitting on `/tests/` used to claim
+        // the path anyway, planning a command that fails with "no test target
+        // named `part_01`" for every change to those files.
+        let plan = plan_for_paths(
+            &["crates/clonk-engine/src/scenario/tests/part_01.rs"],
+            false,
+        );
+        assert!(
+            !plan.has_args(&["nextest", "run", "-p", "clonk-engine", "--test", "part_01"]),
+            "clonk-engine has no test targets"
+        );
+        assert!(plan.has_args(&[
+            "nextest",
+            "run",
+            "-p",
+            "clonk-engine-unit-tests",
+            "--test",
+            "engine_inline",
+        ]));
     }
 
     #[test]
