@@ -9,6 +9,7 @@ mod action_attach;
 mod action_build;
 mod action_procedure;
 mod activate_entrance_native;
+mod bird_flight;
 mod body_declarations;
 mod component_natives;
 mod component_order;

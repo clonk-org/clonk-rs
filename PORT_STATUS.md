@@ -2732,6 +2732,56 @@ an ordered-map model gap.
   Without the notice the client path is byte-identical to today's, pinned by
   `client_host_socket_loss_continues_the_running_round_locally`.
 
+- **Birds fly a steered heading instead of re-rolling a pure-axis ComDir once
+  a second** (`planet/System.c4g/BirdFlight.c`, `#appendto BIRD`; departs from
+  `content/Objects.c4d/Animals.c4d/Bird.c4d/Script.c:25-91,240-284`).
+  Approved 2026-07-30. The shipped bird's whole steering policy is four
+  independent coin flips per `Activity`, and `Activity` runs on the default
+  35-frame `TimerCall` (`C4Def.cpp:298`) because `DefCore.txt` sets no
+  `Timer=`. Every decision snaps ComDir to a pure axis — `COMD_Up`/`COMD_Down`
+  to climb, `COMD_Left`/`COMD_Right` to turn — so the bird never uses any of
+  the four diagonal ComDirs. Against DFA_FLOAT's actuation model that is a
+  decision period shorter than the control horizon: `FLOAT_ACCEL` is
+  `FIXED100(10)` and the per-axis bound is `FIXED100(Float)` = 2.0 px/frame
+  (`C4Object.cpp:5268-5286`), so the bird needs 21 frames to reach terminal
+  and 41 to reverse an axis, and `COMD_Stop` has no deceleration case at all.
+  The result is a permanently mid-transient sawtooth. The append keeps a
+  heading and flies it with per-frame `SetXDir`/`SetYDir` writes at precision
+  100; every write stays inside the clamp, so the script is the sole velocity
+  authority and the engine adds nothing. On top of that it adds what the
+  shipped script has no form of at all: `PathFree` terrain feelers, separation
+  and weak alignment against nearby birds, a startle response to crew, and a
+  flap-glide speed cycle. It also fixes a shipped copy-paste defect —
+  `ContactRight` is a verbatim copy of `ContactLeft`, so its
+  `COMD_Right + Random(2)*2-1` yields `COMD_UpRight` or `COMD_DownRight`
+  (`COMD_Right` is 3) and steers back into the wall that raised the callback,
+  on the one-in-five `!Random(5)` branch.
+  **Blast radius.** `parity verify` and `engine-snapshots verify` cannot see
+  this — neither executes content C4Script (the golden is 31 engine-primitive
+  sections; `SNAPSHOT_SCENARIOS` is synthetic) — and the `tutorial01` replay
+  goldens run a scenario with no `[Animals]` section. What does change is the
+  RNG ledger *position* in the ~15 bird-bearing scenarios: the append
+  reproduces all ten shipped draw sites in the shipped order under the shipped
+  conditions and adds none of its own (per-bird variation comes from
+  `ObjectNumber()`, not the synchronized stream), but `Activity`'s branches
+  read world state the controller changes, so `RandomCount` drifts once the
+  flight path does. Scenario *init* is unaffected — the controller installs
+  itself lazily from `Survive`/`Activity` rather than from `Initialize`, so
+  worldgen and animal placement stay draw-for-draw identical. Cross-play
+  against a stock LegacyClonk client desyncs in any scenario containing a
+  bird; `planet/System.c4g` is the port's own engine data and never reaches
+  one. `ActMap.txt`, `DefCore.txt`, the possession block and the
+  bait/nest/reproduction logic are untouched, and every AI entry point keeps
+  its `GetEffect("PossessionSpell")` guard.
+  Pinned by `bird_flight_controller_installs_itself_on_every_placed_bird`,
+  `bird_heading_turns_continuously_instead_of_snapping_to_an_axis`,
+  `bird_velocity_stays_inside_the_float_physical_clamp`,
+  `bird_flight_controller_adds_no_draw_site_and_leaves_scenario_init_untouched`,
+  `bird_flight_is_reproducible_from_a_fixed_seed`,
+  `contact_right_reflects_away_from_the_wall_instead_of_back_into_it`,
+  `birds_startle_and_flee_when_a_clonk_comes_close` and
+  `birds_separate_from_neighbours_that_start_on_top_of_each_other`.
+
 ## Preserve
 
 Preserve fixed-point sync boundaries, shared RNG state/count, reverse
