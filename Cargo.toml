@@ -57,16 +57,20 @@ block = { path = "third_party/block" }
 lto = "thin"
 codegen-units = 1
 
-# Keep the ordinary edit/build loop lightly optimized. Live gameplay uses the
-# `play` profile below so runtime-heavy rendering and simulation do not force
-# level-3 codegen onto every development build.
+# Keep the ordinary edit/build loop compile-first. Debug assertions, line
+# tables, and incremental reuse retain useful development diagnostics while
+# cheap codegen keeps a fresh workspace build short. Live gameplay uses the
+# `play` profile below.
 [profile.dev]
-opt-level = 1
+opt-level = 0
+debug = "line-tables-only"
+incremental = true
+lto = "off"
 
 [profile.dev.package."*"]
-opt-level = 3
+opt-level = 1
 # We never step into registry deps in a debugger; line tables keep file:line
-# in backtraces while skipping the expensive full-DWARF codegen at opt 3.
+# in backtraces without paying for full DWARF or level-3 codegen.
 debug = "line-tables-only"
 
 # Full-frame output upscaling is hot per-pixel code on the present path;
@@ -79,6 +83,13 @@ opt-level = 3
 # optimizes the hot workspace crates without slowing the default compile loop.
 [profile.play]
 inherits = "dev"
+opt-level = 1
+debug = true
+incremental = true
+lto = false
+
+[profile.play.package."*"]
+opt-level = 3
 
 [profile.play.package.clonk-app]
 opt-level = 3

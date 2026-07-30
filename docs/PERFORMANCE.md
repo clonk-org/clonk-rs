@@ -83,6 +83,69 @@ samples. Always retain sample counts and raw samples; a single mean hides stalls
 There is no portable measured CI baseline yet. Do not turn timings from an
 arbitrary laptop or a shared hosted runner into a blocking threshold.
 
+### Compile-first development profile
+
+On 2026-07-30, the Apple M4 Max reference machine used fresh target directories
+to compare the ordinary full-workspace development build at `d4060ca0e` with a
+profile-only candidate. The content revision was `963e8cb4458b`, the compiler
+was Rust 1.97.1, and every build used the locked, offline dependency graph:
+
+```sh
+cold_target="$(mktemp -d "${TMPDIR:-/tmp}/clonk-cold-build.XXXXXX")"
+caffeinate -dimsu /usr/bin/time -lp env \
+  -u CARGO_INCREMENTAL \
+  -u CARGO_BUILD_JOBS \
+  -u RUSTC_WRAPPER \
+  -u RUSTC_WORKSPACE_WRAPPER \
+  CARGO_TARGET_DIR="$cold_target" \
+  cargo build --workspace --locked --offline --timings
+```
+
+After preserving the Cargo timing report and recording the target size, remove
+only the directory returned by `mktemp`:
+
+```sh
+find "$cold_target" -depth -delete
+```
+
+The baseline is a single directional sample. The candidate result is the
+median of five independent fresh-target builds; its raw wall samples were
+46.63s, 46.01s, 45.87s, 46.04s, and 45.90s. The corresponding raw user CPU
+samples were 321.80s, 321.59s, 324.68s, 327.44s, and 329.91s; system CPU was
+21.63s, 21.30s, 21.33s, 21.62s, and 21.68s. Target sizes were 3,779,220,
+3,778,812, 3,780,428, 3,760,324, and 3,777,788 KiB.
+
+| Development profile | Samples | Cold wall | Build process-tree user CPU | System CPU | Target size |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Level-1 workspace default, level-3 dependencies | 1 | 105.10s | 863.40s | 34.40s | 5.2 GiB |
+| Level-0 workspace default, level-1 dependencies | 5 | **46.01s median** | 324.68s median | 21.62s median | 3.60 GiB median |
+
+The candidate reduced the observed cold wall time by 59.09s (56.2%) and build
+process-tree user CPU by 538.72s (62.4%). It retains debug assertions, line
+tables, incremental reuse, and the same full-workspace default build targets
+and enabled features. The combined A/B reduced development-only optimization
+and debug data and disabled thin-local LTO; it does not isolate the
+contribution of each setting. No production source or feature gate changed.
+`clonk-scaling` remains at level 3 in both configurations.
+
+The `play` profile explicitly restores the preceding level-1 workspace,
+level-3 dependency, prior debug, incremental, and thin-local-LTO settings
+before applying its existing level-3 hot-crate overrides. The shipped
+`release` and the behavior-verification `test` profiles are unchanged.
+
+The candidate passed the full workspace nextest and `-D warnings` clippy gates,
+all three engine snapshots, and the pinned C++ parity golden. The full
+workspace also checked successfully under the restored `play` profile.
+
+These measurements are deliberately not promoted to a portable reference
+baseline. The desktop session was active, and the macOS 26.5.2 AC power reports
+disagreed at measurement time: `pmset -g live` returned `powermode 2`, while
+`system_profiler SPPowerDataType` reported Low Power Mode enabled. Neither was
+sampled continuously through every build, so the actual build-time power state
+is indeterminate. The five-sample 0.76s range and 46.01s median establish the
+local one-minute target with 13.99 seconds of margin; future cross-revision
+comparisons still require a stable, idle power fingerprint.
+
 On 2026-07-19, a same-checkout profile A/B used fresh target directories on
 the Apple M4 Max reference machine with Rust 1.87.0. Both builds used
 `cargo test --workspace --no-run --locked --offline --timings`; execution used
@@ -708,7 +771,7 @@ The focused and full-parity jobs use separate cache scopes so concurrent jobs
 cannot replace a complete parity cache with a smaller focused cache. The cache
 is keyed by the Rust dependency/build inputs maintained by the Rust cache
 action. `CARGO_INCREMENTAL=0` keeps CI artifacts reproducible and smaller;
-local development keeps Cargo's default incremental behavior.
+the local development, play, and test profiles retain incremental behavior.
 
 A cache hit is not proof that every crate was reusable. Report cache state with
 the observed compile duration, and investigate unexpected rebuilds before

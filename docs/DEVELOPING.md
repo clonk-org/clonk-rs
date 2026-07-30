@@ -76,14 +76,17 @@ The frontend's inline unit surface likewise lives in
 `clonk-frontend-unit-tests`; `clonk-frontend` retains the opt-in
 `dev_feedback_render` integration target and the optimized production library.
 
-Do not run `cargo clean` between feedback cycles. Cargo's local incremental
-state is valuable to the edit-test loop. CI disables incremental compilation
-because its build cache is reused between clean runners instead.
+Do not run `cargo clean` between feedback cycles. Cargo's local artifact and
+incremental caches are valuable to the edit-test loop. CI disables incremental
+compilation because its build cache is reused between clean runners instead.
 
-The default `dev` profile is tuned for the edit/build loop. Use the explicit
-`play` profile when launching the interactive client; it keeps debug assertions
-but applies level-3 optimization to the rendering, simulation, and script crates
-whose level-1 runtime is too slow for representative gameplay:
+The default `dev` profile is tuned for cold and ordinary edit/build latency. It
+keeps debug assertions, line tables, and incremental reuse, but most workspace
+crates are unoptimized and dependencies use only light optimization.
+`clonk-scaling` remains level 3 because it is small and hot per pixel. This is
+not a representative runtime build. Use the explicit `play` profile when
+launching the interactive client; it restores level-3 dependencies and applies
+level-3 optimization to the selected rendering, simulation, and script crates:
 
 ```sh
 cargo run --profile play -p clonk-app
