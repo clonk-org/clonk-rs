@@ -301,6 +301,8 @@ pub(crate) async fn run_host(
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
         accepted_routes: BTreeMap::new(),
+        #[cfg(test)]
+        accepted_route_waiters: Vec::new(),
         control_send_time_epoch: 0,
         closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
         pending_sync: Vec::new(),
@@ -652,6 +654,10 @@ pub(crate) async fn run_host(
                     HostCommand::BroadcastLeagueRoundResults(packet) => {
                         broadcast_league_round_results(packet, &mut state).await;
                     }
+                    HostCommand::BroadcastHostRestarting { rejoin_seconds, completion } => {
+                        broadcast_host_restarting(rejoin_seconds, &mut state).await;
+                        let _ = completion.send(());
+                    }
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
                     HostCommand::PublishJoinSnapshot(snapshot) => {
@@ -802,18 +808,24 @@ pub(crate) async fn run_host(
                     }
                     #[cfg(test)]
                     HostCommand::InspectAcceptedRoutes { completion } => {
-                        let routes = state
-                            .accepted_routes
-                            .iter()
-                            .map(|(connection_id, route)| {
-                                (
-                                    *connection_id,
-                                    route.client_id,
-                                    route.remote_connection_id,
-                                )
-                            })
-                            .collect();
-                        let _ = completion.send(routes);
+                        let _ = completion.send(accepted_route_snapshot(&state));
+                    }
+                    #[cfg(test)]
+                    HostCommand::WaitForAcceptedRoutesChange {
+                        initial_ids,
+                        expected_count,
+                        completion,
+                    } => {
+                        let routes = accepted_route_snapshot(&state);
+                        if accepted_routes_changed(&routes, &initial_ids, expected_count) {
+                            let _ = completion.send(routes);
+                        } else {
+                            state.accepted_route_waiters.push(AcceptedRouteWaiter {
+                                initial_ids,
+                                expected_count,
+                                completion,
+                            });
+                        }
                     }
                     #[cfg(test)]
                     HostCommand::InspectConnectedClients { completion } => {
@@ -1163,6 +1175,8 @@ pub(crate) async fn handle_client_accepted(
             state.invalidate_control_send_time();
             return;
         }
+        #[cfg(test)]
+        notify_accepted_route_waiters(state);
         let preferred = preferred_host_route(state, client_id, ConnectionTrafficClass::Message)
             .map(|route| (route.outbound.clone(), route.peer_addr));
         if let (Some(client), Some((outbound, peer_addr))) =
@@ -1226,6 +1240,8 @@ pub(crate) async fn handle_client_accepted(
         .await;
         return;
     }
+    #[cfg(test)]
+    notify_accepted_route_waiters(state);
     let now_seconds = state.resource_epoch.elapsed().as_secs();
     if let Some(backend) = state.resource_backend.as_mut() {
         let mut random = resource_safe_random;
@@ -1236,6 +1252,42 @@ pub(crate) async fn handle_client_accepted(
     } else {
         let actions = state.resource_catalog.on_peer_connected(core.client_id);
         dispatch_host_resource_actions(actions, state).await;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn accepted_route_snapshot(state: &HostState) -> Vec<(u32, ClientId, u32)> {
+    state
+        .accepted_routes
+        .iter()
+        .map(|(connection_id, route)| (*connection_id, route.client_id, route.remote_connection_id))
+        .collect()
+}
+
+#[cfg(test)]
+fn accepted_routes_changed(
+    routes: &[(u32, ClientId, u32)],
+    initial_ids: &BTreeSet<u32>,
+    expected_count: usize,
+) -> bool {
+    routes.len() == expected_count
+        && routes
+            .iter()
+            .map(|(connection_id, _, _)| *connection_id)
+            .collect::<BTreeSet<_>>()
+            != *initial_ids
+}
+
+#[cfg(test)]
+pub(crate) fn notify_accepted_route_waiters(state: &mut HostState) {
+    let routes = accepted_route_snapshot(state);
+    let waiters = std::mem::take(&mut state.accepted_route_waiters);
+    for waiter in waiters {
+        if accepted_routes_changed(&routes, &waiter.initial_ids, waiter.expected_count) {
+            let _ = waiter.completion.send(routes.clone());
+        } else {
+            state.accepted_route_waiters.push(waiter);
+        }
     }
 }
 

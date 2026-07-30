@@ -4961,6 +4961,9 @@ fn runtime_help_default_key_name(name: &str, index: usize) -> &'static str {
         ("MsgBoardScrollDown", 0) => "Shift+Down",
         ("ToggleChat", 0) => "Alt+C",
         ("ScoreboardToggle", 0) => "Tab",
+        // C4Game::InitKeyboard registers the observer-menu opener on K_SPACE
+        // (C4Game.cpp:3428); C4FullScreen::ViewportCheck renders its name.
+        ("FullscreenMenuOpen", 0) => "Space",
         ("Screenshot", 0) => "F9",
         ("ScreenshotEx", 0) => "Ctrl+F9",
         ("GameSpeedUp", 0) => {
@@ -5108,6 +5111,7 @@ pub(crate) fn build_runtime_flash_resources(table: &RuntimeLanguageTable) -> Run
         no_debug_mode: text("IDS_MSG_NODEBUGMODE"),
         on: text("IDS_CTL_ON"),
         off: text("IDS_CTL_OFF"),
+        observer_menu: text("IDS_MSG_PRESSORPUSHANYGAMEPADBUTT"),
     }
 }
 

@@ -31,6 +31,9 @@ pub(crate) async fn handle_client_message(
                 ));
             }
         }
+        // Only the host restarts a session. A client claiming to is either
+        // confused or hostile; either way there is nothing to act on.
+        ControlMessage::HostRestarting { .. } => {}
         ControlMessage::Ping(packet) => {
             if let Some(route) = state.accepted_routes.get(&connection_id) {
                 let _ = route.outbound.try_send(ControlMessage::Pong(packet));
@@ -314,6 +317,25 @@ async fn handle_forward_request(
     ping_ms: i32,
     state: &mut HostState,
 ) {
+    // A relayed packet reaches its target on the host's own route and is
+    // therefore indistinguishable from one the host authored. C++ has no
+    // packet whose meaning depends on coming from the host, so it relays
+    // anything (src/C4Network2IO.cpp:1066-1082); the port's own IDs do, and a
+    // client has no business speaking for the host in that range.
+    if packet
+        .nested_packet
+        .first()
+        .is_some_and(|packet_type| *packet_type & 0xf0 == 0x70)
+    {
+        let _ = state
+            .event_tx
+            .send(HostEvent::UnhandledPacket {
+                client_id: Some(source),
+                packet_type: packet.nested_packet[0],
+            })
+            .await;
+        return;
+    }
     // C4Network2IO keeps connection-list order, excludes the requester's
     // client ID, and deduplicates targets into a positive list. Rust assigns
     // monotonically increasing IDs, so reverse ID order mirrors the current
@@ -573,6 +595,8 @@ pub(crate) async fn handle_client_disconnected(
         return;
     }
     state.invalidate_control_send_time();
+    #[cfg(test)]
+    notify_accepted_route_waiters(state);
     if let Some(route) = &disconnected_route {
         state
             .closed_routes
@@ -1605,6 +1629,15 @@ pub(crate) async fn broadcast_league_round_results(
         state,
         ConnectionTrafficClass::Message,
         ControlMessage::LeagueRoundResults(packet),
+        None,
+    );
+}
+
+pub(crate) async fn broadcast_host_restarting(rejoin_seconds: u16, state: &mut HostState) {
+    let _ = broadcast_host_message(
+        state,
+        ConnectionTrafficClass::Message,
+        ControlMessage::HostRestarting { rejoin_seconds },
         None,
     );
 }

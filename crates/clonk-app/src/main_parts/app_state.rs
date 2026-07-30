@@ -488,6 +488,12 @@ pub(crate) struct GameApp {
     /// PlayerListItem runs its restore hook only on construction, not on each
     /// later row update. Track the items already constructed in this lobby.
     pub(crate) restart_restore_roster_items: HashSet<(i32, i32)>,
+    /// Armed on this client by the host's restart notice
+    /// (`clonk_network::host_restart`). While it is armed, losing the host is a
+    /// restart to follow rather than the dead host native assumes
+    /// (src/C4Network2.cpp:1826-1832), so the round is torn down and the same
+    /// address re-joined instead of dropping to local control.
+    pub(crate) pending_host_rejoin: Option<PendingHostRejoin>,
     /// Process-local `C4PlayerInfo::dwAlternateColor` values for players
     /// loaded by this host. The synchronized row intentionally omits this
     /// field, so resource identity carries it across authoritative echoes and
@@ -2043,6 +2049,10 @@ pub(crate) struct RuntimeFlashResources {
     pub(crate) no_debug_mode: String,
     pub(crate) on: String,
     pub(crate) off: String,
+    /// `C4FullScreen::ViewportCheck` flashes this when the last owned viewport
+    /// closes and the ownerless observer viewport takes over
+    /// (C4FullScreen.cpp:519-526).
+    pub(crate) observer_menu: String,
 }
 
 impl RuntimeFlashResources {
@@ -2057,6 +2067,7 @@ impl RuntimeFlashResources {
             no_debug_mode: text("IDS_MSG_NODEBUGMODE"),
             on: text("IDS_CTL_ON"),
             off: text("IDS_CTL_OFF"),
+            observer_menu: text("IDS_MSG_PRESSORPUSHANYGAMEPADBUTT"),
         }
     }
 
@@ -4265,6 +4276,35 @@ impl NetworkLobbyLayout {
         }
     }
 }
+
+/// A restart announced by the host, and the window in which this client keeps
+/// trying to find it again.
+///
+/// The host re-binds the port it was already configured with and keeps its
+/// password (`C4Application::QuitGame` backs the password up across
+/// `Game.Clear` and hands the same scenario to a fresh `Game::Init`,
+/// src/C4Application.cpp:373-405), so the *whole join this client already made*
+/// is what to repeat — not just its address. Rebuilding the settings from
+/// config would drop the password, the netpuncher brokerage and every route
+/// but the first, which is exactly what a password-protected or NAT'd host
+/// needs. Attempts are spaced because the host is mid-teardown when the notice
+/// arrives and cannot accept a connection yet.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingHostRejoin {
+    pub(crate) settings: ClientSettings,
+    pub(crate) deadline: Instant,
+    pub(crate) next_attempt_at: Option<Instant>,
+}
+
+/// Spacing between reconnect attempts while the host is re-hosting. The first
+/// attempt necessarily races the host's own teardown, so a refused connection
+/// is the expected case rather than a failure.
+pub(crate) const HOST_REJOIN_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Longest reconnect window this client will honour, whatever a peer asks for.
+/// A restart that has not come back in two minutes is not coming back, and the
+/// number arrives from the network.
+pub(crate) const MAX_HOST_RESTART_REJOIN_SECONDS: u16 = 120;
 
 #[derive(Clone, Debug)]
 pub(crate) struct NetworkLobbyState {
