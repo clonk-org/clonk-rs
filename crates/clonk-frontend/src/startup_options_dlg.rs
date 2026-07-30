@@ -8477,4 +8477,223 @@ mod tests {
         std::fs::create_dir_all("/tmp/menu-parity-options").expect("mkdir");
         write_ppm(&surface, "/tmp/menu-parity-options/out.ppm");
     }
+
+    /// The shipped facets. Every other render fixture leaves `control`/`gamepad`
+    /// `None`, which exercises a fallback that cannot exist in C++:
+    /// `C4GraphicsResource.cpp:200,229` both `return false` when those files fail
+    /// to load, aborting graphics init before any dialog can be built.
+    fn control_sheet_assets() -> OptionsDlgAssets {
+        OptionsDlgAssets {
+            control: Some(load_graphics_png("Control.png")),
+            gamepad: Some(load_graphics_png("Gamepad.png")),
+            ..options_assets()
+        }
+    }
+
+    fn render_gamepad_sheet(state: &OptionsDlgState) -> Surface {
+        let assets = control_sheet_assets();
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        OptionsDlgScreen::render_state(
+            &mut surface,
+            &assets,
+            &gui,
+            &book,
+            state,
+            Some(standard_gamma()),
+        );
+        standard_gamma().apply_to_surface(&mut surface);
+        surface
+    }
+
+    fn gamepad_sheet_state(pads: usize) -> OptionsDlgState {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let labels = || std::array::from_fn(|_| std::array::from_fn(|_| "Undefined".to_string()));
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            ControlSheetState::new(labels(), labels(), pads, false),
+            NetworkSheetState::default(),
+        );
+        state.resize(1280, 720, &gui, &book);
+        state.restore_sheet(OptionsSheet::Gamepad);
+        state
+    }
+
+    /// §2 of the C++ draw model at the reference 1280x720 dialog, whose Gamepad
+    /// sheet client rect is (356,108,644,462) and whose caps are 39x39 at
+    /// x{425,598,771} y{203,258,313,368}.
+    #[test]
+    fn gamepad_sheet_render_matches_the_cpp_draw_model_at_1280x720() {
+        let surface = render_gamepad_sheet(&gamepad_sheet_state(1));
+        let px = |x: i32, y: i32| surface.get_pixel(x as u32, y as u32).expect("in bounds");
+        let luma = |x: i32, y: i32| {
+            let c = px(x, y);
+            0.299 * f32::from(c.r) + 0.587 * f32::from(c.g) + 0.114 * f32::from(c.b)
+        };
+        let ink = |x: i32, y: i32| luma(x, y) < 120.0;
+
+        // HorizontalLine::DrawElement (C4GuiLabels.cpp:318-319): the black line
+        // runs from iX1 to iX2 - 2 and GL's diamond-exit rule drops its final
+        // pixel, so 417..=936 for a 522-wide rule at x=417.
+        assert!(
+            !ink(416, 180),
+            "the rule starts exactly at the inner margin"
+        );
+        assert!(ink(417, 180) && ink(600, 180) && ink(936, 180));
+        assert!(!ink(937, 180), "the end pixel is not rasterized");
+        // The 0xaf7f7f7f shadow is one pixel down and one right, and darkens the
+        // paper rather than replacing it.
+        assert!(luma(418, 181) < luma(418, 175) - 5.0);
+        assert!(luma(418, 181) > luma(418, 180) + 40.0);
+
+        // Both label lines land in the gutter between column 0's cap (ending at
+        // x=464) and column 1's (starting at x=598), anchored at
+        // x = cap.x + cap.w + 5 = 469. The two baselines are cgoDraw.Y - 3 = 205
+        // and cgoDraw.Y + cgoDraw.Hgt / 2 = 220, i.e. exactly 15 rows apart.
+        let gutter = 469..594;
+        let row_ink = |y: i32| gutter.clone().filter(|x| ink(*x, y)).count();
+        let inked_rows = (200..250).filter(|y| row_ink(*y) > 4).collect::<Vec<_>>();
+        // Two contiguous runs of the same face, so both lines exist.
+        let runs = inked_rows
+            .iter()
+            .fold(Vec::new(), |mut runs: Vec<Vec<i32>>, y| {
+                match runs.last_mut() {
+                    Some(run) if run[run.len() - 1] + 1 == *y => run.push(*y),
+                    _ => runs.push(vec![*y]),
+                }
+                runs
+            });
+        assert_eq!(runs.len(), 2, "one run per label line: {inked_rows:?}");
+        // The two draw origins are 15 rows apart (`cgoDraw.Y - 3` and
+        // `cgoDraw.Y + cgoDraw.Hgt / 2`); the zoomed raster can round the first
+        // inked row of each either way by one.
+        assert!(
+            (14..=16).contains(&(runs[1][0] - runs[0][0])),
+            "label baselines: {inked_rows:?}",
+        );
+        assert!(
+            runs[0].len().abs_diff(runs[1].len()) <= 1,
+            "both lines use the same GetBlackFontByHeight face and zoom",
+        );
+
+        // `GetBlackFontByHeight(cgoDraw.Hgt / 2 + 5)` picks BookSmallFont here
+        // and reports 17/20 (`C4Startup.cpp:119-137`) — no tolerance snap.
+        let book = book_fonts();
+        let (face, zoom) = book.black_font_by_height(17);
+        assert_eq!(face.line_height, book.book_small.line_height);
+        assert!((zoom - 0.85).abs() < 1.0e-6, "{zoom}");
+        assert!(
+            runs[0].len() < face.line_height as usize,
+            "a 0.85 zoom draws shorter glyphs than the atlas line height",
+        );
+        assert_eq!(
+            gutter.clone().filter(|x| ink(*x, 195)).count(),
+            0,
+            "the gutter is empty between the separator and the first cap",
+        );
+
+        // The command glyph is inset by iKeyIndent = cap.w / 5 = 7 either side and
+        // blitted at its own 1:1 aspect, so the silver cap survives around it.
+        assert!(luma(430, 222) > 180.0, "cap face left of the glyph");
+        assert!(luma(460, 222) > 180.0, "cap face right of the glyph");
+        assert!(luma(444, 222) < 60.0, "the glyph body is dark");
+    }
+
+    /// `KeySelButton::DrawElement` modulates the command picture by `0x7f7f7f`
+    /// unless the button is highlighted, focused or hovered
+    /// (`C4StartupOptionsDlg.cpp:226-238`), and swaps the label colour to red
+    /// (`:242-243`).
+    #[test]
+    fn highlighting_a_key_button_undims_its_glyph_and_reddens_its_labels() {
+        let dimmed = render_gamepad_sheet(&gamepad_sheet_state(1));
+        let mut focused_state = gamepad_sheet_state(1);
+        focused_state.focus = OptionsFocus::Control(ControlSheetHit::Key(0));
+        let focused = render_gamepad_sheet(&focused_state);
+
+        // A texel inside the first cap's arrow: 0x7f7f7f halves every channel, so
+        // undimming it must brighten the same pixel.
+        let glyph = |surface: &Surface| surface.get_pixel(444, 222).expect("in bounds");
+        assert!(
+            u32::from(glyph(&focused).r) > u32::from(glyph(&dimmed).r) + 20,
+            "{:?} vs {:?}",
+            glyph(&focused),
+            glyph(&dimmed),
+        );
+
+        // The labels turn from C4StartupFontClr (black) to red.
+        let label_red = |surface: &Surface| {
+            (469..594)
+                .flat_map(|x| (211..236).map(move |y| (x, y)))
+                .filter_map(|(x, y)| surface.get_pixel(x, y))
+                .filter(|c| c.r > 100 && u32::from(c.g) + 40 < u32::from(c.r))
+                .count()
+        };
+        assert_eq!(label_red(&dimmed), 0, "an idle button draws black text");
+        assert!(label_red(&focused) > 20, "a focused button draws red text");
+
+        // A second key's labels stay black — the highlight is per button.
+        let other_black = |surface: &Surface| {
+            (642..767)
+                .flat_map(|x| (211..236).map(move |y| (x, y)))
+                .filter_map(|(x, y)| surface.get_pixel(x, y))
+                .filter(|c| c.r > 100 && u32::from(c.g) + 40 < u32::from(c.r))
+                .count()
+        };
+        assert_eq!(other_black(&focused), 0);
+    }
+
+    /// `UpdateCtrlSet` gives the selected control-set button a permanent
+    /// highlight (`C4StartupOptionsDlg.cpp:370-373`), which
+    /// `IconButton::DrawElement` renders as two additive `fctButtonHighlight`
+    /// blits over the **full** button rect (`C4GuiButton.cpp:210-224`).
+    #[test]
+    fn selected_control_set_button_is_additively_highlighted() {
+        let mut state = gamepad_sheet_state(2);
+        let highlighted = render_gamepad_sheet(&state);
+        // iSelectedCtrlSet = 0 on entry (:284), so pad 1 carries the highlight.
+        assert_eq!(
+            state.activate_control_hit(ControlSheetHit::Set(1)),
+            vec![OptionsDlgAction::GamepadDeviceSelected(1)]
+        );
+        let dimmed = render_gamepad_sheet(&state);
+
+        // Two pads: iCtrlSetHMargin = (522 - 160) / 4 = 90, so pad 1's 80x36
+        // facet sits at (507,126). Comparing the same pixels of the same phase
+        // isolates the highlight from the facet's own artwork.
+        let mean = |surface: &Surface, rect: (i32, i32, i32, i32)| {
+            let (x, y, w, h) = rect;
+            let total: f32 = (y..y + h)
+                .flat_map(|py| (x..x + w).map(move |pxx| (pxx, py)))
+                .map(|(pxx, py)| {
+                    let c = surface.get_pixel(pxx as u32, py as u32).expect("in bounds");
+                    0.299 * f32::from(c.r) + 0.587 * f32::from(c.g) + 0.114 * f32::from(c.b)
+                })
+                .sum();
+            total / (w * h) as f32
+        };
+        let pad_one = (507, 126, 80, 36);
+        assert!(
+            mean(&highlighted, pad_one) > mean(&dimmed, pad_one) + 2.0,
+            "losing the selection removes both additive blits: {} vs {}",
+            mean(&highlighted, pad_one),
+            mean(&dimmed, pad_one),
+        );
+        // The glow covers the whole rect, corners included — IconButton passes
+        // rcBounds straight to DrawX with no inset.
+        let corner = (507, 126, 4, 4);
+        assert!(mean(&highlighted, corner) > mean(&dimmed, corner) + 1.0);
+    }
+
+    /// A visual artifact for diffing against a live C++ F9 capture
+    /// (`docs/RENDERING_PARITY.md`).
+    #[test]
+    fn render_gamepad_tab_reference_artifact() {
+        let surface = render_gamepad_sheet(&gamepad_sheet_state(1));
+        std::fs::create_dir_all("/tmp/menu-parity-options").expect("mkdir");
+        write_ppm(&surface, "/tmp/menu-parity-options/gamepad.ppm");
+    }
 }
