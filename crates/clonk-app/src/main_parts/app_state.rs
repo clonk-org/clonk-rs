@@ -339,6 +339,10 @@ pub(crate) struct GameApp {
     /// `ViewX`/`ViewY` (`C4Viewport.cpp:1146`).
     pub(crate) console_viewport_projections:
         std::collections::HashMap<u64, clonk_frontend::ActiveViewportProjection>,
+    /// The last pointer position in world coordinates, so a held drag can
+    /// send `MoveSelection` the *delta* C++ computes from the previous
+    /// message's coordinates (`C4EditCursor.cpp:131-137`).
+    pub(crate) edit_cursor_last_world: Option<(i32, i32)>,
     /// `C4EditCursor::Hold` — set by a press, cleared by the release.
     pub(crate) edit_cursor_hold: bool,
     /// `C4EditCursor::DragFrame` with its `(X, Y)` press anchor and live

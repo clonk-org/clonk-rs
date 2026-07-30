@@ -2635,6 +2635,7 @@ impl GameApp {
 
         let press = edit_press(control, target, &selection);
         self.edit_cursor_hold = press.hold;
+        self.edit_cursor_last_world = Some((x, y));
         match press.selection {
             Some(SelectionEdit::Replace(object)) => self
                 .developer_selection
@@ -2681,6 +2682,21 @@ impl GameApp {
             *corner = (x, y);
             return;
         }
+        // `edit_move` decides between moving the selection and re-picking the
+        // hovered target; the offset is the delta from the previous message.
+        let previous = self.edit_cursor_last_world.replace((x, y));
+        if let clonk_engine::developer_cursor::EditMove::MoveSelection { dx, dy } =
+            clonk_engine::developer_cursor::edit_move(
+                self.edit_cursor_hold,
+                false,
+                previous.map_or(0, |(px, _)| x - px),
+                previous.map_or(0, |(_, py)| y - py),
+                || None,
+            )
+        {
+            self.submit_editor_move_selection(dx, dy);
+            return;
+        }
         let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
         let selection = self.developer_selection.objects().to_vec();
         let target = edit_target(shift, &selection, |after| hit_test.object_at(x, y, after));
@@ -2703,6 +2719,7 @@ impl GameApp {
 
         let band = self.edit_cursor_drag_frame.take();
         self.edit_cursor_hold = false;
+        self.edit_cursor_last_world = None;
         if self.developer_console_edit_mode != ConsoleEditMode::Edit {
             return None;
         }
@@ -2741,6 +2758,41 @@ impl GameApp {
             }
         }
         result
+    }
+
+    /// `C4EditCursor::MoveSelection` — `EMMoveObject(EMMO_Move, xoff, yoff,
+    /// nullptr, &Selection)` (`C4EditCursor.cpp`).
+    ///
+    /// Editing is a *control*, not a direct mutation: it goes through the same
+    /// queue as every other player action so a network game stays in lockstep,
+    /// which is why `EMMO_Script` already takes this path.
+    fn submit_editor_move_selection(&mut self, dx: i32, dy: i32) {
+        if dx == 0 && dy == 0 {
+            // C++ still re-issues a zero-offset EMMO_Move every tick from
+            // Execute while Hold is set (`edit_tick_move`); a *motion* message
+            // that moved nothing is not that path and emits nothing.
+            return;
+        }
+        let objects = self
+            .developer_selection
+            .objects()
+            .iter()
+            .map(|id| id.as_u64() as i32)
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_selection_script(clonk_engine::EmMoveObjectControlData {
+                action: clonk_engine::EMMO_MOVE,
+                tx: dx,
+                ty: dy,
+                objects,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor move");
+        }
     }
 
     /// Draw one console viewport window's frame.

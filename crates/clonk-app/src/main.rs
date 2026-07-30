@@ -2009,6 +2009,7 @@ impl GameApp {
             developer_selection: Default::default(),
             console_viewport_projections: Default::default(),
             edit_cursor_hold: false,
+            edit_cursor_last_world: None,
             edit_cursor_drag_frame: None,
             developer_console_editing_enabled: true,
             developer_console_pointer: GuiPoint::new(0.0, 0.0),

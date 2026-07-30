@@ -908,7 +908,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `edit_target` over `EditCursorHitTest` (`C4EditCursor.cpp:150`), the press
   applied by `edit_press` (`:201-229`), and the result written to the shared
   `DeveloperSelection` as `SelectionWriter::EditCursor`. Pinned end to end by
-  `console_viewport_click_selects_the_object_under_the_cursor`.
+  `console_viewport_pointer_gestures_select_move_and_frame`.
   One design point the port had to settle: `viewport_projection_for_identity`
   reads `GraphicsSystem::active_viewports`, which is the **fullscreen** layout
   and is never populated in console mode — so a detached window had no source
@@ -950,12 +950,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   release runs `FrameSelection` over `Game.Objects` master order — the reverse
   of the snapshot's draw order — then clears `Hold` and `DragFrame`
   *regardless*, as C++ does. Covered by
-  `console_viewport_click_selects_the_object_under_the_cursor`, which now walks
+  `console_viewport_pointer_gestures_select_move_and_frame`, which now walks
   the whole gesture.
-  **Still open:** `MoveSelection` and `PutContents`. A held drag over a
-  selection does not move it and `EMMO_Move`/`EMMO_Enter` are still never
-  emitted, because both need the control round trip rather than a local
-  selection edit; `drop_target` and `edit_tick_move` remain uncalled with them.
+  **Dragging moves the selection, as a control.** A held non-frame drag routes
+  `edit_move`'s `MoveSelection(xoff, yoff)` into `EMMO_Move` through the same
+  `submit_or_execute_editor_selection_script` path `EMMO_Script` already used
+  — editing is a *control*, not a direct mutation, so a network game stays in
+  lockstep. The offset is the delta from the previous pointer message, and a
+  motion that moved nothing emits nothing: the zero-offset re-issue is
+  `Execute`'s per-tick path (`edit_tick_move`), not this one.
+  **Still open:** `PutContents`/`EMMO_Enter` and the per-tick zero-offset
+  re-issue. `drop_target` and `edit_tick_move` are ported and tested but
+  uncalled, so a Ctrl-drag onto a container does not put the selection into it,
+  and a stationary held selection produces no control traffic where C++ emits
+  one every tick.
 
 - **Most of the edit-cursor interaction layer still has no production caller.**
   Worth

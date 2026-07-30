@@ -5009,7 +5009,7 @@
     // with Game.FindObject (C4EditCursor.cpp:150), and LeftButtonDown edits
     // the selection (:201-229).
     #[test]
-    fn console_viewport_click_selects_the_object_under_the_cursor() {
+    fn console_viewport_pointer_gestures_select_move_and_frame() {
         let mut app = new_lightweight_running_sandbox_app();
         app.console_mode = true;
         app.developer_console_edit_mode = ConsoleEditMode::Edit;
@@ -5039,6 +5039,28 @@
             "a plain click selects the object under the cursor"
         );
         assert!(app.edit_cursor_hold, "a press always holds");
+
+        // A held drag over a selected object moves it: C4EditCursor::Move's
+        // Edit arm sends MoveSelection(xoff, yoff), and MoveSelection is
+        // EMMoveObject(EMMO_Move, ...) — a control, not a direct mutation, so
+        // a network game stays in lockstep.
+        // Offline the control is applied straight away, so the object itself
+        // is the observable: it moves by the pointer delta.
+        let before = app.engine.snapshot().object(id).expect("the object is live").position;
+        app.console_viewport_motion(identity, (local.0 + 7, local.1 - 3), 1.0, false);
+        let after = app.engine.snapshot().object(id).expect("the object is live").position;
+        assert_ne!(before, after, "a held drag moves the selection");
+
+        // A motion that does not move the pointer emits nothing: the
+        // zero-offset re-issue is `Execute`'s per-tick path, not this one.
+        let settled = app.engine.snapshot().object(id).expect("the object is live").position;
+        app.console_viewport_motion(identity, (local.0 + 7, local.1 - 3), 1.0, false);
+        assert_eq!(
+            app.engine.snapshot().object(id).map(|object| object.position),
+            Some(settled),
+            "a zero-delta motion emits no move"
+        );
+
 
         // The mark frames the object's *live* shape, which
         // `ObjectSnapshot::current_shape` carries only when it is not
