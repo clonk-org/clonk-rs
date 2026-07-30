@@ -315,6 +315,10 @@ pub struct CapturedClonkText {
     pub clip: Option<Rect>,
     pub gamma: Option<GammaRamp>,
     pub images: Vec<CapturedFontImage>,
+    /// `CStdFont::DrawText`'s `fZoom` (`src/StdFont.cpp:814,903`): every glyph
+    /// facet is blitted at `cell * fZoom` and the pen advances by the same.
+    /// `1.0` for every caller that does not size text to a control.
+    pub zoom: f32,
 }
 
 /// Owned inline image referenced by a captured `{{TextSpec}}` run.
@@ -577,7 +581,29 @@ impl ClonkFont {
         markup: bool,
         gamma: Option<&crate::GammaRamp>,
     ) {
-        self.draw_with_gamma_impl(surface, x, y, text, color, align, markup, gamma, None);
+        self.draw_with_gamma_impl(surface, x, y, text, color, align, markup, gamma, None, 1.0);
+    }
+
+    /// [`Self::draw_with_gamma`] at `CStdFont::DrawText`'s `fZoom`
+    /// (`src/StdFont.cpp:814-934`). Each glyph facet is stretched to
+    /// `cell * zoom`, the pen advances in floating point, and the per-line
+    /// advance becomes `zoom * GetLineHeight()` (`src/StdDDraw2.cpp:1039`) —
+    /// which is how `GetBlackFontByHeight`'s caller fits text to a control
+    /// rather than picking a differently rasterized face.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_zoomed_with_gamma(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+        zoom: f32,
+    ) {
+        self.draw_with_gamma_impl(surface, x, y, text, color, align, markup, gamma, None, zoom);
     }
 
     /// Target-generic counterpart of [`Self::draw_with_gamma`] used by
@@ -594,7 +620,7 @@ impl ClonkFont {
         markup: bool,
         gamma: Option<&crate::GammaRamp>,
     ) {
-        self.draw_with_gamma_impl(surface, x, y, text, color, align, markup, gamma, None);
+        self.draw_with_gamma_impl(surface, x, y, text, color, align, markup, gamma, None, 1.0);
     }
 
     /// [`Self::draw_with_gamma`] with FontRegular's custom images.
@@ -621,6 +647,7 @@ impl ClonkFont {
             markup,
             gamma,
             Some(images),
+            1.0,
         );
     }
 
@@ -648,6 +675,7 @@ impl ClonkFont {
             markup,
             gamma,
             Some(images),
+            1.0,
         );
     }
 
@@ -663,6 +691,7 @@ impl ClonkFont {
         markup: bool,
         gamma: Option<&crate::GammaRamp>,
         images: Option<&dyn FontImageProvider>,
+        zoom: f32,
     ) {
         if let Some(role) = self.role {
             let mut captured_images = Vec::new();
@@ -701,6 +730,7 @@ impl ClonkFont {
                 clip: surface.clip(),
                 gamma: gamma.cloned(),
                 images: captured_images,
+                zoom,
             };
             if surface.capture_clonk_text(command) {
                 return;
@@ -711,10 +741,10 @@ impl ClonkFont {
         let mut line_y = y;
         for line in text.split(|c: char| c == '\n' || (markup && c == '|')) {
             self.draw_line(
-                surface, x, line_y, line, color, align, markup, &mut stack, gamma, images,
+                surface, x, line_y, line, color, align, markup, &mut stack, gamma, images, zoom,
             );
             // iTy += fZoom * GetLineHeight() per line (src/StdDDraw2.cpp:1039).
-            line_y = line_y.saturating_add(self.line_height);
+            line_y = line_y.saturating_add((zoom * self.line_height as f32) as i32);
         }
     }
 
@@ -802,6 +832,24 @@ impl ClonkFont {
         );
     }
 
+    /// [`Self::draw_lines_at_origins_with_gamma_to`] at `CStdFont::DrawText`'s
+    /// `fZoom` (`src/StdFont.cpp:903`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_zoomed_lines_at_origins_with_gamma_to<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
+        origins: &[(i32, i32)],
+        text: &str,
+        color: [u8; 4],
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+        zoom: f32,
+    ) {
+        self.draw_lines_at_origins_with_gamma_impl_zoomed(
+            surface, origins, text, color, markup, gamma, None, zoom,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn draw_lines_at_origins_with_gamma_impl<T: SurfaceDrawTarget + ?Sized>(
         &self,
@@ -812,6 +860,23 @@ impl ClonkFont {
         markup: bool,
         gamma: Option<&crate::GammaRamp>,
         images: Option<&dyn FontImageProvider>,
+    ) {
+        self.draw_lines_at_origins_with_gamma_impl_zoomed(
+            surface, origins, text, color, markup, gamma, images, 1.0,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_lines_at_origins_with_gamma_impl_zoomed<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
+        origins: &[(i32, i32)],
+        text: &str,
+        color: [u8; 4],
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+        images: Option<&dyn FontImageProvider>,
+        zoom: f32,
     ) {
         let mut stack: Vec<MarkupTag> = Vec::new();
         for ((x, y), line) in origins
@@ -830,6 +895,7 @@ impl ClonkFont {
                 &mut stack,
                 gamma,
                 images,
+                zoom,
             );
         }
     }
@@ -848,15 +914,19 @@ impl ClonkFont {
         stack: &mut Vec<MarkupTag>,
         gamma: Option<&crate::GammaRamp>,
         images: Option<&dyn FontImageProvider>,
+        zoom: f32,
     ) {
         // Alignment uses the markup-aware extent of this line
-        // (src/StdFont.cpp:826-839); sx / 2 is integer division.
+        // (src/StdFont.cpp:826-839); sx / 2 is integer division, and the
+        // offset it produces is scaled by fZoom (`:831,838`).
         let (sx, _) = self.measure_impl(line, markup, images);
-        let mut pen_x = x - match align {
-            TextAlign::Left => 0,
-            TextAlign::Center => sx / 2, // src/StdFont.cpp:831
-            TextAlign::Right => sx,      // src/StdFont.cpp:838
-        };
+        let mut pen_x = x as f32
+            - zoom
+                * match align {
+                    TextAlign::Left => 0,        // src/StdFont.cpp:826
+                    TextAlign::Center => sx / 2, // src/StdFont.cpp:831
+                    TextAlign::Right => sx,      // src/StdFont.cpp:838
+                } as f32;
         let mut rest = line;
         // DrawText keeps its transform pointer once markup was already open or
         // any valid tag was read, even if a later close empties the stack.
@@ -898,7 +968,7 @@ impl ClonkFont {
                         image,
                         image_width,
                         self.cell_height,
-                        pen_x,
+                        pen_x as i32,
                         y,
                         image_modulation_rgb(stack, color, transform_active),
                         color[3],
@@ -906,9 +976,7 @@ impl ClonkFont {
                         markup_shear(stack),
                         transform_active,
                     );
-                    pen_x = pen_x
-                        .saturating_add(image_width)
-                        .saturating_add(self.h_space);
+                    pen_x += image_width as f32 + self.h_space as f32;
                     continue;
                 }
             }
@@ -927,12 +995,11 @@ impl ClonkFont {
                     markup_shear(stack),
                     transform_active,
                     self.texture_size,
+                    zoom,
                 );
             }
             // x += w2 + iHSpace (src/StdFont.cpp:927); empty facet → width 0.
-            pen_x = pen_x
-                .saturating_add(cell.map_or(0, |g| g.width))
-                .saturating_add(self.h_space);
+            pen_x += cell.map_or(0.0, |g| g.width as f32 * zoom) + self.h_space as f32;
         }
     }
 }
@@ -1247,7 +1314,7 @@ fn blit_font_image<T: SurfaceDrawTarget + ?Sized>(
         for col in 0..width as usize {
             let sample_x = (col as f32 + 0.5) * image.width as f32 / width as f32 - 0.5;
             let sample_y = (row as f32 + 0.5) * image.height as f32 / height as f32 - 0.5;
-            let (Some(dx), Some(dy)) = (offset_coord(x, col), offset_coord(y, row)) else {
+            let (Some(dx), Some(dy)) = (offset_coord(x as i32, col), offset_coord(y, row)) else {
                 continue;
             };
             blend_font_sample(
@@ -1643,7 +1710,7 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
     surface: &mut T,
     cell: &GlyphCell,
     cell_height: i32,
-    x: i32,
+    x: f32,
     y: i32,
     mod_rgb: [u8; 3],
     color_alpha: u8,
@@ -1651,6 +1718,7 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
     shear: f32,
     transform_active: bool,
     texture_size: i32,
+    zoom: f32,
 ) {
     if let Some(config) = active_clonk_text_blit_config().filter(|config| config.changes_geometry())
     {
@@ -1658,7 +1726,7 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
             surface,
             cell,
             cell_height,
-            x,
+            x as i32,
             y,
             mod_rgb,
             color_alpha,
@@ -1670,15 +1738,13 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
         );
         return;
     }
-    if shear != 0.0 {
-        let Some((x0, y0, x1, y1)) = sheared_raster_bounds(
-            surface,
-            x as f32,
-            y as f32,
-            cell.width as f32,
-            cell_height as f32,
-            shear,
-        ) else {
+    // `w2 = fctFromBlt.Wdt * fZoom; h2 = fctFromBlt.Hgt * fZoom`
+    // (src/StdFont.cpp:903) — a stretched blit whenever fZoom is not 1.
+    if shear != 0.0 || zoom != 1.0 {
+        let (dst_w, dst_h) = (cell.width as f32 * zoom, cell_height as f32 * zoom);
+        let Some((x0, y0, x1, y1)) =
+            sheared_raster_bounds(surface, x, y as f32, dst_w, dst_h, shear)
+        else {
             return;
         };
         for target_y in y0..y1 {
@@ -1686,10 +1752,10 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
                 let Some((sample_x, sample_y)) = inverse_sheared_sample(
                     target_x,
                     target_y,
-                    x as f32,
+                    x,
                     y as f32,
-                    cell.width as f32,
-                    cell_height as f32,
+                    dst_w,
+                    dst_h,
                     cell.width as f32,
                     cell_height as f32,
                     shear,
@@ -1725,7 +1791,7 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
             if out_a <= 0.0 {
                 continue; // fully transparent source leaves the surface unchanged
             }
-            let (Some(dx), Some(dy)) = (offset_coord(x, col), offset_coord(y, row)) else {
+            let (Some(dx), Some(dy)) = (offset_coord(x as i32, col), offset_coord(y, row)) else {
                 continue;
             };
             // Keep the unblended float source available to a retained GPU
@@ -2207,6 +2273,7 @@ mod tests {
                 clip: Some(clip),
                 gamma: Some(gamma),
                 images: Vec::new(),
+                zoom: 1.0,
             }]
         );
         assert!(!sfc.is_clonk_text_capture_active());
