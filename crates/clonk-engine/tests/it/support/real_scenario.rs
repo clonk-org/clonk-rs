@@ -63,6 +63,23 @@ impl PreparedInstalledScenario {
         self.instantiate_with_system_scripts(self.system_scripts.clone())
     }
 
+    /// Instantiate with one `planet/System.c4g` script left out, so an
+    /// `#appendto` can be A/B'd against the shipped content it appends to.
+    pub fn instantiate_without_system_script(&self, name: &str) -> Engine {
+        let remaining: Vec<(String, String)> = self
+            .system_scripts
+            .iter()
+            .filter(|(script_name, _)| script_name != name)
+            .cloned()
+            .collect();
+        assert_eq!(
+            remaining.len() + 1,
+            self.system_scripts.len(),
+            "System.c4g script `{name}` is installed exactly once"
+        );
+        self.instantiate_with_system_scripts(remaining)
+    }
+
     fn instantiate_with_system_scripts(&self, scripts: Vec<(String, String)>) -> Engine {
         let mut engine = Engine::with_seed(self.seed);
         engine.configure_materials_from_library(&self.materials);
