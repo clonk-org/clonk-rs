@@ -3824,10 +3824,14 @@ mod tests {
             }
         }
         let fulfilled = fulfilled.unwrap();
+        // One chunk is one stride, not the whole tail: C4Network2ResChunk::Set
+        // sizes by the core's chunk size (src/C4Network2Res.cpp:1268-1269).
         let fulfilled_data = vec![
             0x5a;
-            usize::try_from(core.file_size).unwrap()
-                - usize::try_from(fulfilled.chunk).unwrap()
+            usize::try_from(core.chunk_size).unwrap().min(
+                usize::try_from(core.file_size).unwrap()
+                    - usize::try_from(fulfilled.chunk).unwrap()
+            )
         ];
         dispatch_client_resource_packet(
             1,
