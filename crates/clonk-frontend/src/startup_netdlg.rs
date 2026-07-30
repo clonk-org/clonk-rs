@@ -5510,10 +5510,14 @@ impl NetDlgScreen {
                     DEFAULT_SCENARIO_ICON_PHASE
                 };
                 let small_size = large_size * 2 / 3;
+                // One row of square icons, so the cell is the sheet's height —
+                // the same derivation `draw_scen_list_item` uses
+                // (startup_scensel.rs:1176). Reading it rather than assuming 24
+                // keeps a higher-resolution strip selecting the right icon.
                 Self::draw_icon_phase(
                     surface,
                     &assets.scen_icons,
-                    24,
+                    assets.scen_icons.height().max(1),
                     phase as u32,
                     IntRect {
                         x: row.x + (large_size - small_size) / 2,
@@ -6787,6 +6791,73 @@ mod tests {
                 && y >= small_icon.y
                 && y < small_icon.y + small_icon.h
         }));
+    }
+
+    // The scenario-icon strip is a single row of square icons, so its cell is
+    // the sheet's own height — which is how the scenario-selection list already
+    // reads it (`draw_scen_list_item`, startup_scensel.rs:1176). Deriving it
+    // here too lets a higher-resolution strip drop in: a 3x sheet must still
+    // select icon N, not a 24px sliver of icon N/3.
+    #[test]
+    fn scenario_row_icons_derive_the_cell_from_the_strip_height() {
+        let fonts = endeavour_font_set();
+        let config = NetDlgConfig {
+            masterserver_signup: false,
+            ..NetDlgConfig::default()
+        };
+        let render = |assets: &NetDlgAssets, phase: i32| {
+            let mut controller = NetDlgController::new(config, metrics());
+            controller.set_text_font(&fonts.text);
+            controller.resize(1280, 720);
+            controller.set_games(vec![NetDlgGameEntry {
+                title: "Direct join on example.test".into(),
+                details: "Query status".into(),
+                row_icon: NetDlgRowIcon::Scenario(phase),
+                ..NetDlgGameEntry::default()
+            }]);
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            NetDlgScreen::render_controller(&mut surface, assets, &fonts, None, &controller, 0);
+            surface
+        };
+
+        let native = net_assets();
+        let upscaled = NetDlgAssets {
+            scen_icons: {
+                let src = &native.scen_icons;
+                let (w, h, k) = (src.width(), src.height(), 3u32);
+                let mut pixels = vec![0u8; (w * k * h * k * 4) as usize];
+                for y in 0..h * k {
+                    for x in 0..w * k {
+                        let from = (((y / k) * w + x / k) * 4) as usize;
+                        let to = ((y * w * k + x) * 4) as usize;
+                        pixels[to..to + 4].copy_from_slice(&src.pixels()[from..from + 4]);
+                    }
+                }
+                crate::ImageData::new(w * k, h * k, pixels)
+            },
+            ..net_assets()
+        };
+
+        let distance = |a: &Surface, b: &Surface| -> u64 {
+            a.pixels()
+                .iter()
+                .zip(b.pixels())
+                .map(|(left, right)| u64::from(left.abs_diff(*right)))
+                .sum()
+        };
+        let natives = (0..4)
+            .map(|phase| render(&native, phase))
+            .collect::<Vec<_>>();
+        for phase in 0..4 {
+            let drawn = render(&upscaled, phase);
+            let nearest = (0..4)
+                .min_by_key(|candidate| distance(&drawn, &natives[*candidate as usize]))
+                .unwrap();
+            assert_eq!(
+                nearest, phase,
+                "a 3x strip drew icon {nearest} where phase {phase} was asked for"
+            );
+        }
     }
 
     #[test]
