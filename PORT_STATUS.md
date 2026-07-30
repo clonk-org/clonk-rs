@@ -1184,10 +1184,17 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   scenario fixtures are JSON-backed and have no group behind them.
   **Still open:** the reload body itself — rebuilding DefCore, ActMap, scripts,
   graphics, portraits, ranks and localised components in place, refreshing
-  matching live objects as `UpdateFace(true)` requires, and the definition
-  removal path the failure arm needs (`Engine::remove_definition` does not
-  exist). And the watcher's registration, which is now a short step rather than
-  a blocked one.
+  matching live objects as `UpdateFace(true)` requires. And the watcher's
+  registration, which is now a short step rather than a blocked one.
+  `Engine::remove_definition` landed with it — the exact inverse of
+  `register_definition`, unwinding the map, the load order, the id-sorted
+  runtime order and the script link source, and invalidating the same caches.
+  `C4Game::ReloadDef`'s failure arm removes the definition outright after
+  assigning every object of that type for removal (`C4Game.cpp:2352-2360`), so
+  a failed reload must not leave the old definition in place. Missing any one
+  structure leaves `relink_scripts` walking a host with no definition behind
+  it, which is why the test also re-registers the removed id. Pinned by
+  `removing_a_definition_unwinds_everything_registration_added`.
 
 - **Deferred runtime config save: mechanism landed, most callers still write
   through.** C++ mutates its process-wide `Config` for ordinary runtime toggles

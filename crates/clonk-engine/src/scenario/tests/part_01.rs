@@ -1,6 +1,40 @@
 // Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    // C4Game.cpp:2352-2360 — a failed reload removes the definition outright,
+    // so removal must unwind every structure registration pushed into.
+    #[test]
+    fn removing_a_definition_unwinds_everything_registration_added() {
+        let mut engine = crate::Engine::new();
+        for id in ["AAAA", "BBBB"] {
+            let definition =
+                crate::Definition::from_script(id.to_string(), id.to_string(), "")
+                    .expect("script definition compiles");
+            engine
+                .register_definition(definition)
+                .expect("register definition");
+        }
+        assert!(engine.definition("AAAA").is_some());
+
+        assert!(engine.remove_definition("AAAA"));
+        assert!(engine.definition("AAAA").is_none());
+        assert!(
+            engine.definition("BBBB").is_some(),
+            "removing one definition leaves its siblings alone"
+        );
+        // Removing the same id twice reports the miss rather than unwinding
+        // anything a second time.
+        assert!(!engine.remove_definition("AAAA"));
+
+        // The id is free again, which it would not be if the map entry were
+        // the only thing dropped.
+        let definition = crate::Definition::from_script("AAAA".to_string(), "A".to_string(), "")
+            .expect("script definition compiles");
+        engine
+            .register_definition(definition)
+            .expect("the removed id can be registered again");
+    }
+
     // C4Def.cpp:547-560 — `C4Def::Load` stores the group's own full name as
     // `Filename`. `C4DefList::Reload` re-opens exactly that, `C4Def::Clear`
     // deliberately preserves it ("Assume filename is being kept"), and

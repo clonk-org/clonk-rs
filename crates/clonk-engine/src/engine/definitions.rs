@@ -23,6 +23,34 @@ impl Engine {
         self.register_definition(Definition::from_script(id, name, source)?)
     }
 
+    /// `C4DefList::Remove(C4Def *)` — drop one definition from the list.
+    ///
+    /// `C4Game::ReloadDef`'s failure arm removes the definition outright after
+    /// assigning every object of that type for removal (`C4Game.cpp:2352-2360`),
+    /// so a failed reload does *not* leave the old definition in place.
+    ///
+    /// This is the exact inverse of [`Self::register_definition`]: every
+    /// structure that call pushes into is unwound here — the map, the load
+    /// order, the id-sorted runtime order and the script link source — and the
+    /// same caches are invalidated. Missing one leaves `relink_scripts`
+    /// walking a host that no longer has a definition behind it.
+    pub fn remove_definition(&mut self, id: &str) -> bool {
+        if self.definitions.remove(id).is_none() {
+            return false;
+        }
+        let definition_id = DefinitionId::from(id);
+        self.definition_load_order
+            .retain(|entry| entry != &definition_id);
+        Rc::make_mut(&mut self.runtime_definition_order).retain(|entry| entry != &definition_id);
+        self.script_link_sources.retain(|source| {
+            !matches!(source, ScriptLinkSource::Definition(entry) if entry == &definition_id)
+        });
+        self.definition_metadata_cache.borrow_mut().take();
+        self.command_definition_snapshot_cache.borrow_mut().take();
+        self.invalidate_host_definition_tables();
+        true
+    }
+
     pub fn register_definition(&mut self, definition: Definition) -> Result<(), EngineError> {
         let id = definition.id().to_string();
         if self.definitions.contains_key(&id) {
