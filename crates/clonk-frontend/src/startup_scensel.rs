@@ -962,7 +962,7 @@ fn blend_surface_alpha(opacity: f32, destination: u8) -> u8 {
 /// rule produces fragments for every pixel except the final one. Blending
 /// and opacity semantics equal [`draw_box_dw`] (the inverted engine alpha
 /// becomes GL alpha via `InvertRGBAAlpha`, StdGL.cpp:923-925).
-fn draw_line_dw(
+pub(crate) fn draw_line_dw(
     surface: &mut Surface,
     x1: i32,
     y1: i32,
