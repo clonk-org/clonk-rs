@@ -3409,6 +3409,125 @@ fn joined_lobby_options_sheet_projects_read_only_rows() {
     );
 }
 
+// The Options tab is added for every participant, so a joined client can
+// click the cog itself (src/C4GameLobby.cpp:223). Exercise the pointer route
+// the report used rather than the action it lowers to.
+#[test]
+fn joined_lobby_options_tab_click_opens_the_read_only_sheet() {
+    let mut app = new_menu_app(640, 480);
+    app.startup_view = StartupView::NetworkLobby;
+    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    let (manager, events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+
+    let host_config = clonk_network::HostConfig::default();
+    let snapshot = host_config
+        .initial_join_snapshot
+        .expect("default host publishes JoinData");
+    events
+        .send(NetworkEvent::JoinData(clonk_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 0,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        }))
+        .unwrap();
+    app.process_network_events()
+        .expect("client JoinData seeds lobby state");
+
+    let assets = Arc::clone(&app.assets);
+    let options_tab = app
+        .network_lobby
+        .as_mut()
+        .expect("joined lobby")
+        .with_classic_controller_input(
+            app.graphics.surface(),
+            assets.as_ref(),
+            &app.scenario_game_options,
+            |_, layout, _| {
+                layout
+                    .tab_buttons
+                    .iter()
+                    .find(|tab| tab.sheet == Some(LobbySheet::Options))
+                    .map(|tab| tab.rect)
+            },
+        )
+        .expect("layout the joined lobby")
+        .expect("the joined lobby offers the Options tab");
+    let cog = GuiPoint::new(
+        (options_tab.x + options_tab.w / 2) as f32,
+        (options_tab.y + options_tab.h / 2) as f32,
+    );
+
+    app.handle_network_lobby_pointer_move(cog)
+        .expect("move onto the joined Options tab");
+    app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+        .expect("press the joined Options tab");
+    app.handle_network_lobby_pointer_button(ElementState::Released, false)
+        .expect("clicking the joined Options tab must not raise a parity boundary");
+    assert_eq!(
+        app.network_lobby.as_ref().unwrap().active_sheet,
+        LobbySheet::Options
+    );
+    assert!(
+        !app.network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .option_rows()
+            .is_empty(),
+        "the activated sheet projects its read-only rows"
+    );
+
+    let mut surface = Surface::new(640, 480, clonk_graphics::PixelFormat::Rgba8888);
+    app.network_lobby
+        .as_mut()
+        .expect("joined lobby")
+        .render_classic(
+            &mut surface,
+            assets.as_ref(),
+            &app.scenario_game_options,
+            false,
+            true,
+            &startup_identity_gamma().clone(),
+        )
+        .expect("project one joined Options frame");
+
+    // Every joined row is a read-only ComboBox, so clicking its value opens
+    // no selection popup (src/C4GameOptions.cpp:80,126).
+    let combo = app
+        .network_lobby
+        .as_mut()
+        .expect("joined lobby")
+        .with_classic_controller_input(
+            app.graphics.surface(),
+            assets.as_ref(),
+            &app.scenario_game_options,
+            |_, _, roster| roster.rows.first().and_then(|row| row.option_value),
+        )
+        .expect("layout the joined Options sheet")
+        .expect("the joined Options sheet stacks a ComboBox on its first row");
+    let value = GuiPoint::new(
+        (combo.x + combo.w / 2) as f32,
+        (combo.y + combo.h / 2) as f32,
+    );
+    app.handle_network_lobby_pointer_move(value)
+        .expect("move onto a read-only joined option value");
+    app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+        .expect("press a read-only joined option value");
+    app.handle_network_lobby_pointer_button(ElementState::Released, false)
+        .expect("release a read-only joined option value");
+    assert!(
+        app.context_menu.is_none(),
+        "a read-only joined ComboBox opens no selection popup"
+    );
+}
+
 #[test]
 fn client_lobby_resource_sheet_tracks_hidden_transfer_progress() {
     let mut app = new_menu_app(640, 480);
