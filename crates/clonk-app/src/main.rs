@@ -619,10 +619,6 @@ fn run() -> Result<()> {
     // Past this point a failure is no longer a startup failure, so it is
     // reported by the running application rather than a native dialog.
     clonk_platform::startup_dialog::note_window_created();
-    // Only now: winit installs its own `NSApplication` subclass by being the
-    // first sender of `sharedApplication`, so nothing may reach AppKit before
-    // the window is built.
-    dock_icon::set_dock_icon();
     // `C4Application::DoInit` registers the file classes in the graphical
     // Windows build only, best-effort — C++ notes it "will only work if we have
     // administrator rights" and ignores the result (C4Application.cpp:219-223).
@@ -778,7 +774,14 @@ fn run() -> Result<()> {
         shell_window_host::ShellWindowHost::new(window, pixels, presenter, retained_gpu_renderer),
     );
 
+    let mut dock_tile_attached = false;
     event_loop.run(move |event, _, control_flow| {
+        // Before the window borrow below, because the Dock tile belongs to the
+        // application rather than to any one window.
+        if dock_icon::should_attach_dock_tile(&event, dock_tile_attached) {
+            dock_icon::set_dock_icon();
+            dock_tile_attached = true;
+        }
         let shell_window_host::ShellWindowHost {
             window,
             pixels,
