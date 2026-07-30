@@ -1713,6 +1713,9 @@ pub struct OptionsDlgState {
     pressed_graphics_arrow: Option<(GraphicsSliderId, GraphicsSliderDirection)>,
     graphics_slider_positions: [Option<i32>; 2],
     pressed_release_target: Option<OptionsHit>,
+    /// The control-sheet `Button` currently holding `fDown` from a keyboard or
+    /// gamepad press (`C4GuiButton.cpp:112-128`).
+    pressed_control: Option<ControlSheetHit>,
 }
 
 impl Default for OptionsDlgState {
@@ -1771,6 +1774,7 @@ impl OptionsDlgState {
             pressed_graphics_arrow: None,
             graphics_slider_positions: [None; 2],
             pressed_release_target: None,
+            pressed_control: None,
         }
     }
 
@@ -1803,6 +1807,7 @@ impl OptionsDlgState {
         self.captured_graphics_slider = None;
         self.pressed_graphics_arrow = None;
         self.pressed_release_target = None;
+        self.pressed_control = None;
         self.back_pointer_owned = false;
         self.pressed_back = false;
         self.fair_crew_slider_position = None;
@@ -2051,6 +2056,7 @@ impl OptionsDlgState {
         self.captured_graphics_slider = None;
         self.pressed_graphics_arrow = None;
         self.pressed_release_target = None;
+        self.pressed_control = None;
         Vec::new()
     }
 
@@ -2114,6 +2120,7 @@ impl OptionsDlgState {
         self.captured_graphics_slider = None;
         self.pressed_graphics_arrow = None;
         self.pressed_release_target = None;
+        self.pressed_control = None;
         self.set_pointer_position(Some(position));
         match self.hovered {
             Some(OptionsHit::Back) => {
@@ -2356,6 +2363,29 @@ impl OptionsDlgState {
                 self.pressed_back = true;
                 Vec::new()
             }
+            // A CheckBox binds K_SPACE only, and as the *down* callback
+            // (C4GuiCheckBox.cpp:44-51), so Enter never reaches it.
+            KeyCode::Space
+                if self.focus == OptionsFocus::Control(ControlSheetHit::GamepadGui)
+                    && self.focus_is_visible(self.focus) =>
+            {
+                self.activate_control_hit(ControlSheetHit::GamepadGui)
+            }
+            // Every other control-sheet child is a `Button`, which latches
+            // `fDown` on K_SPACE/K_RETURN down and activates on up
+            // (C4GuiButton.cpp:36-43,112-128).
+            KeyCode::Enter | KeyCode::Space
+                if matches!(
+                    self.focus,
+                    OptionsFocus::Control(target) if target != ControlSheetHit::GamepadGui
+                ) && self.focus_is_visible(self.focus) =>
+            {
+                let OptionsFocus::Control(target) = self.focus else {
+                    unreachable!()
+                };
+                self.pressed_control = Some(target);
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -2382,6 +2412,11 @@ impl OptionsDlgState {
             if let Some(target) = self.pressed_program_button.take() {
                 if self.focus == OptionsFocus::Program(target) {
                     return self.activate_program_button(target);
+                }
+            }
+            if let Some(target) = self.pressed_control.take() {
+                if self.focus == OptionsFocus::Control(target) {
+                    return self.activate_control_hit(target);
                 }
             }
         }
@@ -2570,6 +2605,17 @@ impl OptionsDlgState {
                 self.pressed_back = true;
                 Vec::new()
             }
+            OptionsFocus::Control(ControlSheetHit::GamepadGui)
+                if self.focus_is_visible(self.focus) =>
+            {
+                self.activate_control_hit(ControlSheetHit::GamepadGui)
+            }
+            OptionsFocus::Control(target)
+                if target != ControlSheetHit::GamepadGui && self.focus_is_visible(self.focus) =>
+            {
+                self.pressed_control = Some(target);
+                Vec::new()
+            }
             OptionsFocus::None
             | OptionsFocus::Tabular
             | OptionsFocus::Graphics(_)
@@ -2582,6 +2628,11 @@ impl OptionsDlgState {
         if let Some(target) = self.pressed_program_button.take() {
             if self.focus == OptionsFocus::Program(target) {
                 return self.activate_program_button(target);
+            }
+        }
+        if let Some(target) = self.pressed_control.take() {
+            if self.focus == OptionsFocus::Control(target) {
+                return self.activate_control_hit(target);
             }
         }
         if self.focus == OptionsFocus::Back && self.pressed_back {
@@ -2683,6 +2734,7 @@ impl OptionsDlgState {
         self.captured_graphics_slider = None;
         self.pressed_graphics_arrow = None;
         self.pressed_release_target = None;
+        self.pressed_control = None;
         self.pointer_down = false;
         self.active_sheet = sheet;
         self.set_pointer_position(self.pointer_position);
@@ -2737,9 +2789,13 @@ impl OptionsDlgState {
             || matches!(self.hovered, Some(OptionsHit::Network(hovered)) if hovered == target)
     }
 
-    /// `C4GUI::Button::fDown` for a control-sheet button: held with the pointer
-    /// still over it (`C4GuiButton.cpp:147-176`).
+    /// `C4GUI::Button::fDown` for a control-sheet button: latched by a keyboard
+    /// or gamepad press (`C4GuiButton.cpp:112-119`), or held with the pointer
+    /// still over it (`:147-176`).
     fn control_sheet_pressed(&self, target: ControlSheetHit) -> bool {
+        if self.pressed_control == Some(target) {
+            return true;
+        }
         self.pointer_down
             && self.pressed_release_target == Some(OptionsHit::Control(target))
             && self.hovered == Some(OptionsHit::Control(target))
@@ -7066,6 +7122,109 @@ mod tests {
         controls.push(OptionsFocus::Control(ControlSheetHit::Reset));
 
         assert_options_focus_cycle(&mut state, &controls);
+    }
+
+    fn gamepad_control_state() -> OptionsDlgState {
+        let labels = || std::array::from_fn(|_| std::array::from_fn(|_| "Undefined".to_string()));
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            ControlSheetState::new(labels(), labels(), 3, false),
+            NetworkSheetState::default(),
+        );
+        state.restore_sheet(OptionsSheet::Gamepad);
+        state
+    }
+
+    // `C4GUI::Button`'s ctor binds K_SPACE and K_RETURN gated on `HasDrawFocus`
+    // (C4GuiButton.cpp:36-43); `KeyButtonDown` latches `fDown` and `KeyButtonUp`
+    // activates (C4GuiButton.cpp:112-128). The selectors, key caps and Reset are
+    // all `Button` subclasses, so a keyboard-only user can reach every one.
+    #[test]
+    fn focused_control_sheet_buttons_latch_then_activate_on_release() {
+        let mut state = gamepad_control_state();
+
+        state.focus = OptionsFocus::Control(ControlSheetHit::Key(5));
+        assert!(state.handle_key_down(KeyCode::Space).is_empty());
+        assert!(
+            state.control_sheet_pressed(ControlSheetHit::Key(5)),
+            "fDown latches so the cap draws its pressed phase",
+        );
+        let released = state.handle_key_up(KeyCode::Space);
+        assert!(matches!(
+            released.as_slice(),
+            [OptionsDlgAction::BeginControlCapture(target)]
+                if target.control == 5 && target.device == ControlDevice::Gamepad
+        ));
+        assert!(!state.control_sheet_pressed(ControlSheetHit::Key(5)));
+
+        // Enter is bound alongside Space, and the selector emits its own action.
+        state.focus = OptionsFocus::Control(ControlSheetHit::Set(2));
+        assert!(state.handle_key_down(KeyCode::Enter).is_empty());
+        assert_eq!(
+            state.handle_key_up(KeyCode::Enter),
+            vec![OptionsDlgAction::GamepadDeviceSelected(2)]
+        );
+        assert_eq!(state.controls().selected_set(ControlDevice::Gamepad), 2);
+
+        state.focus = OptionsFocus::Control(ControlSheetHit::Reset);
+        assert!(state.handle_key_down(KeyCode::Space).is_empty());
+        assert_eq!(
+            state.handle_key_up(KeyCode::Space),
+            vec![OptionsDlgAction::ResetControlBindings(
+                ControlDevice::Gamepad
+            )]
+        );
+
+        // Moving the focus away between press and release cancels, exactly as
+        // the Program sheet's buttons already do.
+        state.focus = OptionsFocus::Control(ControlSheetHit::Key(1));
+        assert!(state.handle_key_down(KeyCode::Space).is_empty());
+        state.focus = OptionsFocus::Control(ControlSheetHit::Key(2));
+        assert!(state.handle_key_up(KeyCode::Space).is_empty());
+    }
+
+    // `CheckBox` binds K_SPACE only, and as the *down* callback
+    // (C4GuiCheckBox.cpp:44-51) — Enter never reaches it.
+    #[test]
+    fn focused_control_sheet_checkbox_toggles_on_space_down_only() {
+        let mut state = gamepad_control_state();
+        state.focus = OptionsFocus::Control(ControlSheetHit::GamepadGui);
+
+        assert!(state.handle_key_down(KeyCode::Enter).is_empty());
+        assert!(!state.controls().gamepad_gui_control());
+        assert_eq!(
+            state.handle_key_down(KeyCode::Space),
+            vec![OptionsDlgAction::GamepadGuiControlChanged(true)]
+        );
+        assert!(state.controls().gamepad_gui_control());
+        assert!(
+            state.handle_key_up(KeyCode::Space).is_empty(),
+            "the toggle already happened on the down edge",
+        );
+    }
+
+    // The gamepad's own low button drives the same two paths
+    // (C4GuiButton.cpp:40-42, C4GuiCheckBox.cpp:47-50).
+    #[test]
+    fn control_sheet_gamepad_low_button_matches_the_keyboard_paths() {
+        let mut state = gamepad_control_state();
+
+        state.focus = OptionsFocus::Control(ControlSheetHit::Key(11));
+        assert!(state.handle_gamepad_low_down().is_empty());
+        assert!(state.control_sheet_pressed(ControlSheetHit::Key(11)));
+        assert!(matches!(
+            state.handle_gamepad_low_up().as_slice(),
+            [OptionsDlgAction::BeginControlCapture(target)] if target.control == 11
+        ));
+
+        state.focus = OptionsFocus::Control(ControlSheetHit::GamepadGui);
+        assert_eq!(
+            state.handle_gamepad_low_down(),
+            vec![OptionsDlgAction::GamepadGuiControlChanged(true)]
+        );
+        assert!(state.handle_gamepad_low_up().is_empty());
     }
 
     #[test]
