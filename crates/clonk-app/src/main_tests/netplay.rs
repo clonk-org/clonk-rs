@@ -20331,3 +20331,129 @@ fn debug_classic_host_client_arguments_apply_cpp_lobby_ports() {
     // A trailing suffix keeps the numeric prefix.
     assert_eq!(parse("/client:3rd").tcp_port, Some(11_120));
 }
+
+#[test]
+fn network_host_own_join_binds_the_local_presentation_to_its_player() {
+    // C4Game::JoinPlayer binds the local presentation to the number the join
+    // actually produced: `if (pPlr->LocalControl) CreateViewport(pPlr->Number)`
+    // (pristine 9ffa0a5d src/C4Game.cpp:3544-3556), and C4Player::FinalInit
+    // runs `Game.MouseControl.Init(Number)` for a locally controlled player
+    // (src/C4Player.cpp:784-791). A network host joins before every client, so
+    // C4PlayerList::GetFreeNumber hands it player 0 while `local_owner` still
+    // holds the process default. Mouse commands, HUD lookup and menu ownership
+    // all read `local_owner`, so it has to follow the join.
+    let directory = tempdir().expect("host player directory");
+    let player_path = directory.path().join("Host.c4p");
+    let mut player_group = MutableGroup::new("Host.c4p");
+    player_group
+        .add_file(
+            "Player.txt",
+            b"[Player]\nName=Host\n[Preferences]\nColorDw=255\nControl=0\n".to_vec(),
+        )
+        .expect("add host player core");
+    fs::write(&player_path, player_group.pack().expect("pack host player"))
+        .expect("write host player group");
+
+    let mut app = new_state_only_running_sandbox_app();
+    // A real network host owns no runtime player until its own synchronized
+    // JoinPlayer executes; the sandbox fixture pre-registers one.
+    app.remove_local_control_assignment(app.local_owner);
+    app.engine
+        .remove_player(app.local_owner)
+        .expect("drop the sandbox local player");
+    app.engine.set_local_players([]);
+    let (manager, _event_tx) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    app.engine.set_network_game(true);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+    app.control_clients.register(0, true, false);
+
+    let resource_id = 6;
+    let core = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: resource_id,
+        loadable: true,
+        filename: LegacyCString::from_bytes(b"Host.c4p".to_vec()).expect("valid wire name"),
+        ..clonk_engine::NetworkResourceCore::default()
+    };
+    app.admission_resources
+        .mark_complete(resource_id, player_path.clone());
+    let info_id = 1;
+    app.control_player_infos
+        .apply(clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: info_id,
+                name: LegacyCString::from_bytes(b"Host".to_vec()).expect("valid player name"),
+                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(core.clone()),
+                ..Default::default()
+            }],
+            by_client: 0,
+            ..Default::default()
+        });
+
+    app.apply_join_player_control(clonk_engine::JoinPlayerControlData {
+        filename: LegacyCString::from_bytes(b"Host.c4p".to_vec()).expect("valid legacy filename"),
+        at_client: 0,
+        info_id,
+        source: clonk_engine::JoinPlayerSource::Resource(core),
+        by_client: 0,
+    })
+    .expect("host executes its own synchronized join");
+
+    let joined = app
+        .engine
+        .players()
+        .find(|player| player.player_info_id() == info_id)
+        .map(|player| player.id())
+        .expect("host player joined the round");
+    assert_eq!(
+        app.engine.snapshot().hud.local_players,
+        vec![joined],
+        "the joined host player is the only local player"
+    );
+    assert_eq!(
+        app.local_owner, joined,
+        "local presentation must follow the host's own joined player number"
+    );
+}
+
+#[test]
+fn losing_the_last_local_viewport_flashes_the_native_observer_hint() {
+    // C4FullScreen::ViewportCheck's no-viewport case creates the ownerless
+    // observer viewport and then, outside film mode, flashes
+    // IDS_MSG_PRESSORPUSHANYGAMEPADBUTT with the FullscreenMenuOpen key name
+    // wrapped in the yellow markup (pristine 9ffa0a5d
+    // src/C4FullScreen.cpp:499-527). C4Game::InitKeyboard registers that key
+    // on K_SPACE (src/C4Game.cpp:3428). Without the hint an eliminated player
+    // only sees their controls stop working.
+    let mut app = new_running_sandbox_app();
+    let owner = app.local_owner;
+    let expected = format_resource_string(
+        app.runtime_flash_resources()
+            .expect("process-start flash resources")
+            .observer_menu
+            .clone(),
+        &["<c ffff00><Space></c>"],
+    );
+    app.runtime_flash_message = None;
+
+    assert!(app.close_physical_viewports(owner, false, true));
+    app.check_fullscreen_physical_viewports(true);
+
+    assert!(
+        app.primary_physical_viewport_is_no_owner(),
+        "the fullscreen fallback owns an ownerless observer viewport"
+    );
+    assert_eq!(
+        app.runtime_flash_message
+            .as_ref()
+            .map(|message| message.text.clone()),
+        Some(expected)
+    );
+}

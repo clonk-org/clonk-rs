@@ -662,6 +662,54 @@ fn presentation_detail_steps_down_only_on_a_sustained_overrun() {
 }
 
 #[test]
+fn presentation_detail_ignores_an_overrun_streak_broken_by_an_in_budget_pass() {
+    // `DETAIL_STEP_DOWN_PASSES` counts *consecutive* overruns, so a pass that
+    // lands inside the budget has to break the streak. It previously only
+    // cleared the counter when it also cleared the 50%-headroom ceiling, which
+    // left everything between comfortable and over budget counting as an
+    // overrun: a machine that alternates 40ms/27ms never sustains an overrun
+    // yet still gave up fire particles, and the ratchet only ever descended.
+    let budget = Duration::from_millis(28);
+    let mut governor = PresentationDetailGovernor::default();
+
+    for _ in 0..DETAIL_STEP_DOWN_PASSES * 2 {
+        governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+        governor.record_graphics_pass(true, Duration::from_millis(27), budget);
+    }
+
+    assert_eq!(
+        governor.detail(),
+        PresentationDetail::Full,
+        "an in-budget pass must break the overrun streak, not merely fail to extend it"
+    );
+}
+
+#[test]
+fn presentation_detail_ignores_a_comfortable_streak_broken_by_a_deadband_pass() {
+    // The mirror of the overrun streak: `DETAIL_STEP_UP_PASSES` is also a
+    // consecutive count, so a pass in the deadband must not be free to sit
+    // inside a recovery streak. Restoring cost is what caused the overrun, so
+    // this side is the one that must not fire early.
+    let budget = Duration::from_millis(28);
+    let mut governor = PresentationDetailGovernor::default();
+    for _ in 0..DETAIL_STEP_DOWN_PASSES {
+        governor.record_graphics_pass(true, Duration::from_millis(40), budget);
+    }
+    assert_eq!(governor.detail(), PresentationDetail::NoFireParticles);
+
+    for _ in 0..DETAIL_STEP_UP_PASSES * 2 {
+        governor.record_graphics_pass(true, Duration::from_millis(5), budget);
+        governor.record_graphics_pass(true, Duration::from_millis(27), budget);
+    }
+
+    assert_eq!(
+        governor.detail(),
+        PresentationDetail::NoFireParticles,
+        "a deadband pass must break the comfortable streak too"
+    );
+}
+
+#[test]
 fn presentation_detail_recovers_only_with_real_headroom() {
     let budget = Duration::from_millis(28);
     let mut governor = PresentationDetailGovernor::default();

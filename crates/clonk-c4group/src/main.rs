@@ -93,7 +93,7 @@ fn apply_shell_registration(line: &CommandLine) -> bool {
         if line.options.unregister_shell {
             return clonk_platform::file_classes::unregister_file_classes(&module);
         }
-        return clonk_platform::file_classes::register_file_classes(&module);
+        clonk_platform::file_classes::register_file_classes(&module)
     }
     #[cfg(not(windows))]
     {

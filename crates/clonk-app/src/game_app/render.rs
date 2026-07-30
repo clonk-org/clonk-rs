@@ -552,6 +552,24 @@ impl GameApp {
                     self.film_view_player = film_player;
                     self.physical_viewports_authoritative = true;
                 }
+                // Outside film mode ViewportCheck tells the user how to reach
+                // the observer menu the ownerless viewport just handed them
+                // (C4FullScreen.cpp:518-526). The key name follows the live
+                // registration, which C4Game::InitKeyboard put on K_SPACE
+                // (C4Game.cpp:3428).
+                if !self.engine.is_replay_film() {
+                    let key = format!(
+                        "<c ffff00><{}></c>",
+                        runtime_help_key_name(
+                            self.runtime_key_config().ok(),
+                            "FullscreenMenuOpen",
+                            0,
+                        )
+                    );
+                    self.runtime_flash_message = self.prepare_runtime_resource_flash(|resources| {
+                        format_resource_string(resources.observer_menu.clone(), &[&key])
+                    });
+                }
             }
             1 => {}
             _ => {

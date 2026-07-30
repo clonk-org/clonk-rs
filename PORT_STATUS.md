@@ -425,6 +425,33 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- **`C4PlayerList::Join`'s max-player rejection is not ported.**
+  C++ refuses a join outright when `GetCount() + 1 > Game.Parameters.MaxPlayers`,
+  logs `IDS_PRC_TOOMANYPLRS` and returns no `C4Player`
+  (`C4PlayerList.cpp:288-294`). The Rust execution chain
+  (`apply_join_player_control` -> `join_player_at_client_with_semantics` ->
+  `register_joining_player`) never consults `max_players`, so it is strictly
+  more permissive. This is reachable in shipped content, not theoretical:
+  HarpoonRace's `Script1` calls parameterless `SetMaxPlayer()`
+  (`content/EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s/Script.c:14-18`),
+  which both engines resolve to `MaxPlayers = 0`, closing later admission in
+  C++ only. Initial joins are unaffected — they are issued at the Go tick,
+  before `Initialize()` and long before the Tick10-gated `Script1` — so this
+  can only diverge on a **runtime** join into such a round, where C++ drops the
+  player and Rust seats them. Closing it means adding the count gate to the
+  synchronized join path, with an audit of the fixtures that currently join
+  past a scenario's declared `MaxPlayer`.
+
+- **`C4Player::Eliminate`'s early client deactivation is missing.**
+  When the control host eliminates a player belonging to a *non-host* client
+  and no unbeaten player is left at that client, C++ submits
+  `CID_ClientUpdate`/`CUT_Activate(false)` for it
+  (`C4Player.cpp:2075-2088`). `player.rs::eliminate` has no equivalent, so a
+  fully eliminated remote client keeps its activated slot. The branch is gated
+  on `AtClient > C4ClientIDHost`, so an eliminated host is unaffected either
+  way; the visible effect is confined to lobby/roster activation state and
+  control-tick participation of wiped-out clients.
+
 - **Property-panel composition landed; the surfaces open.**
   `clonk-engine::developer_property_text` ports `C4PropertyDlg::Update`'s body
   (`C4PropertyDlg.cpp:169-256`): the 0/1/many switch, the fixed section order
@@ -1620,13 +1647,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   test wants an injectable send seam so the congested case can be simulated
   without a real blocked socket.
 
-- Flaky test (observed 2026-07-24, not fixed): `clonk-network`
-  `session::tests::dual_client_reconnects_a_missing_tcp_route` failed once in a
-  full `cargo nextest run --workspace` and was not reproducible — 5/5 green in
-  isolation and the immediately following full workspace run was 8828/8828. It
-  is a real-socket reconnect test, so it is load/timing sensitive like the
-  `control_sync_and_reconnect_smoke` case that already carries `retries = 2` in
-  `.config/nextest.toml`. Root-cause it rather than adding another retry.
+- Flaky test (fixed 2026-07-29): `clonk-network`
+  `session::tests::dual_client_reconnects_a_missing_tcp_route` started its
+  reconnect deadline as soon as it asked the proxy task to cut TCP, before
+  that task had been scheduled to abort and await its copier and thereby drop
+  both sockets. It then polled the host through its command channel on every
+  scheduler yield; those queued inspection commands deliberately take priority
+  over network arms and could starve the very disconnect/admission events the
+  test awaited. The proxy now acknowledges completed cancellation, an
+  event-driven host barrier observes route removal and replacement without
+  command flooding, and the test proves UDP traffic remains live while TCP is
+  held absent. Its only lifecycle deadline is the native 30-second ping-timeout
+  horizon, not a Rust-only immediate-redial requirement; no retry was added.
 - Flaky test (observed 2026-07-24, not fixed): `clonk-network`
   `session::tests::sync_controls_wait_for_status_barrier_and_keep_fifo_order`
   failed once in a full workspace run at `session.rs:13493`, asserting that no
@@ -1796,6 +1828,44 @@ an ordered-map model gap.
   the player wrote explicitly still wins in both directions, and with nothing
   configured every one of them is off and the renderer stays C++-exact. Pinned
   by `the_remaster_switch_supplies_a_default_that_each_key_can_override`.
+
+- **Presentation may run at the display's refresh period instead of the
+  oracle's 30 ms ceiling** (`configured_smooth_presentation` +
+  `effective_max_refresh_delay_ms` + `refresh_interval_for_tick`,
+  `crates/clonk-app`; opt-in `Graphics.SmoothPresentation`, default off).
+  Approved 2026-07-29. C++ defaults `Graphics.MaxRefreshDelay` to 30
+  (C4Config.cpp:485) against a 28 ms game tick, so `C4Application` leaves that
+  tick undivided (C4Application.cpp:510-531) and presents once per tick; the
+  startup timer is a flat 16 ms. That is correct for world content, which
+  really does advance only once per tick — but the mouse pointer is composited
+  *into* the frame while the platform cursor is hidden
+  (`classic_platform_cursor_visible`), so the refresh period is also the
+  pointer's update period: measured 35.7 Hz in game and 62.9 Hz in the startup
+  menu against a 120 Hz panel whose GPU pass costs 0.83 ms and whose event loop
+  is idle 96 % of the time. When enabled, the panel period (clamped so it can
+  never be slower than the oracle default) replaces only the *ceiling* of the
+  **startup timer**; the divisor applied to it is C++'s own, and the 16 ms logic
+  tick keeps its exact rate, so menu animation ages identically.
+  The **game timer keeps the oracle ceiling unconditionally** (`RefreshCeilings`),
+  which is why this is safe: all four C++-mirrored per-render behaviours (the
+  C4Viewport camera smoother, `C4MessageBoard::Execute` plus the screen fader,
+  flash-message `remaining_draws`, and the object-audibility cache) live in the
+  running path and never see a changed cadence. Subdividing the game timer was
+  measured and rejected: on an M4 Max at Scale=300 fullscreen a 7 ms ceiling
+  moved presentation from 35.66 to 36.30 FPS while the average graphics pass
+  grew 10.49 -> 18.17 ms and automatic frame skips went 2 -> 98, because in game
+  the pass cost and swapchain back-pressure bind long before the timer does.
+  In-game pointer smoothness is therefore still bounded by graphics-pass cost,
+  not by this key. **This supersedes the unlogged
+  `DEFAULT_MAX_REFRESH_DELAY_MS = 16` divergence** that `469eca304`
+  (2026-07-20) introduced and `d9315f876` (2026-07-24) correctly reverted for
+  being unlogged — the default now stays at the oracle's 30 permanently and the
+  faster cadence is reachable only through this key or `Graphics.Remaster`.
+  Pinned by `smooth_presentation_substitutes_the_display_period_for_the_native_ceiling`
+  and `startup_refresh_honours_the_same_refresh_ceiling_as_the_game_timer`;
+  `max_refresh_delay_defaults_to_cpp_30_ms_and_honors_positive_config` and
+  `max_refresh_delay_missing_or_invalid_matches_cpp_thirty_ms` still hold the
+  default path unchanged.
 
 - **The sky gradient may be dithered below the 8-bit step**
   (`GpuSolidStyle::dither` + `SOLID_SHADER`, `crates/clonk-app-render`; opt-in
@@ -2064,11 +2134,36 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
-- **One chunk in flight per peer while a game is running, three in the lobby**
+- **One chunk in flight per peer while a game is running, thirty in the lobby**
   (`crates/clonk-network/src/resource_catalog.rs`,
   `ResourceCatalog::set_max_loads_per_peer`, narrowed at the game-start
-  transition in `session/host_dispatch.rs`; C++
-  `C4NetResMaxLoadPerPeerPerFile` = 3 always). Approved 2026-07-27.
+  transition in `session/host_dispatch.rs` and `session/client_loop.rs`; C++
+  `C4NetResMaxLoadPerPeerPerFile` = 3 always). Approved 2026-07-27, lobby value
+  rescaled 2026-07-29.
+  The lobby cap is thirty rather than C++'s three because a chunk here is a tenth
+  of `C4NetResChunkSize`: the cap counts chunks, but what it buys is a byte
+  window, and 30 x 10 KiB is exactly C++'s 3 x 100 KiB. `RESOURCE_MAX_LOADS` is
+  scaled the same way (200 against C++'s 20), preserving C++'s ratio between the
+  two. Left at three, the smaller chunk would have divided C++'s
+  bandwidth-delay product by ten and held one resource to 30 KiB per round trip
+  — 375 KiB/s on an 80 ms link, minutes for a definition pack, which is what a
+  joining player experienced as "still loading". The equivalence is pinned by
+  `the_lobby_load_caps_hold_the_cpp_byte_window`; the two tests that assert C++'s
+  literal 3/20 thresholds now set them explicitly via `set_max_loads_per_peer` /
+  `set_max_loads` so they remain true C++ oracles.
+  **Not re-measured:** the lobby window now queues the same bytes ahead of
+  control as C++'s configuration, so lobby control latency should be the
+  `100 KiB x3` row below rather than the `10 KiB x3` row. That is the accepted
+  trade — the lobby has no lockstep control to protect — but the figure is
+  inferred from equal byte counts, not measured. In-game is unaffected and stays
+  at one.
+  Until 2026-07-29 the in-game narrowing was a **no-op on the real download
+  path**: it was applied to `ClientResourceState::catalog` / `HostState::
+  resource_catalog`, but `dispatch_client_resource_packet` schedules through the
+  *backend's* catalog whenever a backend exists and only falls back to the bare
+  one when there is none. Both sites now also narrow the backend
+  (`ResourceTransferBackend::set_max_loads_per_peer`), pinned by
+  `narrowing_the_window_reaches_the_scheduling_catalog`.
   This cap, not `C4NetResMaxLoad`, is what governs head-of-line blocking: bulk
   outstanding *on one connection* is this times the chunk size, and the global
   cap only spreads work across different peers, which are different connections.
@@ -2077,8 +2172,8 @@ an ordered-map model gap.
   ticks, `sim::bulk_stream_tests`). Control latency, mean and worst:
   no bulk at all 49.7 ms / 80 ms;
   100 KiB x3, C++'s configuration, 110.1 ms / 892 ms;
-  10 KiB x3, this port after the chunk-size entry below, 63.1 ms / 445 ms;
-  10 KiB x1, this entry, 53.1 ms / 393 ms.
+  10 KiB x3, the former lobby value, 63.1 ms / 445 ms;
+  10 KiB x1, the in-game value, 53.1 ms / 393 ms.
   So the narrower window recovers most of the remaining gap to an unloaded link.
   It is *not* set to one everywhere, because it also divides transfer throughput
   by three — a peer can only have one chunk in flight per round trip, and on a
@@ -2209,9 +2304,24 @@ an ordered-map model gap.
   lost fragment withholds all of them from the game loop until the repair lands —
   which proceeds at ten fragment asks per check packet. Three concurrent chunks
   to one peer queue 618 fragments ahead of control. 10 KiB is 21 datagrams,
-  cutting that head-of-line window by an order of magnitude, and with
-  `RESOURCE_MAX_LOADS` unchanged at C++'s 20 it also drops the maximum
-  outstanding bulk from 2 MB to 200 KB.
+  cutting that head-of-line window by an order of magnitude.
+  **This divergence delivered none of that until 2026-07-29**, and cost a
+  ten-times *slowdown* instead. `ResourceFileStore::read_chunk` derived the chunk
+  offset from the core's chunk size but capped the chunk *length* with the
+  hardcoded 100 KiB literal — a faithful copy of
+  `src/C4Network2Res.cpp:1268-1269`, which is self-consistent in C++ only because
+  every core C++ publishes carries `ChunkSize = C4NetResChunkSize`
+  (`src/C4Network2Res.cpp:81`, `:89`). Against a 10 KiB core each chunk therefore
+  overlapped the following nine: the host served roughly ten times the file to
+  deliver it once, the reliable-UDP burst stayed 206 fragments so the head-of-line
+  window was never actually reduced, and the client credited one chunk per
+  response. Fixed by sizing from the core's own stride, which is identical for
+  every core C++ can publish and also stops wasting a stock C++ client's
+  bandwidth. Pinned by `serving_every_chunk_moves_the_file_exactly_once` and
+  `cpp_chunk_reads_offset_and_size_by_the_core_chunk_size`, which asserts the two
+  forms still coincide at C++'s own chunk size.
+  `RESOURCE_MAX_LOADS` is scaled with the chunk size (see the per-peer entry
+  above), so the maximum outstanding bulk stays C++'s 2 MB.
   The existing `reliable_udp_redundant_copies` mitigation does not help here: it
   is gated at inner packets <= 256 bytes, so it protects control against *loss*
   and does nothing about control being *queued behind* bulk.

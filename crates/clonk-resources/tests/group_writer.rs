@@ -1646,3 +1646,19 @@ fn oracle_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
+
+/// A new group carries C4Group's native default until something overwrites it,
+/// and `pack` writes whatever `maker_bytes` reports, so the accessor is the
+/// authority on what a reader will see in the packed header.
+#[test]
+fn maker_bytes_reports_what_pack_writes() {
+    let mut group = MutableGroup::new("Report.c4g");
+    group.add_file("Info.txt", b"payload".to_vec()).unwrap();
+    assert_eq!(group.maker_bytes(), b"New C4Group");
+
+    group.set_maker_bytes(b"Overwritten");
+    assert_eq!(group.maker_bytes(), b"Overwritten");
+
+    let packed = Group::from_memory(PathBuf::from("Report.c4g"), group.pack().unwrap()).unwrap();
+    assert_eq!(packed.maker_bytes(), Some(group.maker_bytes()));
+}

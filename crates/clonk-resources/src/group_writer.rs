@@ -511,6 +511,21 @@ impl MutableGroup {
         self.maker = *field;
     }
 
+    /// The NUL-terminated maker body [`MutableGroup::pack`] will write, which is
+    /// what [`crate::Group::maker_bytes`] reads back and what a network resource
+    /// core serializes (`C4Network2Res::SetByGroup`). Callers that stamp the
+    /// process maker conditionally need this rather than their own input: a
+    /// group created here carries the native `New C4Group` default until it is
+    /// overwritten.
+    pub fn maker_bytes(&self) -> &[u8] {
+        let length = self
+            .maker
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.maker.len());
+        &self.maker[..length]
+    }
+
     pub fn set_rewrite_header_template(&mut self, header: &[u8; GROUP_HEADER_SIZE]) {
         self.rewrite_header_template = Some(*header);
         self.maker.copy_from_slice(&header[40..72]);

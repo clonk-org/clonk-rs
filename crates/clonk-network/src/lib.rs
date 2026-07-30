@@ -130,7 +130,7 @@ pub use host_initial_resources::{
 };
 pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
-    HostResourceType, MAX_PLAYER_BIG_ICON_SIZE,
+    HostResourceType, MAX_PLAYER_BIG_ICON_SIZE, STOCK_CHUNK_SIZE,
 };
 pub use http_backend::{HttpBackend, NETIO_HAPPY_EYEBALLS_TIMEOUT, NETIO_QUERY_TIMEOUT};
 pub use initial_network_dynamic::{

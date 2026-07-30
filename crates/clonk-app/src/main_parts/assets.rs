@@ -607,7 +607,7 @@ pub(crate) fn run_console_event_loop(
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.refresh_ceilings(),
     );
 
     let outcome = (|| -> Result<()> {
@@ -625,7 +625,7 @@ pub(crate) fn run_console_event_loop(
                 app.mode,
                 app.engine.game_tick_delay_ms(),
                 app.engine.game_tick_delay_revision(),
-                app.max_refresh_delay_ms,
+                app.refresh_ceilings(),
                 &mut frame_schedule,
                 &mut accumulator,
                 frame_time,
@@ -4961,6 +4961,9 @@ fn runtime_help_default_key_name(name: &str, index: usize) -> &'static str {
         ("MsgBoardScrollDown", 0) => "Shift+Down",
         ("ToggleChat", 0) => "Alt+C",
         ("ScoreboardToggle", 0) => "Tab",
+        // C4Game::InitKeyboard registers the observer-menu opener on K_SPACE
+        // (C4Game.cpp:3428); C4FullScreen::ViewportCheck renders its name.
+        ("FullscreenMenuOpen", 0) => "Space",
         ("Screenshot", 0) => "F9",
         ("ScreenshotEx", 0) => "Ctrl+F9",
         ("GameSpeedUp", 0) => {
@@ -5108,6 +5111,7 @@ pub(crate) fn build_runtime_flash_resources(table: &RuntimeLanguageTable) -> Run
         no_debug_mode: text("IDS_MSG_NODEBUGMODE"),
         on: text("IDS_CTL_ON"),
         off: text("IDS_CTL_OFF"),
+        observer_menu: text("IDS_MSG_PRESSORPUSHANYGAMEPADBUTT"),
     }
 }
 
@@ -8600,6 +8604,47 @@ pub(crate) fn configured_snap_text_to_pixels(config: &[u8]) -> bool {
 /// is recorded as a deliberate divergence in `PORT_STATUS.md`.
 pub(crate) fn configured_sky_dither(config: &[u8]) -> bool {
     configured_remaster_feature(config, "SkyDither")
+}
+
+/// `Graphics.SmoothPresentation`: opt in to presenting at the display's own
+/// refresh period instead of C++'s 30 ms `Graphics.MaxRefreshDelay` ceiling.
+///
+/// C++ chose 30 ms against a 28 ms game tick, which welds presentation to one
+/// frame per tick. That is invisible for world content — the simulation really
+/// does advance only every 28 ms — but the mouse pointer is drawn *into* the
+/// frame (`draw_classic_gui_cursor`) with the platform cursor hidden, so the
+/// refresh period is also the pointer's update period. On a 120 Hz panel that
+/// is a 35.7 Hz pointer next to a 120 Hz system cursor.
+///
+/// This substitutes the panel period for the ceiling of the **startup timer**
+/// only, and changes nothing else: the divisor is C++'s own
+/// (`refresh_interval_for_tick`) and the 16 ms logic tick is untouched. The game
+/// timer deliberately keeps the oracle ceiling — measured, subdividing it buys
+/// +0.6 FPS for an 8 ms longer average pass and 49x the automatic frame skips,
+/// because in game the pass cost binds first. See `RefreshCeilings` and the
+/// `PORT_STATUS.md` divergence entry.
+pub(crate) fn configured_smooth_presentation(config: &[u8]) -> bool {
+    configured_remaster_feature(config, "SmoothPresentation")
+}
+
+/// The refresh ceiling actually in force. An explicit `Graphics.MaxRefreshDelay`
+/// is always honoured; otherwise smooth presentation substitutes the display
+/// period, clamped so it can never be slower than the native default.
+pub(crate) fn effective_max_refresh_delay_ms(
+    config: &[u8],
+    display_refresh_period_ms: Option<u64>,
+) -> u64 {
+    if crate::native_config_text(config, "Graphics", "MaxRefreshDelay").is_some() {
+        return configured_max_refresh_delay_ms(config);
+    }
+    if !configured_smooth_presentation(config) {
+        return DEFAULT_MAX_REFRESH_DELAY_MS;
+    }
+    // A panel that reports nothing still gets the 60+ FPS presentation the
+    // startup timer already assumes; it just does not get 120.
+    display_refresh_period_ms
+        .unwrap_or(STARTUP_FRAME_INTERVAL.as_millis() as u64)
+        .clamp(1, DEFAULT_MAX_REFRESH_DELAY_MS)
 }
 
 pub(crate) fn configured_max_refresh_delay_ms(config: &[u8]) -> u64 {

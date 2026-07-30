@@ -7,7 +7,8 @@ use clonk_engine::{LegacyCString, NetworkResourceCore};
 use clonk_network::{
     HostResourceType, ResourceCatalogAction, ResourceDataPacket, ResourceDiscoverPacket,
     ResourceFileOwnership, ResourcePacket, ResourceRequestPacket, ResourceStatusPacket,
-    ResourceTransferBackend, ResourceTransferEvent,
+    ResourceTransferBackend, ResourceTransferEvent, RESOURCE_MAX_LOADS,
+    RESOURCE_MAX_LOAD_PER_PEER_IN_GAME, RESOURCE_MAX_LOAD_PER_PEER_PER_FILE,
 };
 
 fn core(
@@ -111,20 +112,24 @@ fn cpp_host_and_client_exchange_all_chunks_without_sockets() {
 }
 
 #[test]
-fn cpp_refill_stops_at_three_requests_per_peer_and_nineteen_total() {
-    // StartLoad refuses the third existing load at a peer and the twentieth
-    // total load (src/C4Network2Res.cpp:1042-1110).
+fn cpp_refill_stops_at_the_per_peer_and_per_resource_load_caps() {
+    // StartLoad refuses the (cap+1)-th existing load at a peer and the last
+    // total load (src/C4Network2Res.cpp:1042-1110). C++'s literals are 3 and 20;
+    // this port scales both with its smaller chunk size, so the thresholds are
+    // asserted through the constants. The byte window they buy is pinned against
+    // C++ by `the_lobby_load_caps_hold_the_cpp_byte_window`.
     let directory = TestDirectory::new("limits");
-    let resource_core = core(8, b"large.c4s", 30, 1, 0);
+    let chunk_count = i32::try_from(RESOURCE_MAX_LOADS).unwrap() * 3;
+    let resource_core = core(8, b"large.c4s", u32::try_from(chunk_count).unwrap(), 1, 0);
     let mut backend = ResourceTransferBackend::new(1, directory.path()).unwrap();
     backend.register_remote_loadable(resource_core).unwrap();
     let status = ResourcePacket::Status(ResourceStatusPacket {
         resource_id: 8,
         chunks: clonk_network::ResourceChunkAvailability {
-            chunk_count: 30,
+            chunk_count,
             ranges: vec![clonk_network::ResourceChunkRange {
                 start: 0,
-                length: 30,
+                length: chunk_count,
             }],
         },
     });
@@ -152,10 +157,16 @@ fn cpp_refill_stops_at_three_requests_per_peer_and_nineteen_total() {
     requests.iter().for_each(|(peer_id, _)| {
         *by_peer.entry(*peer_id).or_default() += 1;
     });
-    assert_eq!(requests.len(), 19);
-    assert_eq!(backend.catalog().outstanding_load_count(8), 19);
-    assert!(by_peer.values().all(|count| *count <= 3));
-    assert_eq!(by_peer.values().copied().max(), Some(3));
+    let total = RESOURCE_MAX_LOADS - 1;
+    assert_eq!(requests.len(), total);
+    assert_eq!(backend.catalog().outstanding_load_count(8), total);
+    assert!(by_peer
+        .values()
+        .all(|count| *count <= RESOURCE_MAX_LOAD_PER_PEER_PER_FILE));
+    assert_eq!(
+        by_peer.values().copied().max(),
+        Some(RESOURCE_MAX_LOAD_PER_PEER_PER_FILE)
+    );
     assert_eq!(backend.remove_at_client(0), 1);
 }
 
@@ -777,4 +788,48 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+/// The in-game narrowing has to land on the catalog that actually schedules. A
+/// client with a transfer backend downloads through the backend's catalog
+/// (`dispatch_client_resource_packet` prefers it and only falls back to the bare
+/// one when there is no backend), so narrowing anything else leaves the lobby
+/// window in force while control is flowing -- bulk ahead of control on the same
+/// strictly-ordered stream, which is what freezes a runtime join and, through
+/// lockstep, everybody else.
+#[test]
+fn narrowing_the_window_reaches_the_scheduling_catalog() {
+    let directory = TestDirectory::new("narrow");
+    let chunk_count = 64;
+    let mut backend = ResourceTransferBackend::new(1, directory.path()).unwrap();
+    backend
+        .register_remote_loadable(core(12, b"narrow.c4s", chunk_count, 1, 0))
+        .unwrap();
+    backend.set_max_loads_per_peer(RESOURCE_MAX_LOAD_PER_PEER_IN_GAME);
+
+    let chunks = i32::try_from(chunk_count).unwrap();
+    let status = ResourcePacket::Status(ResourceStatusPacket {
+        resource_id: 12,
+        chunks: clonk_network::ResourceChunkAvailability {
+            chunk_count: chunks,
+            ranges: vec![clonk_network::ResourceChunkRange {
+                start: 0,
+                length: chunks,
+            }],
+        },
+    });
+    let mut safe_random = |_| 0;
+    let mut requests = requests_from(backend.on_packet(10, &status, 0, &mut safe_random).unwrap());
+    requests.extend(requests_from(
+        backend
+            .process_actions(
+                [ResourceCatalogAction::RefillRequests { resource_id: 12 }],
+                0,
+                &mut safe_random,
+            )
+            .unwrap(),
+    ));
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(backend.catalog().outstanding_load_count(12), 1);
 }

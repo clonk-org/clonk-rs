@@ -922,7 +922,7 @@ async fn run_league_record_runtime(
                 publish_league_record_stream_status(&status, Some(&*stream));
                 if let Some(result) = shutdown_result {
                     if let Some(completion) = shutdown_completion.take() {
-                        let _ = completion.send(result);
+                        complete_league_record_runtime_shutdown(&status, completion, result);
                     }
                     break;
                 }
@@ -997,8 +997,11 @@ async fn run_league_record_runtime(
                                 .as_ref()
                                 .is_some_and(clonk_network::LeagueRecordStream::is_streaming);
                         if !needs_drain {
-                            publish_league_record_stream_status(&status, None);
-                            let _ = completion.send(Ok(()));
+                            complete_league_record_runtime_shutdown(
+                                &status,
+                                completion,
+                                Ok(()),
+                            );
                             break;
                         }
                         shutdown_completion = Some(completion);
@@ -1013,7 +1016,11 @@ async fn run_league_record_runtime(
                         match dispatch_result {
                             Err(error) => {
                                 if let Some(completion) = shutdown_completion.take() {
-                                    let _ = completion.send(Err(error.to_string()));
+                                    complete_league_record_runtime_shutdown(
+                                        &status,
+                                        completion,
+                                        Err(error.to_string()),
+                                    );
                                 }
                                 break;
                             }
@@ -1023,7 +1030,11 @@ async fn run_league_record_runtime(
                                     .is_some_and(|stream| !stream.is_streaming()) =>
                             {
                                 if let Some(completion) = shutdown_completion.take() {
-                                    let _ = completion.send(Ok(()));
+                                    complete_league_record_runtime_shutdown(
+                                        &status,
+                                        completion,
+                                        Ok(()),
+                                    );
                                 }
                                 break;
                             }
@@ -1036,6 +1047,15 @@ async fn run_league_record_runtime(
     }
 
     publish_league_record_stream_status(&status, None);
+}
+
+fn complete_league_record_runtime_shutdown(
+    status: &Mutex<LeagueRecordStreamStatus>,
+    completion: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+    result: std::result::Result<(), String>,
+) {
+    publish_league_record_stream_status(status, None);
+    let _ = completion.send(result);
 }
 
 fn publish_league_record_stream_status(
@@ -8910,6 +8930,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        // C++ clears the stream synchronously before returning from
+        // `StopStreaming` (`src/C4Network2.cpp:3099-3112`).
         assert_eq!(runtime.status(), LeagueRecordStreamStatus::default());
 
         let request = request.join().unwrap();

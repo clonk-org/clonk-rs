@@ -31,7 +31,11 @@ use crate::ResourceFileOwnership;
 /// cutting that head-of-line window by an order of magnitude. LegacyClonk raised
 /// this to 100 KiB in 2557ff3d to "better utilize available upload speed", which
 /// is the right trade for a fast link and the wrong one for a narrow one.
-const STOCK_CHUNK_SIZE: u32 = 10 * 1024;
+///
+/// Because this is the *unit* the load caps count in, shrinking it shrinks the
+/// in-flight byte window by the same factor. The caps are scaled to compensate;
+/// see [`crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE`].
+pub const STOCK_CHUNK_SIZE: u32 = 10 * 1024;
 
 /// What an unloadable core carries. Mirrors `clonk_engine`'s
 /// `NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE`, which is the value C++ substitutes

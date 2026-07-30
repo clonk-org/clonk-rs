@@ -9,7 +9,9 @@
 
 #strict
 
-#appendto SF5B
+// `nowarn`: the SFT ships with EkeReloaded, so every other scenario links
+// this script with the target absent (C4AulLink.cpp:42-49).
+#appendto SF5B nowarn
 
 func ControlLeftReleased()
 {

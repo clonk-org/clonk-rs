@@ -259,6 +259,14 @@ impl ResourceTransferBackend {
         &self.catalog
     }
 
+    /// Narrows or restores the per-peer window on the catalog that schedules
+    /// this backend's downloads. A client that has a backend downloads through
+    /// it, so this is the only reachable place to apply the in-game narrowing;
+    /// see [`ResourceCatalog::set_max_loads_per_peer`].
+    pub fn set_max_loads_per_peer(&mut self, max_loads_per_peer: usize) {
+        self.catalog.set_max_loads_per_peer(max_loads_per_peer);
+    }
+
     /// Reconciles a request that could not be placed on the selected peer's
     /// transport. The catalog owns the pre-send reservation and native refill
     /// policy; filesystem state is unaffected.
