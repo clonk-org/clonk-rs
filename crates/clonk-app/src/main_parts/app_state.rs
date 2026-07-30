@@ -2829,12 +2829,20 @@ impl PresentationDetailGovernor {
                 self.over_budget = 0;
                 self.detail = self.detail.step_down();
             }
-        } else if graphics_duration <= comfortable_ceiling {
+        } else {
+            // Both streaks are consecutive-pass counters, so a pass that fails
+            // one side's test still has to break the other's streak. A pass in
+            // the deadband between `comfortable_ceiling` and `budget` is
+            // neither an overrun nor comfortable: it clears both.
             self.over_budget = 0;
-            self.comfortable = self.comfortable.saturating_add(1);
-            if self.comfortable >= DETAIL_STEP_UP_PASSES {
+            if graphics_duration <= comfortable_ceiling {
+                self.comfortable = self.comfortable.saturating_add(1);
+                if self.comfortable >= DETAIL_STEP_UP_PASSES {
+                    self.comfortable = 0;
+                    self.detail = self.detail.step_up();
+                }
+            } else {
                 self.comfortable = 0;
-                self.detail = self.detail.step_up();
             }
         }
     }
