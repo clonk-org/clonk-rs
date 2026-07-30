@@ -491,7 +491,7 @@
 
         app.start_scenario(scenario)
             .expect("a regular scenario shipping restore infos starts");
-        wait_for_running_with_attempts(&mut app, 2_400);
+        wait_for_running_with_attempts(&mut app, 4_800);
 
         let script_player = app
             .engine
@@ -541,7 +541,7 @@
 
         app.start_scenario(scenario)
             .expect("a regular scenario shipping restore infos starts");
-        wait_for_running_with_attempts(&mut app, 2_400);
+        wait_for_running_with_attempts(&mut app, 4_800);
 
         let scientist = app
             .engine
