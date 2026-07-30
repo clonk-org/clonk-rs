@@ -17,6 +17,11 @@
 //!   mismatch behind `IsValidUpdate` and reports it as nothing to do
 //!   (`C4UpdateDlg.cpp:248`). Here it gets its own message, because the release
 //!   does exist and the user has to install it by hand.
+//! * **A finished check names the version it found rather than denying one.**
+//!   `IDS_MSG_NOUPDATEAVAILABLEFORTHISV` ("No update available for this
+//!   version") reads as *an update exists, just not for you*, which is the
+//!   message above and not this one, so the up-to-date case states the running
+//!   version instead (`IDS_MSG_UPTODATE`).
 
 use super::*;
 use crate::update_check::{spawn_update_check, PendingUpdateCheck, UpdateCheckOutcome};
@@ -52,6 +57,17 @@ impl GameApp {
                     .map(str::to_string)
             })
             .unwrap_or_else(|| DEFAULT_UPDATE_BASE_URL.to_string())
+    }
+
+    /// The caption every dialog the check raises carries.
+    ///
+    /// C++ titles all of them with `Config.Network.UpdateServerAddress`
+    /// (`C4UpdateDlg.cpp:277`, `:317`, `:384`, `:399`). There that was a bare
+    /// hostname; here the default is a full release-download URL, which is a
+    /// title bar's worth of address and names no command. The button that
+    /// opened the dialog does, so it supplies the caption instead.
+    pub(crate) fn update_check_caption(&self) -> String {
+        self.runtime_resource_text("IDS_DLG_CHECKFORUPDATES", "Check for Updates")
     }
 
     /// `Config.Network.AutomaticUpdate` (`C4StartupMainDlg.cpp:273`), which
@@ -134,7 +150,7 @@ impl GameApp {
                         "IDS_MSG_UPDATEINPROGRESS",
                         "Update still in progress. Please wait.",
                     ),
-                    self.update_server_address(),
+                    self.update_check_caption(),
                 ),
             };
         }
@@ -149,14 +165,13 @@ impl GameApp {
             .as_ref()
             .map(|paths| paths.install_root().to_path_buf());
         self.update_check = Some(PendingUpdateCheck {
-            receiver: spawn_update_check(server.clone(), install_root),
+            receiver: spawn_update_check(server, install_root),
             automatic,
-            server: server.clone(),
         });
         self.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::new(
                 self.runtime_resource_text("IDS_MSG_LOOKINGFORUPDATES", "Checking for updates..."),
-                server,
+                self.update_check_caption(),
                 clonk_frontend::message_dialog::MessageDialogButtons::CANCEL,
                 UPDATE_ICON,
                 clonk_frontend::message_dialog::MessageDialogSize::Regular,
@@ -187,7 +202,7 @@ impl GameApp {
             install_root.as_deref(),
             crate::update_check::TARGET_TRIPLE,
         );
-        self.finish_update_check(outcome, automatic, server)
+        self.finish_update_check(outcome, automatic)
     }
 
     /// Drains a finished check. Called from the ordinary application pass, so
@@ -208,7 +223,7 @@ impl GameApp {
         let Some(pending) = self.update_check.take() else {
             return Ok(());
         };
-        self.finish_update_check(outcome, pending.automatic, pending.server)
+        self.finish_update_check(outcome, pending.automatic)
     }
 
     /// Abandons the check behind the wait dialog the user just closed
@@ -225,10 +240,10 @@ impl GameApp {
         &mut self,
         outcome: UpdateCheckOutcome,
         automatic: bool,
-        server: String,
     ) -> Result<(), EngineError> {
         self.update_check = None;
         self.close_update_check_wait_dialog()?;
+        let caption = self.update_check_caption();
         match outcome {
             UpdateCheckOutcome::Available {
                 version,
@@ -252,7 +267,7 @@ impl GameApp {
                 self.push_message_dialog(
                     clonk_frontend::message_dialog::MessageDialogState::new(
                         message,
-                        server,
+                        caption,
                         clonk_frontend::message_dialog::MessageDialogButtons::YES_NO,
                         UPDATE_ICON,
                         clonk_frontend::message_dialog::MessageDialogSize::Regular,
@@ -264,15 +279,18 @@ impl GameApp {
             // `C4UpdateDlg.cpp:396-400`: an automatic check that finds nothing
             // says nothing.
             UpdateCheckOutcome::UpToDate if automatic => Ok(()),
-            UpdateCheckOutcome::UpToDate => self.show_update_notice(
-                self.runtime_resource_text(
-                    "IDS_MSG_NOUPDATEAVAILABLEFORTHISV",
-                    "No update available for this version.",
-                ),
-                server,
-            ),
+            UpdateCheckOutcome::UpToDate => {
+                let message = format_resource_string(
+                    self.runtime_resource_text(
+                        "IDS_MSG_UPTODATE",
+                        "Clonk Rust %s is the latest version.",
+                    ),
+                    &[clonk_core::version::PORT_VERSION],
+                );
+                self.show_update_notice(message, caption)
+            }
             UpdateCheckOutcome::EngineChanged { version } => {
-                self.show_manual_install_notice(&version, server)
+                self.show_manual_install_notice(&version, caption)
             }
             UpdateCheckOutcome::Failed { detail } => {
                 tracing::warn!(%detail, "the update check failed");
@@ -280,7 +298,7 @@ impl GameApp {
                     "{}: {detail}",
                     self.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.")
                 );
-                self.show_update_notice(message, server)
+                self.show_update_notice(message, caption)
             }
         }
     }

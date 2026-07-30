@@ -3221,10 +3221,7 @@ fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
         .expect("SDL Up mnemonic requests updates");
     assert_eq!(app.message_dialogs.len(), 1);
-    assert_eq!(
-        app.message_dialogs[0].state.caption(),
-        app.update_server_address()
-    );
+    assert_eq!(app.message_dialogs[0].state.caption(), "Check for Updates");
     assert!(app.ui_sound_log.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .expect("abort the update check");
@@ -4766,7 +4763,7 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
         .expect("start the manual update check");
     assert_eq!(app.startup_view, StartupView::About);
     let wait = app.message_dialogs.last().expect("visible update wait");
-    assert_eq!(wait.state.caption(), app.update_server_address());
+    assert_eq!(wait.state.caption(), "Check for Updates");
     assert_eq!(wait.state.message(), "Checking for updates...");
     assert!(app.update_check.is_some());
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)

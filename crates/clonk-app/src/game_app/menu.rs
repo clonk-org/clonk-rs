@@ -4462,8 +4462,8 @@ impl GameApp {
                 // The download and the out-of-process applier are not wired
                 // yet, so the accepted prompt says so rather than appearing to
                 // start an install that cannot finish.
-                let server = self.update_server_address();
-                self.show_manual_install_notice(&version, server)?;
+                let caption = self.update_check_caption();
+                self.show_manual_install_notice(&version, caption)?;
             }
             MessageDialogContinuation::UpdatePrompt { .. } => {}
             MessageDialogContinuation::UpdateNotice => {}

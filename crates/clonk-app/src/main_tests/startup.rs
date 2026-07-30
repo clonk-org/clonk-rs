@@ -1042,7 +1042,9 @@ fn update_result_dialog(app: &GameApp) -> &PendingMessageDialog {
 #[test]
 fn an_available_update_opens_the_localized_yes_no_prompt() {
     // `C4UpdateDlg.cpp:383-385`: IDS_MSG_ANUPDATETOVERSIONISAVAILA under
-    // btnYesNo and Ico_Ex_Update, captioned with the update server.
+    // btnYesNo and Ico_Ex_Update. C++ captions it with the update server
+    // address; this port captions the whole check flow with the command that
+    // opened it (see `game_app::update`).
     use crate::update_check::test_support::{manifest_for, FakeTransport, OFFERED_VERSION};
 
     let mut app = new_classic_menu_app(640, 480);
@@ -1060,7 +1062,7 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
         "An update to version 99.0.0 is available. \
              Do you want to download and install this update?"
     );
-    assert_eq!(prompt.state.caption(), app.update_server_address());
+    assert_eq!(prompt.state.caption(), "Check for Updates");
     assert_eq!(
         prompt.state.buttons(),
         clonk_frontend::message_dialog::MessageDialogButtons::YES_NO
@@ -1089,11 +1091,13 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     // and the out-of-process applier are not wired yet.
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .expect("accept the update");
+    let manual_install = update_result_dialog(&app);
     assert_eq!(
-        update_result_dialog(&app).state.message(),
+        manual_install.state.message(),
         "Version 99.0.0 cannot be installed from within the game. \
              Please install it manually."
     );
+    assert_eq!(manual_install.state.caption(), "Check for Updates");
 }
 
 #[test]
@@ -1113,7 +1117,14 @@ fn only_a_manual_check_reports_that_there_is_no_update() {
         .expect("present a manual check with nothing to offer");
     assert_eq!(
         update_result_dialog(&manual).state.message(),
-        "No update available for this version."
+        format!(
+            "Clonk Rust {} is the latest version.",
+            clonk_core::version::PORT_VERSION
+        )
+    );
+    assert_eq!(
+        update_result_dialog(&manual).state.caption(),
+        "Check for Updates"
     );
     assert_eq!(
         update_result_dialog(&manual).state.buttons(),
@@ -1144,6 +1155,9 @@ fn a_failed_check_reports_the_transport_error_after_the_localized_prefix() {
         failure.state.message()
     );
     assert!(failure.state.message().contains("503"));
+    // Never "Error" in a title bar: the caption names the command, and the
+    // failure itself is the body.
+    assert_eq!(failure.state.caption(), "Check for Updates");
     assert_eq!(
         failure.state.icon(),
         clonk_frontend::message_dialog::MessageDialogIcon::Extended(14)
@@ -1256,7 +1270,7 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
     assert!(app.startup_about_dialog.is_some());
     assert!(app.update_check.is_some(), "the check must be in flight");
     let wait = app.message_dialogs.last().expect("visible update wait");
-    assert_eq!(wait.state.caption(), app.update_server_address());
+    assert_eq!(wait.state.caption(), "Check for Updates");
     assert_eq!(wait.state.message(), "Checking for updates...");
     assert_eq!(
         wait.state.icon(),

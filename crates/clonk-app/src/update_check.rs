@@ -49,12 +49,9 @@ pub(crate) enum UpdateCheckOutcome {
 /// One check the application is waiting on.
 pub(crate) struct PendingUpdateCheck {
     pub(crate) receiver: Receiver<UpdateCheckOutcome>,
-    /// C++'s `fAutomatic`: it decides only whether "no update available" is
+    /// C++'s `fAutomatic`: it decides only whether an up-to-date result is
     /// worth a dialog (`C4UpdateDlg.cpp:396-400`).
     pub(crate) automatic: bool,
-    /// `Config.Network.UpdateServerAddress`, which C++ uses as the caption of
-    /// every dialog this check raises.
-    pub(crate) server: String,
 }
 
 /// Runs one check against an already-built transport.
