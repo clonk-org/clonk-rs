@@ -805,12 +805,23 @@ jobs:
               print("\n".join(lines[start + 1 : end]).strip())
           PY
 
-          # Names as published, so the sums file stays an exhaustive list of
-          # this release's assets rather than a partial one.
-          (cd assets && sha256sum clonk-rust-*) > assets/SHA256SUMS.txt
-          (cd components && sha256sum -- *.zip) >> assets/SHA256SUMS.txt
-          (cd manifest && sha256sum manifest.json) >> assets/SHA256SUMS.txt
-          cat assets/SHA256SUMS.txt
+          # No SHA256SUMS.txt. Releases here are published immutable, and GitHub
+          # attests them: a Sigstore bundle binding each asset digest to the run
+          # that produced it, fetched by digest with
+          #
+          #   gh api repos/{repo}/attestations/sha256:{digest}
+          #
+          # Deliberately not `gh attestation verify`. That command looks for
+          # SLSA build provenance over an artifact and 404s here — the immutable
+          # release predicate is `https://in-toto.io/attestation/release/v0.2`,
+          # whose subject is the release rather than any one file, so it does
+          # not match even when asked for by name.
+          #
+          # The sums file added nothing this does not: it sat beside the assets
+          # it vouched for, so whoever could replace an asset could replace the
+          # sums. Nothing read it either — a client checks each component
+          # against the SHA-256 in `manifest.json`, and `content.zip` against
+          # the `content.sha256` its own repository publishes.
 
           # Created non-draft with its assets in one step: there is no window
           # in which an empty release is visible. The components go up in that
@@ -818,7 +829,7 @@ jobs:
           # before the archives it names exist.
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
             gh release upload "v${VERSION}" \
-              assets/clonk-rust-* assets/SHA256SUMS.txt \
+              assets/clonk-rust-* \
               components/*.zip manifest/manifest.json --clobber
             gh release edit "v${VERSION}" --draft=false --latest
           else
@@ -826,6 +837,6 @@ jobs:
               --title "Clonk Rust ${VERSION}" \
               --notes-file release-notes.md \
               --latest \
-              assets/clonk-rust-* assets/SHA256SUMS.txt \
+              assets/clonk-rust-* \
               components/*.zip manifest/manifest.json
           fi
