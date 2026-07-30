@@ -10399,6 +10399,68 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
     }
 }
 
+impl Engine {
+    /// `C4Game::ReloadParticle` (`C4Game.cpp:2369-2394`).
+    ///
+    /// Four behaviours a plausible port softens:
+    ///
+    /// - the **network refusal is the first line**, before the name check and
+    ///   before any lookup, so a network game reloads nothing;
+    /// - an **unknown name reloads nothing and clears nothing** — it is a
+    ///   plain `false`, not a failure;
+    /// - a **failed reload clears every particle in the system**, not just
+    ///   this definition's, then removes the definition; and
+    /// - `C4ParticleDef::Reload` refuses outright when the definition has no
+    ///   filename (`C4Particles.cpp:197`), which is every manually registered
+    ///   simulation-only def.
+    pub fn reload_particle(&mut self, name: &str, network_enabled: bool) -> bool {
+        if network_enabled {
+            return false;
+        }
+        // An unknown name is a plain `false`: nothing is reloaded and nothing
+        // is cleared. Only a def that exists and then fails to reload is
+        // destructive.
+        let Some(index) = self
+            .particle_system
+            .defs()
+            .iter()
+            .position(|def| def.core.name == name)
+        else {
+            return false;
+        };
+        let source = self.particle_system.defs()[index].source_path.clone();
+        // `C4ParticleDef::Reload` refuses when there is no filename
+        // (`C4Particles.cpp:197`) — and that refusal is a *failed* reload, so
+        // it takes the destructive arm like any other.
+        let reloaded = source.as_ref().and_then(|path| {
+            clonk_resources::Group::open(path)
+                .ok()
+                .and_then(|group| clonk_resources::ParticleDefinition::load(&group).ok())
+        });
+        let Some(resource) = reloaded else {
+            // "safer: remove all particles" — the whole system, not just this
+            // definition's, then the definition itself.
+            self.particle_system.clear_particles();
+            self.particle_system.remove_def(name);
+            return false;
+        };
+        // `Reload` mutates the definition in place, so its position in
+        // `pDef0..pDefL` must not change: a remove-then-register would move it
+        // to the tail and reorder every later definition.
+        self.particle_system.remove_def(name);
+        if self
+            .particle_system
+            .register_resource_from(&resource, source)
+            .is_err()
+        {
+            self.particle_system.clear_particles();
+            return false;
+        }
+        self.particle_system.restore_def_order(index);
+        true
+    }
+}
+
 /// The edit cursor's world hit test, bound to one snapshot.
 ///
 /// This is the bridge `developer_cursor::edit_target` needs: it supplies that

@@ -1064,6 +1064,32 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `position_subkey` and `store_size` therefore describe **Windows-only**
   behaviour — wiring them to config on macOS would be a divergence, not parity.
 
+- **`ReloadParticle`'s engine half landed (M10-P4-L048's particle steps).**
+  `Engine::reload_particle` ports `C4Game::ReloadParticle`
+  (`C4Game.cpp:2369-2394`), and the ticket's claim that it depends on
+  M10-P4-L086 is false — `C4ParticleDef::Reload` needs only `Filename` plus
+  `C4Group::Open` and `Load` (`C4Particles.cpp:194-205`), all of which existed.
+  What was missing was the filename: `ParticleDef` now carries a `source_path`,
+  set by `register_resource_from`.
+  Four behaviours a plausible port softens, all pinned by
+  `reload_particle_refuses_network_and_clears_everything_on_failure`:
+  the **network refusal is the first line**, before the name check and any
+  lookup; an **unknown name is a plain `false`** that reloads nothing and
+  clears nothing; a **failed reload clears every particle in the system**, not
+  just this definition's, and then removes the definition; and
+  `C4ParticleDef::Reload` **refusing for want of a filename is itself a failed
+  reload**, so it takes that same destructive arm rather than returning early.
+  One ordering trap: `Reload` mutates the definition **in place**, so its
+  position in `pDef0..pDefL` is unchanged. The port's registration pushes to
+  the tail, so `restore_def_order` puts it back — otherwise every later
+  definition shifts and `GetDef` finds a different one for a duplicate name.
+  **Still open:** the script-facing `ReloadParticle`. `FnReloadParticle`
+  (`C4Script.cpp:5161-5165`, not the `:4992-4996` the port's comment claimed)
+  forwards straight to `Game.ReloadParticle`, but a host function reaches the
+  engine only through the staged-command channel, so it still returns `false` —
+  which is what C++ returns for every name it *cannot* reload, confining the
+  divergence to a successful script-driven reload.
+
 - **Live-reload path matching landed; the reload itself is open.**
   `clonk-engine::developer_reload` ports `C4DefList::GetByPath`
   (`C4Def.cpp:1137-1152`), which decides whether a changed file names a loaded

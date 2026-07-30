@@ -293,6 +293,12 @@ pub struct ParticleDef {
     pub graphics: Option<ParticleGraphics>,
     /// Number of live particles of this kind (C4Particles.h:104).
     pub count: i32,
+    /// `C4ParticleDef::Filename` — the group this def was loaded from.
+    /// `Reload` re-opens exactly this path (`C4Particles.cpp:196-205`), and a
+    /// def with no filename refuses to reload at all (`:197`). Manually
+    /// registered simulation-only defs have none.
+    #[serde(default, skip)]
+    pub source_path: Option<std::path::PathBuf>,
 }
 
 /// Load failure reasons (C4Particles.cpp:142-177 logs + returns false).
@@ -385,7 +391,7 @@ impl ParticleSystem {
         gfx_length: i32,
         aspect: f32,
     ) -> Result<(), ParticleDefError> {
-        self.register_def_with_graphics(core, gfx_length, aspect, None)
+        self.register_def_with_graphics(core, gfx_length, aspect, None, None)
     }
 
     fn register_def_with_graphics(
@@ -394,6 +400,7 @@ impl ParticleSystem {
         gfx_length: i32,
         aspect: f32,
         graphics: Option<ParticleGraphics>,
+        source_path: Option<std::path::PathBuf>,
     ) -> Result<(), ParticleDefError> {
         if gfx_length <= 0 {
             return Err(ParticleDefError::InvalidLength);
@@ -433,6 +440,7 @@ impl ParticleSystem {
             self.defs.remove(index);
         }
         self.defs.push(ParticleDef {
+            source_path,
             core,
             length,
             aspect,
@@ -454,6 +462,17 @@ impl ParticleSystem {
     pub fn register_resource(
         &mut self,
         resource: &clonk_resources::ParticleDefinition,
+    ) -> Result<(), ParticleDefError> {
+        self.register_resource_from(resource, None)
+    }
+
+    /// Register a decoded resource, remembering the group it came from so
+    /// `C4ParticleDef::Reload` can re-open exactly that path
+    /// (`C4Particles.cpp:196-205`).
+    pub fn register_resource_from(
+        &mut self,
+        resource: &clonk_resources::ParticleDefinition,
+        source_path: Option<std::path::PathBuf>,
     ) -> Result<(), ParticleDefError> {
         let facet = ParticleGraphicsFacet {
             x: resource.facet.x,
@@ -491,7 +510,38 @@ impl ParticleSystem {
             columns,
             aspect,
             Some(graphics),
+            source_path,
         )
+    }
+
+    /// The definition list in registration order.
+    pub fn defs(&self) -> &[ParticleDef] {
+        &self.defs
+    }
+
+    /// Move the most recently registered definition back to `index`.
+    ///
+    /// `C4ParticleDef::Reload` mutates the definition **in place**, so its
+    /// position in `pDef0..pDefL` is unchanged. Rebuilding it by remove and
+    /// re-register would move it to the tail and reorder every later
+    /// definition, which changes what `GetDef` finds for a duplicate name.
+    pub fn restore_def_order(&mut self, index: usize) {
+        if index < self.defs.len() {
+            let last = self.defs.len() - 1;
+            self.defs[index..=last].rotate_right(1);
+        }
+    }
+
+    /// `delete pDef` — unlink one definition from the list
+    /// (`C4Particles.cpp:104-111`).
+    ///
+    /// C++ leaves `pSmoke`/`pBlast`/`pFSpark`/`pFire1`/`pFire2` dangling here
+    /// because it never re-runs `SetDefParticles`; the port drops the entry
+    /// cleanly instead, since reproducing a dangling pointer is not parity.
+    pub fn remove_def(&mut self, name: &str) -> bool {
+        let before = self.defs.len();
+        self.defs.retain(|def| def.core.name != name);
+        self.defs.len() != before
     }
 
     pub fn particles(&self) -> &[Particle] {
@@ -962,6 +1012,36 @@ impl ParticleSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C4Game.cpp:2369-2394 — ReloadParticle's exact refusal and failure policy.
+    #[test]
+    fn reload_particle_refuses_network_and_clears_everything_on_failure() {
+        let mut engine = crate::Engine::new();
+        engine
+            .particle_system
+            .register_def(std_core("Smoke"), 4, 1.0)
+            .expect("register a simulation-only particle def");
+
+        // The network refusal is the FIRST line — before the name check and
+        // before any lookup, so nothing is touched.
+        assert!(!engine.reload_particle("Smoke", true));
+        assert!(engine.particle_system.get_def("Smoke").is_some());
+
+        // An unknown name reloads nothing and clears nothing: a plain false,
+        // not a failure, so the known def survives it.
+        assert!(!engine.reload_particle("NoSuchParticle", false));
+        assert!(engine.particle_system.get_def("Smoke").is_some());
+
+        // A def that exists but cannot reload takes the destructive arm:
+        // `C4ParticleDef::Reload` refuses without a filename
+        // (C4Particles.cpp:197), and `ReloadParticle` treats that like any
+        // other failure — every particle in the system goes, then the def.
+        assert!(!engine.reload_particle("Smoke", false));
+        assert!(
+            engine.particle_system.get_def("Smoke").is_none(),
+            "a failed reload removes the definition"
+        );
+    }
 
     fn std_core(name: &str) -> ParticleDefCore {
         ParticleDefCore {
