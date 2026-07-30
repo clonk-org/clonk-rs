@@ -4956,6 +4956,53 @@
         );
     }
 
+    // C4Viewport.cpp:1126-1155 — a windowed viewport draws the one viewport
+    // its window owns, at that window's own extent, and hands the pixels back
+    // for the window to blit (`BlitOutput`, :1121-1124).
+    #[test]
+    fn console_viewport_render_uses_the_windows_own_extent_and_identity() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        let second = app.local_owner + 1;
+        app.engine
+            .register_player(PlayerConfig::new(second, "Second window"))
+            .expect("register second window player");
+        app.snapshot = app.engine.snapshot();
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(Some(
+            second,
+        ))])
+        .expect("console player viewport");
+
+        let identities = app
+            .physical_viewports
+            .iter()
+            .map(|viewport| viewport.physical_identity)
+            .collect::<Vec<_>>();
+        assert!(identities.len() >= 2);
+
+        // Every live viewport draws, each into its own window extent — the
+        // windows are deliberately different sizes so a shared surface or a
+        // fullscreen layout split would show up here.
+        for (index, identity) in identities.iter().enumerate() {
+            let width = 320 + index as u32 * 16;
+            let height = 200 + index as u32 * 8;
+            let surface = app
+                .render_console_viewport(*identity, width, height)
+                .unwrap_or_else(|| panic!("viewport {identity} is live"));
+            assert_eq!((surface.width(), surface.height()), (width, height));
+        }
+
+        // A closed viewport's window goes blank rather than adopting the
+        // remaining viewport's view.
+        let closed = identities[0];
+        app.physical_viewports
+            .retain(|viewport| viewport.physical_identity != closed);
+        assert!(app.render_console_viewport(closed, 320, 200).is_none());
+        assert!(app.render_console_viewport(u64::MAX, 320, 200).is_none());
+    }
+
     #[test]
     fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
         // FinishDerive returns on the main thread before its forwarded

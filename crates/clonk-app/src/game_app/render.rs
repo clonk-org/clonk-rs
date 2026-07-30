@@ -2565,6 +2565,40 @@ impl GameApp {
         Ok(RetainedGpuFrame { layers })
     }
 
+    /// Draw one console viewport window's frame.
+    ///
+    /// This is `C4Viewport::Execute` (`C4Viewport.cpp:1126-1155`) for a
+    /// windowed viewport: it draws the one viewport its window owns, at that
+    /// window's own extent, and hands the result back for the window to blit —
+    /// `BlitOutput` page-flips immediately for a windowed viewport and defers
+    /// only for a fullscreen one (`:1121-1124`).
+    ///
+    /// `width`/`height` are the window's logical extent. C++ derives them in
+    /// `UpdateOutputSize` as `ceilf(rect.Wdt / scale)` (`:798`) from the
+    /// window's own drawable, so the caller converts before calling.
+    ///
+    /// Returns `None` when the identity no longer has a physical viewport —
+    /// a closed viewport's window goes blank rather than adopting another
+    /// viewport's view.
+    pub(crate) fn render_console_viewport(
+        &mut self,
+        identity: u64,
+        width: u32,
+        height: u32,
+    ) -> Option<clonk_graphics::Surface> {
+        let Self {
+            snapshot,
+            graphics,
+            physical_viewports,
+            ..
+        } = self;
+        let inputs =
+            collect_viewport_inputs_from_physical_state(snapshot, physical_viewports).ok()?;
+        graphics
+            .render_detached_viewport(snapshot, &inputs, identity, width, height)
+            .map(|frame| frame.surface)
+    }
+
     pub(crate) fn render_running(
         &mut self,
         frame: &mut [u8],
