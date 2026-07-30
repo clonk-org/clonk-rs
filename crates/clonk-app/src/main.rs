@@ -3736,7 +3736,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn prepare_runtime_debug_flash(
+    fn prepare_runtime_resource_flash(
         &self,
         message: impl Fn(&RuntimeFlashResources) -> String,
     ) -> Option<RuntimeFlashMessage> {

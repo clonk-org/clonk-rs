@@ -4567,7 +4567,7 @@ impl GameApp {
     fn handle_runtime_debug_key(&mut self, key: RuntimeDebugKey) -> Result<bool, EngineError> {
         if key != RuntimeDebugKey::Mode && !self.engine.debug_mode() {
             let flash =
-                self.prepare_runtime_debug_flash(|resources| resources.no_debug_mode.clone());
+                self.prepare_runtime_resource_flash(|resources| resources.no_debug_mode.clone());
             self.runtime_flash_message = flash;
             return Ok(false);
         }
@@ -4576,15 +4576,16 @@ impl GameApp {
             RuntimeDebugKey::Mode => {
                 let enabled = self.engine.debug_mode();
                 if !self.engine.allow_debug() && !enabled {
-                    let flash = self.prepare_runtime_debug_flash(|resources| {
+                    let flash = self.prepare_runtime_resource_flash(|resources| {
                         resources.debug_mode_not_allowed.clone()
                     });
                     self.runtime_flash_message = flash;
                     return Ok(false);
                 }
                 let enabled = !enabled;
-                let flash = self
-                    .prepare_runtime_debug_flash(|resources| resources.debug_mode_on_off(enabled));
+                let flash = self.prepare_runtime_resource_flash(|resources| {
+                    resources.debug_mode_on_off(enabled)
+                });
                 self.engine.set_debug_mode(enabled);
                 if !enabled {
                     self.graphics
@@ -4597,7 +4598,7 @@ impl GameApp {
                 flags.show_vertices = !flags.show_vertices;
                 flags.show_entrance = !flags.show_entrance;
                 let enabled = flags.show_vertices || flags.show_entrance;
-                let flash = self.prepare_runtime_debug_flash(|resources| {
+                let flash = self.prepare_runtime_resource_flash(|resources| {
                     resources.on_off("Entrance+Vertices", enabled)
                 });
                 self.graphics.set_debug_draw_flags(flags);
@@ -4607,18 +4608,18 @@ impl GameApp {
                 let mut flags = self.graphics.debug_draw_flags();
                 let flash = if !(flags.show_action || flags.show_command || flags.show_pathfinder) {
                     flags.show_action = true;
-                    self.prepare_runtime_debug_flash(|_| "Actions".to_string())
+                    self.prepare_runtime_resource_flash(|_| "Actions".to_string())
                 } else if flags.show_action {
                     flags.show_action = false;
                     flags.show_command = true;
-                    self.prepare_runtime_debug_flash(|_| "Commands".to_string())
+                    self.prepare_runtime_resource_flash(|_| "Commands".to_string())
                 } else if flags.show_command {
                     flags.show_command = false;
                     flags.show_pathfinder = true;
-                    self.prepare_runtime_debug_flash(|_| "Pathfinder".to_string())
+                    self.prepare_runtime_resource_flash(|_| "Pathfinder".to_string())
                 } else {
                     flags.show_pathfinder = false;
-                    self.prepare_runtime_debug_flash(|resources| {
+                    self.prepare_runtime_resource_flash(|resources| {
                         resources.on_off("Actions/Commands/Pathfinder", false)
                     })
                 };
@@ -4629,7 +4630,7 @@ impl GameApp {
                 let mut flags = self.graphics.debug_draw_flags();
                 flags.show_solid_mask = !flags.show_solid_mask;
                 let enabled = flags.show_solid_mask;
-                let flash = self.prepare_runtime_debug_flash(|resources| {
+                let flash = self.prepare_runtime_resource_flash(|resources| {
                     resources.on_off("SolidMasks", enabled)
                 });
                 self.graphics.set_debug_draw_flags(flags);
