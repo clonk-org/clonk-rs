@@ -29,7 +29,32 @@
             .expect("the object is live")
             .clone();
 
+        // A named graphic that the reloaded definition no longer supplies must
+        // fall back to the object's own definition rather than being left
+        // pointing at a name nothing provides
+        // (`C4DefGraphicsPtrBackup::AssignUpdate`, C4DefGraphics.cpp:355-400).
+        if let Some(index) = engine.find_object_index(object) {
+            engine.objects[index].state.base_graphics = Some(crate::ObjectBaseGraphics {
+                definition: crate::DefinitionId::from("WIPF"),
+                graphics_name: Some("NoSuchVariant".to_string()),
+                blit_mode: 0,
+            });
+        }
+
         assert!(engine.reload_definition("WIPF", false));
+
+        let index = engine
+            .find_object_index(object)
+            .expect("the object is not removed: its own definition can serve it");
+        assert_eq!(
+            engine.objects[index]
+                .state
+                .base_graphics
+                .as_ref()
+                .and_then(|graphics| graphics.graphics_name.clone()),
+            None,
+            "a vanished named graphic falls back to the definition's own"
+        );
 
         // The object survives with its own state intact: `UpdateFace` writes
         // only definition projections, so position, Con, rotation and colour

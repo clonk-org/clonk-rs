@@ -1239,10 +1239,16 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   every existing caller; building the reload's own operation from the same
   primitives leaves those callers untouched, and the two can be unified later
   under a differential test rather than under time pressure.
-  **Still open** is only `C4DefGraphicsPtrBackup::AssignUpdate`'s **name-based**
-  graphics re-resolution (`C4DefGraphics.cpp:355-400`): a live object whose
-  `graphics_name` is gone from the reloaded sprite variants should fall back to
-  its own definition and be removed if that also fails. Notes on where it starts:
+  `C4DefGraphicsPtrBackup::AssignUpdate` landed with it
+  (`reassign_graphics_after_reload`). Re-resolution is **by name**, not pointer
+  patching (`C4DefGraphics.cpp:355-400`): a named graphic that survives the
+  reload keeps the object on it; one that is gone falls back to the object's own
+  definition; and an object that can do neither is removed rather than left
+  holding a name nothing supplies — leaving a dangling name is the divergence.
+  It runs *before* the face refresh so the refresh sees settled graphics.
+  With that, **M10-P4-L086 is complete**: provenance, the rebuild through the
+  production loader, removal, the failure sweep, the success sweep and the
+  graphics re-resolution. Historical notes on where the work started:
   `UpdateFace(true)` has no callable primitive — but its pieces are not
   scattered: they sit inside the **ChangeDef** path in
   `engine/economy.rs` (around the `object.shape_template = template` assignment),

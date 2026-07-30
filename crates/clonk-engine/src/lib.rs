@@ -10464,6 +10464,11 @@ impl Engine {
         if self.register_definition(definition).is_err() {
             return false;
         }
+        // `C4DefGraphicsPtrBackup::AssignUpdate` re-resolves live graphics
+        // **by name**, not by patching pointers (`C4DefGraphics.cpp:355-400`),
+        // and runs before the faces are refreshed so the refresh sees the
+        // settled graphics.
+        self.reassign_graphics_after_reload(id);
         // `C4Game::ReloadDef`'s success sweep: `UpdateFace(true)` on *every*
         // object of that id (`C4Game.cpp:2340-2345`). C++'s own comment says
         // why it is not a computed subset — an object can use another
@@ -10523,6 +10528,52 @@ impl Engine {
             let definition = self.definitions.get(id.as_str())?;
             (definition.source_path()? == candidate).then(|| id.as_str().to_string())
         })
+    }
+
+    /// `C4DefGraphicsPtrBackup::AssignUpdate` (`C4DefGraphics.cpp:355-400`).
+    ///
+    /// Re-resolution is **by name**, not pointer patching: for each live object
+    /// still pointing at the reloaded definition's graphics, C++ tries
+    /// `SetGraphics(Name, pDef)`, then `SetGraphics(Name, pObj->Def)`, and
+    /// `AssignRemoval`s the object when both fail. So a named graphic that
+    /// survives the reload keeps the object on it; one that is gone falls back
+    /// to the object's own definition; and an object that can do neither is
+    /// removed rather than left holding a name nothing supplies — leaving a
+    /// dangling name is the divergence.
+    fn reassign_graphics_after_reload(&mut self, id: &str) {
+        let Some(definition) = self.definitions.get(id) else {
+            return;
+        };
+        let surviving = definition.sprite_variant_keys();
+        let mut orphaned = Vec::new();
+        for object in self.objects.iter_mut() {
+            let Some(graphics) = object.state.base_graphics.as_mut() else {
+                continue;
+            };
+            if graphics.definition.as_str() != id {
+                continue;
+            }
+            let Some(name) = graphics.graphics_name.clone() else {
+                // The definition's default graphic, which the rebuild replaced
+                // in place: nothing to re-resolve.
+                continue;
+            };
+            if surviving.iter().any(|key| key == &name) {
+                continue;
+            }
+            // `SetGraphics(Name, pObj->Def)` — fall back to the object's own
+            // definition, which is the reloaded one here.
+            if object.definition_id.as_str() == id {
+                graphics.graphics_name = None;
+                continue;
+            }
+            orphaned.push(object.id);
+        }
+        for object in orphaned {
+            if let Err(error) = self.assign_object_removal(object) {
+                tracing::warn!(definition = %id, %error, "reload could not remove an orphaned object");
+            }
+        }
     }
 
     /// `C4Object::UpdateFace(true)` for one object (`C4Object.cpp:363-386`).
