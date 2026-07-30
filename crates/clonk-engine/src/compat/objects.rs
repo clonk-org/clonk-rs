@@ -818,7 +818,10 @@ pub(crate) fn effect_object_live_shape_rect(
         .unwrap_or_else(|| DefinitionRect::new(object.position().x, object.position().y, 1, 1))
 }
 
-fn live_exit_layer_bounds(
+/// The pLayer arm of C4Object::SideBounds/VerticalBounds
+/// (C4Movement.cpp:187-201, 209-223), including the DFA_ATTACH skip and the
+/// C4D_StaticBack shape-offset branch.
+fn live_layer_bounds(
     context: &EffectHostContext,
     target: ObjectId,
     horizontal: bool,
@@ -884,7 +887,7 @@ fn live_exit_layer_bounds(
     Some((low, high))
 }
 
-fn apply_live_exit_target_bounds(
+fn apply_live_target_bounds(
     target: ObjectId,
     coordinate: &mut i32,
     low: i32,
@@ -895,22 +898,27 @@ fn apply_live_exit_target_bounds(
     // These are deliberately independent, matching C4Object::TargetBounds.
     if *coordinate < low {
         *coordinate = low;
-        run_live_exit_bound_contact(target, low_cnat);
+        run_live_bound_contact(target, low_cnat);
     }
     if *coordinate > high {
         *coordinate = high;
-        run_live_exit_bound_contact(target, high_cnat);
+        run_live_bound_contact(target, high_cnat);
     }
 }
 
-fn bounds_check_live_exit(target: ObjectId, position: &mut Vector2) {
+/// C4Object::BoundsCheck (C4Object.h:392-395) for a live script target:
+/// SideBounds then VerticalBounds (C4Movement.cpp:185-229). Only pLayer and
+/// map-border limits gated on `Def->BorderBound` — landscape solidity never
+/// enters it. Runs Contact callbacks, so callers must hold no object-scope
+/// borrow across it.
+fn bounds_check_live_object(target: ObjectId, position: &mut Vector2) {
     let layer_side = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .and_then(|context| live_exit_layer_bounds(context, target, true))
+            .and_then(|context| live_layer_bounds(context, target, true))
     });
     if let Some((low, high)) = layer_side {
-        apply_live_exit_target_bounds(target, &mut position.x, low, high, CNAT_LEFT, CNAT_RIGHT);
+        apply_live_target_bounds(target, &mut position.x, low, high, CNAT_LEFT, CNAT_RIGHT);
     }
 
     let landscape_side = HOST_CONTEXT.with(|cell| {
@@ -928,16 +936,16 @@ fn bounds_check_live_exit(target: ObjectId, position: &mut Vector2) {
         Some((-shape_x, width.saturating_add(shape_x)))
     });
     if let Some((low, high)) = landscape_side {
-        apply_live_exit_target_bounds(target, &mut position.x, low, high, CNAT_LEFT, CNAT_RIGHT);
+        apply_live_target_bounds(target, &mut position.x, low, high, CNAT_LEFT, CNAT_RIGHT);
     }
 
     let layer_vertical = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .and_then(|context| live_exit_layer_bounds(context, target, false))
+            .and_then(|context| live_layer_bounds(context, target, false))
     });
     if let Some((low, high)) = layer_vertical {
-        apply_live_exit_target_bounds(target, &mut position.y, low, high, CNAT_TOP, CNAT_BOTTOM);
+        apply_live_target_bounds(target, &mut position.y, low, high, CNAT_TOP, CNAT_BOTTOM);
     }
 
     let top = HOST_CONTEXT.with(|cell| {
@@ -954,7 +962,7 @@ fn bounds_check_live_exit(target: ObjectId, position: &mut Vector2) {
         Some((-shape_y, 1_000_000))
     });
     if let Some((low, high)) = top {
-        apply_live_exit_target_bounds(target, &mut position.y, low, high, CNAT_TOP, CNAT_BOTTOM);
+        apply_live_target_bounds(target, &mut position.y, low, high, CNAT_TOP, CNAT_BOTTOM);
     }
 
     let bottom = HOST_CONTEXT.with(|cell| {
@@ -972,7 +980,7 @@ fn bounds_check_live_exit(target: ObjectId, position: &mut Vector2) {
         Some((-1_000_000, height.saturating_add(shape_y)))
     });
     if let Some((low, high)) = bottom {
-        apply_live_exit_target_bounds(target, &mut position.y, low, high, CNAT_TOP, CNAT_BOTTOM);
+        apply_live_target_bounds(target, &mut position.y, low, high, CNAT_TOP, CNAT_BOTTOM);
     }
 }
 
@@ -1038,7 +1046,7 @@ pub(crate) fn exit_object_at_position_with_full_motion_and_calls(
         return Ok(false);
     };
 
-    bounds_check_live_exit(target, &mut position);
+    bounds_check_live_object(target, &mut position);
 
     with_host_context_mut((), |context| {
         let definition_metadata = context

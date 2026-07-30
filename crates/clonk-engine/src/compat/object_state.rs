@@ -565,7 +565,10 @@ pub(crate) fn live_object_bounds_shape(
     host_vertex_bounds_rect(Vector2::ZERO, &vertices)
 }
 
-pub(crate) fn run_live_exit_bound_contact(target: ObjectId, cnat: u32) {
+/// The stop-and-call half of C4Object::TargetBounds (C4Movement.cpp:135-145,
+/// 152-162): zero xdir for CNAT_Left/Right or ydir otherwise, then
+/// C4Object::Contact — which dispatches only under `Def->ContactFunctionCalls`.
+pub(crate) fn run_live_bound_contact(target: ObjectId, cnat: u32) {
     let calls_enabled = with_host_context_mut(false, |context| {
         let definition_id = context.object_effective_definition_id(target);
         let calls_enabled = definition_id
