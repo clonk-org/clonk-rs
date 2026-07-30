@@ -1160,10 +1160,19 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   then answered exactly, and the only divergence left is an I/O failure between
   the check and the staged reload: a far narrower window than today's
   unconditional `false`.
-  Not attempted here on purpose. `EffectContextOutcome` sits in the script
-  execution path, which is determinism-critical, and this repo's own rule is to
-  freeze current behaviour with a differential test *before* changing such a
-  subsystem. That is a session's opening move, not its closing one.
+  `EffectContextOutcome` sits in the script execution path, which is
+  determinism-critical, so this repo's rule applies: freeze current behaviour
+  with a test *before* changing the subsystem. **That freeze is now in place** —
+  `reload_particle_reports_false_for_every_name_cpp_cannot_reload` pins the
+  script-visible contract for every case where C++ returns false (nil name,
+  unknown name) and that the return is `C4ValueInt`, not a bool. Any
+  implementation of the proposal above can therefore only ever turn a
+  *successful* reload from `false` into `true`; if it changes one of the frozen
+  answers, that test fails.
+  The remaining work is the plumbing itself: seed the context at its single
+  `EffectHostContext::new` call site, carry the staged requests through
+  `EffectContextOutcome`, and apply them where the engine destructures that
+  batch (`engine/game_over.rs`, alongside `trigger_game_over`).
 
 - **Live-reload path matching landed; the reload itself is open.**
   `clonk-engine::developer_reload` ports `C4DefList::GetByPath`

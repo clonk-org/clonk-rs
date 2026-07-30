@@ -3716,3 +3716,42 @@ pub(crate) fn effect_var_to_value(value: &EffectVarValue) -> Value {
         EffectVarValue::Nil => Value::Nil,
     }
 }
+
+#[cfg(test)]
+mod reload_particle_tests {
+    use super::*;
+
+    // C4Script.cpp:5161-5165 -> C4Game::ReloadParticle (C4Game.cpp:2369-2394).
+    //
+    // This freezes the script-visible contract before the synchronous-access
+    // design lands (see PORT_STATUS.md): every case where C++ returns false
+    // must keep returning false afterwards, so the change can only ever turn a
+    // *successful* reload from false into true.
+    #[test]
+    fn reload_particle_reports_false_for_every_name_cpp_cannot_reload() {
+        // `if (!szName) return false;` — the nil safety check.
+        assert_eq!(
+            reload_particle(&[]).expect("nil name is not an error"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            reload_particle(&[Value::Nil]).expect("nil name is not an error"),
+            Value::Int(0)
+        );
+
+        // `C4ParticleDef *pDef = Particles.GetDef(szName); if (!pDef) return false;`
+        // An unknown name reloads nothing and clears nothing.
+        assert_eq!(
+            reload_particle(&[Value::String("NoSuchParticle".into())])
+                .expect("unknown name is not an error"),
+            Value::Int(0)
+        );
+
+        // The return type is C4ValueInt, not a bool — a script comparing
+        // against 0 must keep working.
+        assert!(matches!(
+            reload_particle(&[Value::String("Smoke".into())]).expect("no error"),
+            Value::Int(_)
+        ));
+    }
+}
