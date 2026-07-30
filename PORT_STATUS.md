@@ -926,11 +926,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   reconstructible, so it is usually `None`. `EditCursorHitTest::shape_rect`
   resolves it through the *same* world view the hit test uses, which is what
   makes the mark and the click agree about what was clicked.
-  **Not yet verified:** that the mark is *visible*. A test proves the shape
-  resolves non-empty, but a frame drawn with a selection was byte-identical to
-  one without — consistent with the mark landing outside an ownerless
-  viewport's view rather than with a computation failure, though that has not
-  been confirmed. Do not assume this renders until someone has seen it.
+  Verifying that answered itself and found a bug. The invisible mark was two
+  separate things: the test's ownerless viewport had `ViewX = 864` while the
+  object sat at `x = 240`, so the mark was correctly computed and legitimately
+  off-screen — *and* `object_live_shape_rect` returns the shape in **world**
+  coordinates (`cobj->x + cobj->Shape.x`, the whole left-hand side of C++'s
+  expression), so adding the object's position again double-counted it and put
+  the mark an object-width from where it belonged. Both are fixed and the
+  coordinate convention is now pinned, including that the corner Ls point
+  *outward* — they reach one pixel beyond the shape on each side and no
+  further, which is what catches a displaced mark.
+  **Still not verified:** the mark on screen in a running editor. The maths is
+  pinned; nobody has seen it drawn.
   **Still open:** motion and release. `edit_move`, `edit_tick_move`,
   `edit_release`, `drop_target` and `frame_selection` are ported and tested but
   still uncalled, so a drag neither moves a selection nor completes a rubber

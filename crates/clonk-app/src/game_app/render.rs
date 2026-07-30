@@ -2725,12 +2725,16 @@ impl GameApp {
         let entries = selection
             .iter()
             .filter_map(|id| {
-                let object = snapshot.object(*id)?;
                 let shape = shapes.shape_rect(*id)?;
                 Some(OverlaySelection {
                     object: *id,
-                    x: object.position.x + shape.x - projection.target_x,
-                    y: object.position.y + shape.y - projection.target_y,
+                    // `object_live_shape_rect` already returns the shape in
+                    // *world* coordinates — `cobj->x + cobj->Shape.x`, the
+                    // whole left-hand side of C++'s expression — so only the
+                    // view origin is subtracted here. Adding the position
+                    // again would double-count it.
+                    x: shape.x - projection.target_x,
+                    y: shape.y - projection.target_y,
                     width: shape.width,
                     height: shape.height,
                 })

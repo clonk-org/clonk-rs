@@ -5052,6 +5052,37 @@
             "a clickable object has a shape to frame"
         );
 
+        // `DrawSelectMark` frames `cobj->x + cobj->Shape.x` relative to the
+        // view origin. `object_live_shape_rect` already returns that left-hand
+        // side in world coordinates, so the mark is the shape minus ViewX/ViewY
+        // — adding the object's position again would double-count it, which is
+        // exactly the bug this pins.
+        assert_eq!(
+            (shape.x, shape.y),
+            (position.x, position.y),
+            "the live shape rect is in world coordinates, not object-relative"
+        );
+
+        // Drawn into a viewport whose origin is the object's own position, the
+        // mark lands at the frame origin rather than one object-width away.
+        let marks = clonk_engine::developer_overlay::select_mark_pixels(
+            shape.x - position.x,
+            shape.y - position.y,
+            shape.width,
+            shape.height,
+        );
+        assert!(!marks.is_empty(), "a shape at least a pixel wide marks");
+        // The corner Ls point outward, so they reach one pixel beyond the
+        // shape on each side — but no further. This is what catches a mark
+        // computed an object-width away from where it belongs.
+        assert!(
+            marks
+                .iter()
+                .all(|(x, y)| (-1..=shape.width).contains(x)
+                    && (-1..=shape.height).contains(y)),
+            "the mark frames the shape it belongs to: {marks:?}"
+        );
+
         // Clicking the same object again changes nothing, which is what keeps
         // a selection draggable rather than collapsing it.
         assert!(app
