@@ -446,6 +446,38 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   needs an instrumented oracle run that prints the string the engine actually
   builds.
 
+- **`C4GameObjects::ValidateOwners` is not ported.**
+  `InitGameFinal` resets `Owner` to `NO_OWNER` for every object whose player
+  never joined, before the scenario constructor runs
+  (`C4Game.cpp:2741`, `C4ObjectList.cpp:576`); `C4PlayerList::Remove` repeats it
+  (`C4PlayerList.cpp:264`). There is no Rust counterpart, so an object loaded
+  from `Objects.txt` keeps a dangling owner when its restore row is dropped.
+  Newly relevant now that regular scenarios shipping `SavePlayerInfos.txt` take
+  the recreation branch: Drachenfels carries 27 objects with `Owner=10` that
+  are only valid because its `GameNumber=10` script player is restored.
+
+- **`C4PlayerInfoList::RemoveUnassociatedPlayers` is not ported.**
+  After `RestoreSavegameInfos`' association passes, C++ drops the savegame rows
+  no participant claimed (`C4PlayerInfo.cpp:1424-1441`), logging
+  `IDS_PRC_RESUMENOPLRASSOCIATION`. Unreachable for both shipped restore-info
+  scenarios (their only rows are script players, which are always claimed by
+  `CreateRestoreInfosForJoinedScriptPlayers`), but a real gap for savegames.
+
+- **The restored player-number sentinel differs from C++.**
+  `C4Player::Number` compiles from `Index` with default `C4P_Number_None`
+  (`-5`, `C4Player.cpp:1598`, `C4Player.h:31`) and falls back to the number
+  `RecreatePlayers` passed in. `runtime_join_player_restore.rs`'s
+  `parse_player_state` defaults `Index` to `-1` and then allocates the lowest
+  free number instead. Both shipped restore-info scenarios carry an explicit
+  `GameNumber`, so neither sentinel is reached; a savegame written by C++ with
+  no `Index` would diverge.
+
+- **Automatic user↔savegame association is unverified against C++.**
+  No shipped scenario sets `Head.SaveGame`, so the four `RestoreSavegameInfos`
+  matching passes (`C4PlayerInfo.cpp:1373-1391`, mirrored in
+  `offline_savegame.rs`) are reachable only from runtime-written saves. Their
+  fidelity rests on unit fixtures, not on a differential run.
+
 - **`C4PlayerList::Join`'s max-player rejection is not ported.**
   C++ refuses a join outright when `GetCount() + 1 > Game.Parameters.MaxPlayers`,
   logs `IDS_PRC_TOOMANYPLRS` and returns no `C4Player`
