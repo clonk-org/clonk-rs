@@ -3818,6 +3818,7 @@ impl GameApp {
                         NetworkEvent::PeerConnected { .. } => None,
                         NetworkEvent::PeerDisconnected { .. } => None,
                         NetworkEvent::PeerConnectionFailed { .. } => None,
+                        NetworkEvent::HostRestarting { .. } => None,
                         NetworkEvent::NetpuncherStateChanged { .. } => unreachable!(
                             "netpuncher state is applied before the classic-lobby boundary"
                         ),
@@ -4420,6 +4421,17 @@ impl GameApp {
                             // or changes an active round to local control
                             // (src/C4Network2.cpp:1825-1833).
                             self.record_network_error_round_result(&message);
+                            // Checked ahead of every native unwind: an
+                            // announced restart is unambiguous wherever this
+                            // client happens to be. Round, lobby and final
+                            // init all resolve to the same answer — the host
+                            // is coming back at this address, so wait for it
+                            // there rather than unwinding to the game list or
+                            // playing on alone.
+                            if self.pending_host_rejoin.is_some() {
+                                self.begin_pending_host_rejoin()?;
+                                break;
+                            }
                             if host_lost_in_lobby {
                                 // Clear makes an active DoLobby return false,
                                 // aborting C4Game::Init back through the
@@ -4471,6 +4483,12 @@ impl GameApp {
                                 clonk_network::LeagueDisconnectReason::ConnectionFailed,
                             );
                         }
+                    }
+                    // Only arms the intent. The round keeps running until the
+                    // host connection actually closes, which is both what
+                    // native does and the only proof the restart happened.
+                    NetworkEvent::HostRestarting { rejoin_seconds } => {
+                        self.arm_pending_host_rejoin(rejoin_seconds);
                     }
                     NetworkEvent::NetpuncherStateChanged {
                         game_ids,
@@ -5743,7 +5761,78 @@ impl GameApp {
         Ok(())
     }
 
+    /// Tells connected clients that this session is closing for a restart.
+    ///
+    /// Best-effort by design: a host with no live session, or one whose worker
+    /// has already failed, still restarts. Clients that miss the notice simply
+    /// keep the native dead-host behavior.
+    pub(crate) fn announce_network_round_restart(&mut self) {
+        if !matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
+            return;
+        }
+        if let Some(network) = self.network.as_ref() {
+            if let Err(error) = network
+                .broadcast_host_restarting(clonk_network::DEFAULT_HOST_RESTART_REJOIN_SECONDS)
+            {
+                tracing::warn!(%error, "failed to announce the round restart to clients");
+            }
+        }
+    }
+
+    /// Records that the imminent host loss is a restart to follow.
+    ///
+    /// A zero window is a host declining to be followed; it leaves the native
+    /// dead-host path in place. Longer windows are clamped: the value is a
+    /// remote peer's claim, and an unclamped one would hold this client in a
+    /// reconnect loop for as long as the sender liked.
+    pub(crate) fn arm_pending_host_rejoin(&mut self, rejoin_seconds: u16) {
+        if rejoin_seconds == 0 {
+            return;
+        }
+        let Some(NetworkMode::Client(settings)) = self.network_mode.as_ref() else {
+            return;
+        };
+        let window = rejoin_seconds.min(MAX_HOST_RESTART_REJOIN_SECONDS);
+        self.pending_host_rejoin = Some(PendingHostRejoin {
+            settings: settings.clone(),
+            deadline: Instant::now() + Duration::from_secs(u64::from(window)),
+            next_attempt_at: None,
+        });
+    }
+
+    /// Leaves the round the restarting host abandoned and reconnects to it.
+    ///
+    /// Uses the relaunch teardown rather than the ordinary one for the same
+    /// reason the host's own restart does: another connection opens
+    /// immediately, so the startup dialog and its music must not be rebuilt
+    /// behind it.
+    pub(crate) fn begin_pending_host_rejoin(&mut self) -> Result<(), EngineError> {
+        let Some(rejoin) = self.pending_host_rejoin.take() else {
+            return Ok(());
+        };
+        self.return_to_menu_for_relaunch();
+        // The host is gone, so its manager is dead regardless of which startup
+        // view the teardown above believed it was leaving.
+        self.network = None;
+        self.network_mode = None;
+        self.network_control_clock = None;
+        self.scenario_selector_mode = ScenarioSelectorMode::Local;
+        // Repeat the join itself, so the password, netpuncher brokerage and
+        // full route list survive. The teardown above cleared
+        // `pending_network_join`, which is also what the wrong-password
+        // recovery arm keys on.
+        self.pending_network_join = Some(rejoin.settings.clone());
+        self.pending_host_rejoin = Some(rejoin);
+        self.launch_pending_network_join()
+    }
+
     pub(crate) fn restart_current_network_scenario(&mut self) {
+        // Before anything is torn down: a restart re-hosts from scratch, and
+        // the only thing a client would otherwise observe is its connection
+        // closing — indistinguishable from a dead host
+        // (src/C4Network2.cpp:748-796,1826-1832). Announce the intent while
+        // there is still a session to announce it on.
+        self.announce_network_round_restart();
         let Some(scenario) = self.active_scenario.clone() else {
             self.return_to_menu();
             return;
@@ -5841,6 +5930,11 @@ impl GameApp {
         // Game.Parameters while changing only the cadence to ControlRate=1
         // (C4GameControl.cpp:93-127).
         let game_over_dialog_shown = self.game_over_dialog.is_some();
+        // Continuing the round alone is the opposite of following the host, and
+        // this path also leaves `self.network` empty — the very condition the
+        // rejoin poll waits for. Abandon it here or a worker-level failure
+        // would open a reconnect over a live, still-simulating round.
+        self.pending_host_rejoin = None;
         self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         let control_tick = self.engine.sync_check(local_client_id).control_tick;

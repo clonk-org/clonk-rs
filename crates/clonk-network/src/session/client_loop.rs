@@ -1389,6 +1389,15 @@ pub(crate) async fn run_client_loop_with_routes(
                         // stands.
                         peer_capabilities.record(HOST_CLIENT_ID as i32, capabilities);
                     }
+                    // Only the host restarts the session, so a notice relayed
+                    // by a peer client says nothing about the host's intent.
+                    Ok(ControlMessage::HostRestarting { .. })
+                        if ingress_peer_id != HOST_CLIENT_ID => {}
+                    Ok(ControlMessage::HostRestarting { rejoin_seconds }) => {
+                        let _ = event_tx
+                            .send(ClientEvent::HostRestarting { rejoin_seconds })
+                            .await;
+                    }
                     Ok(ControlMessage::Ping(packet)) => {
                         if let Err(error) = transport.send_message(ControlMessage::Pong(packet)).await {
                             let _ = event_tx

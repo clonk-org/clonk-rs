@@ -2393,6 +2393,48 @@ an ordered-map model gap.
   first ask's deadline survives continuations) remains C++'s and is still
   asserted.
 
+- **Restarting a network round returns every client to the lobby**
+  (`clonk-network/src/host_restart.rs` PID `0x71`,
+  `GameApp::announce_network_round_restart`,
+  `GameApp::begin_pending_host_rejoin`,
+  `GameApp::poll_pending_host_rejoin`; C++ `C4Application::QuitGame`
+  src/C4Application.cpp:373-405, `C4Network2::Clear` src/C4Network2.cpp:748-796,
+  `C4Network2::OnClientDisconnect` src/C4Network2.cpp:1802-1834). Approved
+  2026-07-29. A restart re-hosts from scratch — C++ backs up only
+  `NetworkActive` and the password, runs `Game.Clear()` (which closes `NetIO`
+  and drops every connection), then re-enters `Game::Init` with `fLobby` set.
+  Clients therefore observe nothing but a closed socket, which
+  `OnClientDisconnect` reads as a dead host: it records `NR_NetError` and calls
+  `Clear()`, so each client is left alone in the abandoned round with
+  `ChangeToLocal` while the host's new lobby comes up empty. Nothing in C++ can
+  distinguish this from a crash — there is no restart packet, and `C4Game::Clear`
+  zeroes `DirectJoinAddress` (src/C4Game.cpp:648-651), so a native client can
+  only rejoin by hand. The port states the intent on the wire instead: the host
+  broadcasts `PID_PortHostRestarting` before tearing down, and a client that
+  receives it leaves the round and reconnects to the address it already joined,
+  retrying once a second across the host's re-bind window (30 s by default,
+  carried in the packet and clamped locally to 120 s) before falling back to the
+  ordinary join failure. The reconnect repeats the *same join* — the retained
+  `ClientSettings`, so the password, netpuncher brokerage and full route list
+  survive — rather than rebuilding one from config. This is a
+  lobby/session-lifecycle change only: the notice never enters the control
+  queue, so control ticks, `RandomCount` and simulation state are untouched.
+  **Note on the port-only ID range:** the rationale in
+  `crates/clonk-network/src/capabilities.rs` — that C++ silently ignores an
+  unknown packet ID — is wrong. `C4IDPacket::CompileFunc` `excCorrupt`s on an ID
+  with no `FnUnpack` and `C4Network2IO::HandlePacket` catches that and closes
+  the connection in a release build (src/C4Network2IO.cpp:820-834,
+  src/C4Packet2.cpp:210-217). That is harmless for *this* packet, because the
+  host sends it immediately before closing the session anyway, so a C++ client
+  loses the connection it was about to lose and keeps native behavior. It is not
+  a general licence, and `capabilities.rs`'s own claim should be revisited.
+  Because a relayed `PID_FwdReq` reaches its target on the host's route and is
+  indistinguishable from a host-authored packet, the host refuses to relay the
+  whole `0x7x` port-only range
+  (`a_client_cannot_forge_a_restart_notice_through_the_forward_relay`).
+  Without the notice the client path is byte-identical to today's, pinned by
+  `client_host_socket_loss_continues_the_running_round_locally`.
+
 ## Preserve
 
 Preserve fixed-point sync boundaries, shared RNG state/count, reverse

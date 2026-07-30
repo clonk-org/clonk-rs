@@ -1970,6 +1970,7 @@ impl GameApp {
             restart_restore_infos: RestartRestoreInfos::default(),
             abort_restart_pending: false,
             restart_restore_roster_items: HashSet::new(),
+            pending_host_rejoin: None,
             host_local_alternate_colors_by_resource,
             host_local_player_info_ids,
             deferred_network_savegame_recreation: Vec::new(),

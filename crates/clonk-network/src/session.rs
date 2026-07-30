@@ -2169,6 +2169,66 @@ mod tests {
         host.shutdown().await.unwrap();
     }
 
+    /// A restart notice is only meaningful from the host, and the client can
+    /// only judge that by which route it arrived on. `PID_FwdReq` relays a
+    /// client's opaque nested packet onto the host's own route
+    /// (src/C4Network2IO.cpp:1066-1082), so the relay — not the receiver — is
+    /// the only place that can tell the two apart. Left open, any admitted peer
+    /// could tear down another player's round.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_cannot_forge_a_restart_notice_through_the_forward_relay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut attacker, _attacker_id) = raw_client_transport(address, b"Mallory").await;
+        let (mut victim, _victim_id) = raw_client_transport(address, b"Alice").await;
+        drain_raw_client(&mut attacker).await;
+        drain_raw_client(&mut victim).await;
+
+        attacker
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: crate::encode_host_restart_notice(30),
+            }))
+            .await
+            .unwrap();
+
+        let forged = ControlMessage::HostRestarting { rejoin_seconds: 30 };
+        assert!(
+            !raw_client_received_message(&mut victim, &forged, Duration::from_millis(200)).await,
+            "the host relayed a peer's restart notice as its own"
+        );
+
+        drop(attacker);
+        drop(victim);
+        host.shutdown().await.unwrap();
+    }
+
+    /// The restart notice exists only to be read *before* the disconnect it
+    /// predicts, and the host sends it while already on its way down. If the
+    /// teardown could overtake it, every client would still see a bare socket
+    /// close and fall back to the native dead-host path
+    /// (src/C4Network2.cpp:1826-1832) — the notice has to survive the shutdown
+    /// that immediately follows it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restart_notice_outruns_the_host_shutdown_behind_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut alice, _) = raw_client_transport(address, b"Alice").await;
+        let (mut bob, _) = raw_client_transport(address, b"Bob").await;
+        drain_raw_client(&mut alice).await;
+        drain_raw_client(&mut bob).await;
+
+        host.broadcast_host_restarting(30).await.unwrap();
+        host.shutdown().await.unwrap();
+
+        let expected = ControlMessage::HostRestarting { rejoin_seconds: 30 };
+        assert!(raw_client_received_message(&mut alice, &expected, EVENT_WAIT).await);
+        assert!(raw_client_received_message(&mut bob, &expected, EVENT_WAIT).await);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn host_shutdown_does_not_report_a_client_connection_failure() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -15241,6 +15301,7 @@ mod tests {
                 | ClientEvent::ResourceLoadFailed { .. }
                 | ClientEvent::ResourceDeriveUnsupported { .. }
                 | ClientEvent::LeagueRoundResults { .. }
+                | ClientEvent::HostRestarting { .. }
                 | ClientEvent::UnhandledPacket { .. }
                 | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
@@ -15834,6 +15895,38 @@ mod tests {
         assert_eq!(departures, 1);
 
         host.shutdown().await.unwrap();
+    }
+
+    /// The notice has to reach the app as its own event while the connection
+    /// is still up, because the disconnect that follows carries no reason a
+    /// client could act on.
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_surfaces_a_host_restart_notice_before_the_disconnect() {
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+
+        host_transport
+            .send_message(ControlMessage::HostRestarting { rejoin_seconds: 30 })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::HostRestarting { rejoin_seconds: 30 })
+        ));
+
+        drop(host_transport);
+        let _ = timeout(EVENT_WAIT, client_loop).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17514,6 +17607,7 @@ mod tests {
                 | Ok(Some(ClientEvent::ResourceLoadFailed { .. }))
                 | Ok(Some(ClientEvent::ResourceDeriveUnsupported { .. })) => continue,
                 Ok(Some(ClientEvent::LeagueRoundResults { .. })) => continue,
+                Ok(Some(ClientEvent::HostRestarting { .. })) => continue,
                 Ok(Some(ClientEvent::UnhandledPacket { .. })) => continue,
                 Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {

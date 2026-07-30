@@ -644,6 +644,26 @@ fn l074_host_round_restart_returns_to_network_lobby_staging() {
 }
 
 #[test]
+fn host_round_restart_announces_itself_before_tearing_the_session_down() {
+    // Restarting re-hosts from scratch, exactly as C4Application::QuitGame does
+    // for a NextMission (src/C4Application.cpp:373-405). Every client therefore
+    // sees its host connection close, which native cannot distinguish from a
+    // dead host (src/C4Network2.cpp:1826-1832). The port states the intent on
+    // the wire first so clients can follow the host into the new lobby.
+    let mut app = new_running_sandbox_app();
+    let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 1);
+
+    app.restart_current_scenario()
+        .expect("host restart selects network lobby staging");
+
+    assert_eq!(
+        commands.take_host_restart_broadcasts(),
+        vec![clonk_network::DEFAULT_HOST_RESTART_REJOIN_SECONDS],
+        "a restarting host must announce the restart while it can still be heard"
+    );
+}
+
+#[test]
 fn l074_restart_restore_team_obeys_mask_user_and_equal_team_guards() {
     let submitted = |mask: i32, player_type: u8, live_team: i32, restore_team: i32| {
         let mut app = new_menu_app(640, 480);

@@ -16530,6 +16530,431 @@ fn client_host_socket_loss_continues_the_running_round_locally() {
 }
 
 #[test]
+fn client_follows_an_announced_host_restart_back_to_the_lobby() {
+    // Same socket loss as the test above, but preceded by the host's restart
+    // notice. Native has no such notice and therefore no way to tell the two
+    // apart, so it drops every client to local control
+    // (src/C4Network2.cpp:1826-1832) and the restarted lobby comes up empty.
+    // With the intent stated, the client leaves the abandoned round and
+    // reconnects to the address it already joined.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+    app.control_clients.register(0, true, false);
+    app.control_clients.register(local_client, true, false);
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    event_tx
+        .send(NetworkEvent::PeerDisconnected {
+            client_id: 0,
+            reason: Some("connection lost".to_string()),
+        })
+        .expect("queue host socket loss");
+    app.process_network_events()
+        .expect("process the announced restart");
+
+    assert_eq!(
+        app.mode,
+        AppMode::Menu,
+        "the round the host abandoned is torn down, not continued locally"
+    );
+    assert!(app.network.is_none());
+    assert!(
+        app.pending_host_rejoin.is_some(),
+        "the rejoin stays armed until the connection resolves"
+    );
+    assert_eq!(
+        app.startup_network_connection
+            .as_ref()
+            .map(|connection| connection.purpose),
+        Some(StartupNetworkPurpose::Join),
+        "the client reconnects to the restarted host"
+    );
+}
+
+#[test]
+fn an_oversized_rejoin_window_is_clamped() {
+    // The window is a number off the wire. Honoured literally, a hostile or
+    // buggy host could hold this client in a once-a-second reconnect loop for
+    // eighteen hours.
+    let mut app = new_running_sandbox_app();
+    let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+
+    app.arm_pending_host_rejoin(u16::MAX);
+
+    let deadline = app
+        .pending_host_rejoin
+        .as_ref()
+        .expect("the notice still arms a rejoin")
+        .deadline;
+    assert!(
+        deadline
+            <= Instant::now() + Duration::from_secs(u64::from(MAX_HOST_RESTART_REJOIN_SECONDS)),
+        "a peer-supplied window must not exceed the local ceiling"
+    );
+
+    app.arm_pending_host_rejoin(0);
+    assert!(
+        app.pending_host_rejoin.is_some(),
+        "a zero window declines to re-arm; it does not disarm what is already armed"
+    );
+}
+
+#[test]
+fn cancelling_the_reconnect_dialog_abandons_the_rejoin() {
+    // Every attempt raises the same CANCEL modal. If Cancel left the rejoin
+    // armed, the retry would put the dialog straight back and the player would
+    // be held on the main menu until the window expired.
+    let mut app = new_classic_menu_app(800, 600);
+    app.pending_host_rejoin = Some(PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() + Duration::from_secs(30),
+        next_attempt_at: None,
+    });
+    let (_sender, receiver) = mpsc::channel();
+    app.startup_network_connection = Some(StartupNetworkConnection::new(
+        receiver,
+        None,
+        StartupNetworkPurpose::Join,
+    ));
+    app.push_message_dialog(
+        clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+            "Connecting to host".to_string(),
+            "Network".to_string(),
+            clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+        ),
+        MessageDialogContinuation::StartupNetworkConnectProgress,
+    )
+    .expect("push the reconnect progress dialog");
+
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+        .expect("cancel the reconnect");
+
+    assert!(app.startup_network_connection.is_none());
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "Cancel must end the rejoin, not just the attempt in flight"
+    );
+
+    app.poll_startup_network_connection()
+        .expect("poll after cancelling");
+    assert!(
+        app.startup_network_connection.is_none(),
+        "the cancelled rejoin must not reopen its dialog"
+    );
+}
+
+#[test]
+fn a_window_that_closes_mid_attempt_reports_one_failure() {
+    // The deadline can pass while a connect is still in flight. The failing
+    // attempt and the expiry must not both unwind the startup screen, or the
+    // player gets two teardowns and two stacked error dialogs.
+    let mut app = new_classic_menu_app(800, 600);
+    app.pending_host_rejoin = Some(PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() - Duration::from_secs(1),
+        next_attempt_at: None,
+    });
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Err(NetworkStartError::Other(
+            "connection refused".to_string(),
+        )))
+        .expect("queue the refused reconnect");
+    app.startup_network_connection = Some(StartupNetworkConnection::new(
+        receiver,
+        None,
+        StartupNetworkPurpose::Join,
+    ));
+
+    app.poll_startup_network_connection()
+        .expect("poll the attempt that outlived its window");
+    let after_failure = app.message_dialogs.len();
+    app.poll_startup_network_connection()
+        .expect("poll again once the entry is gone");
+
+    assert!(app.pending_host_rejoin.is_none());
+    assert_eq!(
+        app.message_dialogs.len(),
+        after_failure,
+        "the expired window must not raise a second failure behind the first"
+    );
+}
+
+#[test]
+fn an_armed_rejoin_survives_the_hosts_rebind_window_and_then_gives_up() {
+    // The host is still tearing its own session down when the notice arrives,
+    // so the first reconnect necessarily races an unbound port. A single
+    // refused connection must not end the rejoin — but the window the host
+    // named must, or a host that never comes back would spin forever.
+    let mut app = new_classic_menu_app(800, 600);
+    app.pending_host_rejoin = Some(PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() + Duration::from_secs(30),
+        next_attempt_at: None,
+    });
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Err(NetworkStartError::Other(
+            "connection refused".to_string(),
+        )))
+        .expect("queue refused reconnect");
+    app.startup_network_connection = Some(StartupNetworkConnection::new(
+        receiver,
+        None,
+        StartupNetworkPurpose::Join,
+    ));
+
+    app.poll_startup_network_connection()
+        .expect("poll the refused reconnect");
+
+    assert!(app.startup_network_connection.is_none());
+    let scheduled = app
+        .pending_host_rejoin
+        .as_ref()
+        .expect("a refused reconnect keeps the rejoin armed");
+    assert!(
+        scheduled.next_attempt_at.is_some(),
+        "the next attempt waits for the host to finish re-binding"
+    );
+    assert!(
+        app.startup_restart_diagnostics == StartupRestartDiagnostics::default(),
+        "a retryable reconnect must not present a startup failure"
+    );
+
+    app.pending_host_rejoin = Some(PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() - Duration::from_secs(1),
+        next_attempt_at: None,
+    });
+
+    app.poll_startup_network_connection()
+        .expect("poll past the rejoin deadline");
+
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "the rejoin stops at the window the host named"
+    );
+    assert_eq!(app.startup_view, StartupView::NetworkGame);
+}
+
+#[test]
+fn a_rejoin_reuses_the_live_join_settings_rather_than_rebuilding_them() {
+    // The reconnect has to be the same join, not a fresh one typed from the
+    // address bar: a password-protected or netpuncher-brokered host is only
+    // reachable with the credentials and routes this client already holds.
+    // Rebuilding ClientSettings from config would drop all of it and the
+    // reconnect would be refused for the whole window.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let password = clonk_engine::LegacyCString::from_bytes(b"hunter2".to_vec())
+        .expect("password fixture is NUL-free");
+    let settings = ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
+        .with_password(password.clone())
+        .with_compatibility_build(42);
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(settings.clone()));
+    app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    event_tx
+        .send(NetworkEvent::PeerDisconnected {
+            client_id: 0,
+            reason: None,
+        })
+        .expect("queue host socket loss");
+    app.process_network_events()
+        .expect("process the announced restart");
+
+    let relaunched = app
+        .pending_network_join
+        .as_ref()
+        .expect("the rejoin re-arms the same join it is repeating");
+    assert_eq!(relaunched.password, password);
+    assert_eq!(relaunched.compatibility_build, 42);
+    assert_eq!(
+        relaunched.logical_server_addresses,
+        settings.logical_server_addresses
+    );
+}
+
+#[test]
+fn dropping_to_local_control_abandons_an_armed_rejoin() {
+    // ChangeToLocal keeps the round running with no manager
+    // (src/C4GameControl.cpp:93-127), which is the same `network.is_none()`
+    // the rejoin poll waits for. Without an explicit abandon, a worker-level
+    // failure would open a reconnect dialog over a live, simulating round.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    event_tx
+        .send(NetworkEvent::FatalError("worker failed".to_string()))
+        .expect("queue worker failure");
+    app.process_network_events()
+        .expect("process the worker failure");
+    app.poll_startup_network_connection()
+        .expect("poll after dropping to local control");
+
+    assert_eq!(app.mode, AppMode::Running, "the round continues locally");
+    assert!(app.network.is_none());
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "a round that dropped to local control is no longer following the host"
+    );
+    assert!(
+        app.startup_network_connection.is_none(),
+        "no reconnect dialog may open over a live round"
+    );
+}
+
+#[test]
+fn an_announced_restart_alone_does_not_disturb_the_running_round() {
+    // The notice arrives while the host is still connected and the round is
+    // still simulating; only the disconnect it predicts may act on it. A host
+    // that announces and then does not go away must leave the round untouched.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    app.process_network_events()
+        .expect("process the restart notice");
+    app.poll_startup_network_connection()
+        .expect("poll with the rejoin armed but the host still connected");
+
+    assert!(app.pending_host_rejoin.is_some(), "the intent is recorded");
+    assert!(
+        app.startup_network_connection.is_none(),
+        "no reconnect may start while the session it would replace is still live"
+    );
+    assert!(app.network.is_some());
+    assert_eq!(app.mode, AppMode::Running);
+}
+
+#[test]
+fn a_client_waiting_in_the_lobby_also_follows_an_announced_restart() {
+    // The Restart button also exists on C4Network2StartWaitDlg
+    // (src/C4Network2Dialogs.cpp:574-584), so a client can be sitting in the
+    // lobby when the host restarts. Host loss there normally unwinds
+    // C4Game::Init back to the startup dialog (src/C4Network2.cpp:477-515),
+    // which for an announced restart would throw the player out of a lobby
+    // that is about to exist again.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.mode = AppMode::Menu;
+    app.startup_view = StartupView::NetworkLobby;
+    app.control_clients.register(0, true, false);
+    app.control_clients.register(local_client, true, false);
+
+    event_tx
+        .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
+        .expect("queue host restart notice");
+    event_tx
+        .send(NetworkEvent::PeerDisconnected {
+            client_id: 0,
+            reason: Some("connection lost".to_string()),
+        })
+        .expect("queue host socket loss");
+    app.process_network_events()
+        .expect("process the announced restart from the lobby");
+
+    assert_eq!(
+        app.startup_network_connection
+            .as_ref()
+            .map(|connection| connection.purpose),
+        Some(StartupNetworkPurpose::Join),
+        "a lobby client reconnects instead of unwinding to the game list"
+    );
+    assert!(app.pending_host_rejoin.is_some());
+}
+
+#[test]
+fn a_rejoin_disarms_when_it_resolves_or_the_player_leaves() {
+    // An armed rejoin is a standing instruction to reconnect. Left armed after
+    // it has done its job, its window would later expire underneath a healthy
+    // lobby and tear that lobby down; left armed after the player quits, it
+    // would dial the host again from the main menu.
+    let mut app = new_real_classic_menu_app(800, 600);
+    let armed = || PendingHostRejoin {
+        settings: ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client"),
+        deadline: Instant::now() + Duration::from_secs(30),
+        next_attempt_at: Some(Instant::now() + HOST_REJOIN_RETRY_INTERVAL),
+    };
+    app.pending_host_rejoin = Some(armed());
+    let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Ok((
+            NetworkMode::Client(ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            )),
+            manager,
+        )))
+        .expect("queue the completed rejoin");
+    app.startup_network_connection = Some(StartupNetworkConnection::new(
+        receiver,
+        None,
+        StartupNetworkPurpose::Join,
+    ));
+
+    let _ = app.poll_startup_network_connection();
+
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "a resolved rejoin must not keep its deadline running"
+    );
+
+    app.pending_host_rejoin = Some(armed());
+    app.return_to_menu();
+
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "leaving the round abandons the rejoin with it"
+    );
+}
+
+#[test]
 fn client_non_host_peer_loss_keeps_the_network_session() {
     // OnClientDisconnect clears a client's network only when the lost
     // C4Network2Client is the host. Another peer's eventual synchronized
