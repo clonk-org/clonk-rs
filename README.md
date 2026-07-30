@@ -50,6 +50,13 @@ Tracker music needs the optional libxmp 4 runtime; install it through your
 platform package manager, or point `LC_LIBXMP_LIBRARY` at a compatible library.
 Everything else works without it.
 
+MIDI music additionally needs a General MIDI SoundFont, which no platform ships
+by default. Put an `.sf2` or `.sf3` bank in `~/Library/Audio/Sounds/Banks` on
+macOS, `/usr/share/soundfonts` on other Unix systems, or a `soundfonts` folder
+beside the executable on Windows — or name one explicitly through
+`SDL_SOUNDFONTS`. FluidSynth 2 provides the synthesis itself and is found the
+same way, with `LC_FLUIDSYNTH_LIBRARY` as the override.
+
 ## Building from source
 
 The game data lives in a submodule, so clone recursively:
