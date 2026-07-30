@@ -6769,7 +6769,18 @@ impl GameApp {
                 let mut local_players = self.engine.snapshot().hud.local_players;
                 if !local_players.contains(&joined.number()) {
                     local_players.push(joined.number());
-                    self.engine.set_local_players(local_players);
+                    self.engine.set_local_players(local_players.clone());
+                }
+                // C4Game::JoinPlayer creates the local viewport for the number
+                // this join produced, and C4Player::FinalInit initializes
+                // C4MouseControl with it (C4Game.cpp:3552-3553;
+                // C4Player.cpp:788-791). The port's primary-local-player
+                // projection has to follow the same number: a network host is
+                // swept before every client, so its own player is
+                // C4PlayerList::GetFreeNumber's 0 while the projection still
+                // holds the process default.
+                if let Some(primary) = local_players.first().copied() {
+                    self.local_owner = primary;
                 }
                 if matches!(
                     joined,
