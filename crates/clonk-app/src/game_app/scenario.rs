@@ -1591,7 +1591,13 @@ impl GameApp {
                 let (mut local_players, mut joined_player_files) = if let Some(savegame) =
                     offline_savegame.as_ref()
                 {
-                    self.recreate_offline_savegame_players(&path, savegame)
+                    let restored = Self::restore_offline_savegame_engine_players(
+                        &mut self.engine,
+                        &path,
+                        savegame,
+                    )
+                    .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
+                    self.wire_restored_offline_savegame_players(savegame, restored)
                         .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?
                 } else {
                     (Vec::new(), Vec::new())

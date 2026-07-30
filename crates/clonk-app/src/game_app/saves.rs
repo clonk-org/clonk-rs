@@ -1279,23 +1279,37 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn recreate_offline_savegame_players(
-        &mut self,
+    /// `C4PlayerInfoList::RecreatePlayers`' engine half: the restored players
+    /// exist from here on, which `InitGameFinal`'s script calls rely on
+    /// (C4Game.cpp:479 runs `InitPlayers` before :484).
+    pub(crate) fn restore_offline_savegame_engine_players(
+        engine: &mut Engine,
         scenario_path: &Path,
         savegame: &OfflineSavegameStartup,
-    ) -> Result<(Vec<i32>, Vec<PathBuf>), EngineError> {
+    ) -> Result<Vec<clonk_engine::RestoredRuntimeJoinPlayer>, EngineError> {
         if savegame.runtime_players.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(Vec::new());
         }
-        let restored = self
-            .engine
+        engine
             .restore_offline_savegame_players_from_path(
                 scenario_path,
                 &savegame.runtime_players,
                 &savegame.external_player_paths,
                 savegame.save_game,
             )
-            .map_err(EngineError::from)?;
+            .map_err(EngineError::from)
+    }
+
+    /// The host-owned half: control sets, names and profile icons for players
+    /// [`Self::restore_offline_savegame_engine_players`] already installed.
+    pub(crate) fn wire_restored_offline_savegame_players(
+        &mut self,
+        savegame: &OfflineSavegameStartup,
+        restored: Vec<clonk_engine::RestoredRuntimeJoinPlayer>,
+    ) -> Result<(Vec<i32>, Vec<PathBuf>), EngineError> {
+        if savegame.runtime_players.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
         let mut local_players = Vec::new();
 
         for (source, binding) in savegame.runtime_players.iter().zip(restored) {
