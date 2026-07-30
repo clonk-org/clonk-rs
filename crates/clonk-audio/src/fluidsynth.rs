@@ -720,12 +720,19 @@ fn fluid_library_candidates() -> Vec<PathBuf> {
 
 fn midi_soundfont_candidates() -> Vec<PathBuf> {
     let configured = std::env::var_os("SDL_SOUNDFONTS");
-    resolve_soundfont_candidates(configured.as_deref(), |path| File::open(path).is_ok())
+    resolve_soundfont_candidates(
+        configured.as_deref(),
+        |path| File::open(path).is_ok(),
+        &soundfont_bank_directories(),
+        read_bank_directory,
+    )
 }
 
 fn resolve_soundfont_candidates(
     configured: Option<&OsStr>,
     fallback_is_readable: impl FnOnce(&Path) -> bool,
+    bank_directories: &[PathBuf],
+    bank_entries: impl Fn(&Path) -> Vec<PathBuf>,
 ) -> Vec<PathBuf> {
     configured
         .filter(|paths| !paths.is_empty())
@@ -734,9 +741,87 @@ fn resolve_soundfont_candidates(
             let fallback = PathBuf::from(SDL_MIXER_FALLBACK_SOUNDFONT);
             fallback_is_readable(&fallback)
                 .then_some(fallback)
+                .or_else(|| {
+                    bank_directories
+                        .iter()
+                        .find_map(|directory| first_bank(&bank_entries(directory)))
+                })
                 .into_iter()
                 .collect()
         })
+}
+
+/// Lowest-named SoundFont in a bank directory. Picking one keeps preset layering
+/// out of the picture, and picking it by name keeps the choice independent of
+/// readdir order.
+fn first_bank(entries: &[PathBuf]) -> Option<PathBuf> {
+    entries
+        .iter()
+        .filter(|path| has_bank_extension(path))
+        .min()
+        .cloned()
+}
+
+fn has_bank_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("sf2") || extension.eq_ignore_ascii_case("sf3")
+        })
+}
+
+fn read_bank_directory(directory: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect()
+}
+
+/// Searched only after `SDL_SOUNDFONTS` and SDL_mixer's implicit path come up
+/// empty. SDL_mixer hardcodes a single Linux location (C4AudioSystemSdl.cpp:280-282
+/// delegates to it), which leaves MIDI music unreachable on hosts that cannot
+/// host that path at all — macOS seals `/usr/share`, and Windows has no such
+/// directory.
+fn soundfont_bank_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        // The Apple-documented location for SoundFont banks, then the
+        // `share/soundfonts` directory FluidSynth's own build points
+        // `DEFAULT_SOUNDFONT` at, under each Homebrew prefix.
+        directories.extend(
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join("Library/Audio/Sounds/Banks")),
+        );
+        directories.extend(
+            [
+                "/Library/Audio/Sounds/Banks",
+                "/opt/homebrew/share/soundfonts",
+                "/usr/local/share/soundfonts",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        );
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    directories.extend(
+        [
+            "/usr/share/soundfonts",
+            "/usr/share/sounds/sf2",
+            "/usr/share/sounds/sf3",
+        ]
+        .into_iter()
+        .map(PathBuf::from),
+    );
+    #[cfg(windows)]
+    directories.extend(
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .map(|directory| directory.join("soundfonts")),
+    );
+    directories
 }
 
 fn parse_soundfont_list(configured: &OsStr) -> Vec<PathBuf> {
@@ -941,9 +1026,12 @@ mod tests {
         let configured = OsStr::new("trusted-base.sf2;trusted-override.sf2");
 
         assert_eq!(
-            resolve_soundfont_candidates(Some(configured), |_| {
-                panic!("explicit SoundFonts must bypass implicit discovery")
-            }),
+            resolve_soundfont_candidates(
+                Some(configured),
+                |_| panic!("explicit SoundFonts must bypass implicit discovery"),
+                &[PathBuf::from("/banks")],
+                |_| panic!("explicit SoundFonts must bypass bank directories"),
+            ),
             vec![
                 PathBuf::from("trusted-base.sf2"),
                 PathBuf::from("trusted-override.sf2")
@@ -956,12 +1044,39 @@ mod tests {
         // C4AudioSystemSdl.cpp:280-282 delegates MIDI loading to SDL_mixer 2.8.1,
         // whose sole implicit SoundFont is FluidR3_GM at this exact path.
         let fallback = PathBuf::from("/usr/share/sounds/sf2/FluidR3_GM.sf2");
+        let banks = [PathBuf::from("/banks")];
 
         assert_eq!(
-            resolve_soundfont_candidates(None, |path| path == fallback),
+            resolve_soundfont_candidates(
+                None,
+                |path| path == fallback,
+                &banks,
+                |_| vec![PathBuf::from("/banks/Ignored.sf2")]
+            ),
             vec![fallback]
         );
-        assert!(resolve_soundfont_candidates(None, |_| false).is_empty());
+        assert!(resolve_soundfont_candidates(None, |_| false, &[], |_| Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn implicit_soundfonts_fall_back_to_a_platform_bank_directory() {
+        // SDL_mixer's sole implicit path lives under /usr/share, which no macOS
+        // release since the sealed system volume can host, so MIDI music needs a
+        // platform bank directory before FluidSynth has anything to load.
+        let banks = [PathBuf::from("/empty"), PathBuf::from("/banks")];
+        let entries = |directory: &Path| match directory.to_str() {
+            Some("/banks") => vec![
+                PathBuf::from("/banks/notes.txt"),
+                PathBuf::from("/banks/Zeta.sf2"),
+                PathBuf::from("/banks/Alpha.SF3"),
+            ],
+            _ => Vec::new(),
+        };
+
+        assert_eq!(
+            resolve_soundfont_candidates(None, |_| false, &banks, entries),
+            vec![PathBuf::from("/banks/Alpha.SF3")]
+        );
     }
 
     #[test]
