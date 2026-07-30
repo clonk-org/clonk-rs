@@ -8582,6 +8582,40 @@ pub(crate) fn configured_hd_exact_blits(config: &[u8]) -> bool {
     configured_remaster_feature(config, "HDExactBlits")
 }
 
+/// `Graphics.ShaderLandscape`: compose the landscape in the fragment shader
+/// instead of on the CPU. The CPU composer walks integer landscape coordinates,
+/// so one pattern texel per landscape pixel is its ceiling and higher-resolution
+/// material art only stretches the tiling period. The shader evaluates the same
+/// arithmetic per fragment, which is what `Graphics.LandscapeDetail` needs.
+///
+/// Deliberately has no advanced-settings row: `default_config` materializes
+/// every editor row, and `configured_remaster_feature` only consults
+/// `Graphics.Remaster` while a key is ABSENT, so a row would silently stop the
+/// master switch from reaching this after a config repair. `SnapTextToPixels`
+/// and `SmoothPresentation` are the same hand-edit-only shape.
+pub(crate) fn configured_shader_landscape(config: &[u8]) -> bool {
+    configured_remaster_feature(config, "ShaderLandscape")
+}
+
+/// `Graphics.LandscapeDetail`: landscape supersampling factor for the shader
+/// composer. 1 reproduces the CPU composer byte for byte, so the default is
+/// C++-exact; N evaluates the material pattern at 1/N of a landscape pixel, so
+/// N-times-larger art keeps its world-space tiling period rather than stretching
+/// it across N times as much world.
+///
+/// Clamped here rather than only in the editor, because a hand-edited config
+/// reaches this reader directly and the composer rejects 0 outright.
+pub(crate) fn configured_landscape_detail(config: &[u8]) -> u32 {
+    u32::try_from(startup_config_integer(
+        config,
+        "Graphics",
+        "LandscapeDetail",
+        1,
+    ))
+    .unwrap_or(1)
+    .clamp(1, clonk_app_render::gpu_renderer::MAX_LANDSCAPE_DETAIL)
+}
+
 /// `Graphics.LoaderAspect`: cover-fit the fullscreen loader image instead of
 /// C++'s unconditional non-aspect stretch.
 pub(crate) fn configured_loader_aspect(config: &[u8]) -> bool {

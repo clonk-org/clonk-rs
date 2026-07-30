@@ -780,6 +780,8 @@ pub struct RetainedGpuRenderer {
     linear_mip_sampler: wgpu::Sampler,
     mipmaps: bool,
     smooth_landscape: bool,
+    shader_landscape: bool,
+    landscape_detail: u32,
     repeat_nearest_sampler: wgpu::Sampler,
     present_sampler: wgpu::Sampler,
     _fallback_mask_texture: wgpu::Texture,
@@ -1104,6 +1106,8 @@ impl RetainedGpuRenderer {
             linear_mip_sampler,
             mipmaps: false,
             smooth_landscape: false,
+            shader_landscape: false,
+            landscape_detail: 1,
             repeat_nearest_sampler,
             present_sampler,
             _fallback_mask_texture: fallback_mask_texture,
@@ -1135,7 +1139,21 @@ impl RetainedGpuRenderer {
         surface_format: wgpu::TextureFormat,
     ) -> u64 {
         let generation = self.generation.wrapping_add(1).max(1);
+        // `build` starts every presentation flag at its C++-exact default, so
+        // the configured opt-ins have to be carried over explicitly. The
+        // renderer is a local in `main` that GameApp never holds, so nothing
+        // downstream would re-apply them after a device loss.
+        let carried = (
+            self.mipmaps,
+            self.smooth_landscape,
+            self.shader_landscape,
+            self.landscape_detail,
+        );
         *self = Self::build(device, queue, surface_format, generation);
+        self.mipmaps = carried.0;
+        self.smooth_landscape = carried.1;
+        self.shader_landscape = carried.2;
+        self.landscape_detail = carried.3;
         generation
     }
 
@@ -1417,6 +1435,40 @@ impl RetainedGpuRenderer {
     /// into the silhouette.
     pub fn set_smooth_landscape(&mut self, smooth: bool) {
         self.smooth_landscape = smooth;
+    }
+
+    pub fn mipmaps(&self) -> bool {
+        self.mipmaps
+    }
+
+    pub fn smooth_landscape(&self) -> bool {
+        self.smooth_landscape
+    }
+
+    /// Opt in to composing the landscape in the fragment shader instead of on
+    /// the CPU. The CPU composer walks integer landscape coordinates, so one
+    /// pattern texel per landscape pixel is its ceiling; this evaluates the
+    /// identical arithmetic per fragment, which is what lets `landscape_detail`
+    /// resolve finer material art (`ShaderLandscapeComposer`).
+    pub fn set_shader_landscape(&mut self, shader: bool) {
+        self.shader_landscape = shader;
+    }
+
+    pub fn shader_landscape(&self) -> bool {
+        self.shader_landscape
+    }
+
+    /// Landscape supersampling factor for the shader composer. 1 reproduces the
+    /// CPU composer byte for byte; N evaluates the pattern at 1/N of a
+    /// landscape pixel, so N-times-larger material art keeps its world-space
+    /// tiling period instead of stretching it. Clamped to the range the
+    /// composer accepts — 0 is a validation error there.
+    pub fn set_landscape_detail(&mut self, detail: u32) {
+        self.landscape_detail = detail.clamp(1, MAX_LANDSCAPE_DETAIL);
+    }
+
+    pub fn landscape_detail(&self) -> u32 {
+        self.landscape_detail
     }
 
     fn sync_textures(
@@ -3531,6 +3583,10 @@ pub const SHADER_LANDSCAPE_SUPPRESSED: u8 = 255;
 /// hold. At 64 bytes each that is 8 KiB, inside the 16 KiB downlevel limit.
 pub const SHADER_LANDSCAPE_SLOTS: usize = 128;
 
+/// Upper bound for `landscape_detail`. Each step squares the composed plane's
+/// memory, and 4 already covers a 400% presentation scale.
+pub const MAX_LANDSCAPE_DETAIL: u32 = 4;
+
 /// One texmap slot in the layout `MATERIAL_LANDSCAPE_SHADER` binds.
 ///
 /// This mirrors `clonk_frontend`'s `MaterialGpuSlot` field for field; that type
@@ -5262,6 +5318,49 @@ mod tests {
                 "the fixture must compose real material, not an empty plane"
             );
         }
+    }
+
+    #[test]
+    fn recreating_the_renderer_keeps_its_configured_presentation_flags() {
+        // `recreate` replaces the whole renderer after a lost device, and
+        // `build` hard-codes every presentation flag to false. Without carrying
+        // them over, device-loss recovery silently reverts the player's
+        // configured opt-ins mid-session with nothing to re-apply them: the
+        // renderer is a local in `main` that GameApp never holds, so the
+        // options dialog cannot push them back either.
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping renderer recreate flag carry-over");
+            return;
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        renderer.set_mipmaps(true);
+        renderer.set_smooth_landscape(true);
+        renderer.set_shader_landscape(true);
+        renderer.set_landscape_detail(3);
+
+        let generation = renderer.generation();
+        renderer.recreate(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        assert_ne!(
+            renderer.generation(),
+            generation,
+            "recreate advances the generation"
+        );
+
+        assert!(renderer.mipmaps(), "mipmaps must survive a device loss");
+        assert!(
+            renderer.smooth_landscape(),
+            "smooth landscape must survive a device loss"
+        );
+        assert!(
+            renderer.shader_landscape(),
+            "shader landscape must survive a device loss"
+        );
+        assert_eq!(
+            renderer.landscape_detail(),
+            3,
+            "the landscape detail level must survive a device loss"
+        );
     }
 
     /// The detail factor supersamples the composed plane without changing which
