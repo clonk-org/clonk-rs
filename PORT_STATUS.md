@@ -898,14 +898,38 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `ActiveViewportProjection::pointer_projection` converts them, but nothing
   consumes them yet — see the next entry.
 
-- **The whole edit-cursor interaction layer has no production caller.** Worth
+- **Clicking inside a console viewport window now selects (M10-P4-L043's
+  gesture, reached from a real window).** `GameApp::console_viewport_press`
+  joins the four pieces: a window-local pointer converted through *that*
+  viewport's own `ViewX`/`ViewY` (`C4Viewport.cpp:181`), the target picked by
+  `edit_target` over `EditCursorHitTest` (`C4EditCursor.cpp:150`), the press
+  applied by `edit_press` (`:201-229`), and the result written to the shared
+  `DeveloperSelection` as `SelectionWriter::EditCursor`. Pinned end to end by
+  `console_viewport_click_selects_the_object_under_the_cursor`.
+  One design point the port had to settle: `viewport_projection_for_identity`
+  reads `GraphicsSystem::active_viewports`, which is the **fullscreen** layout
+  and is never populated in console mode — so a detached window had no source
+  for its own view origin. `GameApp::console_viewport_projections` now retains
+  the projection each window was last drawn with, keyed by physical identity.
+  That is the port's form of C++ getting it for free from the `C4Viewport`
+  object that both draws and handles input.
+  **Still open:** motion and release. `edit_move`, `edit_tick_move`,
+  `edit_release`, `drop_target` and `frame_selection` are ported and tested but
+  still uncalled, so a drag neither moves a selection nor completes a rubber
+  band, and no `EMMO_Move`/`EMMO_Enter` control is ever emitted. The overlay is
+  likewise undrawn: `developer_overlay` has the draw list and
+  `viewport_draw_order` has its insertion point, but the detached render does
+  not yet call the hook.
+
+- **Most of the edit-cursor interaction layer still has no production caller.**
+  Worth
   stating on its own, because every card above reads as "landed" and the
   editor still cannot edit. `grep` for the modules outside their own files
-  returns one hit: `developer_viewport` importing `CursorMode`. Nothing calls
-  `developer_cursor`'s `edit_target`, `edit_move`, `edit_release`,
-  `drop_target` or `frame_selection`; nothing calls `developer_selection`'s
-  `select_frame`, `select`, `toggle` or `clear`; nothing calls
-  `developer_overlay`. `developer_tools` is reached only by
+  returned one hit before the click path above landed. `edit_target`,
+  `edit_press`, `DeveloperSelection::replace`/`toggle`/`clear` now have a real
+  caller; `edit_move`, `edit_tick_move`, `edit_release`, `drop_target`,
+  `frame_selection`, `select_frame` and all of `developer_overlay` still do
+  not. `developer_tools` is reached only by
   `clonk-app::developer_tools_page`, which is itself a specification of the
   page rather than a rendered one. On the control side only `EMMO_Script` is
   wired (`clonk-app::main.rs`, the console's script input); `EMMO_Move`,
