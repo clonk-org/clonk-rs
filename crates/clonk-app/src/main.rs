@@ -1012,7 +1012,13 @@ fn run() -> Result<()> {
                         render_inactive_mask,
                         app.window_active,
                         app.console_mode,
-                    ) => {}
+                    ) =>
+            {
+                // The opportunity was still consumed. Leaving the repaint floor
+                // armed would make every later event-loop pass take one, which
+                // both spins and banks graphics-deadline debt.
+                render_floor.note_refused_presentation(Instant::now());
+            }
             Event::RedrawRequested(id)
                 if id == window.id()
                     && automatic_frame_skip.begin_graphics_pass(

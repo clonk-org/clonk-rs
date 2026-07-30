@@ -881,6 +881,37 @@ fn render_floor_forces_a_repaint_at_two_hertz_however_deep_the_skip() {
 }
 
 #[test]
+fn a_refused_presentation_rearms_the_repaint_floor() {
+    // `C4GraphicsSystem::StartDrawing` refuses to draw while the shell is
+    // inactive (C4GraphicsSystem.cpp:96-106), so the pass consumes the graphics
+    // opportunity without ever recording a presentation. Left unarmed the floor
+    // latches true from 500 ms of inactivity onwards, and then EVERY event-loop
+    // pass takes an opportunity: measured on macOS, 267k passes in one second
+    // of inactivity, which is both a busy spin and the source of the graphics
+    // deadline debt in `graphics_deadline_never_banks_more_than_one_period_ahead`.
+    let mut floor = RenderFloor::default();
+    let base = Instant::now();
+    floor.record_presentation(base, Duration::from_millis(5));
+    let reservation = floor.simulation_burst_budget(Duration::from_millis(28));
+
+    let overdue = base + MAX_TIME_BETWEEN_RENDERS;
+    assert!(floor.must_present(overdue));
+    floor.note_refused_presentation(overdue);
+    assert!(
+        !floor.must_present(overdue + Duration::from_millis(499)),
+        "a refused presentation still consumed the opportunity"
+    );
+    assert!(floor.must_present(overdue + MAX_TIME_BETWEEN_RENDERS));
+
+    // The refusal cost no graphics time, so the simulation reservation that the
+    // last real presentation implies is untouched.
+    assert_eq!(
+        floor.simulation_burst_budget(Duration::from_millis(28)),
+        reservation,
+    );
+}
+
+#[test]
 fn automatic_frame_skip_never_skips_two_consecutive_graphics_passes() {
     let mut frame_skip = AutomaticFrameSkip::default();
     frame_skip.finish_graphics_pass(true, Duration::from_millis(29), Duration::from_millis(28));
@@ -915,6 +946,35 @@ fn graphics_deadline_ignores_early_wakes_and_coalesces_missed_periods() {
         advance_graphics_deadline(deadline, late, interval),
         late + interval
     );
+}
+
+#[test]
+fn graphics_deadline_never_banks_more_than_one_period_ahead() {
+    // A pass may take the graphics opportunity for a reason other than the
+    // timer — the repaint floor or an immediate network retry — and it still
+    // advances the deadline. Adding a whole period each time is unbounded:
+    // measured on macOS, one second of an inactive shell (267k event-loop
+    // passes, every redraw refused by `Graphics.RenderInactive`) pushed the
+    // deadline 4,274,775 ms — 71 minutes — into the future. After that the
+    // 16 ms timer never fired again and only the 500 ms repaint floor drew, so
+    // the menu ran at 2 FPS and recovered at barely 1 ms per ms.
+    let base = Instant::now();
+    let interval = Duration::from_millis(16);
+    let mut deadline = base + interval;
+
+    for pass in 0..10_000_u32 {
+        let now = base + Duration::from_micros(u64::from(pass) * 4);
+        deadline = advance_graphics_deadline(deadline, now, interval);
+        assert!(
+            deadline <= now + interval,
+            "pass {pass} banked {:?} of deadline debt",
+            deadline.saturating_duration_since(now + interval),
+        );
+        assert!(
+            deadline > now,
+            "pass {pass} left the deadline in the past, which would spin"
+        );
+    }
 }
 
 #[test]

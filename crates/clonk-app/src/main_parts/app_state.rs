@@ -2909,6 +2909,18 @@ impl RenderFloor {
         reserved.max(simulation_interval).min(ceiling)
     }
 
+    /// A graphics opportunity the shell refused to draw at all — `Graphics.
+    /// RenderInactive` withholding an inactive window (C4GraphicsSystem.cpp:96-106)
+    /// — still consumed the opportunity, exactly like the automatic frame skip's
+    /// `consume_suppressed_graphics_pass`. Re-arm the floor from it: there is no
+    /// visible window to keep fresh, and a floor left latched makes every
+    /// event-loop pass take an opportunity instead of one every 500 ms.
+    ///
+    /// The refusal costs no graphics time, so `last_graphics` is untouched.
+    pub(crate) fn note_refused_presentation(&mut self, at: Instant) {
+        self.last_presented = Some(at);
+    }
+
     /// Whether the repaint floor is due. The first call arms the floor, so a
     /// session that has never drawn still gets its first frame on time.
     pub(crate) fn must_present(&mut self, now: Instant) -> bool {
@@ -3388,7 +3400,11 @@ pub(crate) fn advance_graphics_deadline(
 ) -> Instant {
     let next = deadline + interval;
     if next > now {
-        next
+        // A pass that takes the graphics opportunity before the deadline is due
+        // — the repaint floor, an immediate network retry — must not bank a
+        // whole extra period, or a burst of them pushes the next timer frame
+        // arbitrarily far out and only the floor keeps drawing.
+        next.min(now + interval)
     } else {
         // Coalesce missed timer periods instead of issuing catch-up redraws.
         now + interval
