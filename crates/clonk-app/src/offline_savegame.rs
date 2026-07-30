@@ -115,9 +115,11 @@ fn offline_savegame_initial_game_data(
 /// behind `if (C4S.Head.SaveGame)`, so a regular scenario shipping restore
 /// infos keeps its declared C4S/Parameters capacity (C4Game.cpp:242-250).
 fn effective_offline_max_players(declared: i32, restore_count: usize, save_game: bool) -> i32 {
-    save_game
-        .then(|| declared.max(i32::try_from(restore_count).unwrap_or(i32::MAX)))
-        .unwrap_or(declared)
+    if save_game {
+        declared.max(i32::try_from(restore_count).unwrap_or(i32::MAX))
+    } else {
+        declared
+    }
 }
 
 /// Mirrors `InitLocal`, `CreateRestoreInfosForJoinedScriptPlayers`, and the
@@ -187,7 +189,8 @@ fn associate_offline_savegame_player_info(
     // scenario shipping restore infos keeps its participants unassociated
     // (C4PlayerInfo.cpp:1372).
     let mut wild_takeovers = Vec::new();
-    for matching_level in save_game.then_some(0..=3).unwrap_or(1..=0) {
+    let matching_levels: &[u8] = if save_game { &[0, 1, 2, 3] } else { &[] };
+    for &matching_level in matching_levels {
         for player_index in 0..player_info.players.len() {
             if player_info.players[player_index].savegame_player != 0 {
                 continue;
