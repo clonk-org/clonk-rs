@@ -32,6 +32,12 @@
 //! they are not worth the risk of a file-level overwrite that no rename can
 //! make atomic, and a stale copyright notice is not a failure a user can see.
 //!
+//! `Contents/Resources/ClonkRust.icns` is the one exception, because a stale
+//! icon *is* a failure a user can see — an install updated in place otherwise
+//! keeps its original icon for ever. It is replaced by a rename within its own
+//! directory, which is atomic, with the old one moved aside so a rollback can
+//! put it back. See `install_bundle_icon`.
+//!
 //! # macOS
 //!
 //! Replacing anything under `Contents/` breaks the bundle's code signature, and
@@ -89,6 +95,10 @@ pub const LAUNCHER_STAGED_GROUPS: [&str; 2] = ["System.c4g", "Graphics.c4g"];
 
 /// The nested executables a bundle must sign before the bundle that seals them.
 const NESTED_BUNDLE_EXECUTABLES: [&str; 2] = ["clonk-game", "c4group"];
+
+/// The bundle icon, relative to the `.app`, as `xtask` writes it and
+/// `Info.plist`'s `CFBundleIconFile` names it.
+const BUNDLE_ICON: &str = "Contents/Resources/ClonkRust.icns";
 
 /// `HKCU` subkey the Windows installer writes, and the value naming the
 /// installed release (`scripts/windows-installer.nsi:54,76`).
@@ -1027,6 +1037,49 @@ fn purge_launcher_staged_groups(layout: &InstallLayout) -> Result<Vec<PathBuf>, 
     Ok(purged)
 }
 
+/// Where the displaced icon waits, so a rollback can put it back. Outside the
+/// `.app`, like every other transient, so it cannot break the seal.
+fn displaced_bundle_icon(layout: &InstallLayout, nonce: &str) -> PathBuf {
+    layout.quarantine_dir(nonce).join("ClonkRust.icns")
+}
+
+/// Installs the bundle icon the engine component ships.
+///
+/// Only `Contents/MacOS` is swapped, so the icon the archive also carries was
+/// extracted and then thrown away, and an install updated in place kept its
+/// original icon for ever. It is the one file in `Contents` worth a file-level
+/// overwrite: unlike a stale copyright notice, a stale icon is the thing the
+/// user looks at.
+///
+/// A component that ships no icon leaves the installed one alone — an iconless
+/// bundle would be worse than a stale one. The old icon is moved aside rather
+/// than overwritten so [`roll_back`] can restore it; the rename that replaces it
+/// is within one directory, so no window exists where neither is in place.
+fn install_bundle_icon(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError> {
+    if !journal.steps.iter().any(|step| step.component == "engine") {
+        return Ok(());
+    }
+    let staged = layout
+        .scratch_dir(&journal.nonce)
+        .join("engine")
+        .join(BUNDLE_ICON);
+    if !present(&staged) {
+        return Ok(());
+    }
+
+    let installed = layout.root().join(BUNDLE_ICON);
+    if present(&installed) {
+        let displaced = displaced_bundle_icon(layout, &journal.nonce);
+        if let Some(parent) = displaced.parent() {
+            ensure_dir(parent)?;
+        }
+        rename(&installed, &displaced)?;
+    } else if let Some(parent) = installed.parent() {
+        ensure_dir(parent)?;
+    }
+    rename(&staged, &installed)
+}
+
 /// Re-seals a bundle, in the order `xtask`'s `sign_macos_bundle` uses.
 fn resign_bundle(layout: &InstallLayout, ops: &dyn PlatformOps) -> Result<(), ApplyError> {
     // Nested code first: the bundle's own signature seals it, so signing the
@@ -1054,6 +1107,8 @@ fn commit(
         purge_launcher_staged_groups(layout)?;
     }
     if layout.is_bundle() {
+        // Before signing, so the new seal covers the new icon.
+        install_bundle_icon(layout, journal)?;
         // Nothing transient is inside the bundle at this point: the staged
         // trees were consumed by their swaps, and the scratch and the backups
         // live in the work directory outside the `.app` precisely so the seal
@@ -1119,6 +1174,16 @@ fn roll_back(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError
                 rename(&from, &to)?;
             }
         }
+    }
+
+    // The icon is a file rather than one of the swapped trees, so it needs its
+    // own restore: `install_bundle_icon` runs before the bundle is re-signed and
+    // therefore has already replaced it by the time a failing seal lands here.
+    let displaced = displaced_bundle_icon(layout, &journal.nonce);
+    if present(&displaced) {
+        let installed = layout.root().join(BUNDLE_ICON);
+        remove_any(&installed)?;
+        rename(&displaced, &installed)?;
     }
     // Every destination is restored by this point, so a stubborn temporary is
     // untidy rather than a failed rollback.
@@ -1432,6 +1497,7 @@ mod tests {
                     (&format!("{prefix}/clonk-game"), "new launcher"),
                     (&format!("{prefix}/c4group"), "new c4group"),
                     ("COPYING", "licence"),
+                    (BUNDLE_ICON, "new icon"),
                 ],
             )
         }
@@ -1462,6 +1528,9 @@ mod tests {
         write_file(&data.join("Screenshots/shot.png"), "screenshot");
         write_file(&data.join("Records.c4f/run.c4v"), "recording");
         write_file(&data.join("Clonk-rust-2026-07-28.log"), "launcher log");
+        if bundle {
+            write_file(&root.join(BUNDLE_ICON), "old icon");
+        }
 
         let downloads = directory.path().join("downloads");
         std::fs::create_dir_all(&downloads).expect("create downloads");
@@ -1811,6 +1880,76 @@ mod tests {
         assert_eq!(
             InstallLayout::discover(&plain),
             InstallLayout::plain(&plain)
+        );
+    }
+
+    // The engine component has always carried the bundle icon and always thrown
+    // it away: only `Contents/MacOS` is swapped, so an install updated in place
+    // kept its original icon for ever. A stale icon, unlike a stale copyright
+    // notice, is a failure the user looks straight at.
+    #[test]
+    fn a_bundle_apply_installs_the_new_icon() {
+        let install = install_with(true);
+        let plan = plan(
+            "0.4.0",
+            vec![component("engine", &install.engine_archive(), "")],
+        );
+
+        apply_update(&install.layout, &plan, &FakePlatform::new()).expect("apply the update");
+
+        assert_eq!(read_file(&install.root().join(BUNDLE_ICON)), "new icon");
+        // The rest of `Contents` still stays alone: the icon is an exception
+        // made for one file, not a general widening of what a swap touches.
+        assert!(!install.layout.data_dir().join("COPYING").exists());
+    }
+
+    // A component that ships no icon must leave the installed one in place
+    // rather than deleting it — an iconless bundle is worse than a stale icon.
+    #[test]
+    fn a_bundle_apply_without_an_icon_keeps_the_installed_one() {
+        let install = install_with(true);
+        let archive_without_icon = archive(
+            &install.downloads,
+            "engine-no-icon.zip",
+            &[
+                ("Contents/MacOS/clonk-app", "new app"),
+                ("Contents/MacOS/clonk-game", "new launcher"),
+                ("Contents/MacOS/c4group", "new c4group"),
+            ],
+        );
+        let plan = plan(
+            "0.4.0",
+            vec![component("engine", &archive_without_icon, "")],
+        );
+
+        apply_update(&install.layout, &plan, &FakePlatform::new()).expect("apply the update");
+
+        assert_eq!(read_file(&install.root().join(BUNDLE_ICON)), "old icon");
+    }
+
+    // The icon has to go in before the bundle is re-signed, or the seal would
+    // not cover it — so it is already installed when a failing signature rolls
+    // the update back, and the rollback has to put the old one back too.
+    #[test]
+    fn a_rolled_back_bundle_apply_restores_the_old_icon() {
+        let install = install_with(true);
+        let plan = plan(
+            "0.4.0",
+            vec![component("engine", &install.engine_archive(), "")],
+        );
+
+        let error = apply_update(
+            &install.layout,
+            &plan,
+            &FakePlatform::new().failing_codesign("--verify"),
+        )
+        .expect_err("a bundle whose signature does not verify must not be kept");
+
+        assert_eq!(read_file(&install.root().join(BUNDLE_ICON)), "old icon");
+        assert_eq!(
+            read_file(&install.layout.binaries_dir().join("clonk-app")),
+            "old app",
+            "{error}"
         );
     }
 
