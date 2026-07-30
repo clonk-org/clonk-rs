@@ -942,10 +942,20 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   **Still not verified:** the mark on screen in a running editor. The maths is
   pinned and the viewport around it is now known to draw correctly, so what is
   left is a click in a live window rather than a question about the code.
-  **Still open:** motion and release. `edit_move`, `edit_tick_move`,
-  `edit_release`, `drop_target` and `frame_selection` are ported and tested but
-  still uncalled, so a drag neither moves a selection nor completes a rubber
-  band, and no `EMMO_Move`/`EMMO_Enter` control is ever emitted.
+  **The rubber band is complete.** `console_viewport_motion` and
+  `console_viewport_release` carry `C4EditCursor::Move`'s Edit arm
+  (`C4EditCursor.cpp:129-152`) and `LeftButtonUp`'s (`:287-341`): a press on
+  empty space arms the band with **both** corners at the press (`X2 = X;
+  Y2 = Y`), motion drags the live corner while the anchor stays put, and the
+  release runs `FrameSelection` over `Game.Objects` master order — the reverse
+  of the snapshot's draw order — then clears `Hold` and `DragFrame`
+  *regardless*, as C++ does. Covered by
+  `console_viewport_click_selects_the_object_under_the_cursor`, which now walks
+  the whole gesture.
+  **Still open:** `MoveSelection` and `PutContents`. A held drag over a
+  selection does not move it and `EMMO_Move`/`EMMO_Enter` are still never
+  emitted, because both need the control round trip rather than a local
+  selection edit; `drop_target` and `edit_tick_move` remain uncalled with them.
 
 - **Most of the edit-cursor interaction layer still has no production caller.**
   Worth

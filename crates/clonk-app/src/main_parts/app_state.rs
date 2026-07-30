@@ -341,9 +341,10 @@ pub(crate) struct GameApp {
         std::collections::HashMap<u64, clonk_frontend::ActiveViewportProjection>,
     /// `C4EditCursor::Hold` — set by a press, cleared by the release.
     pub(crate) edit_cursor_hold: bool,
-    /// `C4EditCursor::DragFrame` with its `X2`/`Y2` anchor, in world
-    /// coordinates. `Some` exactly while a rubber band is armed.
-    pub(crate) edit_cursor_drag_frame: Option<(i32, i32)>,
+    /// `C4EditCursor::DragFrame` with its `(X, Y)` press anchor and live
+    /// `(X2, Y2)` corner, both in world coordinates. `Some` exactly while a
+    /// rubber band is armed.
+    pub(crate) edit_cursor_drag_frame: Option<((i32, i32), (i32, i32))>,
     /// Native `C4Console::Editing` starts true and is irreversibly cleared
     /// when `EnableControls` observes a no-input playback. Opening another
     /// game defaults the edit cursor mode, but does not restore this latch.

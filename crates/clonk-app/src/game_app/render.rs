@@ -2645,11 +2645,102 @@ impl GameApp {
             Some(SelectionEdit::ClearAndDragFrame) => {
                 // `DragFrame = true; X2 = X; Y2 = Y` — the band is anchored at
                 // the press, in world coordinates.
-                self.edit_cursor_drag_frame = Some((x, y));
+                self.edit_cursor_drag_frame = Some(((x, y), (x, y)));
                 self.developer_selection.clear(SelectionWriter::EditCursor)
             }
             None => None,
         }
+    }
+
+    /// Pointer motion inside a console viewport window.
+    ///
+    /// `C4EditCursor::Move`'s Edit arm (`C4EditCursor.cpp:129-152`). While a
+    /// rubber band is armed the band's live corner follows the pointer
+    /// (`X2 = X; Y2 = Y`); otherwise the hovered target is re-picked, which is
+    /// what a later shift-click resumes from.
+    pub(crate) fn console_viewport_motion(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+        scale: f32,
+        shift: bool,
+    ) {
+        use clonk_engine::developer_cursor::edit_target;
+
+        if self.developer_console_edit_mode != ConsoleEditMode::Edit {
+            return;
+        }
+        let Some(projection) = self.console_viewport_projections.get(&identity).copied() else {
+            return;
+        };
+        let (x, y) = projection
+            .pointer_projection(scale)
+            .world_position(local.0, local.1);
+
+        if let Some((_, corner)) = self.edit_cursor_drag_frame.as_mut() {
+            *corner = (x, y);
+            return;
+        }
+        let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
+        let selection = self.developer_selection.objects().to_vec();
+        let target = edit_target(shift, &selection, |after| hit_test.object_at(x, y, after));
+        self.developer_selection.set_hover(target);
+    }
+
+    /// Releasing the left button inside a console viewport window.
+    ///
+    /// `C4EditCursor::LeftButtonUp`'s Edit arm runs `FrameSelection()` then
+    /// `PutContents()`, both optional and in that order, and clears `Hold`,
+    /// `DragFrame`, `DragLine` and `DropTarget` regardless
+    /// (`C4EditCursor.cpp:287-341`).
+    pub(crate) fn console_viewport_release(
+        &mut self,
+    ) -> Option<clonk_engine::developer_selection::SelectionSnapshot> {
+        use clonk_engine::developer_cursor::{
+            edit_release, frame_selection, EditRelease, FrameCandidate,
+        };
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let band = self.edit_cursor_drag_frame.take();
+        self.edit_cursor_hold = false;
+        if self.developer_console_edit_mode != ConsoleEditMode::Edit {
+            return None;
+        }
+
+        let mut result = None;
+        for action in edit_release(band.is_some(), None) {
+            match action {
+                EditRelease::FrameSelection => {
+                    let (anchor, corner) = band?;
+                    // `Game.Objects` master order, which is the reverse of the
+                    // snapshot's draw order.
+                    let candidates = self
+                        .snapshot
+                        .render_order
+                        .iter()
+                        .rev()
+                        .filter_map(|id| {
+                            let object = self.snapshot.object(*id)?;
+                            Some(FrameCandidate {
+                                id: *id,
+                                deleted: false,
+                                contained: object.container.is_some(),
+                                x: object.position.x,
+                                y: object.position.y,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let framed = frame_selection(anchor, corner, &candidates);
+                    result = self
+                        .developer_selection
+                        .select_frame(SelectionWriter::EditCursor, framed);
+                }
+                // `PutContents` needs the drop target, which arrives with the
+                // Ctrl-drag gesture that is not wired yet.
+                EditRelease::Enter { .. } => {}
+            }
+        }
+        result
     }
 
     /// Draw one console viewport window's frame.
@@ -2713,7 +2804,7 @@ impl GameApp {
         snapshot: &SimulationSnapshot,
         projection: clonk_frontend::ActiveViewportProjection,
         selection: &[clonk_engine::ObjectId],
-        drag_frame: Option<(i32, i32)>,
+        drag_frame: Option<((i32, i32), (i32, i32))>,
     ) {
         use clonk_engine::developer_overlay::{
             console_overlay_commands, ConsoleOverlayCommand, OverlaySelection,
@@ -2740,12 +2831,18 @@ impl GameApp {
                 })
             })
             .collect::<Vec<_>>();
-        // The rubber band is anchored in world coordinates and follows the
-        // pointer; without a live pointer the band is not drawn at all.
-        let band = drag_frame.map(|(x, y)| {
+        // `DrawFrame` normalises the corners, so the band is the same
+        // rectangle whichever way the drag went (`developer_overlay`).
+        let band = drag_frame.map(|(anchor, corner)| {
             (
-                (x - projection.target_x, y - projection.target_y),
-                (x - projection.target_x, y - projection.target_y),
+                (
+                    anchor.0 - projection.target_x,
+                    anchor.1 - projection.target_y,
+                ),
+                (
+                    corner.0 - projection.target_x,
+                    corner.1 - projection.target_y,
+                ),
             )
         });
         let commands = console_overlay_commands(false, false, &entries, band, None, None);

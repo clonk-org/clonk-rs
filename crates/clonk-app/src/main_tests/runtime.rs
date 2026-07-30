@@ -5097,12 +5097,48 @@
             .expect("clearing the selection is a change")
             .objects
             .is_empty());
+        // `DragFrame = true; X2 = X; Y2 = Y` — both corners start at the press.
+        let world_empty = (
+            projection.target_x + empty.0,
+            projection.target_y + empty.1,
+        );
         assert_eq!(
             app.edit_cursor_drag_frame,
-            Some((
-                projection.target_x + empty.0,
-                projection.target_y + empty.1
-            ))
+            Some((world_empty, world_empty))
+        );
+
+        // A rubber band drawn over the object frames it on release.
+        // C4EditCursor::LeftButtonUp runs FrameSelection() then clears Hold and
+        // DragFrame regardless (C4EditCursor.cpp:287-341).
+        let corner = (local.0 + 40, local.1 + 40);
+        app.console_viewport_motion(identity, corner, 1.0, false);
+        let (anchor, live) = app
+            .edit_cursor_drag_frame
+            .expect("the band is still armed while the button is down");
+        assert_eq!(
+            live,
+            (
+                projection.target_x + corner.0,
+                projection.target_y + corner.1
+            ),
+            "the band's live corner follows the pointer"
+        );
+        assert_ne!(anchor, live, "the anchor stays at the press");
+
+        // Drag the band back so it spans the object, then release.
+        app.console_viewport_motion(identity, (local.0 - 40, local.1 - 40), 1.0, false);
+        let framed = app
+            .console_viewport_release()
+            .expect("the frame changed the selection");
+        assert!(
+            framed.objects.contains(&id),
+            "an object inside the band is framed: {:?}",
+            framed.objects
+        );
+        assert!(!app.edit_cursor_hold, "the release always clears Hold");
+        assert!(
+            app.edit_cursor_drag_frame.is_none(),
+            "the release always clears DragFrame"
         );
 
         // Play mode is ordinary mouse control, not the editor sink.

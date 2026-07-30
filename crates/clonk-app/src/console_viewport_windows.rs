@@ -217,9 +217,24 @@ pub(crate) fn handle_console_viewport_event(
             event: WindowEvent::CursorMoved { position, .. },
             ..
         } => {
-            if let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) {
-                viewport.last_pointer = (position.x as i32, position.y as i32);
-            }
+            let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) else {
+                return;
+            };
+            viewport.last_pointer = (position.x as i32, position.y as i32);
+            let (identity, local) = (viewport.identity, viewport.last_pointer);
+            let shift = app.keyboard_modifiers.shift();
+            app.console_viewport_motion(identity, local, 1.0, shift);
+        }
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Released,
+                    button: winit::event::MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
+            app.console_viewport_release();
         }
         Event::WindowEvent {
             event:
