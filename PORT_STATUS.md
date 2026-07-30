@@ -983,9 +983,14 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   coordinate convention is now pinned, including that the corner Ls point
   *outward* — they reach one pixel beyond the shape on each side and no
   further, which is what catches a displaced mark.
-  **Still not verified:** the mark on screen in a running editor. The maths is
-  pinned and the viewport around it is now known to draw correctly, so what is
-  left is a click in a live window rather than a question about the code.
+  **The mark reaches pixels.** `a_selected_object_draws_its_mark_into_the_viewport_frame`
+  renders a console viewport, selects an object inside the view, renders again
+  and asserts the frames differ — then clears the selection and asserts the
+  frame goes back to *exactly* the unmarked bytes, so the difference is the
+  mark and not per-frame drift. The viewport has to be an **owned** one for
+  this: an ownerless viewport is centred on the map, and a mark on an object
+  outside that view is legitimately clipped away, which is what made an earlier
+  attempt at this test pass for the wrong reason.
   **The rubber band is complete.** `console_viewport_motion` and
   `console_viewport_release` carry `C4EditCursor::Move`'s Edit arm
   (`C4EditCursor.cpp:129-152`) and `LeftButtonUp`'s (`:287-341`): a press on

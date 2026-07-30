@@ -5008,6 +5008,70 @@
     // ViewX/ViewY (C4Viewport.cpp:181), C4EditCursor::Move picks the target
     // with Game.FindObject (C4EditCursor.cpp:150), and LeftButtonDown edits
     // the selection (:201-229).
+    // C4Viewport.cpp:1107 — Console.EditCursor.Draw runs inside the viewport
+    // pass, so a selection mark is part of the frame the window blits. This is
+    // the mark reaching pixels, not just the geometry being right.
+    #[test]
+    fn a_selected_object_draws_its_mark_into_the_viewport_frame() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        // An owned viewport follows the player, so the crew object it follows
+        // is inside the view — an ownerless one is centred on the map and the
+        // mark would legitimately fall outside it.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(Some(
+            app.local_owner,
+        ))])
+        .expect("console player viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+
+        let unmarked = app
+            .render_console_viewport(identity, 320, 200)
+            .expect("the viewport draws");
+        let projection = app.console_viewport_projections[&identity];
+
+        // Select whatever sits under the view's own centre.
+        let object = app
+            .snapshot
+            .objects
+            .iter()
+            .find(|object| {
+                let x = object.position.x - projection.target_x;
+                let y = object.position.y - projection.target_y;
+                (0..320).contains(&x) && (0..200).contains(&y)
+            })
+            .map(|object| object.id)
+            .expect("an object inside the view");
+        app.developer_selection
+            .replace(clonk_engine::developer_selection::SelectionWriter::EditCursor, object);
+
+        let marked = app
+            .render_console_viewport(identity, 320, 200)
+            .expect("the viewport draws");
+        assert_ne!(
+            marked.pixels(),
+            unmarked.pixels(),
+            "the select mark is drawn into the frame"
+        );
+
+        // And it goes away again, so the difference is the mark and not some
+        // unrelated per-frame drift.
+        app.developer_selection
+            .clear(clonk_engine::developer_selection::SelectionWriter::EditCursor);
+        let cleared = app
+            .render_console_viewport(identity, 320, 200)
+            .expect("the viewport draws");
+        assert_eq!(
+            cleared.pixels(),
+            unmarked.pixels(),
+            "clearing the selection restores the unmarked frame"
+        );
+    }
+
     // C4Game.cpp:2413-2424,2738 + :2306-2320 — the monitor arms only in a
     // windowed dev session, registers before it starts, and its callback is
     // bound straight to ReloadFile's dispatcher.
