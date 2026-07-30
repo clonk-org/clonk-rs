@@ -19,6 +19,9 @@ pub(super) struct OfflineSavegameStartup {
     pub(super) initial_game_data: Option<InitialNetworkGameData>,
     pub(super) runtime_players: Vec<RuntimeJoinPlayerSource>,
     pub(super) external_player_paths: HashMap<i32, PathBuf>,
+    /// `C4S.Head.SaveGame`: only a real savegame insists on a runtime section
+    /// per restored player (C4Player.cpp:359-371).
+    pub(super) save_game: bool,
     /// One entry per assignment made beyond `PML_PlrName`. C++ logs each and,
     /// in graphical non-replay mode, shows a hideable modal
     /// (C4PlayerInfo.cpp:1384-1390).
@@ -86,6 +89,7 @@ pub(super) fn prepare_offline_savegame_startup(
             initial_game_data,
             runtime_players,
             external_player_paths,
+            save_game,
             wild_takeovers,
         },
     ))

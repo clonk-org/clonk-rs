@@ -452,17 +452,24 @@ impl Engine {
         scenario_path: impl AsRef<Path>,
         sources: &[RuntimeJoinPlayerSource],
         external_player_paths: &HashMap<i32, PathBuf>,
+        save_game: bool,
     ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
         if sources.is_empty() {
             return Ok(Vec::new());
         }
         let group = Group::open(scenario_path)?;
-        let game_txt = group.read_file("Game.txt")?;
+        // `C4Game::OpenScenario` leaves `GameText` null for a scenario that
+        // ships no Game.txt, and `LoadRuntimeData` simply reports failure
+        // instead of aborting the open (C4Game.cpp:224; C4Player.cpp:1654-1655).
+        let game_txt = group
+            .exists("Game.txt")
+            .then(|| group.read_file("Game.txt"));
         self.restore_runtime_join_players_with_external_paths(
             &group,
-            &game_txt,
+            &game_txt.transpose()?.unwrap_or_default(),
             sources,
             external_player_paths,
+            save_game,
         )
     }
 
@@ -477,7 +484,36 @@ impl Engine {
             game_txt,
             sources,
             &HashMap::new(),
+            true,
         )
+    }
+
+    /// The state `C4Player::Init` is left holding when `LoadRuntimeData` finds
+    /// no runtime section for a script player in a non-savegame: the
+    /// pre-`Load` defaults (`Status = PS_Normal`, view centred on the world at
+    /// C4Player.cpp:257,286) with Number/ColorDw/ID/Team re-seeded from the
+    /// restore row (C4Player.cpp:363-369).
+    fn default_script_player_state(&self, info: &ControlPlayerInfoEntry) -> PlayerState {
+        let (world_width, world_height) = self
+            .landscape
+            .as_ref()
+            .map(|landscape| (landscape.width() as i32, landscape.estimated_height()))
+            .unwrap_or((0, 0));
+        PlayerState {
+            id: info.game_number,
+            player_info_id: info.id,
+            status: PlayerStatus::Active,
+            status_value: Some(1),
+            color: Some(RgbColor::new(
+                ((info.color >> 16) & 0xff) as u8,
+                ((info.color >> 8) & 0xff) as u8,
+                (info.color & 0xff) as u8,
+            )),
+            color_dw_raw: Some(info.color),
+            view_center: Some(Vector2::new(world_width / 2, world_height / 2)),
+            initial_value_set: true,
+            ..PlayerState::default()
+        }
     }
 
     fn restore_runtime_join_players_with_external_paths(
@@ -486,6 +522,7 @@ impl Engine {
         game_txt: &[u8],
         sources: &[RuntimeJoinPlayerSource],
         external_player_paths: &HashMap<i32, PathBuf>,
+        save_game: bool,
     ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
         if sources.is_empty() {
             return Ok(Vec::new());
@@ -507,13 +544,20 @@ impl Engine {
 
         for source in sources {
             let section_name = format!("Player{}", source.info.id);
-            let section = sections
-                .iter()
-                .find(|section| section.name == section_name)
-                .ok_or(RuntimeJoinPlayerRestoreError::MissingPlayerSection(
-                    source.info.id,
-                ))?;
-            let mut state = parse_player_state(section, source.info.id, &object_numbers)?;
+            let mut state = match sections.iter().find(|section| section.name == section_name) {
+                Some(section) => parse_player_state(section, source.info.id, &object_numbers)?,
+                // "for script players in non-savegames, this is OK - it means
+                // they get restored using default values"
+                // (C4Player.cpp:359-371).
+                None if !save_game && source.info.is_script_player() => {
+                    self.default_script_player_state(&source.info)
+                }
+                None => {
+                    return Err(RuntimeJoinPlayerRestoreError::MissingPlayerSection(
+                        source.info.id,
+                    ))
+                }
+            };
             if state.player_info_id == 0 {
                 return Err(RuntimeJoinPlayerRestoreError::ZeroPlayerInfoId(
                     source.info.id,
@@ -655,6 +699,7 @@ mod tests {
                 &save,
                 &[source],
                 &HashMap::from([(7, profile)]),
+                true,
             )
             .expect("restore external user profile");
 
@@ -663,6 +708,98 @@ mod tests {
         assert_eq!(player.name(), "Alice");
         assert_eq!(player.wealth(), 19);
         assert_eq!(player.score(), 31);
+    }
+
+    /// `C4Player::LoadRuntimeData` bails when the scenario ships no `Game.txt`
+    /// and again when that text carries no `[Player<ID>]` section
+    /// (C4Player.cpp:1652-1657). For a script player in a non-savegame,
+    /// `C4Player::Init` treats that as expected and re-seeds
+    /// Number/ColorDw/ID/Team straight from the restore row instead of failing
+    /// (C4Player.cpp:355-371).
+    #[test]
+    fn a_regular_scenario_restores_its_script_player_without_runtime_data() {
+        let fixture = tempdir().expect("scenario tempdir");
+        let scenario = fixture.path().join("Drachenfels.c4s");
+        std::fs::create_dir(&scenario).expect("create scenario group");
+        std::fs::write(scenario.join("Scenario.txt"), "[Head]\nMaxPlayer=4\n")
+            .expect("write scenario core");
+        let script_profile = scenario.join("ScriptPlr-1.c4p");
+        std::fs::create_dir(&script_profile).expect("create script player group");
+        std::fs::write(
+            script_profile.join("Player.txt"),
+            "[Player]\nName=Ala Kadabra\n",
+        )
+        .expect("write script profile");
+        let source = RuntimeJoinPlayerSource {
+            client_id: 0,
+            info: ControlPlayerInfoEntry {
+                name: crate::LegacyCString::from_bytes(b"Ala Kadabra".to_vec()).unwrap(),
+                filename: crate::LegacyCString::from_bytes(b"ScriptPlr-1.c4p".to_vec()).unwrap(),
+                flags: crate::PLAYER_INFO_FLAG_JOINED
+                    | crate::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
+                id: 1,
+                player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+                color: 65535,
+                game_number: 10,
+                team: 2,
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+
+        let restored = engine
+            .restore_offline_savegame_players_from_path(
+                &scenario,
+                &[source],
+                &HashMap::new(),
+                false,
+            )
+            .expect("a regular scenario restores its shipped script player");
+
+        assert_eq!(restored.len(), 1);
+        // `GetInGameNumber` owns the number, not a free-number scan.
+        assert_eq!(restored[0].number, 10);
+        assert_eq!(restored[0].player_info_id, 1);
+        let player = engine.player(10).expect("script player 10 joined");
+        assert!(player.is_script_player());
+        assert!(player.no_elimination_check());
+        assert_eq!(player.team(), Some(2));
+        assert_eq!(player.name(), "Ala Kadabra");
+    }
+
+    /// The same missing section stays fatal for a real savegame and for user
+    /// players, where C++ returns false from `C4Player::Init`
+    /// (C4Player.cpp:370-371).
+    #[test]
+    fn a_savegame_still_fails_when_its_runtime_player_section_is_missing() {
+        let fixture = tempdir().expect("scenario tempdir");
+        let save = fixture.path().join("Save.c4s");
+        std::fs::create_dir(&save).expect("create save group");
+        std::fs::write(save.join("Game.txt"), "[Player9]\nStatus=1\nID=9\n")
+            .expect("write Game.txt");
+        let source = RuntimeJoinPlayerSource {
+            client_id: 0,
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id: 1,
+                player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+                game_number: 10,
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+
+        assert!(matches!(
+            engine.restore_offline_savegame_players_from_path(
+                &save,
+                &[source],
+                &HashMap::new(),
+                true,
+            ),
+            Err(RuntimeJoinPlayerRestoreError::MissingPlayerSection(1))
+        ));
     }
 
     #[test]
