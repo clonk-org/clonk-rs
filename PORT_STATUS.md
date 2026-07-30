@@ -917,6 +917,27 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   (M10-P4-L047's criteria 1-3). Closing that card is what turns this group
   from a tested library into a working editor; nothing else in the group is
   blocked on anything but it.
+  The window half is now done, so what remains is the bridge. Two concrete
+  pieces, both scouted:
+  - **`C4EditCursor::LeftButtonDown`'s Edit arm is ported** as
+    `developer_cursor::edit_press` (`C4EditCursor.cpp:201-229`), pinned by
+    `edit_press_selects_toggles_and_arms_the_rubber_band_like_cpp`. Two details
+    it keeps: a plain click on an *already selected* object changes nothing
+    (C++ guards the replace on `!Selection.GetLink(Target)`), which is what lets
+    a multi-object selection be dragged as a unit; and the whole Ctrl branch is
+    inside `if (Target)`, so Ctrl-clicking empty space neither clears nor starts
+    a rubber band where a plain click there does both.
+  - **The hit test is the missing bridge.** `edit_target` takes a
+    `find_next(after)` closure that is exactly
+    `Game.FindObject(0, X, Y, 0, 0, OCF_NotContained, …, ANY_OWNER, after)`
+    (`C4EditCursor.cpp:150`), and the port already implements that query
+    faithfully — `compat::objects::find_object_linear` with
+    `FindObjectParams`, including the `find_next` cursor and the OCF mask.
+    What is missing is a way to run it *outside* the script host: it takes a
+    `WorldAccessor`, which today only `with_host_context` supplies. An
+    `Engine::edit_cursor_object_at(x, y, after)` needs that accessor reachable
+    from a plain `&Engine`. That is the next step, and it is a design decision
+    rather than a transcription — do not reimplement the query.
 
 - **Frame-selection membership landed; three editor gaps remain untracked.**
   `DeveloperSelection::select_frame` took the framed objects *from its caller*
