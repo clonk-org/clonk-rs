@@ -1647,13 +1647,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   test wants an injectable send seam so the congested case can be simulated
   without a real blocked socket.
 
-- Flaky test (observed 2026-07-24, not fixed): `clonk-network`
-  `session::tests::dual_client_reconnects_a_missing_tcp_route` failed once in a
-  full `cargo nextest run --workspace` and was not reproducible — 5/5 green in
-  isolation and the immediately following full workspace run was 8828/8828. It
-  is a real-socket reconnect test, so it is load/timing sensitive like the
-  `control_sync_and_reconnect_smoke` case that already carries `retries = 2` in
-  `.config/nextest.toml`. Root-cause it rather than adding another retry.
+- Flaky test (fixed 2026-07-29): `clonk-network`
+  `session::tests::dual_client_reconnects_a_missing_tcp_route` started its
+  reconnect deadline as soon as it asked the proxy task to cut TCP, before
+  that task had been scheduled to abort and await its copier and thereby drop
+  both sockets. It then polled the host through its command channel on every
+  scheduler yield; those queued inspection commands deliberately take priority
+  over network arms and could starve the very disconnect/admission events the
+  test awaited. The proxy now acknowledges completed cancellation, an
+  event-driven host barrier observes route removal and replacement without
+  command flooding, and the test proves UDP traffic remains live while TCP is
+  held absent. Its only lifecycle deadline is the native 30-second ping-timeout
+  horizon, not a Rust-only immediate-redial requirement; no retry was added.
 - Flaky test (observed 2026-07-24, not fixed): `clonk-network`
   `session::tests::sync_controls_wait_for_status_barrier_and_keep_fifo_order`
   failed once in a full workspace run at `session.rs:13493`, asserting that no

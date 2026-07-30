@@ -665,6 +665,7 @@ mod tests {
                     outbound,
                 },
             )]),
+            accepted_route_waiters: Vec::new(),
             control_send_time_epoch: 0,
             closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
             pending_sync: Vec::new(),
@@ -5266,7 +5267,7 @@ mod tests {
     async fn dual_client_reconnects_a_missing_tcp_route() {
         let host_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let host_tcp_address = host_listener.local_addr().unwrap();
-        let host = start_host(
+        let mut host = start_host(
             host_listener,
             HostConfig {
                 udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
@@ -5279,6 +5280,8 @@ mod tests {
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_address = proxy_listener.local_addr().unwrap();
         let (cut_first, cut_first_rx) = oneshot::channel();
+        let (first_cut, first_cut_rx) = oneshot::channel();
+        let (resume_reconnect, resume_reconnect_rx) = oneshot::channel();
         let proxy = tokio::spawn(async move {
             let (mut client, _) = proxy_listener.accept().await.unwrap();
             let mut host = TcpStream::connect(host_tcp_address).await.unwrap();
@@ -5289,6 +5292,8 @@ mod tests {
             let _ = cut_first_rx.await;
             first.abort();
             let _ = first.await;
+            let _ = first_cut.send(());
+            let _ = resume_reconnect_rx.await;
 
             let (mut client, _) = proxy_listener.accept().await.unwrap();
             let mut host = TcpStream::connect(host_tcp_address).await.unwrap();
@@ -5301,15 +5306,17 @@ mod tests {
         )
         .await
         .unwrap();
-        let initial_routes = timeout(EVENT_WAIT, async {
-            loop {
-                let routes = host.accepted_routes().await;
-                if routes.len() == 2 {
-                    break routes;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
+        let mut host_events = host.take_event_receiver();
+        // This is a deadlock guard at native C4NetPingTimeout, not a
+        // reconnect-performance assertion. Native retries are timer-driven
+        // and may legitimately wait beyond five seconds
+        // (oracle-src-pinned src/C4Network2Client.cpp:126-184;
+        // src/C4Network2IO.cpp:1155-1182).
+        let route_lifecycle_wait = Duration::from_millis(crate::PING_TIMEOUT_MS as u64);
+        let initial_routes = timeout(
+            route_lifecycle_wait,
+            host.wait_for_accepted_routes_change(BTreeSet::new(), 2),
+        )
         .await
         .expect("dual routes were not established");
         let initial_ids = initial_routes
@@ -5317,22 +5324,60 @@ mod tests {
             .map(|(connection_id, _, _)| *connection_id)
             .collect::<BTreeSet<_>>();
         cut_first.send(()).unwrap();
+        // C4Network2IO reports a disconnect only after the socket has closed,
+        // then C4Network2 removes that route before recovery can reconnect it
+        // (oracle-src-pinned src/C4Network2IO.cpp:533-567;
+        // src/C4Network2.cpp:866-905). Start the recovery deadline at that
+        // same observable boundary, not when this task merely asks the proxy
+        // task to cut the route.
+        timeout(route_lifecycle_wait, first_cut_rx)
+            .await
+            .expect("proxy did not cut the initial TCP route")
+            .expect("proxy dropped the route-cut acknowledgement");
 
-        timeout(EVENT_WAIT, async {
+        let surviving_routes = timeout(
+            route_lifecycle_wait,
+            host.wait_for_accepted_routes_change(initial_ids.clone(), 1),
+        )
+        .await
+        .expect("host did not retire the cut TCP route");
+        assert_eq!(surviving_routes.len(), 1);
+
+        while host_events.try_recv().is_ok() {}
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: 17,
+        };
+        client.submit_status_ack(status).await.unwrap();
+        timeout(route_lifecycle_wait, async {
             loop {
-                let routes = host.accepted_routes().await;
-                let route_ids = routes
-                    .iter()
-                    .map(|(connection_id, _, _)| *connection_id)
-                    .collect::<BTreeSet<_>>();
-                if routes.len() == 2 && route_ids != initial_ids {
+                if matches!(
+                    host_events.recv().await,
+                    Some(HostEvent::StatusAck {
+                        client_id,
+                        status: received,
+                    }) if client_id == client.client_id() && received == status
+                ) {
                     break;
                 }
-                tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("missing TCP protocol was not reconnected");
+        .expect("the surviving UDP route did not carry message traffic");
+
+        resume_reconnect.send(()).unwrap();
+        let reconnected_routes = timeout(
+            route_lifecycle_wait,
+            host.wait_for_accepted_routes_change(initial_ids.clone(), 2),
+        )
+        .await
+        .expect("missing TCP protocol was not eventually reconnected");
+        let reconnected_ids = reconnected_routes
+            .iter()
+            .map(|(connection_id, _, _)| *connection_id)
+            .collect::<BTreeSet<_>>();
+        assert_ne!(reconnected_ids, initial_ids);
 
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();

@@ -857,6 +857,12 @@ pub enum HostCommand {
         completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
     },
     #[cfg(test)]
+    WaitForAcceptedRoutesChange {
+        initial_ids: BTreeSet<u32>,
+        expected_count: usize,
+        completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
+    },
+    #[cfg(test)]
     InspectConnectedClients {
         completion: oneshot::Sender<Vec<ClientId>>,
     },
@@ -1290,6 +1296,26 @@ impl HostHandle {
         routes
             .await
             .expect("test host loop returns route inspection")
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_accepted_routes_change(
+        &self,
+        initial_ids: BTreeSet<u32>,
+        expected_count: usize,
+    ) -> Vec<(u32, ClientId, u32)> {
+        let (completion, routes) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::WaitForAcceptedRoutesChange {
+                initial_ids,
+                expected_count,
+                completion,
+            })
+            .await
+            .expect("test host loop accepts a route-change barrier");
+        routes
+            .await
+            .expect("test host loop completes a route-change barrier")
     }
 
     #[cfg(test)]

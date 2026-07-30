@@ -573,6 +573,8 @@ pub(crate) async fn handle_client_disconnected(
         return;
     }
     state.invalidate_control_send_time();
+    #[cfg(test)]
+    notify_accepted_route_waiters(state);
     if let Some(route) = &disconnected_route {
         state
             .closed_routes
