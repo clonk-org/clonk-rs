@@ -95,8 +95,6 @@ pub enum ScenarioError {
     OfflineStartupSavegameUnsupported,
     #[error("offline startup preflight does not support legacy replays yet")]
     OfflineStartupReplayUnsupported,
-    #[error("offline startup preflight does not support SavePlayerInfos.txt yet")]
-    OfflineStartupRestoreInfosUnsupported,
 }
 
 /// The C4GameParameters player capacity available before offline InitLocal.
@@ -114,6 +112,11 @@ pub struct OfflineScenarioStartupPreflight {
     /// configured local player files, but associates them with the saved
     /// restore rows before recreating the live players.
     pub save_game: bool,
+    /// `hGroup.FindEntry(C4CFN_SavePlayerInfos)`: a present component fills
+    /// `RestorePlayerInfos` whatever `SaveGame` says, so ordinary scenarios
+    /// shipping restore rows reach `InitPlayers`' recreation branch too
+    /// (C4GameParameters.cpp:378-385, C4Game.cpp:2841-2843).
+    pub restore_player_infos: bool,
 }
 
 /// Parameters that must be frozen before a replay's dynamic landscape is
@@ -1920,9 +1923,8 @@ impl Scenario {
         if manifest.core.head.replay != 0 {
             return Err(ScenarioError::OfflineStartupReplayUnsupported);
         }
-        if !save_game && read_optional_legacy_entry(group, "SavePlayerInfos.txt")?.is_some() {
-            return Err(ScenarioError::OfflineStartupRestoreInfosUnsupported);
-        }
+        let restore_player_infos =
+            read_optional_legacy_entry(group, "SavePlayerInfos.txt")?.is_some();
 
         let (max_players, random_seed) = match read_optional_legacy_entry(group, "Parameters.txt")?
         {
@@ -1939,6 +1941,7 @@ impl Scenario {
             max_players,
             random_seed,
             save_game,
+            restore_player_infos,
         })
     }
 
