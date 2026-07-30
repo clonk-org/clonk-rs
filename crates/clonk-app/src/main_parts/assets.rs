@@ -2638,14 +2638,18 @@ pub(crate) fn resolve_classic_startup_font_bundle_for_request_with_system_fonts(
 
     Ok(ClassicStartupFontBundle {
         book: Arc::new(clonk_frontend::startup_scensel::BookFontSet {
-            title,
+            title: title.clone(),
             caption: caption.clone(),
             text: text.clone(),
             small: small.clone(),
         }),
+        // All four tiers, because `GetBlackFontByHeight` picks between them
+        // (C4Startup.cpp:125-143).
         options: Arc::new(clonk_frontend::startup_options_dlg::BookFonts {
             book: text.clone(),
             book_small: small,
+            book_caption: caption.clone(),
+            book_title: title,
         }),
         player_selection: Arc::new(clonk_frontend::startup_plrsel::BookFontSet { caption, text }),
     })

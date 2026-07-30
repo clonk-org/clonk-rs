@@ -225,12 +225,54 @@ pub const PROGRAM_FONT_SIZES: [i32; 9] = [8, 10, 12, 14, 16, 18, 20, 24, 28];
 // C4FT_MainSmall 13px, fDoShadow = false).
 // ---------------------------------------------------------------------------
 
-/// The two shadowless Endeavour book fonts the options dialog draws with.
+/// The shadowless Endeavour book fonts the options dialog draws with — the same
+/// four tiers `C4StartupGraphics::GetBlackFontByHeight` chooses between
+/// (`C4Startup.cpp:125-143`).
+/// `KeySelButton::DrawElement`'s highlighted text colour, `0xffff0000`
+/// (`C4StartupOptionsDlg.cpp:248-249`).
+const HIGHLIGHT_FONT_RGBA: [u8; 4] = [255, 0, 0, 255];
+
+/// The blit modulation an unhighlighted command glyph is drawn under
+/// (`C4StartupOptionsDlg.cpp:226`).
+const IDLE_COMMAND_MODULATION: u32 = 0x7f7f7f;
+
+/// `C4GUI::HorizontalLine`'s default colours (`C4Gui.h:628`). The engine's
+/// alpha byte is inverted, so `0x00` is opaque and `0xaf` is a light wash.
+const SEPARATOR_CLR: u32 = 0x0000_0000;
+const SEPARATOR_SHADOW_CLR: u32 = 0xaf7f_7f7f;
+
 pub struct BookFonts {
     /// `C4StartupGraphics::BookFont` (14px, line height 22).
     pub book: ClonkFont,
     /// `C4StartupGraphics::BookSmallFont` (13px, line height 20).
     pub book_small: ClonkFont,
+    /// `C4StartupGraphics::BookFontCapt` (16px, line height 25).
+    pub book_caption: ClonkFont,
+    /// `C4StartupGraphics::BookFontTitle` (22px, line height 34).
+    pub book_title: ClonkFont,
+}
+
+impl BookFonts {
+    /// `C4StartupGraphics::GetBlackFontByHeight` (`C4Startup.cpp:125-143`):
+    /// the first tier whose line height covers `height`, plus the zoom that
+    /// would map that line height onto the requested one.
+    pub fn black_font_by_height(&self, height: i32) -> (&ClonkFont, f32) {
+        let font = if height <= self.book_small.line_height {
+            &self.book_small
+        } else if height <= self.book.line_height {
+            &self.book
+        } else if height <= self.book_caption.line_height {
+            &self.book_caption
+        } else {
+            &self.book_title
+        };
+        let zoom = if font.line_height != 0 {
+            height as f32 / font.line_height as f32
+        } else {
+            1.0
+        };
+        (font, zoom)
+    }
 }
 
 /// Builds the two book fonts from a TTF, mirroring `CStdFont::Init` with
@@ -245,6 +287,8 @@ pub fn build_book_fonts(ttf_bytes: &[u8]) -> Result<BookFonts> {
     Ok(BookFonts {
         book: build_shadowless_font(&face, 14)?.with_role(ClonkFontRole::BookText),
         book_small: build_shadowless_font(&face, 13)?.with_role(ClonkFontRole::BookSmall),
+        book_caption: build_shadowless_font(&face, 16)?.with_role(ClonkFontRole::BookCaption),
+        book_title: build_shadowless_font(&face, 22)?.with_role(ClonkFontRole::BookTitle),
     })
 }
 
@@ -2693,6 +2737,14 @@ impl OptionsDlgState {
             || matches!(self.hovered, Some(OptionsHit::Network(hovered)) if hovered == target)
     }
 
+    /// `C4GUI::Button::fDown` for a control-sheet button: held with the pointer
+    /// still over it (`C4GuiButton.cpp:147-176`).
+    fn control_sheet_pressed(&self, target: ControlSheetHit) -> bool {
+        self.pointer_down
+            && self.pressed_release_target == Some(OptionsHit::Control(target))
+            && self.hovered == Some(OptionsHit::Control(target))
+    }
+
     fn program_button_pressed(&self, target: OptionsProgramFocusTarget) -> bool {
         self.pressed_program_button == Some(target)
             || (self.pointer_down
@@ -4131,6 +4183,43 @@ pub(crate) fn retained_blackened_image(image: &ImageData) -> ImageData {
     })
 }
 
+thread_local! {
+    /// Blit-modulated copies of GUI images, keyed by source texture and
+    /// modulation color. `ActivateBlitModulation` is a uniform per-channel
+    /// multiply, which commutes with the filter kernel, so pre-modulating the
+    /// source is equivalent to C++'s `glColor4ub` modulate up to rounding.
+    static RETAINED_MODULATED_IMAGES: RefCell<
+        HashMap<(clonk_graphics::GpuTextureId, u32), ImageData>,
+    > = RefCell::new(HashMap::new());
+}
+
+/// `CStdDDraw::ActivateBlitModulation(dwClr)` applied to `image`
+/// (`StdGL.cpp:673,727-748`): the GL vertex color multiplies each texel, i.e.
+/// `channel * (dwClr >> shift & 0xff) / 255`. Alpha is untouched — the mod
+/// color's alpha byte is replaced by the blit mode's own mask.
+pub(crate) fn retained_modulated_image(image: &ImageData, modulation: u32) -> ImageData {
+    RETAINED_MODULATED_IMAGES.with(|images| {
+        let key = (image.gpu_texture_id(), modulation);
+        if let Some(cached) = images.borrow().get(&key).cloned() {
+            return cached;
+        }
+        let factors = [
+            (modulation >> 16) & 0xff,
+            (modulation >> 8) & 0xff,
+            modulation & 0xff,
+        ];
+        let mut pixels = retained_blackened_image(image).pixels().to_vec();
+        for pixel in pixels.chunks_exact_mut(4) {
+            for (channel, factor) in pixel.iter_mut().zip(factors) {
+                *channel = (u32::from(*channel) * factor / 255) as u8;
+            }
+        }
+        let modulated = ImageData::new(image.width(), image.height(), pixels);
+        images.borrow_mut().insert(key, modulated.clone());
+        modulated
+    })
+}
+
 /// `CStdDDraw::Blit` whole-image stretch (StdDDraw2.cpp:637-786) like
 /// `crate::draw_image_bilinear`, but with the C++ texture padding color
 /// (transparent white) so edge samples bleed toward white exactly like the
@@ -5095,6 +5184,27 @@ impl OptionsDlgScreen {
         gamma: Option<&GammaRamp>,
         draw_focus: bool,
     ) {
+        // `C4GUI::HorizontalLine::DrawElement` (C4GuiLabels.cpp:317-324): the
+        // translucent shadow first, then the black rule one pixel above it.
+        let line = layout.separator;
+        crate::startup_scensel::draw_line_dw(
+            surface,
+            line.x + 1,
+            line.y + 1,
+            line.x + line.w - 1,
+            line.y + 1,
+            SEPARATOR_SHADOW_CLR,
+            gamma,
+        );
+        crate::startup_scensel::draw_line_dw(
+            surface,
+            line.x,
+            line.y,
+            line.x + line.w - 2,
+            line.y,
+            SEPARATOR_CLR,
+            gamma,
+        );
         for set in 0..state.controls().visible_sets(device) {
             let label = match device {
                 ControlDevice::Keyboard => format!("Keyboard {}", set + 1),
@@ -5122,6 +5232,26 @@ impl OptionsDlgScreen {
             if let Some((image, cell)) = selector {
                 let rect = layout.set_buttons[set];
                 let source = control_facets::phase_rect(cell, set);
+                // `UpdateCtrlSet` highlights the active set
+                // (C4StartupOptionsDlg.cpp:377-379) and `IconButton::DrawElement`
+                // then blits `fctButtonHighlight` additively *twice* — once
+                // under the icon for highlight/focus/hover and once over it for
+                // down-or-highlight (C4GuiButton.cpp:210-225).
+                let selected = state.controls().selected_set(device) == set;
+                let hot = selected
+                    || (draw_focus
+                        && state.control_sheet_control_highlighted(ControlSheetHit::Set(set)));
+                let highlight = |surface: &mut Surface| {
+                    draw_image_bilinear_additive(
+                        surface,
+                        &GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+                        &retained_blackened_image(&assets.button_highlight),
+                        gamma,
+                    );
+                };
+                if hot {
+                    highlight(surface);
+                }
                 crate::classic_gui::draw_facet_stretch(
                     surface,
                     image,
@@ -5134,6 +5264,9 @@ impl OptionsDlgScreen {
                     (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
                     gamma,
                 );
+                if selected {
+                    highlight(surface);
+                }
                 continue;
             }
             Self::draw_small_button(
@@ -5160,10 +5293,11 @@ impl OptionsDlgScreen {
                 .visible_label(device, control)
                 .unwrap_or("Undefined");
             // `KeySelButton::DrawElement` blits fctKey then an inset fctCommand
-            // (C4StartupOptionsDlg.cpp:215-240). Without the facet the sheet
+            // (C4StartupOptionsDlg.cpp:216-250). Without the facet the sheet
             // keeps its text button, which is what a headless run gets.
             if let Some(control_facet) = assets.control.as_ref() {
-                let facets = key_button_facets(rect, control, false);
+                let pressed = state.control_sheet_pressed(ControlSheetHit::Key(control));
+                let facets = key_button_facets(rect, control, pressed);
                 let key_cell = control_facets::phase_rect(control_facets::KEY, facets.key_phase);
                 crate::classic_gui::draw_facet_stretch(
                     surface,
@@ -5177,12 +5311,21 @@ impl OptionsDlgScreen {
                     (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
                     gamma,
                 );
+                // An unhighlighted glyph is blit-modulated by 0x7f7f7f (:225-244).
+                let lit = pressed
+                    || (draw_focus
+                        && state.control_sheet_control_highlighted(ControlSheetHit::Key(control)));
+                let source = if lit {
+                    control_facet.clone()
+                } else {
+                    retained_modulated_image(control_facet, IDLE_COMMAND_MODULATION)
+                };
                 let command_cell =
                     control_facets::phase_rect(control_facets::COMMAND, facets.command_phase);
                 let target = facets.command_rect;
                 crate::classic_gui::draw_facet_stretch(
                     surface,
-                    control_facet,
+                    &source,
                     (
                         command_cell.x as f32,
                         command_cell.y as f32,
@@ -5197,6 +5340,31 @@ impl OptionsDlgScreen {
                     ),
                     gamma,
                 );
+                // The two labels sit in the gutter the layout reserved to the
+                // right of the cap, in `GetBlackFontByHeight(cgoDraw.Hgt/2 + 5)`
+                // and turning red while highlighted (:247-249).
+                let (font, _zoom) = book.black_font_by_height(target.h / 2 + 5);
+                let color = if lit {
+                    HIGHLIGHT_FONT_RGBA
+                } else {
+                    STARTUP_FONT_RGBA
+                };
+                let text_x = rect.x + rect.w + 5;
+                for (text, y) in [
+                    (label.as_str(), target.y - 3),
+                    (binding, target.y + target.h / 2),
+                ] {
+                    font.draw_with_gamma(
+                        surface,
+                        text_x,
+                        y,
+                        text,
+                        color,
+                        TextAlign::Left,
+                        false,
+                        gamma,
+                    );
+                }
                 continue;
             }
             Self::draw_small_button(
@@ -5237,7 +5405,7 @@ impl OptionsDlgScreen {
                 assets,
                 book,
                 &layout.gamepad_gui_check,
-                "GUI control",
+                &state.labels.gamepad_gui_control,
                 state.controls().gamepad_gui_control(),
                 draw_focus && state.control_sheet_control_highlighted(ControlSheetHit::GamepadGui),
                 gamma,
@@ -5724,6 +5892,119 @@ mod tests {
             control: None,
             gamepad: None,
         }
+    }
+
+    /// `KeySelButton::DrawElement` (`C4StartupOptionsDlg.cpp:216-250`) and the
+    /// `C4GUI::HorizontalLine` above the grid (`:292`). Verified against a live
+    /// 1280x720 C++ F9 capture of the Keyboard sheet: the separator's black rule
+    /// lands on screen row 180 with its `0xaf7f7f7f` shadow on 181, the action
+    /// and key names sit in the gutter right of each cap, and an unhighlighted
+    /// command glyph is blit-modulated by `0x7f7f7f` — the 216-red arrow of
+    /// `Control.png` reads back as 107 (`216 * 127 / 255`).
+    #[test]
+    fn control_sheet_dims_glyphs_and_draws_labels_and_the_separator() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut assets = options_assets();
+        assets.control = Some(load_graphics_png("Control.png"));
+        let bindings =
+            |name: &str| std::array::from_fn(|_| std::array::from_fn(|_| name.to_string()));
+        let controls = ControlSheetState::new(bindings("Q"), bindings("< 1 >"), 1, false);
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            controls,
+            NetworkSheetState::default(),
+        );
+        state.resize(1280, 720, &gui, &book);
+        state.restore_sheet(OptionsSheet::Keyboard);
+
+        let render = |state: &OptionsDlgState| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            OptionsDlgScreen::render_state_with_draw_focus(
+                &mut surface,
+                &assets,
+                &gui,
+                &book,
+                state,
+                None,
+                true,
+            );
+            surface
+        };
+        let surface = render(&state);
+        let (separator, key) = {
+            let layout = state.layout.as_ref().expect("resized layout");
+            (layout.controls.separator, layout.controls.key_buttons[0])
+        };
+
+        // The main rule is `dwClr = 0x000000` from `x1` to `x2-2`, and the
+        // translucent `dwShadowClr` row sits one pixel below it.
+        let rule = surface
+            .get_pixel((separator.x + 4) as u32, separator.y as u32)
+            .expect("separator rule");
+        assert!(
+            rule.r < 16 && rule.g < 16 && rule.b < 16,
+            "separator rule should be the black line, got {rule:?}"
+        );
+        let shadow = surface
+            .get_pixel((separator.x + 4) as u32, (separator.y + 1) as u32)
+            .expect("separator shadow");
+        let paper = surface
+            .get_pixel((separator.x + 4) as u32, (separator.y - 4) as u32)
+            .expect("paper above the rule");
+        assert!(
+            shadow.r < paper.r && shadow.r > rule.r,
+            "the 0xaf7f7f7f shadow row should sit between the rule and the paper"
+        );
+
+        // Both labels are drawn in the gutter the layout reserves to the right
+        // of the cap, at `cgoDraw.Y - 3` and `cgoDraw.Y + cgoDraw.Hgt/2`.
+        let indent = key.w / 5;
+        let (draw_y, draw_h) = (key.y + indent * 3 / 4, key.h - 2 * indent);
+        let gutter_x = key.x + key.w + 5;
+        let ink_rows = |top: i32| {
+            (top..top + book.book_small.line_height)
+                .filter(|y| {
+                    (gutter_x..gutter_x + 100).any(|x| {
+                        surface
+                            .get_pixel(x as u32, *y as u32)
+                            .is_some_and(|p| p.r < 100 && p.g < 100 && p.b < 100)
+                    })
+                })
+                .count()
+        };
+        assert!(ink_rows(draw_y - 3) > 3, "the action name is not drawn");
+        assert!(
+            ink_rows(draw_y + draw_h / 2) > 3,
+            "the bound key name is not drawn"
+        );
+
+        // `fctCommand` is modulated by 0x7f7f7f whenever the button is neither
+        // focused, highlighted nor hovered.
+        let glyph = (key.x + key.w / 2, draw_y + draw_h / 2);
+        let dimmed = surface
+            .get_pixel(glyph.0 as u32, glyph.1 as u32)
+            .expect("command glyph");
+        assert!(
+            (100..=114).contains(&dimmed.r),
+            "the idle glyph should be 216 * 127/255, got {dimmed:?}"
+        );
+
+        // Hovering the button restores full brightness — `fMouseOver &&
+        // IsInActiveDlg(false)` is one of `fDoHightlight`'s three terms.
+        state.handle_pointer_move(GuiPoint::new(
+            (key.x + key.w / 2) as f32,
+            (key.y + key.h / 2) as f32,
+        ));
+        let lit = render(&state)
+            .get_pixel(glyph.0 as u32, glyph.1 as u32)
+            .expect("command glyph");
+        assert!(
+            lit.r > dimmed.r + 60,
+            "a highlighted glyph drops the modulation: {lit:?} vs {dimmed:?}"
+        );
     }
 
     // CStdFont::Init with fDoShadow=false (StdFont.cpp:319-358): BookFont
