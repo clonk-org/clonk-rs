@@ -15,6 +15,7 @@ members = [
     "crates/clonk-app-netplay",
     "crates/clonk-app-render",
     "crates/clonk-graphics",
+    "crates/clonk-icon",
     "crates/clonk-frontend",
     "crates/clonk-frontend-unit-tests",
     "crates/clonk-launcher",

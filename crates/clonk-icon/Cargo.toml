@@ -1,0 +1,19 @@
+[package]
+name = "clonk-icon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Feature set matches every other consumer in the workspace so the shared
+# dependency graph stays unified. This crate is also a build-dependency, where
+# a divergent feature set would compile `image` twice.
+image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+
+[lib]
+doctest = false

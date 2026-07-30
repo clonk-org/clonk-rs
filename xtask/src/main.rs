@@ -1961,21 +1961,15 @@ fn macos_info_plist() -> String {
 
 /// Render the project logo into an `.icns` via a temporary iconset.
 ///
-/// The logo is wider than it is tall, so it is composited onto a transparent
-/// square first; padding with `sips` would force an opaque background.
+/// `clonk-icon` owns the composition so the bundle icon, the window icon and
+/// the Windows executable resource are cut from the same image; `sips` is not
+/// used for the fit because padding with it would force an opaque background.
 fn write_macos_icon(paths: &WorkspacePaths, destination: &Path) -> Result<()> {
     let logo_path = paths.repo_root.join(MACOS_ICON_SOURCE);
-    let logo = image::open(&logo_path)
-        .with_context(|| format!("failed to read icon source {}", logo_path.display()))?
-        .to_rgba8();
-    let side = logo.width().max(logo.height());
-    let mut square = image::RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 0, 0]));
-    image::imageops::overlay(
-        &mut square,
-        &logo,
-        i64::from((side - logo.width()) / 2),
-        i64::from((side - logo.height()) / 2),
-    );
+    let logo = fs::read(&logo_path)
+        .with_context(|| format!("failed to read icon source {}", logo_path.display()))?;
+    let square = clonk_icon::square_source(&logo)
+        .with_context(|| format!("failed to decode icon source {}", logo_path.display()))?;
 
     let iconset_dir = destination.with_extension("iconset");
     if iconset_dir.exists() {
@@ -1998,8 +1992,7 @@ fn write_macos_icon(paths: &WorkspacePaths, destination: &Path) -> Result<()> {
         (512, "icon_512x512.png"),
         (1024, "icon_512x512@2x.png"),
     ] {
-        let scaled =
-            image::imageops::resize(&square, size, size, image::imageops::FilterType::Lanczos3);
+        let scaled = clonk_icon::resize_square(&square, size);
         let path = iconset_dir.join(name);
         scaled
             .save(&path)

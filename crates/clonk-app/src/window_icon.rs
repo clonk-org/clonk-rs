@@ -5,15 +5,10 @@
 //! window and the developer console show one identical icon.
 //!
 //! C++ takes that icon from `src/res/lc.ico`, which carries LegacyClonk's
-//! branding. This port ships as a separate product, and the release tooling
-//! already derives its bundle icon from `planet/Graphics.c4g/Logo.png`
-//! (`xtask/src/main.rs:31-32`), so the window icon is taken from the same
-//! source rather than the engine's. That keeps one product identity across the
-//! bundle icon and the window chrome.
-
-/// The source the release bundle icon also uses. Embedded so the window still
-/// has an icon when the data root is missing or unreadable.
-const LOGO_PNG: &[u8] = include_bytes!("../../../planet/Graphics.c4g/Logo.png");
+//! branding. This port ships as a separate product and derives its icon from
+//! `planet/Graphics.c4g/Logo.png` instead. `clonk-icon` owns that derivation so
+//! the window chrome, the macOS bundle `.icns` and the Windows executable
+//! resource are cut from one image — see that crate for the rationale.
 
 /// Side length of the decoded icon. Windows asks for a large and a small
 /// variant and downsamples the rest itself; winit takes one RGBA image and
@@ -28,31 +23,10 @@ pub(crate) struct WindowIconImage {
 }
 
 /// Decodes the product logo into a square RGBA icon.
-///
-/// The logo is not square, so it is centred on a transparent square before
-/// scaling — the same fit the bundle icon uses (`xtask/src/main.rs:1936-1943`) —
-/// which preserves its aspect ratio instead of stretching it.
 pub(crate) fn window_icon_image() -> Option<WindowIconImage> {
-    let logo = image::load_from_memory(LOGO_PNG).ok()?.to_rgba8();
-    let side = logo.width().max(logo.height());
-    if side == 0 {
-        return None;
-    }
-    let mut square = image::RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 0, 0]));
-    image::imageops::overlay(
-        &mut square,
-        &logo,
-        i64::from((side - logo.width()) / 2),
-        i64::from((side - logo.height()) / 2),
-    );
-    let scaled = image::imageops::resize(
-        &square,
-        WINDOW_ICON_SIDE,
-        WINDOW_ICON_SIDE,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let square = clonk_icon::square_source(clonk_icon::LOGO_PNG)?;
     Some(WindowIconImage {
-        rgba: scaled.into_raw(),
+        rgba: clonk_icon::resize_square(&square, WINDOW_ICON_SIDE).into_raw(),
         side: WINDOW_ICON_SIDE,
     })
 }

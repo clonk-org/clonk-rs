@@ -26,6 +26,7 @@ clonk-engine = { path = "../clonk-engine" }
 clonk-frontend = { path = "../clonk-frontend" }
 clonk-gui = { path = "../clonk-gui" }
 clonk-graphics = { path = "../clonk-graphics" }
+clonk-icon = { path = "../clonk-icon" }
 clonk-logging = { path = "../clonk-logging" }
 clonk-scaling = { path = "../clonk-scaling" }
 clonk-network = { path = "../clonk-network" }

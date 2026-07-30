@@ -16,6 +16,7 @@ default = []
 engine-tools = [
     "dep:clonk-core",
     "dep:clonk-engine",
+    "dep:clonk-icon",
     "dep:clonk-network",
     "dep:clonk-logging",
     "dep:clonk-resources",
@@ -39,6 +40,9 @@ zip = { version = "0.6", default-features = false, features = ["deflate"], optio
 # refuse content built for a newer engine.
 clonk-core = { path = "../crates/clonk-core", optional = true }
 clonk-engine = { path = "../crates/clonk-engine", optional = true }
+# Owns the shared icon derivation, so the bundle `.icns` this tool renders is
+# cut from the same image as the window icon and the Windows resource.
+clonk-icon = { path = "../crates/clonk-icon", optional = true }
 clonk-network = { path = "../crates/clonk-network", optional = true }
 clonk-logging = { path = "../crates/clonk-logging", optional = true }
 clonk-resources = { path = "../crates/clonk-resources", optional = true }
