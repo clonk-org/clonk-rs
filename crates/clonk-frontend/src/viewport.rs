@@ -1173,4 +1173,33 @@ impl ActiveViewportProjection {
             && point.0 < self.rect.x as f32 + self.rect.width as f32
             && point.1 < self.rect.y as f32 + self.rect.height as f32
     }
+
+    /// This viewport's own pointer projection.
+    ///
+    /// `C4Viewport`'s window handlers convert a window-local pointer through
+    /// *that viewport's* `ViewX`/`ViewY` and the application scale
+    /// (`C4Viewport.cpp:112,181,192`), never through the last globally
+    /// rendered layout.
+    pub fn pointer_projection(self, scale: f32) -> crate::viewport_projection::ViewportProjection {
+        crate::viewport_projection::ViewportProjection {
+            view_x: self.target_x,
+            view_y: self.target_y,
+            scale,
+        }
+    }
+}
+
+/// One console viewport window's completed frame.
+///
+/// `C4Viewport::Execute` selects that viewport's own rendering context, draws
+/// into a `cgo` covering the whole window, and blits it
+/// (`C4Viewport.cpp:1126-1155`). The port has no per-window GL context, so the
+/// drawn pixels and the projection they were drawn with travel together.
+#[derive(Debug, Clone)]
+pub struct DetachedViewportFrame {
+    /// The window-sized target the viewport was drawn into.
+    pub surface: Surface,
+    /// The projection this frame was drawn with. Pointer input for the window
+    /// must be converted through this, not through the fullscreen layout.
+    pub projection: ActiveViewportProjection,
 }

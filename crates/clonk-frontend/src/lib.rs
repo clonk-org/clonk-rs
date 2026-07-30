@@ -10754,6 +10754,81 @@ mod tests {
         );
     }
 
+    // `C4GraphicsSystem::Execute` runs `cvp->Execute()` per viewport
+    // (C4GraphicsSystem.cpp:167-169) and each console viewport draws through
+    // *its own* window context, so one identity reaches one target.
+    // `C4Viewport::Execute` sets `cgo` to the whole window extent
+    // (C4Viewport.cpp:1146), and the message board and upper board are gated
+    // on `Application.isFullScreen` (C4GraphicsSystem.cpp:171-177) — so a
+    // detached window reserves nothing for them and is never split.
+    #[test]
+    fn detached_viewport_render_targets_only_requested_physical_identity() {
+        let mut snapshot = camera_world_snapshot();
+        let mut second = snapshot.objects[0].clone();
+        second.id = ObjectId::new(2);
+        second.position = Vector2::new(900, 500);
+        snapshot.objects.push(second);
+        let mut graphics = test_graphics(100, 80, 80, "Detached render");
+
+        // Duplicate owners, distinct identities — exactly what a console
+        // second window on an already-viewed player produces.
+        let inputs = || {
+            vec![
+                ViewportInput::new(0, Vector2::new(500, 500), 1.0, &snapshot.objects[0])
+                    .with_physical_camera_identity(41, 0),
+                ViewportInput::new(0, Vector2::new(900, 500), 1.0, &snapshot.objects[1])
+                    .with_physical_camera_identity(42, 1),
+            ]
+        };
+
+        let first = graphics
+            .render_detached_viewport(&snapshot, &inputs(), 41, 320, 200)
+            .expect("identity 41 is in the supplied list");
+        let second_frame = graphics
+            .render_detached_viewport(&snapshot, &inputs(), 42, 320, 200)
+            .expect("identity 42 is in the supplied list");
+
+        // The supplied target is filled whole: no split layout, and no
+        // upper-board/message-board reservation.
+        assert_eq!(first.surface.width(), 320);
+        assert_eq!(first.surface.height(), 200);
+        assert_eq!(first.projection.logical_width, 320);
+        assert_eq!(first.projection.logical_height, 200);
+        assert_eq!(
+            first.projection.rect,
+            SurfaceRect::new(0, 0, 320, 200),
+            "a detached viewport owns its entire window"
+        );
+
+        // Each call drew the viewport it was asked for, not the first one.
+        assert_eq!(first.projection.identity, Some(41));
+        assert_eq!(second_frame.projection.identity, Some(42));
+        assert_ne!(
+            first.projection.target_x, second_frame.projection.target_x,
+            "the two identities follow different world positions"
+        );
+
+        // An identity that is not in the supplied list draws nothing rather
+        // than falling back to the first viewport.
+        assert!(graphics
+            .render_detached_viewport(&snapshot, &inputs(), 99, 320, 200)
+            .is_none());
+
+        // A detached pass must not disturb the fullscreen layout state the
+        // other windows and the audibility reduction read.
+        graphics.render_frame(&snapshot, &inputs());
+        let fullscreen = graphics.active_viewport_projections();
+        assert_eq!(fullscreen.len(), 2);
+        let _ = graphics
+            .render_detached_viewport(&snapshot, &inputs(), 41, 320, 200)
+            .expect("identity 41 is still live");
+        assert_eq!(
+            graphics.active_viewport_projections(),
+            fullscreen,
+            "the detached pass restored the fullscreen viewport records"
+        );
+    }
+
     #[test]
     fn observer_scroll_queued_before_projection_moves_the_first_rendered_camera() {
         let snapshot = camera_world_snapshot();
