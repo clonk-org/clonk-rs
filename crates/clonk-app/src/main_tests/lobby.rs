@@ -7892,6 +7892,10 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         .expect("disable selected-host multicast discovery");
     persist_config_value(&paths, "Network", "EnableUPnP", "0")
         .expect("disable selected-host UPnP probe");
+    // The enabled async path has its own preload-reuse regression; this test
+    // isolates host preparation and admission ordering.
+    persist_config_value(&paths, "General", "Preloading", "0")
+        .expect("keep this admission test independent of platform preload defaults");
     let reference_port = std::net::TcpListener::bind("[::1]:0")
         .expect("reserve selected-host reference port")
         .local_addr()

@@ -3561,7 +3561,7 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
             assert!(loader_group_has_content(&directory_group)
                 .expect("opaque sibling does not abort loader classification"));
             let selected = select_loader_source(
-                &[directory_group.clone()],
+                std::slice::from_ref(&directory_group),
                 &directory_group,
                 "LoaderGood",
                 |_| 0,
