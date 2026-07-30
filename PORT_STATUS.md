@@ -813,10 +813,40 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   caller. Pinned by
   `detached_viewport_projection_is_addressable_by_physical_identity`, which
   renders two same-owner viewports, swaps their layout order, and checks the
-  indices move while the identities do not. **Still open:** drawing a single
-  identity into a supplied target — the part that touches the rasterizer.
+  indices move while the identities do not.
 
-- **Per-viewport pointer projection landed; identity-addressed rendering open.**
+- **Identity-addressed detached rendering landed (M10-P4-L082 is complete).**
+  `GraphicsSystem::render_detached_viewport` draws exactly one physical
+  identity into a window-sized target and hands back the pixels plus the
+  `ActiveViewportProjection` they were drawn with, the way `C4Viewport::Execute`
+  selects that viewport's own context, sets `cgo` from its own six numbers and
+  blits it (`C4Viewport.cpp:1126-1155`). Selecting a context is literally what
+  the Rust surface swap models — `CStdGLCtx::Select` rewrites the primary
+  surface's `Wdt`/`Hgt` to the window's own extent (`StdGLCtx.cpp:467-476`).
+  An identity that is not in the supplied list draws **nothing** rather than
+  falling back to the first viewport, so a closed viewport's window goes blank
+  instead of showing somebody else's view. The pass saves and restores the
+  fullscreen records, which is C++-faithful rather than merely defensive:
+  fullscreen and console viewports are mutually exclusive in one process
+  (`C4GraphicsSystem.cpp:231-234`).
+  Three fullscreen-only behaviours had leaked into it and are now gated on
+  `Application.isFullScreen`, all three verified against the oracle:
+  `C4GraphicsSystem::RecalculateViewports` — the sole writer of the
+  landscape-extent cap, the layout cell and `DrawX`/`DrawY` — opens with
+  `if (!Application.isFullScreen) return;` (`C4GraphicsSystem.cpp:335-336`), so
+  a console viewport is never capped to the landscape and always draws at its
+  target's origin; the message board and upper board are inside the same gate
+  (`:171-183`), so a detached window reserves no height for them; and
+  `C4Viewport::UpdateViewPosition` centres an ownerless view on an undersized
+  map only `if (Application.isFullScreen)` (`C4Viewport.cpp:1237,1246`) —
+  otherwise it runs `min` then `max` and pins the origin at 0. Pinned by
+  `detached_viewport_render_targets_only_requested_physical_identity` and
+  `detached_viewport_window_is_never_capped_or_centred_on_a_small_map`.
+  `ActiveViewportProjection::pointer_projection` closes the loop: the frame a
+  window drew is the frame its pointer input converts through.
+  **Still open:** the OS windows that would consume it (M10-P4-L047).
+
+- **Per-viewport pointer projection landed.**
   `clonk-frontend::viewport_projection` ports `C4Viewport`'s local-to-world
   conversion (`C4Viewport.cpp:112,181,192`):
   `ViewX + static_cast<int32_t>(local / scale)`. Two details a from-scratch
@@ -826,10 +856,63 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   truncation. A non-finite or non-positive scale yields the view origin rather
   than a wild coordinate. Pinned by
   `detached_viewport_pointer_projection_uses_window_identity_and_scale`.
-  **Still open:** rendering one physical identity into a supplied target,
-  keying camera state by identity rather than the last global layout, and the
-  console-overlay hook that must run after world/foreground and before the
-  per-viewport HUD (`C4Viewport.cpp:1023-1110`).
+
+- **The whole edit-cursor interaction layer has no production caller.** Worth
+  stating on its own, because every card above reads as "landed" and the
+  editor still cannot edit. `grep` for the modules outside their own files
+  returns one hit: `developer_viewport` importing `CursorMode`. Nothing calls
+  `developer_cursor`'s `edit_target`, `edit_move`, `edit_release`,
+  `drop_target` or `frame_selection`; nothing calls `developer_selection`'s
+  `select_frame`, `select`, `toggle` or `clear`; nothing calls
+  `developer_overlay`. `developer_tools` is reached only by
+  `clonk-app::developer_tools_page`, which is itself a specification of the
+  page rather than a rendered one. On the control side only `EMMO_Script` is
+  wired (`clonk-app::main.rs`, the console's script input); `EMMO_Move`,
+  `EMMO_Enter` and `EMMO_Remove` have no emitter.
+  This is not a gap in any one card — each ported the behaviour its card
+  named, and each is pinned by tests. The missing piece is the *caller*, and
+  there is exactly one reason there is no caller: a console viewport window is
+  where all of it would be driven from, and no such window is ever created
+  (M10-P4-L047's criteria 1-3). Closing that card is what turns this group
+  from a tested library into a working editor; nothing else in the group is
+  blocked on anything but it.
+
+- **Frame-selection membership landed; three editor gaps remain untracked.**
+  `DeveloperSelection::select_frame` took the framed objects *from its caller*
+  and nothing computed them, so a rubber-band drag drew a band and selected
+  nothing even once wired. `developer_cursor::frame_selection` ports
+  `C4EditCursor::FrameSelection` (`C4EditCursor.cpp:460-471`). Three details a
+  from-scratch version gets wrong: the test is on the object's **own `x`/`y`**,
+  not its shape rectangle — a wide object centred outside the band is not
+  framed even though its graphic covers it, which is why the candidate type
+  carries no shape at all; `Inside` is `>= lbound && <= rbound`
+  (`C4Math.h:22`), so an object exactly on an edge is admitted and a zero-area
+  band still frames what sits under the cursor; and the band is normalised per
+  axis inside the `Inside` call, so every drag direction frames the same set.
+  `cobj->OCF & OCF_NotContained` is just `!Contained` — that bit is set from
+  nothing else (`C4Object.cpp:636-637,735-736`). Objects are appended with
+  `C4ObjectList::stNone`, which does not sort, so master order is preserved.
+  Pinned by
+  `frame_selection_admits_master_order_positions_inside_the_normalised_band`.
+  **Still open, and owned by no queue card:**
+  (a) `C4GameMessageList::UpdateDef` (`C4GameMessage.cpp:233-244,340-345`),
+  which `C4Game::ReloadDef` runs last (`C4Game.cpp:2364`) to re-resolve every
+  live message's frame decoration and drop it when the reloaded definition no
+  longer supplies it — the port names it in a doc comment and implements
+  nothing;
+  (b) the console frame-tick order `C4Console::Execute`
+  (`C4Console.cpp:1630-1639`) — `EditCursor.Execute()`, `ObjectListDlg.Execute()`,
+  `UpdateStatusBars()`, then `GraphicsSystem.Execute()`. In console mode the
+  graphics pass is driven *by the console tick, after the edit-cursor tick*,
+  which is why a selection resolved this tick is visible in the same frame's
+  overlay; in fullscreen the driver is `C4FullScreen::Execute` instead. No test
+  pins it;
+  (c) `C4ViewportWindow::GetPositionData` is `#ifdef _WIN32` (`C4Viewport.h:39-49`;
+  `StorePosition`/`RestorePosition` exist only in the HWND `StdWindow.cpp`), so
+  the arm64 macOS reference build never remembers viewport geometry. The landed
+  `developer_viewport::viewport_window_spec` fields `position_id`,
+  `position_subkey` and `store_size` therefore describe **Windows-only**
+  behaviour — wiring them to config on macOS would be a divergence, not parity.
 
 - **Live-reload path matching landed; the reload itself is open.**
   `clonk-engine::developer_reload` ports `C4DefList::GetByPath`
