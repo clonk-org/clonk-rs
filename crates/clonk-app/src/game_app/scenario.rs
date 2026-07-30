@@ -843,7 +843,13 @@ impl GameApp {
             && offline_startup_error.is_none()
             && replay_startup.is_none())
         .then(|| current_offline_round_random_seed(offline_parameter_seed));
-        let fresh_authority_may_retry = offline_random_seed.is_some() && offline_savegame.is_none();
+        // Only a savegame replaces the fresh round's generated landscape with
+        // a stored one; a regular scenario shipping restore infos is still a
+        // fresh authoritative round.
+        let fresh_authority_may_retry = offline_random_seed.is_some()
+            && offline_savegame
+                .as_ref()
+                .is_none_or(|savegame| !savegame.save_game);
         let preloaded_scenario = self
             .lobby_preload_artifact
             .as_mut()
@@ -1491,8 +1497,25 @@ impl GameApp {
             )));
         }
 
+        // `C4Game::Init` recreates the restored players in `InitPlayers`
+        // before `InitGameFinal` makes any script call (C4Game.cpp:479,484),
+        // so a constructor calling `GetPlayerByName` finds them.
+        let restored_offline_savegame_players = offline_savegame
+            .as_ref()
+            .map(|savegame| {
+                Self::restore_offline_savegame_engine_players(&mut engine, &path, savegame)
+                    .map_err(|error| scenario_activation_engine_error(&scenario.title, error))
+            })
+            .transpose()?;
+
+        // `InitGameFinal` skips the scenario constructor for savegames alone
+        // (C4Game.cpp:2747); a regular scenario shipping restore infos still
+        // runs `Initialize()`.
+        let save_game_round = offline_savegame
+            .as_ref()
+            .is_some_and(|savegame| savegame.save_game);
         let mut script_created_objects = false;
-        if !network_game && offline_savegame.is_none() {
+        if !network_game && !save_game_round {
             let objects_before_initialize = engine.active_object_count();
             if let Err(err) = engine.initialize_scenario_script() {
                 tracing::error!(
@@ -1588,20 +1611,15 @@ impl GameApp {
                     .engine
                     .startup_player_count()
                     .unwrap_or_else(|| startup.startup_player_count());
-                let (mut local_players, mut joined_player_files) = if let Some(savegame) =
-                    offline_savegame.as_ref()
-                {
-                    let restored = Self::restore_offline_savegame_engine_players(
-                        &mut self.engine,
-                        &path,
-                        savegame,
-                    )
-                    .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
-                    self.wire_restored_offline_savegame_players(savegame, restored)
-                        .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?
-                } else {
-                    (Vec::new(), Vec::new())
-                };
+                let (mut local_players, mut joined_player_files) =
+                    match (offline_savegame.as_ref(), restored_offline_savegame_players) {
+                        (Some(savegame), Some(restored)) => self
+                            .wire_restored_offline_savegame_players(savegame, restored)
+                            .map_err(|error| {
+                                scenario_activation_engine_error(&scenario.title, error)
+                            })?,
+                        _ => (Vec::new(), Vec::new()),
+                    };
                 let mut team_selection_players = Vec::new();
                 for join in pending_offline_joins {
                     let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {

@@ -453,6 +453,113 @@
         );
     }
 
+    /// Drachenfels ships `SavePlayerInfos.txt` without `Head.SaveGame`, so
+    /// `C4GameParameters::Load` fills `RestorePlayerInfos` anyway
+    /// (C4GameParameters.cpp:378-385) and `InitPlayers` recreates its
+    /// `GameNumber=10` script player "for savegames or regular scenarios with
+    /// restore infos" (C4Game.cpp:2841-2843). 27 of its `Objects.txt` rows
+    /// carry `Owner=10`.
+    #[test]
+    fn dragon_rock_restores_its_shipped_script_player() {
+        let user_data = tempdir().expect("isolated Drachenfels user data");
+        let (_paths_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        configure_test_startup_participant(&paths, user_data.path());
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Restore parity".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize Drachenfels app");
+        wait_for_menu(&mut app);
+        let scenario =
+            resolve_next_mission_scenario(&app.scenario_catalog, "Fantasy.c4f/Drachenfels.c4s")
+                .expect("Drachenfels is present in the real scenario catalog");
+
+        app.start_scenario(scenario)
+            .expect("a regular scenario shipping restore infos starts");
+        wait_for_running_with_attempts(&mut app, 2_400);
+
+        let script_player = app
+            .engine
+            .player(10)
+            .expect("the GameNumber=10 script player is restored");
+        assert!(script_player.is_script_player());
+        assert!(script_player.no_elimination_check());
+        assert_eq!(script_player.team(), Some(2));
+    }
+
+    /// Arso-Morf proves the ordering as well as the gating: its `Initialize()`
+    /// runs `CreateObject(CLNK, ..., GetPlayerByName("I.S.I"))`, so the
+    /// scenario constructor must run at all (C4Game.cpp:2747 skips it only for
+    /// `Head.SaveGame`) *and* must run after `InitPlayers` has joined the
+    /// restore row (C4Game.cpp:479 before :484).
+    #[test]
+    fn arso_morf_runs_its_constructor_after_restoring_its_script_player() {
+        let user_data = tempdir().expect("isolated Arso-Morf user data");
+        let (_paths_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        configure_test_startup_participant(&paths, user_data.path());
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Restore parity".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize Arso-Morf app");
+        wait_for_menu(&mut app);
+        let scenario = resolve_next_mission_scenario(
+            &app.scenario_catalog,
+            "EkeReloaded.c4f/TheStippelAge.c4f/Arso-Morf.c4s",
+        )
+        .expect("Arso-Morf is present in the real scenario catalog");
+
+        app.start_scenario(scenario)
+            .expect("a regular scenario shipping restore infos starts");
+        wait_for_running_with_attempts(&mut app, 2_400);
+
+        let scientist = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.custom_name.as_deref() == Some("Mad Scientist"))
+            .expect("Initialize creates the Mad Scientist");
+        let owner = app
+            .engine
+            .player(scientist.owner)
+            .expect("GetPlayerByName resolved a live script player, not NO_OWNER");
+        assert!(
+            owner.is_script_player(),
+            "the constructor ran after the restore row joined",
+        );
+    }
+
     #[test]
     fn l001_fresh_offline_skyparcour_retries_and_activates_the_accepted_seed() {
         let _pin_guard = EnvGuard::set(&[
