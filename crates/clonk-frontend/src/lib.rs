@@ -10814,6 +10814,36 @@ mod tests {
             .render_detached_viewport(&snapshot, &inputs(), 99, 320, 200)
             .is_none());
 
+        // The frame that was drawn is the frame the window's pointer input is
+        // converted through: `ViewX + static_cast<int32_t>(local / scale)`
+        // per viewport (C4Viewport.cpp:112,181,192). Two windows showing the
+        // same player must not share one projection.
+        assert_eq!(
+            first
+                .projection
+                .pointer_projection(1.0)
+                .world_position(7, 3),
+            (first.projection.target_x + 7, first.projection.target_y + 3)
+        );
+        assert_ne!(
+            first
+                .projection
+                .pointer_projection(1.0)
+                .world_position(7, 3),
+            second_frame
+                .projection
+                .pointer_projection(1.0)
+                .world_position(7, 3)
+        );
+        // The window's own presenter scale divides before the origin is added.
+        assert_eq!(
+            first
+                .projection
+                .pointer_projection(2.0)
+                .world_position(7, 3),
+            (first.projection.target_x + 3, first.projection.target_y + 1)
+        );
+
         // A detached pass must not disturb the fullscreen layout state the
         // other windows and the audibility reduction read.
         graphics.render_frame(&snapshot, &inputs());
