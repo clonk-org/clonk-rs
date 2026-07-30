@@ -669,9 +669,19 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   the callback skips the `UserDropped|KernelDropped` flags and does nothing
   else (`:256-273`), so adding a rescan would be stricter than C++. Pinned by
   `file_monitor_reports_directories_and_refuses_late_registration`.
-  **Still open:** its app-thread delivery and registration. Nothing calls
-  `add_directory` from definition loading yet, and no poll is wired into the
-  event loop, so the monitor watches nothing in a running game.
+  **Still open, and the dependency here is real.** Nothing calls
+  `add_directory` from definition loading, so the monitor watches nothing in a
+  running game — and that is not a wiring oversight. `C4Def::Load` registers
+  `Filename`, the group's own full name (`C4Def.cpp:547-560`), which is exactly
+  the source provenance **M10-P4-L086** exists to retain: the port resolves a
+  definition group to a `Group`, builds the runtime definition and drops the
+  path. So the watcher's registration genuinely blocks on L086, unlike the
+  particle half above, whose stated dependency on it was false. Do the
+  provenance thread first and registration becomes a two-line consequence of
+  it; do the wiring first and there is nothing to register.
+  The delivery half is independent: a poll on the event loop's own cadence
+  feeding `developer_reload::changed_file_route`, whose dispatch, network
+  refusal and script-host fallback are already ported.
 
 - **File-monitor arming and the external reload trigger landed; the watcher is
   open.** `clonk-engine::developer_file_monitor` ports the two gates.
