@@ -1693,6 +1693,7 @@ impl GameApp {
         graphics.set_sky_dither(sky_dither);
         graphics.set_fine_fog_of_war(configured_fine_fog_of_war(&native_config));
         graphics.set_hd_exact_blits(configured_hd_exact_blits(&native_config));
+        graphics.set_shader_landscape(configured_shader_landscape(&native_config));
         graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         graphics.set_game_palette(assets.game_palette());
         graphics.set_liquid_animation(assets.liquid_animation());

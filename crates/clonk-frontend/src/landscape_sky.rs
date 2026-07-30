@@ -17,6 +17,10 @@ pub(crate) struct LandscapeRenderCache {
 }
 
 impl LandscapeRenderCache {
+    pub(crate) fn gpu_texture_id(&self) -> GpuTextureId {
+        self.gpu_texture_id
+    }
+
     pub(crate) fn new(
         grid: PixelGrid,
         width: u32,

@@ -172,6 +172,11 @@ pub(crate) fn present_retained_gpu_frame(
         crop_top: geometry.crop_top(),
     };
     let frame = app.render_retained_gpu_frame(presentation)?;
+    // The landscape draw inside the frame produces the shader composer's
+    // inputs; hand them over before the renderer syncs textures. Always set,
+    // including None, so a frame that composed no landscape clears any plan
+    // left by the previous one.
+    renderer.set_pending_shader_landscape(app.graphics.take_shader_landscape_plan());
     let layers = frame
         .layers
         .iter()

@@ -336,6 +336,15 @@ pub struct GraphicsSystem {
     /// definition art land one authored texel per device pixel. See
     /// [`GraphicsSystem::runtime_sprite_blit`].
     hd_exact_blits: bool,
+    /// `Graphics.ShaderLandscape`: produce composition inputs for the fragment
+    /// shader composer instead of relying on the CPU-composed cache alone.
+    /// Building a plan copies the whole index plane and pattern atlas, so it is
+    /// only done when the renderer will actually consume one.
+    shader_landscape: bool,
+    pending_shader_landscape: Option<(
+        clonk_graphics::GpuTextureId,
+        clonk_graphics::ShaderLandscapePlan,
+    )>,
     /// Immutable CStdGL device/resource options installed by the application.
     advanced_renderer_config: AdvancedRendererConfig,
     surface_width: u32,
@@ -465,6 +474,8 @@ impl GraphicsSystem {
             presentation_scale: 1.0,
             point_filtering: false,
             hd_exact_blits: false,
+            shader_landscape: false,
+            pending_shader_landscape: None,
             advanced_renderer_config: AdvancedRendererConfig::DEFAULT,
             surface_width,
             surface_height,
@@ -570,6 +581,26 @@ impl GraphicsSystem {
         self.hd_exact_blits
     }
 
+    pub fn set_shader_landscape(&mut self, enabled: bool) {
+        self.shader_landscape = enabled;
+    }
+
+    pub fn shader_landscape(&self) -> bool {
+        self.shader_landscape
+    }
+
+    /// Take the composition inputs produced by the last landscape draw, if any.
+    /// Taking rather than borrowing keeps a stale plan from outliving the
+    /// landscape it describes.
+    pub fn take_shader_landscape_plan(
+        &mut self,
+    ) -> Option<(
+        clonk_graphics::GpuTextureId,
+        clonk_graphics::ShaderLandscapePlan,
+    )> {
+        self.pending_shader_landscape.take()
+    }
+
     /// The sized cursor sheet the current resolution selects.
     fn selected_cursor_image(&self) -> Option<ImageData> {
         self.cursor_atlas.image_for_tiers(
@@ -625,6 +656,7 @@ impl GraphicsSystem {
         self.cursor_tiers = previous.cursor_tiers;
         self.sky_dither = previous.sky_dither;
         self.hd_exact_blits = previous.hd_exact_blits;
+        self.shader_landscape = previous.shader_landscape;
         self.fine_fog_of_war = previous.fine_fog_of_war;
     }
 
@@ -4540,6 +4572,26 @@ impl GraphicsSystem {
                 &material_render_info,
                 &material_textures,
             );
+            // The fragment-shader composer reads the same resolved slots. Build
+            // its inputs here, while they are in scope, rather than resolving
+            // the texmap a second time somewhere the two could drift.
+            if self.shader_landscape {
+                let placement_table: [i32; 128] =
+                    std::array::from_fn(|index| placements.get(index).copied().unwrap_or(0));
+                let shading_plane = shade_materials.then(|| {
+                    placement_shading_plane(bytes, width, height, &placement_table, border_state)
+                });
+                let plan = build_shader_landscape_plan(
+                    [width, height],
+                    bytes.to_vec(),
+                    shading_plane,
+                    &slots,
+                );
+                self.pending_shader_landscape = self
+                    .landscape_cache
+                    .as_ref()
+                    .map(|cache| (cache.gpu_texture_id(), plan));
+            }
             // C4Landscape::GetPix/GetPlacement are inline array lookups in
             // the native relight loop. Keep the same border rules local to
             // this hot composition pass instead of crossing the crate
@@ -9344,5 +9396,43 @@ mod hd_exact_blit_tests {
         rebuilt.inherit_cursor_tiers(&graphics);
 
         assert!(rebuilt.hd_exact_blits());
+    }
+
+    /// GraphicsSystem is rebuilt on every resolution change and scenario start,
+    /// so a startup-configured opt-in that is not carried over is silently lost
+    /// the first time either happens.
+    #[test]
+    fn shader_landscape_survives_a_viewport_rebuild() {
+        let mut graphics = test_graphics(1.0, false);
+        graphics.set_shader_landscape(true);
+        let mut rebuilt = test_graphics(1.0, false);
+        assert!(!rebuilt.shader_landscape(), "the default stays C++-exact");
+
+        rebuilt.inherit_cursor_tiers(&graphics);
+        assert!(rebuilt.shader_landscape());
+    }
+
+    /// The plan is frame state: taking it clears it, so a landscape that stops
+    /// being drawn cannot leave stale composition inputs queued behind it.
+    #[test]
+    fn taking_the_shader_landscape_plan_clears_it() {
+        let mut graphics = test_graphics(1.0, false);
+        assert!(graphics.take_shader_landscape_plan().is_none());
+        graphics.pending_shader_landscape = Some((
+            clonk_graphics::GpuTextureId::fresh(),
+            clonk_graphics::ShaderLandscapePlan {
+                extent: [2, 2],
+                index_plane: vec![0; 4],
+                shading_plane: None,
+                atlas: vec![0; 4],
+                atlas_extent: [1, 1],
+                slots: vec![[0; 16]],
+            },
+        ));
+        assert!(graphics.take_shader_landscape_plan().is_some());
+        assert!(
+            graphics.take_shader_landscape_plan().is_none(),
+            "a taken plan must not be handed to a second frame"
+        );
     }
 }
