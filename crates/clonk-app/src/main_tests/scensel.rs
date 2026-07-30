@@ -3160,6 +3160,31 @@
     }
 
     #[test]
+    fn script_earned_mission_access_reaches_the_saved_config() {
+        // `FnGainMissionAccess` grows the live `Config.General.MissionAccess`
+        // and queues nothing (C4Script.cpp:2466-2471) — it is `Config.Save()`
+        // on a clean quit that writes the whole config back
+        // (C4Application.cpp:367). A save surface must therefore persist the
+        // live list even though only the engine touched it; the host function
+        // mutates the very string this store shares with every engine
+        // (`configured_mission_access_reaches_fresh_engines_and_survives_replacement`).
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated mission access user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.mission_access.update_modules("Earned", false);
+        assert_eq!(app.deferred_config.get("General", "MissionAccess"), None);
+
+        app.flush_deferred_config();
+
+        assert_eq!(
+            load_configured_mission_access(&paths).expect("read saved mission access"),
+            "Earned"
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
     fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         let _lock = env_lock().lock();
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))

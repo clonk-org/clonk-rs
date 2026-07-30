@@ -13880,12 +13880,43 @@ mod tests {
         host.submit_exec_sync(2)
             .await
             .expect("empty sync release is accepted");
-        assert!(timeout(Duration::from_millis(50), host_events.recv())
+        // ExecSyncControl returns before sending PID_ExecSyncCtrl when the
+        // synchronized queue is empty (src/C4GameControlNetwork.cpp:267-269,
+        // 281-283). ReadyCheck is an ordered message-stream sentinel: seeing
+        // it proves the preceding host command and every earlier wire packet
+        // have been handled without mistaking a delayed StatusAck or ping for
+        // an empty Sync release.
+        let empty_release_barrier = ReadyCheckPacket {
+            client_id: HOST_CLIENT_ID as i32,
+            data: crate::ReadyCheckData::Other(0x5359),
+        };
+        host.submit_ready_check(empty_release_barrier)
             .await
-            .is_err());
-        assert!(timeout(Duration::from_millis(50), client_events.recv())
-            .await
-            .is_err());
+            .expect("submit empty-release barrier");
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client empty-release barrier wait")
+            {
+                Some(ClientEvent::ReadyCheck { packet }) if packet == empty_release_barrier => {
+                    break;
+                }
+                Some(ClientEvent::SyncScheduled { .. } | ClientEvent::ExecSync { .. }) => {
+                    panic!("empty Sync release reached the client")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before empty-release barrier"),
+            }
+        }
+        while let Ok(event) = host_events.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::SyncScheduled { .. } | HostEvent::ExecSync { .. }
+                ),
+                "empty Sync release reached the host"
+            );
+        }
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");

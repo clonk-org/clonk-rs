@@ -745,6 +745,17 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `FnGainMissionAccess` (`C4Script.cpp:2466-2471`) and the cheat-code
   add/remove (`C4StartupScenSelDlg.cpp:1838-1856`), change the string in memory
   and return; `C4StartupScenSelDlg.cpp` contains no `Config.Save()` at all.
+  Only the cheat-code site could *queue* that write, though — `GainMissionAccess`
+  grows the list inside the engine, through the store both share — so both flush
+  points now snapshot the live `General.MissionAccess`, exactly as `Config.Save()`
+  writes the whole in-memory config. An empty list is skipped: C++ suppresses
+  `Save()` when the config never loaded (`C4Application.cpp:367`), which is the
+  state a failed read leaves here. The same list is what `CanOpen` tests
+  (`C4StartupScenSelDlg.cpp:743`); the network branch used to re-read the config
+  *file* instead, so every password earned this session stayed locked in the
+  network selector while the local selector already honoured it. Pinned by
+  `script_earned_mission_access_reaches_the_saved_config` and
+  `network_mission_access_gate_honours_memory_only_grant`.
   The four `[Sound]` toggles defer too: `C4SoundSystem::ToggleOnOff` is
   `enabled = !enabled` with no save (`C4SoundSystem.cpp:138-142`), and neither
   `C4SoundSystem.cpp` nor `C4MainMenu.cpp` contains a `Config.Save()`.

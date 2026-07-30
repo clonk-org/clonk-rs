@@ -1369,6 +1369,7 @@ fn run() -> Result<()> {
         ) && !app.configuration_reset_requested
         {
             if let Some(paths) = app_paths.as_ref() {
+                app.queue_live_mission_access();
                 for (section, entries) in app.deferred_config.take_by_section() {
                     let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
                         .iter()
