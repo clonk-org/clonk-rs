@@ -3,12 +3,18 @@ use super::*;
 /// `FnReloadParticle` (`C4Script.cpp:5161-5165`) — it forwards straight to
 /// `Game.ReloadParticle(FnStringPar(szParticleName))`.
 ///
-/// `Engine::reload_particle` now carries that behaviour, but reaching it needs
-/// a `&mut Engine`, which a host function only has through the staged-command
-/// channel. Until that arm exists this keeps the native nullable-string
-/// conversion and reports `false`, which is also what C++ returns for every
-/// name it cannot reload — so the divergence is confined to a *successful*
-/// script-driven reload.
+/// `Engine::reload_particle` carries that behaviour, but the staged-command
+/// channel cannot deliver it: `FnReloadParticle` returns
+/// `Game.ReloadParticle`'s result **synchronously**, and a staged command is
+/// applied after the script call has already returned. So the port would have
+/// to answer the script before doing the work — which is not a wiring gap but
+/// a design question about synchronous engine access from a host function, the
+/// same one `FnReloadDef` will ask.
+///
+/// Until that is decided this keeps the native nullable-string conversion and
+/// reports `false`, which is what C++ returns for every name it *cannot*
+/// reload — so the divergence is confined to a script-driven reload that would
+/// have succeeded.
 pub(crate) fn reload_particle(args: &[Value]) -> Result<Value, RuntimeError> {
     let _name = parse_native_c4_string_argument(args.first(), "ReloadParticle", "name")?;
     Ok(Value::Int(0))

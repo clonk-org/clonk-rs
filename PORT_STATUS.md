@@ -1129,12 +1129,17 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   position in `pDef0..pDefL` is unchanged. The port's registration pushes to
   the tail, so `restore_def_order` puts it back — otherwise every later
   definition shifts and `GetDef` finds a different one for a duplicate name.
-  **Still open:** the script-facing `ReloadParticle`. `FnReloadParticle`
-  (`C4Script.cpp:5161-5165`, not the `:4992-4996` the port's comment claimed)
-  forwards straight to `Game.ReloadParticle`, but a host function reaches the
-  engine only through the staged-command channel, so it still returns `false` —
-  which is what C++ returns for every name it *cannot* reload, confining the
-  divergence to a successful script-driven reload.
+  **Still open, and not for the reason first recorded here.** The script-facing
+  `ReloadParticle` (`C4Script.cpp:5161-5165`, not the `:4992-4996` the port's
+  comment claimed) returns `Game.ReloadParticle`'s result **synchronously**. The
+  staged-command channel — the port's route from a host function to
+  `&mut Engine` — applies its commands *after* the script call has returned, so
+  it cannot produce that value: the port would have to answer the script before
+  doing the work. This is a design question about synchronous engine access
+  from host functions, not a wiring gap, and `FnReloadDef` will ask the same
+  one. Until it is decided the builtin returns `false`, which is what C++
+  returns for every name it *cannot* reload — so the divergence is confined to
+  a script-driven reload that would have succeeded.
 
 - **Live-reload path matching landed; the reload itself is open.**
   `clonk-engine::developer_reload` ports `C4DefList::GetByPath`
