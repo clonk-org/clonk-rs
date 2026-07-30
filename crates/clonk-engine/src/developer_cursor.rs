@@ -263,6 +263,59 @@ pub fn drop_target(
         .map(|candidate| candidate.id)
 }
 
+/// What a left-button press does to the selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectionEdit {
+    /// Ctrl-click on a selected object — `Selection.Remove(Target)`.
+    Remove(ObjectId),
+    /// Ctrl-click on an unselected object — `Selection.Add(Target, stNone)`.
+    /// The rest of the selection is untouched.
+    Add(ObjectId),
+    /// Plain click on an unselected object — `Selection.Clear()` then
+    /// `Selection.Add(Target, stNone)`.
+    Replace(ObjectId),
+    /// Plain click on empty space — `Selection.Clear()` and arm the rubber
+    /// band from the press position (`DragFrame = true; X2 = X; Y2 = Y`).
+    ClearAndDragFrame,
+}
+
+/// The result of one left-button press in Edit mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditPress {
+    /// `Hold = true` (`C4EditCursor.cpp:203`). It is assigned *before* the
+    /// mode switch, so every press holds — including the two that change no
+    /// selection at all.
+    pub hold: bool,
+    /// The selection change, if any.
+    pub selection: Option<SelectionEdit>,
+}
+
+/// `C4EditCursor::LeftButtonDown`'s Edit arm (`C4EditCursor.cpp:201-229`).
+///
+/// Two details a plausible port loses. A plain click on an object that is
+/// *already* selected changes nothing — C++ guards the replace on
+/// `!Selection.GetLink(Target)` — which is what lets a multi-object selection
+/// be dragged as a unit instead of collapsing to the object under the cursor.
+/// And the whole Ctrl branch is inside `if (Target)`, so Ctrl-clicking empty
+/// space neither clears the selection nor starts a rubber band, where a plain
+/// click there does both.
+pub fn edit_press(control: bool, target: Option<ObjectId>, selection: &[ObjectId]) -> EditPress {
+    let edit = match (control, target) {
+        // `if (!Selection.Remove(Target)) Selection.Add(Target, stNone)` —
+        // Remove reports whether it found the object.
+        (true, Some(target)) if selection.contains(&target) => Some(SelectionEdit::Remove(target)),
+        (true, Some(target)) => Some(SelectionEdit::Add(target)),
+        (true, None) => None,
+        (false, Some(target)) if selection.contains(&target) => None,
+        (false, Some(target)) => Some(SelectionEdit::Replace(target)),
+        (false, None) => Some(SelectionEdit::ClearAndDragFrame),
+    };
+    EditPress {
+        hold: true,
+        selection: edit,
+    }
+}
+
 /// One object considered for a rubber-band frame.
 ///
 /// It deliberately carries no shape. `C4EditCursor::FrameSelection` tests the
@@ -331,6 +384,76 @@ pub fn edit_release(drag_frame: bool, drop_target: Option<ObjectId>) -> Vec<Edit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C4EditCursor.cpp:201-229 — what pressing the left button does to the
+    // selection in Edit mode.
+    #[test]
+    fn edit_press_selects_toggles_and_arms_the_rubber_band_like_cpp() {
+        let a = ObjectId(1);
+        let b = ObjectId(2);
+
+        // Plain click on an unselected object replaces the whole selection.
+        assert_eq!(
+            edit_press(false, Some(a), &[b]),
+            EditPress {
+                hold: true,
+                selection: Some(SelectionEdit::Replace(a)),
+            }
+        );
+
+        // Plain click on an *already selected* object changes nothing. This is
+        // what lets a multi-object selection be dragged as a unit: C++ guards
+        // the replace on `!Selection.GetLink(Target)`.
+        assert_eq!(
+            edit_press(false, Some(a), &[a, b]),
+            EditPress {
+                hold: true,
+                selection: None,
+            }
+        );
+
+        // Plain click on empty space clears and arms the rubber band.
+        assert_eq!(
+            edit_press(false, None, &[a]),
+            EditPress {
+                hold: true,
+                selection: Some(SelectionEdit::ClearAndDragFrame),
+            }
+        );
+
+        // Ctrl toggles one object without disturbing the rest:
+        // `if (!Selection.Remove(Target)) Selection.Add(Target, stNone)`.
+        assert_eq!(
+            edit_press(true, Some(a), &[a, b]),
+            EditPress {
+                hold: true,
+                selection: Some(SelectionEdit::Remove(a)),
+            }
+        );
+        assert_eq!(
+            edit_press(true, Some(a), &[b]),
+            EditPress {
+                hold: true,
+                selection: Some(SelectionEdit::Add(a)),
+            }
+        );
+
+        // Ctrl on empty space does nothing at all — the whole Ctrl branch is
+        // guarded on `if (Target)`, so it never clears and never drags a frame.
+        assert_eq!(
+            edit_press(true, None, &[a]),
+            EditPress {
+                hold: true,
+                selection: None,
+            }
+        );
+
+        // `Hold = true` runs *before* the mode switch, so every press holds —
+        // including the two that change no selection at all.
+        for (control, target) in [(true, None), (false, Some(a))] {
+            assert!(edit_press(control, target, &[a]).hold);
+        }
+    }
 
     // C4EditCursor.cpp:460-471 — which objects a rubber-band drag admits.
     #[test]
