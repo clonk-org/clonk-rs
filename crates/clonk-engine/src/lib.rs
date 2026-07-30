@@ -10464,6 +10464,13 @@ impl Engine {
         if self.register_definition(definition).is_err() {
             return false;
         }
+        // `C4Game::ReloadDef`'s success sweep: `UpdateFace(true)` on *every*
+        // object of that id (`C4Game.cpp:2340-2345`). C++'s own comment says
+        // why it is not a computed subset — an object can use another
+        // definition's graphics, so "better update everything".
+        for object in self.object_ids_of_definition(id) {
+            self.refresh_object_face_from_definition(object);
+        }
         // `ReLink` runs with the definition at its final position. C++ links
         // and logs whatever diagnostics arise without failing the reload, so a
         // link error here does not undo it either.
@@ -10516,6 +10523,45 @@ impl Engine {
             let definition = self.definitions.get(id.as_str())?;
             (definition.source_path()? == candidate).then(|| id.as_str().to_string())
         })
+    }
+
+    /// `C4Object::UpdateFace(true)` for one object (`C4Object.cpp:363-386`).
+    ///
+    /// Everything it writes is a projection of the definition: the shape (via
+    /// `UpdateShape`), the solid mask, and the action facet. It deliberately
+    /// does **not** touch `Con`, rotation, position, colour, the action index,
+    /// energy, contents, effects or commands — a reload refreshes an object,
+    /// it does not reinitialise one.
+    ///
+    /// `UpdateSolidMask(false)` is called with `fRestoreAttachedObjects`
+    /// **false** (`:371`), which is what `refresh_shape_after_state_change`'s
+    /// last argument carries: a reload must not re-attach riders that the C++
+    /// path leaves alone.
+    pub(crate) fn refresh_object_face_from_definition(&mut self, object: ObjectId) {
+        let Some(index) = self.find_object_index(object) else {
+            return;
+        };
+        let definition_id = self.objects[index].definition_id.clone();
+        let Some(definition) = self.definitions.get(definition_id.as_str()) else {
+            return;
+        };
+        let template = crate::object::ObjectShapeTemplate::new(
+            definition.shape_vertices().to_vec(),
+            definition.shape_rect(),
+            definition.fire_top(),
+            definition.stretch_growth(),
+            definition.rotateable(),
+        )
+        .with_line(definition.line());
+        let object = &mut self.objects[index];
+        let previous_rect = object.current_shape_rect();
+        let previous_construction = object.state.construction;
+        object.shape_template = template;
+        // The mask falls back to the reloaded definition's default, the way
+        // ChangeDef drops the override (`C4Object.cpp:1213`).
+        object.state.solid_mask_override = None;
+        object.compiled_mass = None;
+        object.refresh_shape_after_state_change(previous_construction, previous_rect, false);
     }
 
     /// Every live object of one definition, in master order — the set both

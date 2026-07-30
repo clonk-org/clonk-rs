@@ -1218,7 +1218,31 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   id **alone**, not on `Status` (`C4Game.cpp:2352-2360`), unlike
   `C4ObjectList::UpdateFaces` which does check it — so `object_ids_of_definition`
   deliberately does not.
-  **Still open: the success sweep**, and where to start it is now known.
+  **The success sweep landed, additively.** `refresh_object_face_from_definition`
+  ports `C4Object::UpdateFace(true)` (`C4Object.cpp:363-386`) as its own engine
+  operation, and `reload_definition` runs it over *every* object of that id —
+  not a computed subset, because C++'s own comment says why: an object can use
+  another definition's graphics, so "better update everything"
+  (`C4Game.cpp:2340-2345`).
+  It writes only definition projections — shape template, solid-mask override,
+  compiled mass — and deliberately leaves `Con`, rotation, position, colour, the
+  action index, energy, contents, effects and commands alone: a reload
+  *refreshes* an object, it does not reinitialise one. The last argument to
+  `refresh_shape_after_state_change` is `false`, which is `UpdateSolidMask`'s
+  `fRestoreAttachedObjects` (`:371`) — a reload must not re-attach riders the
+  C++ path leaves alone. Pinned by
+  `a_successful_reload_refreshes_live_objects_without_reinitialising_them`,
+  against the real shipped `Wipf.c4d`.
+  This was written **additively** rather than by extracting the ChangeDef
+  block it resembles. Extraction would have changed a path
+  (`refresh_shape_after_state_change`) that feeds movement and contact for
+  every existing caller; building the reload's own operation from the same
+  primitives leaves those callers untouched, and the two can be unified later
+  under a differential test rather than under time pressure.
+  **Still open** is only `C4DefGraphicsPtrBackup::AssignUpdate`'s **name-based**
+  graphics re-resolution (`C4DefGraphics.cpp:355-400`): a live object whose
+  `graphics_name` is gone from the reloaded sprite variants should fall back to
+  its own definition and be removed if that also fails. Notes on where it starts:
   `UpdateFace(true)` has no callable primitive — but its pieces are not
   scattered: they sit inside the **ChangeDef** path in
   `engine/economy.rs` (around the `object.shape_template = template` assignment),

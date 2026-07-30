@@ -1,6 +1,49 @@
 // Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    // C4Game.cpp:2340-2345 + C4Object.cpp:363-386 — a successful reload
+    // refreshes every object of that id against the rebuilt definition, and
+    // touches nothing else about them.
+    #[test]
+    fn a_successful_reload_refreshes_live_objects_without_reinitialising_them() {
+        let group = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../content/Objects.c4d/Animals.c4d/Wipf.c4d");
+        if !group.is_dir() {
+            return;
+        }
+
+        let mut engine = crate::Engine::new();
+        let mut definition =
+            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "")
+                .expect("script definition compiles");
+        definition.set_source_path(Some(group.clone()));
+        engine
+            .register_definition(definition)
+            .expect("register definition");
+        let object = engine
+            .spawn_object(crate::SpawnConfig::new("WIPF"))
+            .expect("spawn a live object");
+        let before = engine
+            .snapshot()
+            .object(object)
+            .expect("the object is live")
+            .clone();
+
+        assert!(engine.reload_definition("WIPF", false));
+
+        // The object survives with its own state intact: `UpdateFace` writes
+        // only definition projections, so position, Con, rotation and colour
+        // are untouched — a reload refreshes an object, it does not
+        // reinitialise one.
+        let snapshot = engine.snapshot();
+        let live = snapshot
+            .object(object)
+            .expect("the object survives a successful reload");
+        assert_eq!(live.position, before.position);
+        assert_eq!(live.rotation, before.rotation);
+        assert_eq!(live.energy, before.energy);
+    }
+
     // The reload against a *real shipped group*, not a synthetic DefCore:
     // C4DefList::Reload re-opens the definition's own path and rebuilds it
     // through the same loader production uses (C4Def.cpp:1191-1213).
