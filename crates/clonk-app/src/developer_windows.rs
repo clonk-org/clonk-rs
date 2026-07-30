@@ -123,6 +123,23 @@ impl<H: DeveloperWindowHost> DeveloperWindows<H> {
         self.host_mut(SHELL_WINDOW)
     }
 
+    /// Every registered key, in no particular order.
+    pub fn keys(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.records.keys().copied()
+    }
+
+    /// The key of the first record whose host satisfies `predicate`.
+    ///
+    /// The registry stays platform-agnostic: the runner resolves a winit
+    /// `WindowId` by comparing the host's own window, which only the runner
+    /// knows how to reach.
+    pub fn find_key(&self, predicate: impl Fn(&H) -> bool) -> Option<WindowId> {
+        self.records
+            .iter()
+            .find(|(_, record)| predicate(&record.host))
+            .map(|(id, _)| *id)
+    }
+
     /// Routes a resize to one record. Unknown ids are ignored, which is what an
     /// event for an already-closed window is.
     pub fn resize(&mut self, id: WindowId, width: u32, height: u32) -> bool {

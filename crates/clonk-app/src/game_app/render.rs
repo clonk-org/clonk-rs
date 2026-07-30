@@ -461,6 +461,35 @@ impl GameApp {
         true
     }
 
+    /// `C4GraphicsSystem::CloseViewport(C4Viewport *cvp)`
+    /// (`C4GraphicsSystem.cpp:205-224`) — the path a viewport window's own
+    /// close button takes (`C4ViewportWindow::Close`, `C4Viewport.cpp:775-778`).
+    ///
+    /// Two things separate it from its player-keyed sibling (`:314-331`): it
+    /// erases **exactly one** viewport, found by pointer, so closing one window
+    /// never takes a sibling viewport of the same player with it; and it has no
+    /// `fSilent` parameter at all, so it always plays.
+    pub(crate) fn close_physical_viewport_identity(&mut self, identity: u64) -> bool {
+        let primary_removed = self
+            .physical_viewports
+            .first()
+            .is_some_and(|viewport| viewport.physical_identity == identity);
+        let previous_count = self.physical_viewports.len();
+        self.physical_viewports
+            .retain(|viewport| viewport.physical_identity != identity);
+        if self.physical_viewports.len() == previous_count {
+            return false;
+        }
+        self.graphics.drop_physical_camera(identity);
+        if primary_removed {
+            self.film_view_player = None;
+        }
+        self.sort_physical_viewports_by_player_control();
+        self.update_film_viewport_availability();
+        self.play_viewport_feedback_sound_for_game_state(self.mode == AppMode::Running);
+        true
+    }
+
     pub(crate) fn close_physical_viewports(
         &mut self,
         player: i32,

@@ -28,6 +28,7 @@ mod control_options;
 mod deferred_config;
 mod desktop_notification;
 mod developer_console_save;
+mod developer_host;
 mod developer_toolbox;
 mod developer_tools_page;
 mod developer_windows;
@@ -58,6 +59,7 @@ mod shell_window_host;
 mod startup_player_files;
 mod system_fonts;
 mod update_check;
+mod viewport_window_host;
 mod window_icon;
 
 // Step 6a of the decomposition campaign (rust/REFACTOR_PLAN.md): per-area
@@ -766,22 +768,76 @@ fn run() -> Result<()> {
     // The shell is a registry record like every other developer window, so a
     // WindowId arriving from winit resolves to a purpose before it is routed
     // (M10-P4-L081). It is the only record until the console opens its own.
-    let mut developer_windows: developer_windows::DeveloperWindows<
-        shell_window_host::ShellWindowHost,
-    > = developer_windows::DeveloperWindows::new();
+    let mut developer_windows: developer_windows::DeveloperWindows<developer_host::DeveloperHost> =
+        developer_windows::DeveloperWindows::new();
     developer_windows.insert(
         developer_windows::SHELL_WINDOW,
         developer_windows::HostPurpose::Shell,
-        shell_window_host::ShellWindowHost::new(window, pixels, presenter, retained_gpu_renderer),
+        developer_host::DeveloperHost::Shell(shell_window_host::ShellWindowHost::new(
+            window,
+            pixels,
+            presenter,
+            retained_gpu_renderer,
+        )),
     );
+    // The next viewport window's key. `SHELL_WINDOW` is 0, so console windows
+    // start above it; the value is a registry key, not a viewport identity.
+    let mut next_developer_window_key = 1u64;
 
     let mut dock_tile_attached = false;
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, event_target, control_flow| {
         // Before the window borrow below, because the Dock tile belongs to the
         // application rather than to any one window.
         if dock_icon::should_attach_dock_tile(&event, dock_tile_attached) {
             dock_icon::set_dock_icon();
             dock_tile_attached = true;
+        }
+        // `C4GraphicsSystem` opens and closes a viewport's window inside
+        // Create/CloseViewport (`C4GraphicsSystem.cpp:229-240,205-224`). winit
+        // can only create a window from the event loop's target, so the same
+        // decisions are taken here instead, before the shell record is
+        // borrowed for the rest of the pass.
+        if app.console_mode && matches!(event, Event::MainEventsCleared) {
+            let scale = developer_windows
+                .shell_mut()
+                .and_then(developer_host::DeveloperHost::as_shell_mut)
+                .map_or(1.0, |shell| shell.presenter.scale());
+            console_viewport_windows::reconcile_console_viewport_windows(
+                &mut app,
+                &mut developer_windows,
+                &mut next_developer_window_key,
+                scale,
+                event_target,
+            );
+            // Every viewport window redraws with the shell, the way
+            // `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
+            // viewport in one pass (`:167-169`).
+            for key in developer_windows.keys().collect::<Vec<_>>() {
+                if developer_windows
+                    .host(key)
+                    .and_then(developer_host::DeveloperHost::viewport_identity)
+                    .is_some()
+                {
+                    developer_windows.request_redraw(key);
+                }
+            }
+        }
+        // An event naming a viewport window is that window's alone. Resolving
+        // it before the shell destructure keeps the shell arms — all of which
+        // already guard on `window.id()` — exactly as they were.
+        if let Some(os_window) = console_viewport_windows::event_window_id(&event) {
+            if let Some(key) = developer_windows
+                .find_key(|host| host.window().id() == os_window)
+                .filter(|key| *key != developer_windows::SHELL_WINDOW)
+            {
+                console_viewport_windows::handle_console_viewport_event(
+                    key,
+                    &event,
+                    &mut app,
+                    &mut developer_windows,
+                );
+                return;
+            }
         }
         let shell_window_host::ShellWindowHost {
             window,
@@ -791,7 +847,9 @@ fn run() -> Result<()> {
             ..
         } = developer_windows
             .shell_mut()
-            .expect("the console shell record lives for the whole process");
+            .expect("the console shell record lives for the whole process")
+            .as_shell_mut()
+            .expect("the reserved shell key holds the shell host");
         match event {
             Event::Resumed => {
                 if reconcile_deferred_fullscreen(window, display_options.mode) {

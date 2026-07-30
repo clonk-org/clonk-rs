@@ -53,6 +53,166 @@ pub(crate) fn console_viewport_window_changes(
     changes
 }
 
+/// Open and close console viewport windows so the registry matches the live
+/// physical list.
+///
+/// `scale` is `Application.GetScale()` (`C4Application.h:119`), which sizes the
+/// window as `ceilf(400 * scale)` by `ceilf(250 * scale)`
+/// (`C4Viewport.cpp:1350`).
+///
+/// A window that fails to build is logged and skipped, not fatal:
+/// `C4GraphicsSystem::CreateViewport` deletes the viewport and returns false
+/// when `Init` fails (`:235-239`), leaving the console running.
+pub(crate) fn reconcile_console_viewport_windows(
+    app: &mut crate::GameApp,
+    windows: &mut crate::developer_windows::DeveloperWindows<crate::developer_host::DeveloperHost>,
+    next_key: &mut u64,
+    scale: f32,
+    target: &winit::event_loop::EventLoopWindowTarget<crate::NetworkEventWake>,
+) {
+    use crate::developer_host::DeveloperHost;
+    use crate::developer_windows::{HostPurpose, WindowId};
+    use clonk_engine::developer_viewport::{viewport_window_spec, ViewportWindowTitle};
+
+    let open = windows
+        .keys()
+        .filter_map(|key| {
+            windows
+                .host(key)
+                .and_then(DeveloperHost::viewport_identity)
+                .map(|identity| (key, identity))
+        })
+        .collect::<Vec<_>>();
+    let physical = app
+        .physical_viewports
+        .iter()
+        .map(|viewport| (viewport.physical_identity, viewport.displayed_player))
+        .collect::<Vec<_>>();
+    let open_identities = open
+        .iter()
+        .map(|(_, identity)| *identity)
+        .collect::<Vec<_>>();
+    let changes = console_viewport_window_changes(physical, &open_identities);
+    if changes.is_empty() {
+        return;
+    }
+
+    for change in changes {
+        match change {
+            ConsoleViewportWindowChange::Open { identity, player } => {
+                let name = app
+                    .engine
+                    .player(player)
+                    .map(|player| player.name().to_owned());
+                let spec = viewport_window_spec(player, name.as_deref(), scale);
+                let title = match spec.title {
+                    // The shipped resource table has no IDS_CNS_VIEWPORT, so
+                    // the English fallback carries it, as it does for every
+                    // other console string.
+                    ViewportWindowTitle::Resource => {
+                        app.runtime_resource_text("IDS_CNS_VIEWPORT", "Viewport")
+                    }
+                    ViewportWindowTitle::PlayerName(name) => name,
+                };
+                match crate::viewport_window_host::build_viewport_window(
+                    target,
+                    &title,
+                    spec.width.max(1) as u32,
+                    spec.height.max(1) as u32,
+                    identity,
+                    scale,
+                ) {
+                    Ok(host) => {
+                        let key = WindowId(*next_key);
+                        *next_key += 1;
+                        windows.insert(
+                            key,
+                            HostPurpose::Viewport {
+                                viewport: identity as u32,
+                            },
+                            DeveloperHost::Viewport(host),
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, identity, "failed to open a console viewport window");
+                    }
+                }
+            }
+            ConsoleViewportWindowChange::Close { identity } => {
+                if let Some((key, _)) = open.iter().find(|(_, open)| *open == identity) {
+                    windows.close(*key);
+                }
+            }
+        }
+    }
+}
+
+/// Which OS window an event names, if any.
+pub(crate) fn event_window_id(
+    event: &winit::event::Event<'_, crate::NetworkEventWake>,
+) -> Option<winit::window::WindowId> {
+    match event {
+        winit::event::Event::WindowEvent { window_id, .. } => Some(*window_id),
+        winit::event::Event::RedrawRequested(id) => Some(*id),
+        _ => None,
+    }
+}
+
+/// One console viewport window's own events.
+///
+/// Close routes through the pointer-keyed `CloseViewport(C4Viewport *)`
+/// (`C4GraphicsSystem.cpp:205-224`) by way of this window's identity, so
+/// closing one window never takes a sibling viewport of the same player with
+/// it — that is what the player-keyed overload (`:314-331`) would do.
+pub(crate) fn handle_console_viewport_event(
+    key: crate::developer_windows::WindowId,
+    event: &winit::event::Event<'_, crate::NetworkEventWake>,
+    app: &mut crate::GameApp,
+    windows: &mut crate::developer_windows::DeveloperWindows<crate::developer_host::DeveloperHost>,
+) {
+    use crate::developer_host::DeveloperHost;
+    use crate::developer_windows::DeveloperWindowPresenter;
+    use winit::event::{Event, WindowEvent};
+
+    match event {
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
+            if let Some(identity) = windows.host(key).and_then(DeveloperHost::viewport_identity) {
+                app.close_physical_viewport_identity(identity);
+            }
+            windows.close(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::Resized(size),
+            ..
+        } => {
+            windows.resize(key, size.width.max(1), size.height.max(1));
+            windows.request_redraw(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::ScaleFactorChanged { new_inner_size, .. },
+            ..
+        } => {
+            windows.resize(
+                key,
+                new_inner_size.width.max(1),
+                new_inner_size.height.max(1),
+            );
+            windows.request_redraw(key);
+        }
+        Event::RedrawRequested(_) => {
+            if let Some(host) = windows.host_mut(key) {
+                if let Err(error) = host.present(app) {
+                    tracing::error!(%error, "console viewport window present failed");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
