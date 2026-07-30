@@ -84,6 +84,20 @@ class CiLatencyTests(unittest.TestCase):
             workflow,
         )
 
+    def test_parity_uses_the_lightweight_xtask_dispatcher(self):
+        dispatcher = (
+            REPOSITORY / "xtask" / "src" / "dispatcher.rs"
+        ).read_text(encoding="utf-8")
+
+        lightweight = (
+            'Some("parity") => return xtask::parity::command(&args[1..]),'
+        )
+        self.assertIn(lightweight, dispatcher)
+        self.assertLess(
+            dispatcher.index(lightweight),
+            dispatcher.index("Command::new(cargo)"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
