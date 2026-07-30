@@ -1502,6 +1502,40 @@ impl Engine {
         Ok(true)
     }
 
+    /// `C4ActionDef::FlipDir` of the action a world object currently holds.
+    /// Idle objects answer the C++ zero (C4Object.cpp:412-415).
+    pub(crate) fn object_action_flip_dir(&self, idx: usize) -> i32 {
+        self.action_entry_flip_dir(idx, &self.objects[idx].state.action)
+    }
+
+    /// `C4ActionDef::FlipDir` of an arbitrary ActMap entry of the object's
+    /// definition — SetAction's guard compares the outgoing entry's value
+    /// against the incoming one (C4Object.cpp:4183-4184).
+    pub(crate) fn action_entry_flip_dir(&self, idx: usize, action: &ActionState) -> i32 {
+        self.definitions
+            .get(&self.objects[idx].definition_id)
+            .map_or(0, |definition| {
+                definition
+                    .action_library()
+                    .flip_dir_for_entry(&action.name, action.act_map_index)
+            })
+    }
+
+    /// `C4Object::UpdateFlipDir` (C4Object.cpp:410-442) for a world object.
+    pub(crate) fn update_object_flip_dir(&mut self, idx: usize) {
+        let flip_dir = self.object_action_flip_dir(idx);
+        self.objects[idx].state.update_flip_dir(flip_dir);
+    }
+
+    /// `C4Object::SetDir`'s trailing assignment for a world object. Every C++
+    /// facing change goes through SetDir — `Action.Dir` is assigned directly
+    /// nowhere else at runtime — so every engine-side direction write has to
+    /// keep the mirror coherent too.
+    pub(crate) fn write_object_direction(&mut self, idx: usize, direction: Direction) {
+        let flip_dir = self.object_action_flip_dir(idx);
+        self.objects[idx].state.write_direction(direction, flip_dir);
+    }
+
     /// C4Object::SetDir as reached from an internal ExecAction procedure
     /// (C4Object.cpp:4248-4265): run the current action's TurnAction through
     /// SetActionByName on a facing change, then assign the requested direction
@@ -1540,7 +1574,7 @@ impl Engine {
                 self.action_with_calls(idx, definition_id, &turn_action)?;
             }
         }
-        self.objects[idx].state.direction = direction;
+        self.write_object_direction(idx, direction);
         Ok(())
     }
 
@@ -1582,7 +1616,7 @@ impl Engine {
             }
         }
         if let Some(idx) = self.find_object_index(object_id) {
-            self.objects[idx].state.direction = direction;
+            self.write_object_direction(idx, direction);
         }
         Ok(())
     }
@@ -1675,6 +1709,16 @@ impl Engine {
         };
         if !matches!(result, ActionUpdateResult::Applied) {
             return Ok(false);
+        }
+
+        // SetAction refreshes the mirror only when the FlipDir VALUE differs
+        // between the old and the new action — two actions sharing a FlipDir
+        // keep the transform untouched (C4Object.cpp:4183-4184). It runs after
+        // UpdateActionFace and before SetOCF.
+        let previous_flip_dir = library.flip_dir_for_entry(&previous.name, previous.act_map_index);
+        let current_flip_dir = self.objects[idx].state.action_flip_dir(&library);
+        if previous_flip_dir != current_flip_dir {
+            self.objects[idx].state.update_flip_dir(current_flip_dir);
         }
 
         // SetOCF and fixed-position resync both precede StartCall in C++
@@ -2223,7 +2267,7 @@ impl Engine {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
-            object.state.direction = direction;
+            self.write_object_direction(idx, direction);
             return Ok(true);
         }
         Ok(false)
@@ -2240,7 +2284,7 @@ impl Engine {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
-            object.state.direction = direction;
+            self.write_object_direction(idx, direction);
             return Ok(true);
         }
         Ok(false)
@@ -2257,7 +2301,7 @@ impl Engine {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
-            object.state.direction = direction;
+            self.write_object_direction(idx, direction);
             return Ok(true);
         }
         Ok(false)
@@ -2273,8 +2317,8 @@ impl Engine {
         ydir: C4Fixed,
     ) -> Result<bool, EngineError> {
         if self.action_with_calls(idx, definition_id, "Tumble")? {
+            self.write_object_direction(idx, direction);
             let object = &mut self.objects[idx];
-            object.state.direction = direction;
             object.fixed_velocity = FixedVec2::new(xdir, ydir);
             object.state.velocity = object.velocity_pixels();
             return Ok(true);
@@ -2889,13 +2933,14 @@ impl Engine {
         // grounded.
         let xdir = movement + walk * (target_x - position.x).clamp(-10, 10) / 10;
         let physics = self.physics;
+        let flip_dir = self.object_action_flip_dir(idx);
         let object = &mut self.objects[idx];
         object.fixed_velocity.x = xdir;
         if xdir < C4Fixed::ZERO {
-            object.state.direction = Direction::Left;
+            object.state.write_direction(Direction::Left, flip_dir);
         }
         if xdir > C4Fixed::ZERO {
-            object.state.direction = Direction::Right;
+            object.state.write_direction(Direction::Right, flip_dir);
         }
         object.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut object.fixed_velocity);
@@ -3129,7 +3174,7 @@ impl Engine {
         } else {
             initial_direction
         };
-        self.objects[idx].state.direction = direction;
+        self.write_object_direction(idx, direction);
 
         // Position (C4Object.cpp:5221-5228): stand beside the target at half
         // its shape width + 2, approach with the Walk physical:
@@ -3521,6 +3566,7 @@ impl Engine {
             .max(sax - push_distance)
             .min(sax + sawdt - 1 + push_distance);
         let physics = self.physics;
+        let flip_dir = self.object_action_flip_dir(idx);
         let object = &mut self.objects[idx];
         let mut xdir = C4Fixed::ZERO;
         if position.x < target_x {
@@ -3532,10 +3578,10 @@ impl Engine {
         object.fixed_velocity.x = xdir;
         // SetDir by xdir (C4Object.cpp:5089-5090), grounded (5092).
         if xdir < C4Fixed::ZERO {
-            object.state.direction = Direction::Left;
+            object.state.write_direction(Direction::Left, flip_dir);
         }
         if xdir > C4Fixed::ZERO {
-            object.state.direction = Direction::Right;
+            object.state.write_direction(Direction::Right, flip_dir);
         }
         object.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut object.fixed_velocity);
@@ -4115,7 +4161,14 @@ impl Engine {
             && (previous.name != object.state.action.name
                 || previous.act_map_index != object.state.action.act_map_index)
         {
+            let previous_flip_dir =
+                library.flip_dir_for_entry(&previous.name, previous.act_map_index);
             object.record_action_event(previous, ActionTransitionKind::Forced);
+            // SetAction's FlipDir refresh, guarded on the value changing
+            // (C4Object.cpp:4183-4184).
+            if previous_flip_dir != self.object_action_flip_dir(idx) {
+                self.update_object_flip_dir(idx);
+            }
         }
     }
 

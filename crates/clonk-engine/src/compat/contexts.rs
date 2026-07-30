@@ -9430,6 +9430,33 @@ impl ObjectScopeContext {
         }
         self.current_direction = direction;
         self.pending_update.direction = Some(direction);
+        // C4Object::SetDir only refreshes the mirror for actions that declare
+        // a FlipDir; the plain `Action.DrawDir = iDir` branch keeps whatever
+        // transform the object already carries (C4Object.cpp:4276-4279).
+        if self.action_flip_dir() != 0 {
+            self.update_flip_dir();
+        }
+    }
+
+    /// `C4ActionDef::FlipDir` of the action the object is currently in.
+    pub(crate) fn action_flip_dir(&self) -> i32 {
+        let action_name = self.effective_action_name();
+        let action_index = self.effective_action_index();
+        self.action_library
+            .flip_dir_for_entry(action_name, action_index)
+    }
+
+    /// `C4Object::UpdateFlipDir` (C4Object.cpp:410-442). The mirror lives in
+    /// the draw transform itself, so the renderer never re-derives it: a
+    /// mirrored direction folds the sign into mat[0], and leaving the
+    /// mirrored range unfolds it and drops a transform that became identity.
+    pub(crate) fn update_flip_dir(&mut self) {
+        let updated = DrawTransform::updated_flip_dir(
+            self.draw_transform(),
+            self.direction().to_script_value(),
+            self.action_flip_dir(),
+        );
+        self.set_draw_transform(updated);
     }
 
     pub(crate) fn rotation(&self) -> i32 {

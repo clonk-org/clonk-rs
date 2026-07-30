@@ -1484,6 +1484,10 @@ impl Engine {
         }
 
         let mut exec_set_direction = None;
+        // C4Object::SetDir refreshes the FlipDir mirror in place
+        // (C4Object.cpp:4276-4279); the arms below face inside a live
+        // `&mut` borrow, so resolve the ActMap FlipDir up front.
+        let exec_flip_dir = self.object_action_flip_dir(idx);
         {
             // At-limit physical training before the ComDir movement: Scale
             // Tick5 (C4Object.cpp:4810-4812), Hangle Tick5 (:4844-4846),
@@ -1876,23 +1880,29 @@ impl Engine {
                 }
                 ActionProcedure::Push => {
                     if object.state.velocity.x < 0 {
-                        object.state.direction = Direction::Left;
+                        object.state.write_direction(Direction::Left, exec_flip_dir);
                     } else if object.state.velocity.x > 0 {
-                        object.state.direction = Direction::Right;
+                        object
+                            .state
+                            .write_direction(Direction::Right, exec_flip_dir);
                     }
                 }
                 ActionProcedure::Pull => {
                     if object.state.velocity.x < 0 {
-                        object.state.direction = Direction::Left;
+                        object.state.write_direction(Direction::Left, exec_flip_dir);
                     } else if object.state.velocity.x > 0 {
-                        object.state.direction = Direction::Right;
+                        object
+                            .state
+                            .write_direction(Direction::Right, exec_flip_dir);
                     }
                 }
                 ActionProcedure::Fight => {
                     if object.state.velocity.x < 0 {
-                        object.state.direction = Direction::Left;
+                        object.state.write_direction(Direction::Left, exec_flip_dir);
                     } else if object.state.velocity.x > 0 {
-                        object.state.direction = Direction::Right;
+                        object
+                            .state
+                            .write_direction(Direction::Right, exec_flip_dir);
                     }
                 }
                 _ => {}

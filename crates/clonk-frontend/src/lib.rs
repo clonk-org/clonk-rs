@@ -1133,11 +1133,15 @@ mod tests {
             flip_dir: Some(7),
             ..DefinitionActionGraphics::default()
         };
-        for (raw, expected) in [(13, (0, true)), (7, (6, true))] {
+        for (raw, expected_row, expected_mirror) in [(13, 0, true), (7, 6, true)] {
             let direction = Direction::from_script_value(raw);
             assert_eq!(
                 GraphicsSystem::resolve_draw_direction(&banner, direction),
-                expected
+                expected_row
+            );
+            assert_eq!(
+                GraphicsSystem::resolve_overlay_action_flip(&banner, direction),
+                expected_mirror
             );
         }
 
@@ -1146,10 +1150,10 @@ mod tests {
             ..DefinitionActionGraphics::default()
         };
         let direction = Direction::from_script_value(4);
-        assert_eq!(
-            GraphicsSystem::resolve_draw_direction(&flag, direction),
-            (4, false)
-        );
+        assert_eq!(GraphicsSystem::resolve_draw_direction(&flag, direction), 4);
+        assert!(!GraphicsSystem::resolve_overlay_action_flip(
+            &flag, direction
+        ));
 
         let malformed = DefinitionActionGraphics {
             flip_dir: Some(-2),
@@ -1157,9 +1161,13 @@ mod tests {
         };
         assert_eq!(
             GraphicsSystem::resolve_draw_direction(&malformed, Direction::from_script_value(0),),
-            (-5, true),
+            -5,
             "negative FlipDir remains truthy and uses the signed C++ formula"
         );
+        assert!(GraphicsSystem::resolve_overlay_action_flip(
+            &malformed,
+            Direction::from_script_value(0),
+        ));
     }
 
     #[test]
@@ -1492,7 +1500,6 @@ mod tests {
                 source,
                 (0.0, 0.0, 4.0, 1.0),
                 (2.0, 0.5),
-                false,
                 None,
                 1.0,
                 0.0,
@@ -1590,6 +1597,11 @@ mod tests {
         object.action = clonk_engine::ActionState::new("Active");
         object.action.phase = 1;
         object.direction = Direction::from_script_value(1);
+        // UpdateFlipDir owns the mirror: it folds into pDrawTransform, and
+        // C4Object::Draw hands that matrix straight to the blit
+        // (src/C4Object.cpp:415-428,2506-2515). Source it from the ported
+        // engine function so this stays an assertion about the real fold.
+        object.draw_transform = DrawTransform::updated_flip_dir(object.draw_transform, 1, 1);
         object.base_graphics = Some(clonk_engine::ObjectBaseGraphics {
             definition: "OverrideSheet".to_string(),
             graphics_name: None,
@@ -1655,6 +1667,10 @@ mod tests {
             object.position = Vector2::new(12, 8);
             object.action = clonk_engine::ActionState::new("Active");
             object.direction = Direction::from_script_value(direction);
+            // Same fold, sourced from the engine port rather than
+            // hand-built (src/C4Object.cpp:415-428).
+            object.draw_transform =
+                DrawTransform::updated_flip_dir(object.draw_transform, direction, 1);
             let mut graphics = GraphicsSystem::new(
                 24,
                 16,
@@ -1751,7 +1767,6 @@ mod tests {
                 SourceRect::new(0, 0, 9, 3),
                 (6.0, 9.0, 9.0, 3.0),
                 (10.5, 10.5),
-                false,
                 None,
                 1.0,
                 0.0,
@@ -7178,7 +7193,6 @@ mod tests {
                 facet,
                 (0.0, 0.0, 16.0, 22.0),
                 (8.0, 11.0),
-                false,
                 None,
                 1.0,
                 0.0,

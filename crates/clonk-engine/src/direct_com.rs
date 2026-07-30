@@ -5889,12 +5889,12 @@ impl Engine {
         {
             match com_dir {
                 CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => {
-                    self.objects[index].state.direction = Direction::Left;
+                    self.write_object_direction(index, Direction::Left);
                 }
                 CommandDirection::Right
                 | CommandDirection::UpRight
                 | CommandDirection::DownRight => {
-                    self.objects[index].state.direction = Direction::Right;
+                    self.write_object_direction(index, Direction::Right);
                 }
                 _ => {}
             }

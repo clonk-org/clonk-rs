@@ -425,6 +425,67 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-30: **Every preplaced object whose saved `DrawTransform`
+  carried the FlipDir mirror rendered exactly backwards.** Reported as the
+  Dragon Rock intro dragon facing right while it flew left. `C4Object::
+  UpdateFlipDir` (`C4Object.cpp:410-442`) is the *sole* owner of the mirror:
+  it folds the sign into `pDrawTransform->mat[0]` via `SetFlipDir`
+  (`C4Facet.h:79-88`), and `C4Object::Draw` hands that matrix straight to
+  `DrawT`/`DrawXT` without mirroring anything itself
+  (`C4Object.cpp:2506-2515`). The port had no `UpdateFlipDir` at all. Instead
+  the loader faithfully restored C++'s already-mirrored matrix *and* the
+  renderer independently re-derived the mirror from `Action.Dir`, so the two
+  cancelled: `DRGN` #202 and `KING` #5129 ship
+  `Dir=1` / `DrawTransform=-1,0,0,0,1,0,-1`, and every such object drew with
+  its facing inverted. The mirror now lives in the engine — at SetDir
+  (`C4Object.cpp:4276-4279`), at SetAction guarded on the FlipDir *value*
+  changing (`:4183-4184`), and once per active object after `Objects.txt`
+  load (`C4GameObjects.cpp:665-674`) — and `resolve_draw_direction` returns
+  only `Action.DrawDir`, the facet row. Three consequences are C++-correct
+  convergence rather than regressions: 6 preplaced objects that mirror with
+  no saved transform (OilWars `PLM2`/`SNKE`, Paxhill `HORS`) now gain
+  `new C4DrawTransform(-1)`; Goldrush #439 and Hammerfest #1019 (`CCAN`,
+  saved FlipDir `-1` under an ActMap with no FlipDir) now draw unmirrored;
+  and 173 preplaced exactly-identity transforms are deleted at load, so a
+  re-save omits the key while engine-created facing objects start emitting
+  it. The three `testdata/dev-replays` goldens moved for the same reason —
+  a right-facing crew Clonk now carries the transform.
+
+- Open: **Graphics overlays in `MODE_Action`/`MODE_Base` still take their
+  facet row and mirror from the host object's facing.**
+  `C4GraphicsOverlay::Draw` blits with `iPhaseY = 0` and the overlay's *own*
+  `C4DrawTransform`, never the host's `pDrawTransform`
+  (`C4DefGraphics.cpp:820-826`). The port's behaviour is unchanged and now
+  quarantined behind `GraphicsSystem::resolve_overlay_action_flip`; no test
+  covers it, so closing it needs its own oracle first. `MODE_ExtraGraphics`
+  is unaffected — it *does* inherit the host transform in C++
+  (`C4DefGraphics.cpp:794-806`), which the port already reproduces.
+
+- Open: **`Action.DrawDir` is derived at draw time rather than stored.**
+  C++ writes it in `UpdateFlipDir`/`SetDir` and reads it back; it is
+  `// NoSave` (`C4Object.h:98`) and absent from `C4Action::CompileFunc`, so
+  keeping it derived costs no savegame fidelity and keeps `ObjectSnapshot`'s
+  serialized shape unchanged. The one unreproducible case is C++'s stale
+  window: `SetAction` skips the refresh when old and new FlipDir are equal
+  and never clamps `DrawDir` to the new action's `Directions`.
+
+- Open: **The `transformed` predicate in `blit_face` has no `Def->Rotateable`
+  gate.** C++ takes the untransformed blit iff
+  `(!Def->Rotateable || r == 0) && !pDrawTransform` (`C4Object.cpp:477`); the
+  port tests `rotation_degrees.abs() > EPSILON` on a `rem_euclid(360)` value,
+  so a non-rotateable object with a scripted `r` rotates where C++ does not,
+  and `r == 360` normalizes to `0` where C++ reads it as nonzero. Pre-existing
+  and deliberately left alone while the FlipDir change landed, so a facing
+  regression stays distinguishable from a rotation one.
+
+- Open: **The `DFA_PUSH`/`DFA_PULL`/`DFA_FIGHT` fallback arms in
+  `engine/movement.rs` face by the whole-pixel velocity mirror** where C++
+  tests the raw `C4Fixed` xdir, so a sub-pixel velocity leaves `Dir` unchanged
+  in Rust and calls `SetDir` in C++. The same `Fight` arm faces by velocity
+  where `C4Object.cpp:5276-5277` faces the *target* and calls `SetDir` zero
+  times when the two share an x. Pre-existing; surfaced while mapping every
+  direction write for the FlipDir port.
+
 - Closed 2026-07-30: **The Options Gamepad sheet printed `invalid` where the
   oracle prints nothing.** With no `[Gamepad1]` section in the config,
   `C4ConfigGamepad::CompileFunc` defaults every `Button[i]` to `-1`

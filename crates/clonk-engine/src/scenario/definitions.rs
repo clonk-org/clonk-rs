@@ -335,6 +335,9 @@ pub(crate) fn convert_action_definition(
     if let Some(directions) = action.directions {
         spec = spec.with_directions(directions);
     }
+    if let Some(flip_dir) = action.flip_dir {
+        spec = spec.with_flip_dir(flip_dir);
+    }
     if let Some(turn_action) = &action.turn_action {
         spec = spec.with_turn_action(turn_action.clone());
     }

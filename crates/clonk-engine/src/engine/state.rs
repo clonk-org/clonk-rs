@@ -1287,6 +1287,17 @@ impl Engine {
             self.refresh_object_ocf(index);
         }
 
+        // Restoring a snapshot re-enters C4GameObjects::Load, whose
+        // misc-updates pass runs UpdateFlipDir once per still-active object —
+        // "for old objects.txt with no flipdir defined"
+        // (C4GameObjects.cpp:665-674). Runtime CreateObject deliberately does
+        // not get this, so it belongs here and not in the spawn path.
+        for index in 0..self.objects.len() {
+            if self.objects[index].state.status.is_active() {
+                self.update_object_flip_dir(index);
+            }
+        }
+
         self.crew_roles = state
             .crew_roles
             .iter()

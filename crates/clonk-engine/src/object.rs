@@ -405,6 +405,35 @@ pub(crate) fn preview_spawn_state_with_components(
 }
 
 impl ObjectState {
+    /// `C4ActionDef::FlipDir` of the action this object currently holds.
+    pub(crate) fn action_flip_dir(&self, library: &ActionLibrary) -> i32 {
+        library.flip_dir_for_entry(&self.action.name, self.action.act_map_index)
+    }
+
+    /// `C4Object::UpdateFlipDir` (C4Object.cpp:410-442). C++ keeps the mirror
+    /// in `pDrawTransform` itself — `C4Object::Draw` applies no mirror of its
+    /// own — so entering the mirrored direction range folds the sign into
+    /// mat[0], and leaving it unfolds the sign and deletes a transform that
+    /// has become the identity.
+    pub(crate) fn update_flip_dir(&mut self, flip_dir: i32) {
+        self.draw_transform = DrawTransform::updated_flip_dir(
+            self.draw_transform,
+            self.direction.to_script_value(),
+            flip_dir,
+        );
+    }
+
+    /// The trailing half of `C4Object::SetDir` (C4Object.cpp:4275-4279): the
+    /// direction write, then the FlipDir refresh it triggers. The
+    /// `else Action.DrawDir = iDir` branch leaves the transform alone, so an
+    /// action without a FlipDir must not unfold a stale mirror.
+    pub(crate) fn write_direction(&mut self, direction: Direction, flip_dir: i32) {
+        self.direction = direction;
+        if flip_dir != 0 {
+            self.update_flip_dir(flip_dir);
+        }
+    }
+
     fn apply_delta(&mut self, delta: &ObjectDelta, library: &ActionLibrary) -> ApplyDeltaOutcome {
         let previous_container = self.container;
         let mut container_change = None;
@@ -655,6 +684,16 @@ impl ObjectState {
 
         if !raw_change_def_idle {
             self.action.reconcile_with_library(library);
+        }
+        // A delta batches direction, action and draw transform, so the
+        // C4Object::SetDir / SetAction folds (C4Object.cpp:4183-4184,
+        // 4276-4279) collapse into one refresh after every input has landed —
+        // notably after `delta.draw_transform`, which would otherwise clobber
+        // an earlier fold. ChangeDef's raw `Action.Act = ActIdle` is excluded
+        // because C++ writes it without one, and its trailing SetDir(0) is a
+        // no-op on an idle object (C4Object.cpp:1224-1225,4264-4265).
+        if !raw_change_def_idle && (delta.direction.is_some() || delta.action.is_some()) {
+            self.update_flip_dir(self.action_flip_dir(library));
         }
         ApplyDeltaOutcome {
             energy_died,

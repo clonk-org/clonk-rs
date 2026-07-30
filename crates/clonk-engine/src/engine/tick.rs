@@ -811,7 +811,7 @@ impl Engine {
                         object.fixed_position =
                             FixedVec2::from_ints(object.state.position.x, object.state.position.y);
                         object.record_action_event(
-                            transition_previous_state,
+                            transition_previous_state.clone(),
                             ActionTransitionKind::Natural,
                         );
                         // A PhaseCall may have assigned removal already. C++
@@ -821,6 +821,15 @@ impl Engine {
                         // and suppresses the remaining EndCall.
                         allow_deleted_phase_end_start = object.destroyed
                             || matches!(object.state.status, ObjectStatus::Deleted);
+                    }
+                    // The phase-end transition is a SetAction, so it carries
+                    // SetAction's FlipDir refresh — guarded on the FlipDir
+                    // VALUE changing, and ordered before SetOCF
+                    // (C4Object.cpp:4182-4192).
+                    let previous_flip_dir =
+                        self.action_entry_flip_dir(idx, &transition_previous_state);
+                    if previous_flip_dir != self.object_action_flip_dir(idx) {
+                        self.update_object_flip_dir(idx);
                     }
                     // C4Object::SetAction refreshes OCF after selecting the
                     // actual (possibly incomplete-coerced) action and before
@@ -1864,6 +1873,10 @@ impl Engine {
             menu: update_menu,
             ..
         } = update;
+        // Only a staged facing or action change reaches C4Object::SetDir /
+        // SetAction, and only those two run UpdateFlipDir
+        // (C4Object.cpp:4183-4184,4276-4279).
+        let update_touches_flip_dir = direction.is_some() || action.is_some();
         let mut update_menu = update_menu;
         if let Some(Some(menu)) = update_menu.as_mut() {
             if menu.runtime_id == 0 {
@@ -2258,6 +2271,13 @@ impl Engine {
                     }
                 }
             }
+        }
+        // A staged update carries direction, action and draw transform as one
+        // batch, so the two folds collapse into a single refresh once every
+        // input has landed — in particular after the staged draw transform,
+        // which would otherwise clobber an earlier fold.
+        if update_touches_flip_dir {
+            self.update_object_flip_dir(index);
         }
         // Host-driven changes are SetOCF events (SetAlive C4Object.h:361,
         // DoCon C4Object.cpp:1417, status C4Object.cpp:4139).
