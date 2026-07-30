@@ -1094,11 +1094,14 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   Pinned by
   `frame_selection_admits_master_order_positions_inside_the_normalised_band`.
   **Still open, and owned by no queue card:**
-  (a) `C4GameMessageList::UpdateDef` (`C4GameMessage.cpp:233-244,340-345`),
-  which `C4Game::ReloadDef` runs last (`C4Game.cpp:2364`) to re-resolve every
-  live message's frame decoration and drop it when the reloaded definition no
-  longer supplies it — the port names it in a doc comment and implements
-  nothing;
+  (a) **closed** — `MessageManager::update_def` ports
+  `C4GameMessageList::UpdateDef` (`C4GameMessage.cpp:233-244,340-345`), which
+  `C4Game::ReloadDef` runs as its **last** act after *either* arm
+  (`C4Game.cpp:2364`). A decoration the definition still supplies is
+  re-resolved and kept; one it no longer supplies is **deleted** rather than
+  left drawing from a definition that is gone, and decorations sourced from
+  other definitions are untouched. Pinned by
+  `a_removed_definition_drops_the_frame_decorations_it_supplied`;
   (b) **closed** — the console frame-tick order is ported as
   `developer_cursor::console_tick_steps` (`C4Console.cpp:1630-1639`). The order
   is not the obvious one: in console mode the **graphics pass is driven by the

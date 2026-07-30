@@ -1,6 +1,49 @@
 // Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    // C4GameMessage.cpp:233-244,340-345 — ReloadDef's last act, after either
+    // arm: a frame decoration the definition no longer supplies is deleted
+    // rather than left drawing from a definition that is gone.
+    #[test]
+    fn a_removed_definition_drops_the_frame_decorations_it_supplied() {
+        let mut engine = crate::Engine::new();
+        let decorated = |source: &str| crate::message::MessageSpec {
+            kind: crate::message::MessageKind::Global,
+            text: format!("from {source}"),
+            target: None,
+            player: None,
+            offset: crate::Vector2::ZERO,
+            color: 0xffffff,
+            flags: crate::message::FLAG_MULTIPLE,
+            width: None,
+            decoration: None,
+            frame_decoration: Some(crate::ObjectMenuFrameDecoration {
+                source_definition: source.to_string(),
+                ..Default::default()
+            }),
+            portrait: None,
+        };
+        engine.messages.add_message(decorated("ROCK"));
+        engine.messages.add_message(decorated("WIPF"));
+
+        // A definition that still supplies its decoration keeps it: C++
+        // re-resolves the graphics and deletes only when that fails.
+        assert_eq!(engine.messages.update_def("ROCK", true), 0);
+
+        // Gone: its decoration goes with it, and only its own.
+        assert_eq!(engine.messages.update_def("ROCK", false), 1);
+        assert_eq!(
+            engine.messages.update_def("ROCK", false),
+            0,
+            "the decoration is dropped once, not on every later reload"
+        );
+        assert_eq!(
+            engine.messages.update_def("WIPF", false),
+            1,
+            "another definition's decoration was untouched"
+        );
+    }
+
     // C4Game.cpp:2340-2345 + C4Object.cpp:363-386 — a successful reload
     // refreshes every object of that id against the rebuilt definition, and
     // touches nothing else about them.

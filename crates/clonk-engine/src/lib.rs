@@ -4010,7 +4010,7 @@ impl PartialEq for ObjectMenuState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMenuFrameDecoration {
     pub source_definition: String,
     pub background_color: u32,
@@ -10457,6 +10457,9 @@ impl Engine {
                 }
             }
             self.remove_definition(id);
+            // The definition is gone, so every frame decoration drawing from
+            // it goes with it.
+            self.messages.update_def(id, false);
             return false;
         };
         definition.set_source_path(Some(source));
@@ -10482,6 +10485,9 @@ impl Engine {
         if let Err(error) = self.relink_scripts() {
             tracing::warn!(definition = %id, %error, "definition reload relink diagnostic");
         }
+        // `Messages.UpdateDef(id)` is `ReloadDef`'s last act, after *either*
+        // arm (`C4Game.cpp:2364`).
+        self.messages.update_def(id, true);
         true
     }
 
