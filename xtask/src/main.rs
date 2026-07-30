@@ -1123,7 +1123,7 @@ fn archive_identity(
         .into_iter()
         .map(components::BuiltComponent::id)
         .filter(|component| component.is_platform_independent())
-        .find(|component| name.starts_with(&format!("{}-", component.name())))
+        .find(|component| name.starts_with(&components::shared_archive_prefix(*component)))
         .map(|component| Ok((component, None)))
         .unwrap_or_else(|| {
             engine_archive_triple(name, version)
@@ -1138,7 +1138,7 @@ fn archive_identity(
 /// earlier release cannot enter this manifest: it would name an asset this
 /// release never uploads, and every client on that triple would fail to fetch.
 fn engine_archive_triple(name: &str, version: &str) -> Result<String> {
-    name.strip_prefix(&format!("clonk-rust-{version}-engine-"))
+    name.strip_prefix(&components::engine_archive_prefix(version))
         .and_then(|rest| rest.strip_suffix(".zip"))
         .filter(|triple| !triple.is_empty())
         .map(str::to_string)

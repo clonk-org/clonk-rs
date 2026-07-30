@@ -258,6 +258,25 @@ pub struct EmittedComponent {
     pub size: u64,
 }
 
+/// The filename prefix an `engine` archive of `version` carries.
+///
+/// Engine is the only platform-dependent component, so no [`ComponentId`] is
+/// needed to build this — which is the point: the publishing job reads the
+/// triple back out of the filename (`archive_identity` in `main.rs`) with
+/// nothing but the version in hand. Construction and parsing therefore have to
+/// agree on this string forever, and sharing it is what stops them drifting.
+pub fn engine_archive_prefix(version: &str) -> String {
+    format!("clonk-rust-{version}-engine-")
+}
+
+/// The filename prefix a platform-independent component's archives carry.
+///
+/// The digest follows it, so this is also what identifies the component once
+/// the archives arrive in the publishing job as a flat directory.
+pub fn shared_archive_prefix(component: ComponentId) -> String {
+    format!("{}-", component.name())
+}
+
 /// The archive filename for a component.
 ///
 /// Shared components are named after their own digest so an unchanged `planet`
@@ -272,12 +291,13 @@ pub fn component_archive_name(
 ) -> String {
     let component = component.id();
     if component.is_platform_independent() {
-        format!("{}-{}.zip", component.name(), short_digest(digest))
-    } else {
         format!(
-            "clonk-rust-{version}-{}-{target_triple}.zip",
-            component.name()
+            "{}{}.zip",
+            shared_archive_prefix(component),
+            short_digest(digest)
         )
+    } else {
+        format!("{}{target_triple}.zip", engine_archive_prefix(version))
     }
 }
 
