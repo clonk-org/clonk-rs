@@ -13,6 +13,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Required checks must report on the merge group, or a queued pull request
+  # waits forever for a status that never runs.
+  merge_group:
   workflow_dispatch:
     inputs:
       ref:
@@ -92,6 +95,11 @@ jobs:
   # rather than a question.
   runtime-msvc:
     name: Runtime builds for MSVC
+    # Queue-time, not pull-request time: 18 minutes of Windows runner per open
+    # pull request is the wrong place to spend a public repository's 20
+    # concurrent jobs. `launcher` and `installer` still run per pull request,
+    # so a Windows-shaped mistake is still caught in under three minutes.
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
