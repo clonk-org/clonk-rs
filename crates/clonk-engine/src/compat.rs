@@ -63,7 +63,7 @@ mod effects;
 mod landscape;
 mod menus_messages;
 mod object_state;
-mod objects;
+pub(crate) mod objects;
 mod players;
 mod registration;
 mod sounds;

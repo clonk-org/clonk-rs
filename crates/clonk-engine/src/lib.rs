@@ -10399,6 +10399,33 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
     }
 }
 
+/// The edit cursor's world hit test, bound to one snapshot.
+///
+/// This is the bridge `developer_cursor::edit_target` needs: it supplies that
+/// function's `find_next(after)` closure, which C++ writes as
+/// `Game.FindObject(0, X, Y, 0, 0, OCF_NotContained, …, ANY_OWNER, Target)`
+/// (`C4EditCursor.cpp:150`). Building it once per gesture and reusing it across
+/// the shift-click walk is deliberate — `edit_target` calls `find_next`
+/// repeatedly, and rebuilding the world view per call would rescan the snapshot
+/// for every step of the stack.
+pub struct EditCursorHitTest {
+    world: HostWorldContext,
+}
+
+impl EditCursorHitTest {
+    pub fn new(snapshot: &SimulationSnapshot) -> Self {
+        Self {
+            world: host_world_context_from_snapshot(snapshot),
+        }
+    }
+
+    /// The first object at `(x, y)` strictly after `after` in master-list
+    /// order, skipping contained ones, or `None` at the end of the stack.
+    pub fn object_at(&self, x: i32, y: i32, after: Option<ObjectId>) -> Option<ObjectId> {
+        crate::compat::objects::edit_cursor_object_at(&self.world, x, y, after)
+    }
+}
+
 fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldContext {
     let next_object_id = snapshot
         .objects

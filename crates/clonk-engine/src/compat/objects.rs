@@ -4397,6 +4397,46 @@ pub(crate) fn find_object_owner(args: &[Value]) -> Result<Value, RuntimeError> {
 /// C4Game::FindObject (C4Game.cpp:1334-1424): the legacy single-result
 /// search scans the MASTER list for every query form — first master-order
 /// match wins; sectors are never consulted (unlike the criteria form).
+/// The edit cursor's hit test, outside the script host.
+///
+/// `C4EditCursor::Move` picks its target with
+/// `Game.FindObject(0, X, Y, 0, 0, OCF_NotContained, nullptr, nullptr, nullptr,
+/// nullptr, ANY_OWNER, Target)` (`C4EditCursor.cpp:150`) — the same
+/// `Game.FindObject` script content calls, so it runs through the same query
+/// rather than a second hit test that could disagree with it.
+///
+/// It is a free function over a snapshot rather than an `Engine` method
+/// because `find_object_linear` needs a `WorldAccessor`, and a snapshot-backed
+/// `HostWorldContext` is one without entering the script host — the console
+/// hit-tests between ticks, not during a script call. Callers that walk a
+/// stack with `developer_cursor::edit_target` should build the context once
+/// and reuse it; a snapshot per click is wasteful, not wrong.
+pub(crate) fn edit_cursor_object_at(
+    world: &crate::compat::world::HostWorldContext,
+    x: i32,
+    y: i32,
+    after: Option<ObjectId>,
+) -> Option<ObjectId> {
+    let params = FindObjectParams {
+        definition: None,
+        x,
+        y,
+        // A zero-extent query is C++'s point test, not an empty one.
+        width: 0,
+        height: 0,
+        ocf_mask: crate::ocf::NOT_CONTAINED,
+        action: None,
+        treat_idle: false,
+        action_target: None,
+        // The console has no caller object to exclude.
+        exclude: None,
+        container: ContainerFilter::Any,
+        owner: OWNER_ANY,
+        find_next: after,
+    };
+    find_object_linear(world, &params)
+}
+
 fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let mut skip_until = params.find_next;
     for object_id in world.master_object_ids() {

@@ -385,6 +385,55 @@ pub fn edit_release(drag_frame: bool, drop_target: Option<ObjectId>) -> Vec<Edit
 mod tests {
     use super::*;
 
+    // C4EditCursor.cpp:143-151 — `edit_target` walking a real world through
+    // the bridge that supplies its `find_next`. This is the seam that had no
+    // implementation: the picking rule was ported, the hit test it calls was
+    // reachable only from inside a script call.
+    #[test]
+    fn edit_target_walks_the_live_object_stack_through_the_hit_test() {
+        let recording = crate::fixtures::basic_movement_recording(2).expect("fixture recording");
+        let snapshot = recording.frames().last().expect("a recorded frame");
+        let subject = snapshot.objects.first().expect("a live object");
+        let (x, y) = (subject.position.x, subject.position.y);
+        let hit_test = crate::EditCursorHitTest::new(snapshot);
+
+        // With nothing selected the cursor takes the first object under it,
+        // which is `Game.FindObject`'s master-order first hit.
+        let picked = edit_target(false, &[], |after| hit_test.object_at(x, y, after));
+        assert_eq!(
+            picked,
+            Some(subject.id),
+            "an unmodified click picks the object under the cursor"
+        );
+
+        // Without Shift the pick does not advance, however many times it runs:
+        // C++ restarts from the top every time.
+        assert_eq!(
+            edit_target(false, &[subject.id], |after| hit_test
+                .object_at(x, y, after)),
+            Some(subject.id)
+        );
+
+        // Shift resumes *after* the selection and keeps advancing past
+        // anything already selected — and there is no wrap-around, so a
+        // fully-selected stack ends at `None` rather than cycling forever.
+        assert_eq!(
+            edit_target(true, &[subject.id], |after| hit_test.object_at(x, y, after)),
+            None,
+            "shift past the only object under the cursor ends the stack"
+        );
+
+        // Empty space picks nothing rather than falling back to any object.
+        assert_eq!(
+            edit_target(false, &[], |after| hit_test.object_at(
+                i32::MIN / 2,
+                i32::MIN / 2,
+                after
+            )),
+            None
+        );
+    }
+
     // C4EditCursor.cpp:201-229 — what pressing the left button does to the
     // selection in Edit mode.
     #[test]
