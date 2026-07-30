@@ -14,7 +14,7 @@ internet in lockstep multiplayer.
 ## Installing
 
 Download the release for your platform from the
-[Releases](https://github.com/syb0rg/clonk-rs/releases) page:
+[Releases](https://github.com/clonk-org/clonk-rs/releases) page:
 
 | Platform | Asset |
 | --- | --- |
@@ -55,7 +55,7 @@ Everything else works without it.
 The game data lives in a submodule, so clone recursively:
 
 ```sh
-git clone --recurse-submodules https://github.com/syb0rg/clonk-rs.git
+git clone --recurse-submodules https://github.com/clonk-org/clonk-rs.git
 cd clonk-rs
 cargo run --release -p clonk-app --bin clonk-app
 ```

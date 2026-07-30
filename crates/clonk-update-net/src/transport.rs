@@ -536,12 +536,12 @@ mod tests {
 
     #[test]
     fn an_allowlisted_https_hop_is_accepted() {
-        let origin = reqwest::Url::parse("https://github.com/syb0rg/clonk-rs/releases/latest")
+        let origin = reqwest::Url::parse("https://github.com/clonk-org/clonk-rs/releases/latest")
             .expect("origin parses");
         for target in [
             "https://objects.githubusercontent.com/x?token=1",
             "https://release-assets.githubusercontent.com/x",
-            "https://github.com/syb0rg/clonk-rs/releases/download/v0.4.0/planet.zip",
+            "https://github.com/clonk-org/clonk-rs/releases/download/v0.4.0/planet.zip",
         ] {
             let target = reqwest::Url::parse(target).expect("target parses");
             assert!(

@@ -40,7 +40,7 @@ edition = "2021"
 rust-version = "1.97.1"
 description = "Clonk Rust game engine and application"
 license = "ISC"
-repository = "https://github.com/syb0rg/clonk-rs"
+repository = "https://github.com/clonk-org/clonk-rs"
 readme = "README.md"
 publish = false
 
