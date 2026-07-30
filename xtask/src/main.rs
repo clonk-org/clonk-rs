@@ -928,7 +928,7 @@ const UPDATE_TRIPLE_ALIASES: [(&str, &str); 3] = [
 /// release; two content-addressed producers would have to agree byte for byte
 /// forever, so it stopped and references the published artifact instead. See
 /// [`components::BuiltComponent`].
-const CONTENT_REPOSITORY: &str = "syb0rg/clonk-rs-content";
+const CONTENT_REPOSITORY: &str = "clonk-org/clonk-rs-content";
 
 /// The asset name that repository publishes.
 const CONTENT_ARCHIVE: &str = "content.zip";
@@ -3854,7 +3854,7 @@ mod tests {
             .source
             .as_ref()
             .expect("content must name the release that publishes it");
-        assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+        assert_eq!(source.repo, "clonk-org/clonk-rs-content");
         // The tag names the exact commit the `content` submodule pins, so the
         // pin resolves to an artifact with no lookup table in between.
         assert_eq!(source.tag, format!("content-{CONTENT_COMMIT_FIXTURE}"));

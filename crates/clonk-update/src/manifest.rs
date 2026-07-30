@@ -238,7 +238,7 @@ mod tests {
         let published = VALID.replace(
             r#""archive": "content-0123456789abcdef.zip","#,
             r#""archive": "content.zip",
-             "source": {"repo": "syb0rg/clonk-rs-content", "tag": "content-abc"},"#,
+             "source": {"repo": "clonk-org/clonk-rs-content", "tag": "content-abc"},"#,
         );
         let manifest = Manifest::parse(published.as_bytes()).expect("valid manifest");
         let source = manifest
@@ -246,7 +246,7 @@ mod tests {
             .and_then(|entry| entry.target_for("x86_64-unknown-linux-gnu"))
             .and_then(|target| target.source.as_ref())
             .expect("content names its release");
-        assert_eq!(source.repo, "syb0rg/clonk-rs-content");
+        assert_eq!(source.repo, "clonk-org/clonk-rs-content");
         assert_eq!(source.tag, "content-abc");
     }
 

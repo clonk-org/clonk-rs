@@ -22,7 +22,7 @@ WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
 
 PIN = "d34d385591134ce6c262b8c9ed53faaa6229cc6b"
 TAG = f"content-{PIN}"
-CONTENT_REPOSITORY = "syb0rg/clonk-rs-content"
+CONTENT_REPOSITORY = "clonk-org/clonk-rs-content"
 BASE = f"https://github.com/{CONTENT_REPOSITORY}/releases/download/{TAG}"
 
 

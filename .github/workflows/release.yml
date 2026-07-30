@@ -395,7 +395,7 @@ jobs:
       # The only pass that emits `planet`. Its archive is prefix-free and
       # therefore byte-identical on every triple, so emitting it from every pass
       # would spend the time to produce exact duplicates. `content` is not
-      # emitted by any pass — syb0rg/clonk-rs-content publishes it.
+      # emitted by any pass — clonk-org/clonk-rs-content publishes it.
       - name: Package Linux
         if: matrix.runner == 'ubuntu-latest'
         run: ./target/release/xtask-engine-tools package --components=all
@@ -538,7 +538,7 @@ jobs:
               *-engine-universal-*) floor=10000000 ;;
               *-engine-*) floor=5000000 ;;
               # `content-*` is deliberately not here: that archive is built and
-              # published by syb0rg/clonk-rs-content, and a second builder of
+              # published by clonk-org/clonk-rs-content, and a second builder of
               # content-addressed bytes is exactly what must not exist. The
               # manifest generator refuses one too.
               *) echo "$name matches no known update component" >&2; exit 1 ;;
@@ -635,7 +635,7 @@ jobs:
         id: content
         env:
           GH_TOKEN: ${{ github.token }}
-          CONTENT_REPOSITORY: syb0rg/clonk-rs-content
+          CONTENT_REPOSITORY: clonk-org/clonk-rs-content
         run: |
           # The submodule is not checked out in this job; this reads the gitlink
           # straight out of the commit's tree, which *is* the pin. The content
