@@ -425,26 +425,66 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
-- **The Options Gamepad sheet prints `invalid` where the oracle prints nothing.**
-  With no `[Gamepad1]` section in the config, `C4ConfigGamepad::CompileFunc`
-  defaults every `Button[i]` to `-1` (`C4Config.cpp:591-602`), and
-  `KeySelButton::DrawElement` displays
+- Closed 2026-07-30: **The Options Gamepad sheet printed `invalid` where the
+  oracle prints nothing.** With no `[Gamepad1]` section in the config,
+  `C4ConfigGamepad::CompileFunc` defaults every `Button[i]` to `-1`
+  (`C4Config.cpp:591-602`), and `KeySelButton::DrawElement` displays
   `C4KeyCodeEx::KeyCode2String(key, true, false)`
-  (`C4StartupOptionsDlg.cpp:249`). Reading that function, `-1` is not a gamepad
-  code (`Key_IsGamepad` wants `0x42` in bits 16-23, `C4KeyboardInput.h:85-88`),
-  so it falls into the `USE_SDL_MAINLOOP` branch, where
-  `SDL_GetKeyName(SDL_GetKeyFromScancode(-1))` is empty and the function returns
-  the literal `"invalid"` (`C4KeyboardInput.cpp:377-393`). Rust reproduces that
-  reading (`legacy_gamepad_key_label`, `crates/clonk-app/src/input.rs:1006-1013`).
-  **A live 1280x720 F9 capture of the oracle's Gamepad sheet nevertheless draws
-  the key-name line empty for all twelve controls.** The mechanism is
-  unexplained: probes against both the linked `sdl2-compat` build and Homebrew
-  SDL2 confirm `SDL_GetKeyName` returns `""` for that scancode, which by the
-  source must yield `"invalid"`. Left as-is rather than guessed at — changing it
-  would make Rust looser than a C++ path that has not been explained. The
-  Keyboard sheet is unaffected (every control is bound there). Closing this
-  needs an instrumented oracle run that prints the string the engine actually
-  builds.
+  (`C4StartupOptionsDlg.cpp:243`). `-1` is not a gamepad code (`Key_IsGamepad`
+  wants `0x42` in bits 16-23, `C4KeyboardInput.h:83-86`), so it falls into the
+  `USE_SDL_MAINLOOP` branch. That branch calls **`SDL_GetScancodeName`**, and
+  returns `"invalid"` only when the returned pointer is NULL
+  (`C4KeyboardInput.cpp:375-381`) — the earlier note here described
+  `SDL_GetKeyName(SDL_GetKeyFromScancode(...))`, a pair that does not appear
+  anywhere in that file at the pinned snapshot, which is where the `"invalid"`
+  reading came from. `SDL_GetScancodeName` never returns NULL: for an
+  out-of-range scancode it sets an error and returns the empty string, verified
+  by probe against the locally installed SDL2 for `-1`, `0xFFFFFFFF` and `0`.
+  The oracle therefore prints an empty second line, which is exactly what the
+  live 1280x720 F9 capture showed. `legacy_gamepad_key_label`
+  (`crates/clonk-app/src/input.rs`) now returns the empty string for the
+  unassigned default, names the scancode for any other non-gamepad code, and
+  reproduces the wrapping `uint8` button index for gamepad codes outside the
+  axis ranges rather than inventing a sentinel — so `Undefined` and `invalid`
+  are both gone from the control sheets and the player overlay.
+
+- Closed 2026-07-30: **Options control-sheet behaviour.** The sheets rendered
+  correctly but did not yet behave like `ControlConfigArea`. The capture modal
+  substituted a second, hand-written English name (`"Cursor Left"` where the
+  button beside it said `"Select left"`) instead of the `IDS_CTL_*` string C++
+  puts in `IDS_MSG_PRESSKEY`/`IDS_MSG_PRESSBTN`
+  (`C4StartupOptionsDlg.cpp:176-177`, `:243`). Space, Return and the gamepad low
+  button did nothing on a focused selector, key cap or reset button, so the
+  sheets were unreachable without a mouse; they now latch `fDown` and activate on
+  release with `Button`'s `ArrowHit`/`Click` pair
+  (`C4GuiButton.cpp:36-43,112-128,183-200`), and the reset button no longer plays
+  an invented `Command` — `OnResetKeysBtn` is silent (`:416-427`). The GUI
+  checkbox accepted clicks across its whole caption where `CheckBox::MouseInput`
+  gates on `Inside(iX, 0, rcBounds.Hgt)` (`C4GuiCheckBox.cpp:87`), and toggled on
+  Return where C++ binds K_SPACE only, as the *down* callback (`:44-51`).
+  Toggling it only faded the dialog; `OnGUIGamepadCheckChange` ends in
+  `RecreateDialog(false)` (`:437`), which rebuilds through `SwitchDialog`
+  (`:1331`) — so both areas return to set 0 and the config is re-read, with only
+  the sheet index restored (`:1332`). And `connected_count` tallied gilrs events
+  rather than enumerating, so a pad attached before launch stayed invisible until
+  first touched, hiding its bindings and mis-sizing the selector row;
+  `GetGamePadCount()` is `SDL_NumJoysticks()` (`C4GamePadCon.cpp:437-440`).
+  Pinned by `gamepad_sheet_render_matches_the_cpp_draw_model_at_1280x720`,
+  `selected_control_set_button_is_additively_highlighted` and
+  `highlighting_a_key_button_undims_its_glyph_and_reddens_its_labels`, which are
+  the first tests to render either control sheet with the shipped
+  `Control.png`/`Gamepad.png` rather than the facet-less fallback that cannot
+  exist in C++ (`C4GraphicsResource.cpp:200,229` both `return false`).
+  **Still open:** `C4GamePadOpener` is claimed only while the Gamepad sheet is
+  visible where C++ holds it for the whole dialog lifetime
+  (`C4StartupOptionsDlg.cpp:347-352,384-388`); `is_supported_key` refuses
+  keycodes the config codec cannot encode, leaving the modal open, where C++
+  stores any raw code; reset writes 48 `ButtonN=-1` plus 72 `Axis*` lines where
+  C++ omits defaults entirely; more than four attached pads are clamped to four,
+  where C++ shows one selector per pad and then reads `Config.Gamepads[4]` out of
+  bounds (a deliberate, non-determinism-affecting divergence); and no captured
+  C++ pixel baseline exists for either sheet, so those render tests are Rust
+  self-consistency only.
 
 - **`C4PlayerList::Join`'s max-player rejection is not ported.**
   C++ refuses a join outright when `GetCount() + 1 > Game.Parameters.MaxPlayers`,
