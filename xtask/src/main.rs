@@ -1178,7 +1178,7 @@ fn scan_emitted_components(
         .with_context(|| format!("failed to list {}", directory.display()))?
         .into_iter()
         // Only zips claim to be components; the publishing job assembles
-        // release notes and checksums in the same tree.
+        // release notes and the manifest in the same tree.
         .filter(|path| path.extension().is_some_and(|extension| extension == "zip"))
         .collect();
     // Sorted so the manifest does not depend on directory iteration order.
@@ -3948,10 +3948,10 @@ mod tests {
 
     #[test]
     fn the_component_scan_ignores_everything_that_is_not_an_archive() {
-        // The publishing job assembles release notes and checksums in the same
-        // tree; only the zips are components.
+        // The publishing job assembles release notes and the manifest in the
+        // same tree; only the zips are components.
         let components = release_components_fixture();
-        write_fixture(&components.path().join("SHA256SUMS.txt"), b"sums");
+        write_fixture(&components.path().join("manifest.json"), b"{}");
         write_fixture(&components.path().join("release-notes.md"), b"notes");
 
         assert_eq!(
