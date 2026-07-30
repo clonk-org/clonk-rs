@@ -25,21 +25,34 @@ use clonk_engine::NetworkResourceCore;
 /// different connections, so lowering that one does not shrink this window.
 ///
 /// This is the *default*; see [`ResourceCatalog::set_max_loads_per_peer`], which
-/// tightens it to one while a game is actually running. C++'s value, kept as the
-/// lobby default because a fast join is what the player is waiting for there and
-/// there is no control traffic to protect yet.
-pub const RESOURCE_MAX_LOAD_PER_PEER_PER_FILE: usize = 3;
+/// tightens it to one while a game is actually running. The lobby keeps the
+/// widest window because a fast join is what the player is waiting for and there
+/// is no lockstep control to protect yet.
+///
+/// Ten times C++'s 3, because a chunk here is a tenth of C++'s
+/// `C4NetResChunkSize`: the cap counts chunks, but what matters is the byte
+/// window it buys, and 30 x 10 KiB is exactly C++'s 3 x 100 KiB. Leaving it at 3
+/// would divide C++'s bandwidth-delay product by ten and hold one resource to
+/// 30 KiB per round trip -- 375 KiB/s on an 80 ms link, minutes for a definition
+/// pack. Same bytes ahead of a control packet as C++, in ten times as many
+/// chunks, so a single lost fragment withholds a 21-datagram chunk instead of a
+/// 206-datagram one. Pinned against C++ by
+/// `the_lobby_load_caps_hold_the_cpp_byte_window`.
+pub const RESOURCE_MAX_LOAD_PER_PEER_PER_FILE: usize = 30;
 
 /// Concurrent requests to one peer while a game is running.
 ///
 /// One chunk in flight is the smallest head-of-line window available without
-/// stopping transfer altogether: 21 datagrams at 10 KiB chunks, against 63 at
-/// the lobby default.
+/// stopping transfer altogether: 21 datagrams at 10 KiB chunks, against 630 at
+/// the lobby default. This stays at one, so in-game transfer is an order of
+/// magnitude gentler on control latency than C++ is.
 pub const RESOURCE_MAX_LOAD_PER_PEER_IN_GAME: usize = 1;
-/// Concurrent chunk requests across all resources and peers (C++
-/// `C4NetResMaxLoad`). Bounds aggregate bandwidth, not per-connection latency,
-/// so it is left at C++'s value.
-pub const RESOURCE_MAX_LOADS: usize = 20;
+/// Concurrent chunk requests for one resource across every peer (C++
+/// `C4NetResMaxLoad`, counted per `C4Network2Res` in `iLoadCnt`). Bounds
+/// aggregate bandwidth, not per-connection latency. Scaled by the same factor as
+/// the per-peer cap above so the byte window matches C++'s, which also preserves
+/// C++'s ratio between the two -- room for the same ~6.7 peers to saturate.
+pub const RESOURCE_MAX_LOADS: usize = 200;
 pub const RESOURCE_LOAD_TIMEOUT_SECONDS: u64 = 60;
 pub const RESOURCE_DELETE_TIME_SECONDS: u64 = 60;
 pub const RESOURCE_DISCOVER_TIMEOUT_SECONDS: u64 = 10;
@@ -275,6 +288,9 @@ pub struct ResourceCatalog {
     /// cap is what governs head-of-line blocking, and
     /// [`ResourceCatalog::set_max_loads_per_peer`] for why it is not constant.
     max_loads_per_peer: usize,
+    /// Concurrent requests allowed for one resource across every peer. See
+    /// [`RESOURCE_MAX_LOADS`].
+    max_loads: usize,
 }
 
 impl ResourceCatalog {
@@ -300,6 +316,18 @@ impl ResourceCatalog {
         self.max_loads_per_peer
     }
 
+    /// Companion knob to [`ResourceCatalog::set_max_loads_per_peer`] for the
+    /// per-resource total. Both caps count chunks, so both scale with the
+    /// published chunk size; keeping them settable lets a caller ask for C++'s
+    /// exact thresholds.
+    pub fn set_max_loads(&mut self, max_loads: usize) {
+        self.max_loads = max_loads.max(1);
+    }
+
+    pub fn max_loads(&self) -> usize {
+        self.max_loads
+    }
+
     pub fn new(local_client_id: i32) -> Self {
         Self {
             local_client_id,
@@ -308,6 +336,7 @@ impl ResourceCatalog {
             last_discover_at: None,
             last_status_at: None,
             max_loads_per_peer: RESOURCE_MAX_LOAD_PER_PEER_PER_FILE,
+            max_loads: RESOURCE_MAX_LOADS,
         }
     }
 
@@ -855,12 +884,11 @@ impl ResourceCatalog {
         now_seconds: u64,
         refill_on_send_failure: bool,
     ) -> Option<ResourceCatalogAction> {
-        // Read the cap before taking the mutable borrow of the resource.
+        // Read the caps before taking the mutable borrow of the resource.
         let max_loads_per_peer = self.max_loads_per_peer;
+        let max_loads = self.max_loads;
         let resource = self.resource_mut(resource_id)?;
-        if !resource.registration.loading
-            || resource.outstanding_loads.len() + 1 >= RESOURCE_MAX_LOADS
-        {
+        if !resource.registration.loading || resource.outstanding_loads.len() + 1 >= max_loads {
             return None;
         }
         let peer_load_count = resource
@@ -959,7 +987,7 @@ impl ResourceCatalog {
             });
 
         let mut actions = Vec::new();
-        while self.outstanding_load_count(resource_id) < RESOURCE_MAX_LOADS {
+        while self.outstanding_load_count(resource_id) < self.max_loads {
             let previous_count = self.outstanding_load_count(resource_id);
             for peer_id in shuffled.iter().flatten().copied() {
                 let eligible_count = self.eligible_chunk_count(resource_id, peer_id);
@@ -1035,7 +1063,7 @@ impl ResourceCatalog {
             return 0;
         };
         if !resource.registration.loading
-            || resource.outstanding_loads.len() + 1 >= RESOURCE_MAX_LOADS
+            || resource.outstanding_loads.len() + 1 >= self.max_loads
             || resource
                 .outstanding_loads
                 .iter()

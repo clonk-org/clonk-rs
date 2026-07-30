@@ -7,8 +7,6 @@ use thiserror::Error;
 
 const SCENARIO_ENTRY: &str = "Scenario.txt";
 const PARAMETERS_ENTRY: &str = "Parameters.txt";
-// C4GroupMaxMaker (`src/C4Group.h:54`).
-const GROUP_MAKER_MAX_BYTES: usize = 30;
 // `C4FLS_Scenario` (`src/C4Components.h:140`). Keep this explicit here so
 // the returned entry metadata has the same order as the packed group, rather
 // than merely relying on MutableGroup's filename-selected Close-time sort.
@@ -189,7 +187,11 @@ pub fn compose_live_network_dynamic(
 
     Ok(LiveNetworkDynamic {
         group_filename: spec.group_filename,
-        maker: packed_maker(&spec.maker),
+        // The maker actually in the header, which is the new group's native
+        // default whenever the process maker was empty above. Reporting the
+        // offered maker instead makes this metadata contradict `packed_bytes`,
+        // and the host rejects the publication when it rebuilds the core.
+        maker: group.maker_bytes().to_vec(),
         packed_bytes,
         file_size,
         file_crc,
@@ -214,15 +216,6 @@ fn validate_component_names(
         }
     }
     Ok(())
-}
-
-fn packed_maker(maker: &[u8]) -> Vec<u8> {
-    let length = maker
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(maker.len())
-        .min(GROUP_MAKER_MAX_BYTES);
-    maker[..length].to_vec()
 }
 
 fn selects_scenario_sort(filename: &str) -> bool {

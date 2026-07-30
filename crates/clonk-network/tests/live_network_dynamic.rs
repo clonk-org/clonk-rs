@@ -121,3 +121,31 @@ fn live_dynamic_returns_exact_scenario_sort_order() {
         ]
     );
 }
+
+/// `C4Group::Close` copies the process maker only when its first byte is
+/// nonzero (`C4Group.cpp:955`), so an empty `Config.General.Name` leaves a new
+/// group's native default in the header. The published metadata has to describe
+/// the bytes that are actually there: `C4Network2Res::SetByGroup` reads the
+/// maker back off the group, and the host rejects a runtime dynamic whose
+/// rebuilt core disagrees with the composed metadata.
+#[test]
+fn live_dynamic_reports_the_maker_its_packed_bytes_carry() {
+    let dynamic = compose_live_network_dynamic(LiveNetworkDynamicSpec {
+        group_filename: "DynRuntime.c4s".to_string(),
+        maker: Vec::new(),
+        parameters: b"[Parameters]\r\nControlRate=2\r\n".to_vec(),
+        scenario: b"[Head]\r\nSaveGame=1\r\nNetworkGame=1\r\n".to_vec(),
+        components: vec![LiveNetworkDynamicComponent::File {
+            name: "Game.txt".to_string(),
+            payload: b"[Game]\r\nControlTick=42\r\n".to_vec(),
+        }],
+    })
+    .unwrap();
+
+    let packed = Group::from_memory(
+        PathBuf::from("DynRuntime.c4s"),
+        dynamic.packed_bytes.clone(),
+    )
+    .unwrap();
+    assert_eq!(packed.maker_bytes(), Some(dynamic.maker.as_slice()));
+}

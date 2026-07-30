@@ -2102,11 +2102,36 @@ an ordered-map model gap.
   of 6400 ticks against a 250 ms peer without PreSend), so the budget must stay
   above ordinary delivery time rather than being tuned down to chase the tail.
 
-- **One chunk in flight per peer while a game is running, three in the lobby**
+- **One chunk in flight per peer while a game is running, thirty in the lobby**
   (`crates/clonk-network/src/resource_catalog.rs`,
   `ResourceCatalog::set_max_loads_per_peer`, narrowed at the game-start
-  transition in `session/host_dispatch.rs`; C++
-  `C4NetResMaxLoadPerPeerPerFile` = 3 always). Approved 2026-07-27.
+  transition in `session/host_dispatch.rs` and `session/client_loop.rs`; C++
+  `C4NetResMaxLoadPerPeerPerFile` = 3 always). Approved 2026-07-27, lobby value
+  rescaled 2026-07-29.
+  The lobby cap is thirty rather than C++'s three because a chunk here is a tenth
+  of `C4NetResChunkSize`: the cap counts chunks, but what it buys is a byte
+  window, and 30 x 10 KiB is exactly C++'s 3 x 100 KiB. `RESOURCE_MAX_LOADS` is
+  scaled the same way (200 against C++'s 20), preserving C++'s ratio between the
+  two. Left at three, the smaller chunk would have divided C++'s
+  bandwidth-delay product by ten and held one resource to 30 KiB per round trip
+  — 375 KiB/s on an 80 ms link, minutes for a definition pack, which is what a
+  joining player experienced as "still loading". The equivalence is pinned by
+  `the_lobby_load_caps_hold_the_cpp_byte_window`; the two tests that assert C++'s
+  literal 3/20 thresholds now set them explicitly via `set_max_loads_per_peer` /
+  `set_max_loads` so they remain true C++ oracles.
+  **Not re-measured:** the lobby window now queues the same bytes ahead of
+  control as C++'s configuration, so lobby control latency should be the
+  `100 KiB x3` row below rather than the `10 KiB x3` row. That is the accepted
+  trade — the lobby has no lockstep control to protect — but the figure is
+  inferred from equal byte counts, not measured. In-game is unaffected and stays
+  at one.
+  Until 2026-07-29 the in-game narrowing was a **no-op on the real download
+  path**: it was applied to `ClientResourceState::catalog` / `HostState::
+  resource_catalog`, but `dispatch_client_resource_packet` schedules through the
+  *backend's* catalog whenever a backend exists and only falls back to the bare
+  one when there is none. Both sites now also narrow the backend
+  (`ResourceTransferBackend::set_max_loads_per_peer`), pinned by
+  `narrowing_the_window_reaches_the_scheduling_catalog`.
   This cap, not `C4NetResMaxLoad`, is what governs head-of-line blocking: bulk
   outstanding *on one connection* is this times the chunk size, and the global
   cap only spreads work across different peers, which are different connections.
@@ -2115,8 +2140,8 @@ an ordered-map model gap.
   ticks, `sim::bulk_stream_tests`). Control latency, mean and worst:
   no bulk at all 49.7 ms / 80 ms;
   100 KiB x3, C++'s configuration, 110.1 ms / 892 ms;
-  10 KiB x3, this port after the chunk-size entry below, 63.1 ms / 445 ms;
-  10 KiB x1, this entry, 53.1 ms / 393 ms.
+  10 KiB x3, the former lobby value, 63.1 ms / 445 ms;
+  10 KiB x1, the in-game value, 53.1 ms / 393 ms.
   So the narrower window recovers most of the remaining gap to an unloaded link.
   It is *not* set to one everywhere, because it also divides transfer throughput
   by three — a peer can only have one chunk in flight per round trip, and on a
@@ -2247,9 +2272,24 @@ an ordered-map model gap.
   lost fragment withholds all of them from the game loop until the repair lands —
   which proceeds at ten fragment asks per check packet. Three concurrent chunks
   to one peer queue 618 fragments ahead of control. 10 KiB is 21 datagrams,
-  cutting that head-of-line window by an order of magnitude, and with
-  `RESOURCE_MAX_LOADS` unchanged at C++'s 20 it also drops the maximum
-  outstanding bulk from 2 MB to 200 KB.
+  cutting that head-of-line window by an order of magnitude.
+  **This divergence delivered none of that until 2026-07-29**, and cost a
+  ten-times *slowdown* instead. `ResourceFileStore::read_chunk` derived the chunk
+  offset from the core's chunk size but capped the chunk *length* with the
+  hardcoded 100 KiB literal — a faithful copy of
+  `src/C4Network2Res.cpp:1268-1269`, which is self-consistent in C++ only because
+  every core C++ publishes carries `ChunkSize = C4NetResChunkSize`
+  (`src/C4Network2Res.cpp:81`, `:89`). Against a 10 KiB core each chunk therefore
+  overlapped the following nine: the host served roughly ten times the file to
+  deliver it once, the reliable-UDP burst stayed 206 fragments so the head-of-line
+  window was never actually reduced, and the client credited one chunk per
+  response. Fixed by sizing from the core's own stride, which is identical for
+  every core C++ can publish and also stops wasting a stock C++ client's
+  bandwidth. Pinned by `serving_every_chunk_moves_the_file_exactly_once` and
+  `cpp_chunk_reads_offset_and_size_by_the_core_chunk_size`, which asserts the two
+  forms still coincide at C++'s own chunk size.
+  `RESOURCE_MAX_LOADS` is scaled with the chunk size (see the per-peer entry
+  above), so the maximum outstanding bulk stays C++'s 2 MB.
   The existing `reliable_udp_redundant_copies` mitigation does not help here: it
   is gated at inner packets <= 256 bytes, so it protects control against *loss*
   and does nothing about control being *queued behind* bulk.

@@ -1733,9 +1733,14 @@ pub(crate) async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &m
                     // per-peer window narrows. In the lobby the opposite is
                     // true: nothing is being blocked and a fast join is what the
                     // player is waiting for.
+                    // Same as the client side: the backend's catalog is what
+                    // schedules whenever there is a backend.
                     state
                         .resource_catalog
                         .set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME);
+                    if let Some(backend) = state.resource_backend.as_mut() {
+                        backend.set_max_loads_per_peer(crate::RESOURCE_MAX_LOAD_PER_PEER_IN_GAME);
+                    }
                 }
                 committed = true;
             }

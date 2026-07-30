@@ -264,6 +264,47 @@ fn cpp_omits_game_entry_when_initial_game_component_is_all_default() {
     );
 }
 
+/// An empty `Config.General.Name` leaves the new group's native default in the
+/// header, because `C4Group::Close` copies the process maker only when its first
+/// byte is nonzero (`src/C4Group.cpp:955`). The composed metadata must describe
+/// the header that is actually packed, not the process maker that was offered.
+#[test]
+fn initial_dynamic_reports_the_maker_its_packed_bytes_carry() {
+    let content = content_root();
+    let scenario_path = content.join("Tutorial.c4f/Tutorial01.c4s");
+    let resolver = ContentResolver {
+        root: content.clone(),
+    };
+    let scenario = Scenario::load_from_path_with(&scenario_path, &resolver).unwrap();
+    let definitions = vec!["Objects.c4d".to_owned(), "Tutorial.c4f".to_owned()];
+    let game = InitialNetworkGameData::default();
+    let parameters = tutorial_parameters();
+    let defaults = tutorial_defaults();
+
+    let dynamic = compose_initial_network_dynamic(InitialNetworkDynamicSpec {
+        group_filename: "DynTutorial01.c4s",
+        maker: b"",
+        scenario: &scenario,
+        scenario_title: "A Clonk",
+        definition_modules: &definitions,
+        definition_executable_path: "",
+        definition_path: "",
+        scenario_origin: "Tutorial.c4f/Tutorial01.c4s",
+        game: &game,
+        original_game_text: None,
+        parameters: &parameters,
+        scenario_defaults: &defaults,
+    })
+    .unwrap();
+
+    let packed = Group::from_memory(
+        PathBuf::from("DynTutorial01.c4s"),
+        dynamic.packed_bytes.clone(),
+    )
+    .unwrap();
+    assert_eq!(packed.maker_bytes(), Some(dynamic.maker.as_slice()));
+}
+
 struct ContentResolver {
     root: PathBuf,
 }

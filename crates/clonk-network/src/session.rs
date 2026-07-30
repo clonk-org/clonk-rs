@@ -3663,6 +3663,10 @@ mod tests {
                 binary_compatible: true,
                 loading: true,
             }));
+        // C++'s own thresholds, so the rollback/refill counts below stay the
+        // ones StartLoad produces rather than the port's scaled lobby window.
+        resource_state.catalog.set_max_loads_per_peer(3);
+        resource_state.catalog.set_max_loads(20);
         let availability = crate::ResourceChunkAvailability {
             chunk_count: 64,
             ranges: vec![crate::ResourceChunkRange {
@@ -3761,7 +3765,7 @@ mod tests {
             resource_type: 2,
             id: 77,
             loadable: true,
-            file_size: 64,
+            file_size: 512,
             chunk_size: 1,
             filename: clonk_engine::LegacyCString::from_bytes(b"Swarm.bin".to_vec()).unwrap(),
             ..Default::default()
@@ -3789,10 +3793,10 @@ mod tests {
         let status = ResourcePacket::Status(crate::ResourceStatusPacket {
             resource_id: core.id,
             chunks: crate::ResourceChunkAvailability {
-                chunk_count: 64,
+                chunk_count: 512,
                 ranges: vec![crate::ResourceChunkRange {
                     start: 0,
-                    length: 64,
+                    length: 512,
                 }],
             },
         });
@@ -3824,10 +3828,14 @@ mod tests {
             }
         }
         let fulfilled = fulfilled.unwrap();
+        // One chunk is one stride, not the whole tail: C4Network2ResChunk::Set
+        // sizes by the core's chunk size (src/C4Network2Res.cpp:1268-1269).
         let fulfilled_data = vec![
             0x5a;
-            usize::try_from(core.file_size).unwrap()
-                - usize::try_from(fulfilled.chunk).unwrap()
+            usize::try_from(core.chunk_size).unwrap().min(
+                usize::try_from(core.file_size).unwrap()
+                    - usize::try_from(fulfilled.chunk).unwrap()
+            )
         ];
         dispatch_client_resource_packet(
             1,
@@ -3854,16 +3862,22 @@ mod tests {
                 outstanding.push((*peer_id, request.chunk));
             }
         }
+        // Both caps bind: the swarm saturates the per-resource total, no single
+        // peer is asked for more than the per-peer window, and every request is
+        // for a distinct chunk. Asserted through the constants because the port
+        // scales them with its smaller chunk size; the byte window they buy is
+        // pinned against C++ by `the_lobby_load_caps_hold_the_cpp_byte_window`.
         let backend = resource_state.backend.as_ref().unwrap();
-        assert_eq!(backend.catalog().outstanding_load_count(core.id), 19);
-        assert_eq!(outstanding.len(), 19);
+        let total = crate::RESOURCE_MAX_LOADS - 1;
+        assert_eq!(backend.catalog().outstanding_load_count(core.id), total);
+        assert_eq!(outstanding.len(), total);
         assert_eq!(
             outstanding
                 .iter()
                 .map(|(_, chunk)| *chunk)
                 .collect::<BTreeSet<_>>()
                 .len(),
-            19
+            total
         );
         let mut per_peer = BTreeMap::<i32, usize>::new();
         for (peer_id, _) in &outstanding {
@@ -3871,7 +3885,15 @@ mod tests {
         }
         let mut counts = per_peer.values().copied().collect::<Vec<_>>();
         counts.sort_unstable();
-        assert_eq!(counts, vec![1, 3, 3, 3, 3, 3, 3]);
+        assert_eq!(counts.len(), 7);
+        assert_eq!(counts.iter().sum::<usize>(), total);
+        assert!(counts
+            .iter()
+            .all(|count| *count <= crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE));
+        assert_eq!(
+            counts.last().copied(),
+            Some(crate::RESOURCE_MAX_LOAD_PER_PEER_PER_FILE)
+        );
         assert_eq!(
             backend
                 .catalog()
