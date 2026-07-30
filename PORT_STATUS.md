@@ -1196,13 +1196,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   group is refused without disturbing anything. Pinned by
   `reloading_a_definition_reopens_its_group_and_removes_it_on_failure`, which
   drives a real on-disk group and then deletes it.
-  **Still open:** the live-object half. `developer_reload::definition_reload_outcome`
-  already describes the sweeps — `UpdateFace(true)` over *every* object of that
-  id on success, `AssignRemoval` over every one on failure — but nothing
-  applies them, so a reload updates the definition and leaves live objects
-  pointing at the old graphics and shape. `C4DefGraphicsPtrBackup::AssignUpdate`'s
-  name-based re-resolution belongs with it. And the watcher's registration,
-  which is now a short step rather than a blocked one.
+  **The failure sweep is applied.** A failed reload now assigns every object of
+  that id for removal before dropping the definition, through
+  `definition_reload_outcome`'s plan. It is blunt on purpose: C++ filters on the
+  id **alone**, not on `Status` (`C4Game.cpp:2352-2360`), unlike
+  `C4ObjectList::UpdateFaces` which does check it — so `object_ids_of_definition`
+  deliberately does not.
+  **Still open: the success sweep.** `UpdateFace(true)` over every object of
+  that id has no primitive to call — the operation exists only inlined at each
+  of its current call sites, and porting it as one reusable engine operation
+  (re-seeding `shape_template`, the solid mask, the action facet, and
+  `C4DefGraphicsPtrBackup::AssignUpdate`'s **name-based** graphics
+  re-resolution) is the remaining piece of M10-P4-L086. Until then a successful
+  reload replaces the definition and leaves live objects on their old graphics
+  and shape. Also still open: the watcher's registration, now a short step
+  rather than a blocked one.
   `Engine::remove_definition` landed with it — the exact inverse of
   `register_definition`, unwinding the map, the load order, the id-sorted
   runtime order and the script link source, and invalidating the same caches.

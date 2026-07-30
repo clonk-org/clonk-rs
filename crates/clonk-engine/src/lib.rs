@@ -10438,8 +10438,24 @@ impl Engine {
             .and_then(|group| ResourceDefinitionData::load(&group).ok())
             .and_then(|resource| Definition::from_resource(&resource).ok());
         let Some(mut definition) = reloaded else {
-            // `Clear()` has already emptied the definition in C++, so the
-            // failure arm removes it rather than restoring anything.
+            // `C4Game::ReloadDef`'s failure arm is destructive and blunt: it
+            // filters on the id alone — not on `Status` — and assigns *every*
+            // matching object for removal before dropping the definition
+            // (`C4Game.cpp:2352-2360`). `Clear()` has already emptied the
+            // definition by then, so there is nothing intact to restore.
+            let outcome = developer_reload::definition_reload_outcome(
+                false,
+                &self.object_ids_of_definition(id),
+            );
+            if let developer_reload::DefinitionReloadOutcome::Failed { remove_objects, .. } =
+                outcome
+            {
+                for object in remove_objects {
+                    if let Err(error) = self.assign_object_removal(object) {
+                        tracing::warn!(definition = %id, %error, "failed reload could not remove an object");
+                    }
+                }
+            }
             self.remove_definition(id);
             return false;
         };
@@ -10455,6 +10471,17 @@ impl Engine {
             tracing::warn!(definition = %id, %error, "definition reload relink diagnostic");
         }
         true
+    }
+
+    /// Every live object of one definition, in master order — the set both
+    /// `C4Game::ReloadDef` sweeps operate on. It filters on the id **alone**:
+    /// C++ does not check `Status` here, unlike `C4ObjectList::UpdateFaces`.
+    pub(crate) fn object_ids_of_definition(&self, id: &str) -> Vec<ObjectId> {
+        self.objects
+            .iter()
+            .filter(|object| object.definition_id.as_str() == id)
+            .map(|object| object.id)
+            .collect()
     }
 
     /// `C4Game::ReloadParticle` (`C4Game.cpp:2369-2394`).
