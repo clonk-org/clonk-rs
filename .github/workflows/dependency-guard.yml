@@ -1,31 +1,27 @@
 name: Dependency guard
 
-# Compile-and-invariant guard for dependency changes. This is deliberately the
-# one workflow that runs today: it does **not** check out the `content/`
-# submodule, so it is unaffected by that repository being private and needs no
-# token beyond the built-in one. See `.github/workflows/rust.yml` for the full
-# gate, which does need content and stays disabled until checkout can reach it.
-#
-# It exists because two Renovate security pull requests were merged while CI
-# was off: `rand` 0.8 -> 0.9 removed `SmallRng::from_entropy()` and broke the
-# workspace build, and the dependency-graph change silently invalidated
-# `licenses/RUST_THIRD_PARTY_LICENSES.txt`, which `cargo xtask package`
-# validates. Both commands below were verified to catch those failures with
-# `content/` absent.
+# Fast, submodule-free compile guard for dependency-shaped changes. It exists
+# because a Renovate security pull request once moved `rand` 0.8 -> 0.9,
+# removed `SmallRng::from_entropy()`, and broke the workspace build. The full
+# Rust workflow now runs every pull request and owns the behavioral packaging
+# gate; this workflow keeps the earlier locked-graph signal without compiling
+# that same optimized test harness twice.
 
 on:
   pull_request:
     paths:
       - '**/Cargo.toml'
       - 'Cargo.lock'
-      - 'about.toml'
+      - '.cargo/**'
+      - 'rust-toolchain.toml'
       - '.github/workflows/dependency-guard.yml'
   push:
     branches: [main]
     paths:
       - '**/Cargo.toml'
       - 'Cargo.lock'
-      - 'about.toml'
+      - '.cargo/**'
+      - 'rust-toolchain.toml'
       - '.github/workflows/dependency-guard.yml'
   workflow_dispatch:
 
@@ -53,12 +49,11 @@ jobs:
         shell: bash
     steps:
       # Pinned to a full commit SHA, not a tag: a mutable ref is the vector the
-      # tj-actions/changed-files compromise used. v7 rather than the v4 pinned
-      # in rust.yml, because v4 runs on the deprecated Node 20 runtime.
+      # tj-actions/changed-files compromise used.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # No `submodules:` key. The default is false, and that is what lets
-          # this workflow run at all while `content/` is a private repository.
+          # No `submodules:` key. These targets need no game data, so fetching
+          # the 299 MB content checkout would add latency without coverage.
           persist-credentials: false
 
       # alsa-sys and libudev-sys run pkg-config in their build scripts, which
@@ -80,19 +75,14 @@ jobs:
           shared-key: dependency-guard
           cache-on-failure: true
 
-      # Type-checks every library and binary in the workspace without codegen.
-      # `--locked` additionally fails when a manifest moved without its
-      # lockfile, which is the shape a bad dependency update takes.
+      # Type-checks every library and binary, including the optional release
+      # tooling, without optimized codegen. `--locked` additionally fails when
+      # a manifest moved without its lockfile, which is the shape a bad
+      # dependency update takes.
       #
       # Deliberately NOT `--all-targets`: test targets `include_bytes!` real
       # game data (crates/clonk-resources/src/definition.rs,
       # crates/clonk-engine/src/map_creator_s2.rs), so checking them would
       # require the content submodule.
       - name: Check workspace libraries and binaries
-        run: cargo check --workspace --locked
-
-      # Guards the committed third-party notice against the dependency graph
-      # (dependency_licenses::tests::committed_notice_matches_workspace_release_inputs)
-      # plus the release packaging layout. Needs no game content.
-      - name: Verify dependency notice and packaging invariants
-        run: cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
+        run: cargo check --workspace --features xtask/engine-tools --locked

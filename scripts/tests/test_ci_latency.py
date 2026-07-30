@@ -71,6 +71,19 @@ class CiLatencyTests(unittest.TestCase):
 
         self.assertIn("python3-pil", full_parity[:script_tests])
 
+    def test_dependency_guard_does_not_repeat_the_full_packaging_gate(self):
+        workflow = WORKFLOWS[2].read_text(encoding="utf-8")
+
+        self.assertIn(
+            "cargo check --workspace --features xtask/engine-tools --locked",
+            workflow,
+        )
+        self.assertNotIn(
+            "cargo test -p xtask --features engine-tools "
+            "--bin xtask-engine-tools --locked",
+            workflow,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
