@@ -7755,21 +7755,20 @@ impl GameApp {
             .map_err(|error| inspect_error(&error))?;
         let cannot_start =
             || self.runtime_resource_text("IDS_MSG_CANNOTSTARTSCENARIO", "Cannot start scenario.");
-        if !head.mission_access().is_empty() {
-            let granted = load_configured_mission_access(paths)
-                .map_err(|error| inspect_error(&error))?
-                .split(';')
-                .map(str::trim)
-                .any(|access| access.eq_ignore_ascii_case(head.mission_access()));
-            if !granted {
-                return Ok(NetworkScenarioOpenDecision::Error {
-                    message: self.runtime_resource_text(
-                        "IDS_PRC_NOMISSIONACCESS",
-                        "Access to this mission not yet granted.",
-                    ),
-                    caption: cannot_start(),
-                });
-            }
+        // `SIsModule(Config.General.MissionAccess, ...)` reads the live config
+        // string (C4StartupScenSelDlg.cpp:743), which the grant sites mutate in
+        // memory alone. Re-reading the config *file* here would hide every
+        // password earned this session from the network selector while the local
+        // one already honours it.
+        if !head.mission_access().is_empty() && !self.mission_access.contains(head.mission_access())
+        {
+            return Ok(NetworkScenarioOpenDecision::Error {
+                message: self.runtime_resource_text(
+                    "IDS_PRC_NOMISSIONACCESS",
+                    "Access to this mission not yet granted.",
+                ),
+                caption: cannot_start(),
+            });
         }
         if head.is_replay() {
             return Ok(NetworkScenarioOpenDecision::Error {

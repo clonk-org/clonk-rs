@@ -2004,8 +2004,53 @@ fn network_mission_access_gate_precedes_replay_rejection() {
         NetworkScenarioOpenDecision::Error { message, .. }
             if message == "Access to this mission not yet granted."
     ));
+    // C4Config only reads the file at load, so the granted list has to reach
+    // the live config the way it does natively: through startup.
     persist_config_value(&paths, "General", "MissionAccess", "other;lock")
         .expect("grant case-insensitive mission access");
+    let granted = new_menu_app_with_paths(640, 480, &paths);
+    assert!(matches!(
+        granted
+            .network_scenario_open_decision(&scenario)
+            .expect("granted replay decision"),
+        NetworkScenarioOpenDecision::Error { message, .. }
+            if message == "Cannot play back records while in network mode."
+    ));
+}
+
+#[test]
+fn network_mission_access_gate_honours_memory_only_grant() {
+    // `C4ScenarioListLoader::Scenario::CanOpen` tests the *in-memory*
+    // `Config.General.MissionAccess` (C4StartupScenSelDlg.cpp:743), and both
+    // native grant sites grow that string without writing the config file
+    // (`FnGainMissionAccess`, C4Script.cpp:2466-2471; the Alt+M dialog,
+    // C4StartupScenSelDlg.cpp:1838-1856). A password earned this session must
+    // therefore unlock the network selector exactly as it unlocks the local one.
+    let _lock = env_lock().lock();
+    let user_data = tempdir().expect("isolated mission-access user data");
+    let scenario_group = tempdir().expect("mission-access scenario");
+    fs::write(
+        scenario_group.path().join("Scenario.txt"),
+        "[Head]\nTitle=Locked replay\nMissionAccess=LOCK\nReplay=1\n",
+    )
+    .expect("write locked replay core");
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let app = new_menu_app_with_paths(640, 480, &paths);
+    let mut scenario = FrontendScenario::fallback();
+    scenario.path = Some(scenario_group.path().to_path_buf());
+
+    assert!(matches!(
+        app.network_scenario_open_decision(&scenario)
+            .expect("locked CanOpen decision"),
+        NetworkScenarioOpenDecision::Error { message, .. }
+            if message == "Access to this mission not yet granted."
+    ));
+    app.mission_access.update_modules("other;lock", false);
+    assert_eq!(
+        load_configured_mission_access(&paths).expect("read stale config access"),
+        "",
+        "the grant is memory-only, exactly as the native sites leave it"
+    );
     assert!(matches!(
         app.network_scenario_open_decision(&scenario)
             .expect("granted replay decision"),
