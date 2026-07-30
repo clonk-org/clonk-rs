@@ -657,6 +657,7 @@ global func Step(state, frame, random)
             max_players: 2,
             random_seed: Some(73),
             save_game: false,
+            restore_player_infos: false,
         };
         assert_eq!(
             Scenario::preflight_offline_startup_from_group(&group)
@@ -676,6 +677,7 @@ global func Step(state, frame, random)
             max_players: 4,
             random_seed: None,
             save_game: false,
+            restore_player_infos: false,
         };
         assert_eq!(
             Scenario::preflight_offline_startup_from_group(&group)
@@ -703,6 +705,7 @@ global func Step(state, frame, random)
                 max_players: 4,
                 random_seed: None,
                 save_game: true,
+                restore_player_infos: false,
             }
         );
 
@@ -718,17 +721,6 @@ global func Step(state, frame, random)
             Err(ScenarioError::OfflineStartupReplayUnsupported)
         ));
 
-        let restore = dir.path().join("Restore.c4s");
-        std::fs::create_dir(&restore).expect("create restore fixture");
-        std::fs::write(restore.join("Scenario.txt"), "[Head]\nMaxPlayer=4\n")
-            .expect("write restore core");
-        std::fs::write(restore.join("SavePlayerInfos.txt"), "[PlayerInfoList]\n")
-            .expect("write restore infos");
-        assert!(matches!(
-            Scenario::preflight_offline_startup_from_path(&restore),
-            Err(ScenarioError::OfflineStartupRestoreInfosUnsupported)
-        ));
-
         let json = dir.path().join("Json.c4s");
         std::fs::create_dir(&json).expect("create JSON fixture");
         std::fs::write(json.join("Scenario.json"), "{\"definitions\":[]}")
@@ -737,6 +729,36 @@ global func Step(state, frame, random)
             Scenario::preflight_offline_startup_from_path(&json),
             Err(ScenarioError::OfflineStartupJsonUnsupported)
         ));
+    }
+
+    #[test]
+    fn offline_startup_preflight_admits_restore_infos_without_a_savegame() {
+        // C4GameParameters::Load reads SavePlayerInfos.txt into
+        // RestorePlayerInfos whenever the entry exists; Head.SaveGame guards
+        // only the historical Game.txt [PlayerFiles] fallback in the else-arm
+        // (pristine 9ffa0a5d src/C4GameParameters.cpp:378-399). InitPlayers
+        // then enters the restore branch on
+        // RestorePlayerInfos.GetActivePlayerCount(true) alone, "for savegames
+        // or regular scenarios with restore infos" (src/C4Game.cpp:2841-2843).
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Scenario.txt"), "[Head]\nMaxPlayer=4\n")
+            .expect("write scenario core");
+        std::fs::write(
+            dir.path().join("SavePlayerInfos.txt"),
+            "[PlayerInfoList]\nLastPlayerID=1\n",
+        )
+        .expect("write restore infos");
+
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_path(dir.path())
+                .expect("a regular scenario shipping restore infos preflights"),
+            OfflineScenarioStartupPreflight {
+                max_players: 4,
+                random_seed: None,
+                save_game: false,
+                restore_player_infos: true,
+            },
+        );
     }
 
     #[test]
