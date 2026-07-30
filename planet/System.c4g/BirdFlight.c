@@ -174,8 +174,8 @@ private func FlightAvoidTerrain()
     return(1);
   }
   // Keep air underneath and stay off the map ceiling.
-  if (GetY() < 60)       flight_heading = FlightTurnToward(flight_heading, 180, 6);
-  else if (GBackSolid(0, 40)) flight_heading = FlightTurnToward(flight_heading, 0, 6);
+  if (GetY() < 60)            flight_heading = FlightTurnToward(flight_heading, 180, 6);
+  else if (GBackSolid(0, 40)) flight_heading = FlightTurnToward(flight_heading,   0, 6);
   return(0);
 }
 
@@ -208,6 +208,10 @@ private func FlightSeparate()
   var flock = FindObjects(Find_ID(BIRD), Find_Distance(90), Find_Exclude(this()));
   for (other in flock)
   {
+    // Drained with `continue` rather than `break`, which the shipped bird
+    // never uses at this #strict level. k = 5 bounds the cost in a dense
+    // flock, and FindObjects order is main-list order, so which five is
+    // deterministic.
     if (n >= 5) continue;
     d = ObjectDistance(other, this());
     if (d < 8) d = 8;
