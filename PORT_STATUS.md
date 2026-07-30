@@ -1797,6 +1797,44 @@ an ordered-map model gap.
   configured every one of them is off and the renderer stays C++-exact. Pinned
   by `the_remaster_switch_supplies_a_default_that_each_key_can_override`.
 
+- **Presentation may run at the display's refresh period instead of the
+  oracle's 30 ms ceiling** (`configured_smooth_presentation` +
+  `effective_max_refresh_delay_ms` + `refresh_interval_for_tick`,
+  `crates/clonk-app`; opt-in `Graphics.SmoothPresentation`, default off).
+  Approved 2026-07-29. C++ defaults `Graphics.MaxRefreshDelay` to 30
+  (C4Config.cpp:485) against a 28 ms game tick, so `C4Application` leaves that
+  tick undivided (C4Application.cpp:510-531) and presents once per tick; the
+  startup timer is a flat 16 ms. That is correct for world content, which
+  really does advance only once per tick — but the mouse pointer is composited
+  *into* the frame while the platform cursor is hidden
+  (`classic_platform_cursor_visible`), so the refresh period is also the
+  pointer's update period: measured 35.7 Hz in game and 62.9 Hz in the startup
+  menu against a 120 Hz panel whose GPU pass costs 0.83 ms and whose event loop
+  is idle 96 % of the time. When enabled, the panel period (clamped so it can
+  never be slower than the oracle default) replaces only the *ceiling* of the
+  **startup timer**; the divisor applied to it is C++'s own, and the 16 ms logic
+  tick keeps its exact rate, so menu animation ages identically.
+  The **game timer keeps the oracle ceiling unconditionally** (`RefreshCeilings`),
+  which is why this is safe: all four C++-mirrored per-render behaviours (the
+  C4Viewport camera smoother, `C4MessageBoard::Execute` plus the screen fader,
+  flash-message `remaining_draws`, and the object-audibility cache) live in the
+  running path and never see a changed cadence. Subdividing the game timer was
+  measured and rejected: on an M4 Max at Scale=300 fullscreen a 7 ms ceiling
+  moved presentation from 35.66 to 36.30 FPS while the average graphics pass
+  grew 10.49 -> 18.17 ms and automatic frame skips went 2 -> 98, because in game
+  the pass cost and swapchain back-pressure bind long before the timer does.
+  In-game pointer smoothness is therefore still bounded by graphics-pass cost,
+  not by this key. **This supersedes the unlogged
+  `DEFAULT_MAX_REFRESH_DELAY_MS = 16` divergence** that `469eca304`
+  (2026-07-20) introduced and `d9315f876` (2026-07-24) correctly reverted for
+  being unlogged — the default now stays at the oracle's 30 permanently and the
+  faster cadence is reachable only through this key or `Graphics.Remaster`.
+  Pinned by `smooth_presentation_substitutes_the_display_period_for_the_native_ceiling`
+  and `startup_refresh_honours_the_same_refresh_ceiling_as_the_game_timer`;
+  `max_refresh_delay_defaults_to_cpp_30_ms_and_honors_positive_config` and
+  `max_refresh_delay_missing_or_invalid_matches_cpp_thirty_ms` still hold the
+  default path unchanged.
+
 - **The sky gradient may be dithered below the 8-bit step**
   (`GpuSolidStyle::dither` + `SOLID_SHADER`, `crates/clonk-app-render`; opt-in
   `Graphics.SkyDither`, default off). Approved 2026-07-28. C++ emits the sky

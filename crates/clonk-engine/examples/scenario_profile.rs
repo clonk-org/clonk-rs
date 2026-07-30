@@ -210,4 +210,26 @@ fn main() {
         "frames > 27.7ms  {over_budget} ({:.1}%)",
         over_budget as f64 / frames as f64 * 100.0
     );
+
+    // Degradation trend. Aggregates cannot distinguish a uniformly slow run
+    // from one that starts fast and decays, which is what a leak looks like.
+    let segments = 10;
+    let per_segment = frames / segments;
+    if per_segment > 0 {
+        println!("\nsegment    frames        mean      p95");
+        for segment in 0..segments {
+            let window = &frame_times[segment * per_segment..(segment + 1) * per_segment];
+            let mut sorted_window = window.to_vec();
+            sorted_window.sort_unstable();
+            let window_mean: Duration =
+                window.iter().sum::<Duration>() / window.len().max(1) as u32;
+            println!(
+                "{:>7}  {:>6}  {:>10.3?}  {:>7.3?}",
+                segment,
+                segment * per_segment,
+                window_mean,
+                percentile(&sorted_window, 0.95)
+            );
+        }
+    }
 }

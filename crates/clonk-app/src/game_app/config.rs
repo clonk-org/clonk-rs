@@ -1329,6 +1329,8 @@ impl GameApp {
         let native_config = load_native_config_bytes(paths);
         self.allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
         self.max_refresh_delay_ms = configured_max_refresh_delay_ms(&native_config);
+        self.startup_refresh_delay_ms =
+            crate::effective_max_refresh_delay_ms(&native_config, self.display_refresh_period_ms);
         let record = load_recording_flag(paths);
         self.startup_view_flags.record = record;
         self.recording_enabled = record && self.recordings_dir.is_some();
