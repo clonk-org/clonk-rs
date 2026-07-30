@@ -1027,7 +1027,10 @@
 
         // A key the player wrote explicitly wins in both directions.
         assert_eq!(
-            effective_max_refresh_delay_ms(b"[Graphics]\nRemaster=1\nSmoothPresentation=0\n", Some(8)),
+            effective_max_refresh_delay_ms(
+                b"[Graphics]\nRemaster=1\nSmoothPresentation=0\n",
+                Some(8)
+            ),
             30
         );
         assert_eq!(
