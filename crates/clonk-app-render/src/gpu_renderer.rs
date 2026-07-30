@@ -782,6 +782,11 @@ pub struct RetainedGpuRenderer {
     smooth_landscape: bool,
     shader_landscape: bool,
     landscape_detail: u32,
+    /// Composed by the fragment shader before the next frame draws, replacing
+    /// the CPU-composed upload for this texture id. Taken each frame so a stale
+    /// plan can never outlive the landscape it describes.
+    pending_shader_landscape: Option<(GpuTextureId, clonk_graphics::ShaderLandscapePlan)>,
+    landscape_composer: Option<ShaderLandscapeComposer>,
     repeat_nearest_sampler: wgpu::Sampler,
     present_sampler: wgpu::Sampler,
     _fallback_mask_texture: wgpu::Texture,
@@ -1108,6 +1113,8 @@ impl RetainedGpuRenderer {
             smooth_landscape: false,
             shader_landscape: false,
             landscape_detail: 1,
+            pending_shader_landscape: None,
+            landscape_composer: None,
             repeat_nearest_sampler,
             present_sampler,
             _fallback_mask_texture: fallback_mask_texture,
@@ -1154,6 +1161,8 @@ impl RetainedGpuRenderer {
         self.smooth_landscape = carried.1;
         self.shader_landscape = carried.2;
         self.landscape_detail = carried.3;
+        // The composer owns a pipeline built against the OLD device, so it is
+        // deliberately not carried; the next frame rebuilds it lazily.
         generation
     }
 
@@ -1265,6 +1274,7 @@ impl RetainedGpuRenderer {
         self.texture_epoch = self.texture_epoch.wrapping_add(1).max(1);
         self.sync_gamma(queue, scene);
         self.sync_textures(device, queue, &resources)?;
+        self.compose_shader_landscape(device, queue, encoder)?;
 
         let (vertices, calls) = self.build_layered_draw_stream(layers)?;
         let vertex_bytes = packed_vertex_bytes(&vertices);
@@ -1469,6 +1479,98 @@ impl RetainedGpuRenderer {
 
     pub fn landscape_detail(&self) -> u32 {
         self.landscape_detail
+    }
+
+    /// Hand the next frame's landscape composition inputs to the renderer.
+    ///
+    /// Kept off `GpuScene` on purpose: the plan is frame state, not retained
+    /// scene content, and threading it through the recorder would put a
+    /// multi-megabyte index plane and atlas into every scene literal.
+    pub fn set_pending_shader_landscape(
+        &mut self,
+        plan: Option<(GpuTextureId, clonk_graphics::ShaderLandscapePlan)>,
+    ) {
+        self.pending_shader_landscape = plan;
+    }
+
+    /// Replace a CPU-composed landscape texture with a shader-composed one.
+    ///
+    /// Runs after `sync_textures`, so the texture the plan names already exists
+    /// with the CPU composition uploaded. Composing over it keeps every
+    /// downstream lookup — bind groups, `base_extent`, the liquid scale —
+    /// working unchanged, and the landscape quad's UVs are normalized, so a
+    /// `detail > 1` plane simply samples finer.
+    fn compose_shader_landscape(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), GpuRendererError> {
+        // Always take the plan: a frame that does not compose must not leave a
+        // stale landscape queued for the next one.
+        let Some((id, plan)) = self.pending_shader_landscape.take() else {
+            return Ok(());
+        };
+        if !self.shader_landscape {
+            return Ok(());
+        }
+        let slots: Vec<ShaderLandscapeSlot> = plan
+            .slots
+            .iter()
+            .map(|words| ShaderLandscapeSlot {
+                colors: [words[0], words[1], words[2], words[3]],
+                params: [words[4], words[5], words[6], words[7]],
+                primary: [words[8], words[9], words[10], words[11]],
+                overlay: [words[12], words[13], words[14], words[15]],
+            })
+            .collect();
+        let inputs = ShaderLandscapeInputs {
+            extent: plan.extent,
+            index_plane: &plan.index_plane,
+            shading_plane: plan.shading_plane.as_deref(),
+            atlas: &plan.atlas,
+            atlas_extent: plan.atlas_extent,
+            slots: &slots,
+            detail: self.landscape_detail,
+        };
+        let extent = inputs.composed_extent();
+        let composer = self
+            .landscape_composer
+            .get_or_insert_with(|| ShaderLandscapeComposer::new(device));
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lc_gpu_shader_landscape_composed"),
+            size: wgpu::Extent3d {
+                width: extent[0],
+                height: extent[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        composer.compose_into(device, queue, encoder, &view, inputs)?;
+
+        let byte_len = u64::from(extent[0]) * u64::from(extent[1]) * 4;
+        self.textures.insert(
+            id,
+            CachedTexture {
+                // The composed plane has no CPU backing to diff against, so it
+                // is rebuilt whole whenever a plan arrives.
+                revision: 0,
+                extent,
+                format: GpuTextureFormat::Rgba8,
+                byte_len,
+                last_used_epoch: self.texture_epoch,
+                _texture: texture,
+                view,
+            },
+        );
+        self.quad_bind_groups.clear();
+        Ok(())
     }
 
     fn sync_textures(
@@ -5318,6 +5420,128 @@ mod tests {
                 "the fixture must compose real material, not an empty plane"
             );
         }
+    }
+
+    /// The whole wiring: a plan handed to the renderer must REPLACE the
+    /// CPU-composed landscape texture before the frame draws, at
+    /// `composed_extent()` rather than the map extent. Without the
+    /// substitution the composer runs and nothing samples its output; without
+    /// taking the plan, a stale one would recompose over a later landscape.
+    #[test]
+    fn a_pending_plan_replaces_the_landscape_texture_at_its_composed_extent() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping shader landscape substitution");
+            return;
+        };
+        let extent = [16_u32, 12_u32];
+        let (atlas_extent, atlas, _) = shader_landscape_atlas();
+        let plan = clonk_graphics::ShaderLandscapePlan {
+            extent,
+            index_plane: shader_landscape_index_plane(extent),
+            shading_plane: None,
+            atlas,
+            atlas_extent,
+            slots: shader_landscape_slots()
+                .iter()
+                .map(|slot| {
+                    let mut words = [0_u32; 16];
+                    words[0..4].copy_from_slice(&slot.colors);
+                    words[4..8].copy_from_slice(&slot.params);
+                    words[8..12].copy_from_slice(&slot.primary);
+                    words[12..16].copy_from_slice(&slot.overlay);
+                    words
+                })
+                .collect(),
+        };
+
+        let base = GpuTextureId::fresh();
+        let corner = |x: f32, y: f32, u: f32, v: f32| GpuVertex {
+            position: [x, y, 1.0],
+            uv: [u, v],
+            modulation: [1.0, 1.0, 1.0, 0.0],
+            owner_modulation: [0.0; 4],
+            outer_modulation: clonk_graphics::GpuOuterModulation::default(),
+            owner_outer_modulation: clonk_graphics::GpuOuterModulation::default(),
+            sample_tile: [0.0; 4],
+        };
+        // The CPU-composed upload the plan is expected to displace.
+        let scene = GpuScene {
+            logical_extent: extent,
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![GpuTextureResource::immutable_rgba(
+                base,
+                extent[0],
+                extent[1],
+                vec![0_u8; (extent[0] * extent[1] * 4) as usize].into(),
+            )],
+            commands: vec![GpuCommand::Landscape {
+                base,
+                liquid_mask: None,
+                liquid: None,
+                vertices: [
+                    corner(0.0, 0.0, 0.0, 0.0),
+                    corner(extent[0] as f32, 0.0, 1.0, 0.0),
+                    corner(0.0, extent[1] as f32, 0.0, 1.0),
+                    corner(extent[0] as f32, extent[1] as f32, 1.0, 1.0),
+                ],
+                clip: None,
+                phase: [0.0; 3],
+                gamma: false,
+            }],
+        };
+
+        for (detail, expected) in [(1_u32, extent), (3, [extent[0] * 3, extent[1] * 3])] {
+            let mut renderer =
+                RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+            renderer.set_shader_landscape(true);
+            renderer.set_landscape_detail(detail);
+            renderer.set_pending_shader_landscape(Some((base, plan.clone())));
+            let _ = render_readback(
+                &mut renderer,
+                &device,
+                &queue,
+                &scene,
+                &GpuPresentation::identity(extent[0], extent[1]),
+            );
+            assert_eq!(
+                renderer
+                    .textures
+                    .get(&base)
+                    .expect("landscape texture")
+                    .extent,
+                expected,
+                "detail {detail} must compose a plane {detail}x the map extent"
+            );
+        }
+
+        // With the opt-in off the CPU upload must survive untouched, and the
+        // plan must still be consumed rather than queued for a later frame.
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        renderer.set_landscape_detail(3);
+        renderer.set_pending_shader_landscape(Some((base, plan)));
+        let _ = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &scene,
+            &GpuPresentation::identity(extent[0], extent[1]),
+        );
+        assert_eq!(
+            renderer
+                .textures
+                .get(&base)
+                .expect("landscape texture")
+                .extent,
+            extent,
+            "the CPU-composed upload must stand when the opt-in is off"
+        );
+        assert!(
+            renderer.pending_shader_landscape.is_none(),
+            "the plan must be taken even when it is not composed"
+        );
     }
 
     #[test]
