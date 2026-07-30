@@ -714,6 +714,33 @@ fn modulate_packed_c4(destination: u32, source: u32) -> u32 {
 ///
 /// This is the exact bridge for semantic captured text: RGB uses `>> 8` and
 /// packed transparency uses the native screen combine before conversion back
+/// Everything the fragment-shader landscape composer reads, owned so it can
+/// travel on a retained scene.
+///
+/// The CPU composer walks INTEGER landscape coordinates, so one pattern texel
+/// per landscape pixel is its ceiling and larger material art only stretches
+/// the tiling period. Composing from this plan instead evaluates the same
+/// arithmetic per fragment, which is what lets a detail factor resolve finer
+/// art while keeping the world-space period.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShaderLandscapePlan {
+    /// Landscape-map extent, i.e. `PixelGrid::width()`/`height()`.
+    pub extent: [u32; 2],
+    /// One landscape byte per map pixel.
+    pub index_plane: Vec<u8>,
+    /// Interleaved `(lighten, darken)` amounts, two bytes per map pixel.
+    /// `None` when material shading is off.
+    pub shading_plane: Option<Vec<u8>>,
+    /// RGBA pattern atlas; `Surface8` patterns carry their palette index in red.
+    pub atlas: Vec<u8>,
+    pub atlas_extent: [u32; 2],
+    /// One packed texmap slot per entry, laid out exactly as the renderer's
+    /// `ShaderLandscapeSlot`: `colors[4]`, `params[4]`, `primary[4]`,
+    /// `overlay[4]`. Kept as a flat array so this crate does not need a third
+    /// mirror of a layout that already exists on both sides.
+    pub slots: Vec<[u32; 16]>,
+}
+
 /// to straight opacity.
 pub fn modulate_rgba8_by_packed_c4(color: [u8; 4], modulation: u32) -> [u8; 4] {
     packed_c4_to_rgba8(modulate_packed_c4(rgba8_to_packed_c4(color), modulation))

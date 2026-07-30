@@ -655,6 +655,72 @@ pub(crate) fn compose_material_gpu_slot(
 /// Lays every registered pattern out in one vertical strip. A strip needs no
 /// packing heuristic and keeps each rect's origin independent of its
 /// neighbours, which is all the per-slot modulo tiling requires.
+/// Build the fragment-shader composer's inputs from resolved texmap slots.
+///
+/// Every pattern a slot references is packed into one atlas, then each slot is
+/// packed with `pack_material_gpu_slot` — the same packer
+/// `packed_material_slot_matches_the_cpu_composer` proves equals
+/// `compose_material_surface_pixel`. Nothing here re-derives composition
+/// arithmetic; it only marshals what the CPU composer already resolved.
+pub(crate) fn build_shader_landscape_plan(
+    extent: [u32; 2],
+    index_plane: Vec<u8>,
+    shading_plane: Option<Vec<u8>>,
+    slots: &[MaterialSlot<'_>],
+) -> clonk_graphics::ShaderLandscapePlan {
+    // Collect every referenced pattern once, remembering where each slot's
+    // primary and overlay landed so the rects can be looked up after packing.
+    let mut patterns: Vec<MaterialPatternRef<'_>> = Vec::new();
+    let mut indices: Vec<Option<(usize, Option<usize>)>> = Vec::with_capacity(slots.len());
+    for slot in slots {
+        match slot {
+            MaterialSlot::Empty => indices.push(None),
+            MaterialSlot::Patterns {
+                texture, overlay, ..
+            } => {
+                let primary = patterns.len();
+                patterns.push(MaterialPatternRef::from(*texture));
+                let secondary = overlay.map(|overlay| {
+                    patterns.push(MaterialPatternRef::from(overlay));
+                    patterns.len() - 1
+                });
+                indices.push(Some((primary, secondary)));
+            }
+        }
+    }
+    let (atlas_width, atlas_height, atlas, rects) = build_material_atlas(&patterns);
+
+    let packed = slots
+        .iter()
+        .zip(&indices)
+        .map(|(slot, index)| {
+            let (MaterialSlot::Patterns { material, .. }, Some((primary, overlay))) = (slot, index)
+            else {
+                // An absent slot composes nothing; the shader reads the
+                // PRESENT bit out of the zeroed params word.
+                return [0_u32; 16];
+            };
+            let packed =
+                pack_material_gpu_slot(material, rects[*primary], overlay.map(|i| rects[i]));
+            let mut words = [0_u32; 16];
+            words[0..4].copy_from_slice(&packed.colors);
+            words[4..8].copy_from_slice(&packed.params);
+            words[8..12].copy_from_slice(&packed.primary);
+            words[12..16].copy_from_slice(&packed.overlay);
+            words
+        })
+        .collect();
+
+    clonk_graphics::ShaderLandscapePlan {
+        extent,
+        index_plane,
+        shading_plane,
+        atlas,
+        atlas_extent: [atlas_width, atlas_height],
+        slots: packed,
+    }
+}
+
 /// One texmap slot's composition inputs: `C4TexMapEntry`'s primary pattern
 /// plus the material's secondary pattern.
 pub(crate) enum MaterialSlot<'a> {
@@ -816,6 +882,108 @@ mod gpu_slot_tests {
 
     fn surface8_pattern() -> MaterialTextureSurface {
         MaterialTextureSurface::surface8(3, 5, (0..15u8).map(|index| index * 7).collect())
+    }
+
+    /// A plan built from RESOLVED slots must compose the same pixels the CPU
+    /// composer does for those slots. `packed_material_slot_matches_the_cpu_composer`
+    /// already proves the packer's arithmetic; this proves the marshalling
+    /// around it — atlas placement, per-slot rect lookup and the flat word
+    /// layout the renderer reads — does not scramble which pattern a slot gets.
+    #[test]
+    fn a_landscape_plan_composes_the_same_pixels_as_the_cpu_composer() {
+        let image = surface32_pattern();
+        let indexed = surface8_pattern();
+        let mut render_info = HashMap::new();
+        let mut textures = HashMap::new();
+        // Two materials with different patterns and overlay policies, so a
+        // swapped atlas rect cannot pass by coincidence.
+        render_info.insert(
+            clonk_resources::material::c4_name_key("Earth"),
+            MaterialRenderInfo::new(
+                [127, 95, 63, 147, 111, 75, 171, 127, 91],
+                [0, 30, 60, 90, 120, 200],
+                Some("Rough".to_string()),
+                MATERIAL_OVERLAY_EXACT,
+                50,
+            ),
+        );
+        render_info.insert(
+            clonk_resources::material::c4_name_key("Rock"),
+            MaterialRenderInfo::new(
+                [86, 86, 86, 106, 106, 106, 126, 126, 126],
+                [10, 40, 70, 100, 130, 210],
+                None,
+                MATERIAL_OVERLAY_MONOCHROME,
+                60,
+            ),
+        );
+        textures.insert(
+            clonk_resources::material::c4_name_key("Smooth"),
+            MaterialTextureSurface::surface32(image.clone()),
+        );
+        textures.insert(clonk_resources::material::c4_name_key("Rough"), indexed);
+
+        let mut material_names = vec![None; 128];
+        let mut texture_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        texture_names[1] = Some("Smooth".to_string());
+        material_names[2] = Some("Rock".to_string());
+        texture_names[2] = Some("Smooth".to_string());
+
+        let slots =
+            resolve_material_slots(&material_names, &texture_names, &render_info, &textures);
+        let extent = [7_u32, 5_u32];
+        let index_plane: Vec<u8> = (0..extent[0] * extent[1])
+            .map(|i| if i % 3 == 0 { 1 } else { 2 })
+            .collect();
+        let plan = build_shader_landscape_plan(extent, index_plane.clone(), None, &slots);
+
+        assert_eq!(plan.slots.len(), 128);
+        assert_eq!(plan.extent, extent);
+        // Sky and every unnamed slot stay absent, so the shader composes nothing.
+        assert_eq!(plan.slots[0], [0_u32; 16]);
+        assert_eq!(plan.slots[3], [0_u32; 16]);
+
+        let atlas = MaterialAtlasView {
+            width: plan.atlas_extent[0],
+            height: plan.atlas_extent[1],
+            pixels: &plan.atlas,
+        };
+        let mut compared = 0_usize;
+        for (offset, byte) in index_plane.iter().enumerate() {
+            let MaterialSlot::Patterns {
+                material,
+                texture,
+                overlay,
+            } = &slots[usize::from(byte & 0x7f)]
+            else {
+                panic!("fixture slot {byte} must carry patterns");
+            };
+            let x = (offset as u32 % extent[0]) as i32;
+            let y = (offset as u32 / extent[0]) as i32;
+            let expected = compose_material_surface_pixel(
+                material,
+                *byte,
+                x,
+                y,
+                MaterialPatternRef::from(*texture),
+                overlay.map(MaterialPatternRef::from),
+            );
+            let words = plan.slots[usize::from(byte & 0x7f)];
+            let packed = MaterialGpuSlot {
+                colors: words[0..4].try_into().expect("colors"),
+                params: words[4..8].try_into().expect("params"),
+                primary: words[8..12].try_into().expect("primary"),
+                overlay: words[12..16].try_into().expect("overlay"),
+            };
+            assert_eq!(
+                compose_material_gpu_slot(&packed, *byte, x, y, atlas),
+                expected,
+                "plan slot {byte} disagrees at ({x},{y})"
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, index_plane.len());
     }
 
     /// The packed slot plus the shared atlas must reproduce
