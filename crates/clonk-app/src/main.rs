@@ -22,6 +22,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod advanced_config;
 mod classic_record_stream;
+mod console_viewport_windows;
 mod console_window_position;
 mod control_options;
 mod deferred_config;
