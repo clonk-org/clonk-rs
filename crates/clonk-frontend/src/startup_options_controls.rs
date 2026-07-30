@@ -465,9 +465,16 @@ pub fn control_sheet_hit_test(
     if contains(layout.reset_button) {
         return Some(ControlSheetHit::Reset);
     }
+    // `CheckBox::MouseInput` only reacts inside the box square, whose width is an
+    // inclusive `rcBounds.Hgt` from the left edge (`C4GuiCheckBox.cpp:87`); the
+    // caption beside it is not a target.
+    let check_square = IntRect {
+        w: layout.gamepad_gui_check.h + 1,
+        ..layout.gamepad_gui_check
+    };
     if device == ControlDevice::Gamepad
         && state.gamepad_gui_checkbox_visible()
-        && contains(layout.gamepad_gui_check)
+        && contains(check_square)
     {
         return Some(ControlSheetHit::GamepadGui);
     }
@@ -725,6 +732,47 @@ mod tests {
         // lands exactly where the keyboard tab puts it.
         assert_eq!(layout.reset_button.x, 757);
         assert_eq!(layout.reset_button.w, 180);
+    }
+
+    // `CheckBox::MouseInput` gates `fMouseOn` on `Inside(iX, 0, rcBounds.Hgt)`
+    // (`C4GuiCheckBox.cpp:87`), so only the leading box square reacts — the
+    // caption beside it is inert, exactly as the Program and Sound sheets model.
+    #[test]
+    fn gamepad_gui_checkbox_accepts_only_its_box_square() {
+        let sheet = IntRect {
+            x: 356,
+            y: 108,
+            w: 644,
+            h: 462,
+        };
+        let layout = ControlSheetLayout::from_sheet(sheet, 61, 13, 1, (100, 20), Some((150, 20)));
+        let state = ControlSheetState::default();
+        let hit = |x: i32, y: i32| {
+            control_sheet_hit_test(
+                &layout,
+                &state,
+                ControlDevice::Gamepad,
+                GuiPoint::new(x as f32, y as f32),
+            )
+        };
+        let check = layout.gamepad_gui_check;
+        for x in [check.x, check.x + check.h] {
+            assert_eq!(
+                hit(x, check.y),
+                Some(ControlSheetHit::GamepadGui),
+                "the box square spans an inclusive Hgt from the left edge",
+            );
+        }
+        assert_eq!(
+            hit(check.x + check.h + 1, check.y),
+            None,
+            "the first caption column is not a target",
+        );
+        assert_eq!(hit(check.x + check.w - 1, check.y), None);
+        assert_eq!(
+            hit(check.x, check.y + check.h - 1),
+            Some(ControlSheetHit::GamepadGui),
+        );
     }
 
     #[test]
