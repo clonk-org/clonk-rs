@@ -10400,6 +10400,63 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
 }
 
 impl Engine {
+    /// `C4DefList::Reload` plus the `C4Game::ReloadDef` policy around it
+    /// (`C4Def.cpp:1191-1213`, `C4Game.cpp:2322-2367`).
+    ///
+    /// The ordering here is load-bearing in three places, all of them easy to
+    /// shuffle:
+    ///
+    /// - the reload **re-opens the group from the definition's own stored
+    ///   path**. `C4Def::Clear` deliberately preserves `Filename` ("Assume
+    ///   filename is being kept") precisely so this can work;
+    /// - the **relink runs after the definition is back in place**, so it sees
+    ///   it at its final position — C++ calls `SortByID()` before `ReLink` for
+    ///   the same reason; and
+    /// - **a failed load removes the definition entirely** rather than leaving
+    ///   the old one behind. `C4Def::Clear` has already run by then, so there
+    ///   is no intact definition to keep.
+    ///
+    /// The object sweeps this outcome implies — `UpdateFace(true)` on success,
+    /// `AssignRemoval` on failure, both over *every* object of that id — are
+    /// described by [`developer_reload::definition_reload_outcome`] and applied
+    /// by the caller, exactly as `C4Game::ReloadDef` applies them around
+    /// `Defs.Reload`.
+    pub fn reload_definition(&mut self, id: &str, network_enabled: bool) -> bool {
+        // The network refusal is `C4Game::ReloadDef`'s first line.
+        if network_enabled {
+            return false;
+        }
+        let Some(source) = self
+            .definition(id)
+            .and_then(|definition| definition.source_path().map(std::path::Path::to_path_buf))
+        else {
+            // No stored group: nothing to re-open, and nothing is disturbed.
+            return false;
+        };
+        let reloaded = clonk_resources::Group::open(&source)
+            .ok()
+            .and_then(|group| ResourceDefinitionData::load(&group).ok())
+            .and_then(|resource| Definition::from_resource(&resource).ok());
+        let Some(mut definition) = reloaded else {
+            // `Clear()` has already emptied the definition in C++, so the
+            // failure arm removes it rather than restoring anything.
+            self.remove_definition(id);
+            return false;
+        };
+        definition.set_source_path(Some(source));
+        self.remove_definition(id);
+        if self.register_definition(definition).is_err() {
+            return false;
+        }
+        // `ReLink` runs with the definition at its final position. C++ links
+        // and logs whatever diagnostics arise without failing the reload, so a
+        // link error here does not undo it either.
+        if let Err(error) = self.relink_scripts() {
+            tracing::warn!(definition = %id, %error, "definition reload relink diagnostic");
+        }
+        true
+    }
+
     /// `C4Game::ReloadParticle` (`C4Game.cpp:2369-2394`).
     ///
     /// Four behaviours a plausible port softens:

@@ -1,6 +1,65 @@
 // Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    // C4Def.cpp:1191-1213 + C4Game.cpp:2322-2367 — the reload re-opens the
+    // definition's own stored group, and a failed load removes it outright.
+    #[test]
+    fn reloading_a_definition_reopens_its_group_and_removes_it_on_failure() {
+        let dir = tempfile::tempdir().expect("temp group root");
+        let group_path = dir.path().join("Rock.c4d");
+        std::fs::create_dir_all(&group_path).expect("create definition group");
+        std::fs::write(
+            group_path.join("DefCore.txt"),
+            "[DefCore]\nid=ROCK\nVersion=4,9,8\nName=Rock\n",
+        )
+        .expect("write DefCore");
+
+        let mut engine = crate::Engine::new();
+        let mut definition =
+            crate::Definition::from_script("ROCK".to_string(), "Rock".to_string(), "")
+                .expect("script definition compiles");
+        definition.set_source_path(Some(group_path.clone()));
+        engine
+            .register_definition(definition)
+            .expect("register definition");
+
+        // The network refusal is the first line: nothing is re-opened and the
+        // definition is untouched.
+        assert!(!engine.reload_definition("ROCK", true));
+        assert!(engine.definition("ROCK").is_some());
+
+        // A definition with no stored group cannot reload, and nothing is
+        // disturbed by the attempt.
+        let mut pathless =
+            crate::Definition::from_script("STON".to_string(), "Stone".to_string(), "")
+                .expect("script definition compiles");
+        pathless.set_source_path(None);
+        engine
+            .register_definition(pathless)
+            .expect("register pathless definition");
+        assert!(!engine.reload_definition("STON", false));
+        assert!(
+            engine.definition("STON").is_some(),
+            "a definition with no group to re-open is refused, not removed"
+        );
+
+        // The group is real, so the reload succeeds and the definition keeps
+        // its path for the next one.
+        assert!(engine.reload_definition("ROCK", false));
+        let reloaded = engine.definition("ROCK").expect("the definition survives");
+        assert_eq!(reloaded.source_path(), Some(group_path.as_path()));
+
+        // Now break the group. `C4Def::Clear` has already emptied the
+        // definition by the time `Load` fails, so the failure arm removes it
+        // rather than restoring anything.
+        std::fs::remove_dir_all(&group_path).expect("remove the group");
+        assert!(!engine.reload_definition("ROCK", false));
+        assert!(
+            engine.definition("ROCK").is_none(),
+            "a failed reload removes the definition"
+        );
+    }
+
     // C4Game.cpp:2352-2360 — a failed reload removes the definition outright,
     // so removal must unwind every structure registration pushed into.
     #[test]

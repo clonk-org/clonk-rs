@@ -1182,10 +1182,27 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   the accessor contract; **end-to-end coverage that a definition loaded from a
   real shipped group carries a usable path is still owed** — the existing
   scenario fixtures are JSON-backed and have no group behind them.
-  **Still open:** the reload body itself — rebuilding DefCore, ActMap, scripts,
-  graphics, portraits, ranks and localised components in place, refreshing
-  matching live objects as `UpdateFace(true)` requires. And the watcher's
-  registration, which is now a short step rather than a blocked one.
+  **The reload body landed.** `Engine::reload_definition` re-opens the group
+  from the definition's own stored path, rebuilds it through the same
+  `ResourceDefinition::load` + `Definition::from_resource` pair production
+  loading uses — so DefCore, ActMap, scripts, graphics, portraits and ranks all
+  come back by construction rather than through a second, drifting code path —
+  and relinks. Three orderings are load-bearing: the re-open uses the stored
+  `Filename`, which is exactly why `C4Def::Clear` preserves it; the relink runs
+  with the definition back at its final position (C++ calls `SortByID()` before
+  `ReLink` for the same reason); and **a failed load removes the definition
+  entirely** rather than leaving the old one, because `Clear()` has already
+  emptied it and there is nothing intact to keep. A definition with no stored
+  group is refused without disturbing anything. Pinned by
+  `reloading_a_definition_reopens_its_group_and_removes_it_on_failure`, which
+  drives a real on-disk group and then deletes it.
+  **Still open:** the live-object half. `developer_reload::definition_reload_outcome`
+  already describes the sweeps — `UpdateFace(true)` over *every* object of that
+  id on success, `AssignRemoval` over every one on failure — but nothing
+  applies them, so a reload updates the definition and leaves live objects
+  pointing at the old graphics and shape. `C4DefGraphicsPtrBackup::AssignUpdate`'s
+  name-based re-resolution belongs with it. And the watcher's registration,
+  which is now a short step rather than a blocked one.
   `Engine::remove_definition` landed with it — the exact inverse of
   `register_definition`, unwinding the map, the load order, the id-sorted
   runtime order and the script link source, and invalidating the same caches.
