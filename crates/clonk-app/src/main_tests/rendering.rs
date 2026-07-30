@@ -2486,6 +2486,7 @@ fn m06_l033_startup_fade_modulates_retained_draws_and_text_like_cpp() {
                 clip: None,
                 gamma: None,
                 images: Vec::new(),
+                zoom: 1.0,
             }],
             fonts: None,
             gpu_recorder: surface.take_gpu_scene_capture(),

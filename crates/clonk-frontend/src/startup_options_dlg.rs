@@ -5343,7 +5343,7 @@ impl OptionsDlgScreen {
                 // The two labels sit in the gutter the layout reserved to the
                 // right of the cap, in `GetBlackFontByHeight(cgoDraw.Hgt/2 + 5)`
                 // and turning red while highlighted (:247-249).
-                let (font, _zoom) = book.black_font_by_height(target.h / 2 + 5);
+                let (font, zoom) = book.black_font_by_height(target.h / 2 + 5);
                 let color = if lit {
                     HIGHLIGHT_FONT_RGBA
                 } else {
@@ -5354,7 +5354,7 @@ impl OptionsDlgScreen {
                     (label.as_str(), target.y - 3),
                     (binding, target.y + target.h / 2),
                 ] {
-                    font.draw_with_gamma(
+                    font.draw_zoomed_with_gamma(
                         surface,
                         text_x,
                         y,
@@ -5363,6 +5363,7 @@ impl OptionsDlgScreen {
                         TextAlign::Left,
                         false,
                         gamma,
+                        zoom,
                     );
                 }
                 continue;
@@ -5979,6 +5980,30 @@ mod tests {
         assert!(
             ink_rows(draw_y + draw_h / 2) > 3,
             "the bound key name is not drawn"
+        );
+
+        // `GetBlackFontByHeight(cgoDraw.Hgt/2 + 5)` returns BookSmallFont plus
+        // the `17 / 20` zoom every glyph facet is stretched by
+        // (C4Startup.cpp:125-143; StdFont.cpp:903). The live C++ capture draws
+        // "Select left" as a 58x10 ink box; without the zoom it is 68x12.
+        let mut ink: Option<(i32, i32, i32, i32)> = None;
+        for y in draw_y - 3..draw_y - 3 + book.book_small.line_height {
+            for x in gutter_x..gutter_x + 120 {
+                let dark = surface
+                    .get_pixel(x as u32, y as u32)
+                    .is_some_and(|p| p.r < 110 && p.g < 110 && p.b < 110);
+                if dark {
+                    ink = Some(ink.map_or((x, y, x, y), |(x0, y0, x1, y1)| {
+                        (x0.min(x), y0.min(y), x1.max(x), y1.max(y))
+                    }));
+                }
+            }
+        }
+        let ink = ink.expect("action label ink");
+        assert_eq!(
+            (ink.2 - ink.0 + 1, ink.3 - ink.1 + 1),
+            (58, 10),
+            "the action label must match the C++ capture's ink box"
         );
 
         // `fctCommand` is modulated by 0x7f7f7f whenever the button is neither

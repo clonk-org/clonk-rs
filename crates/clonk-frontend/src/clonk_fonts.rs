@@ -412,6 +412,7 @@ impl NativeClonkFont {
             NativeDrawProjection::application(self.application_scale, physical_offset),
             gamma,
             None,
+            1.0,
         );
     }
 
@@ -441,6 +442,7 @@ impl NativeClonkFont {
             NativeDrawProjection::application(self.application_scale, physical_offset),
             gamma,
             Some(images),
+            1.0,
         );
     }
 
@@ -488,6 +490,7 @@ impl NativeClonkFont {
             NativeDrawProjection::clipper(projection),
             gamma,
             None,
+            1.0,
         );
     }
 
@@ -536,6 +539,7 @@ impl NativeClonkFont {
             NativeDrawProjection::clipper(projection),
             gamma,
             Some(images),
+            1.0,
         );
     }
 
@@ -552,18 +556,22 @@ impl NativeClonkFont {
         projection: NativeDrawProjection,
         gamma: Option<&GammaRamp>,
         images: Option<&dyn FontImageProvider>,
+        zoom: f32,
     ) {
-        let line_height = self.logical_line_height();
+        // `fZoom` scales the alignment offset and the per-line advance as well
+        // as the glyphs (`src/StdFont.cpp:831,838`; `src/StdDDraw2.cpp:1039`).
+        let line_height = (zoom * self.logical_line_height() as f32) as i32;
         let origins = text
             .split(|character: char| character == '\n' || (markup && character == '|'))
             .enumerate()
             .map(|(line_index, line)| {
                 let logical_width = self.measure_impl(line, markup, images).0;
-                let logical_left = x.saturating_sub(match align {
+                let offset = match align {
                     TextAlign::Left => 0,
                     TextAlign::Center => logical_width / 2,
                     TextAlign::Right => logical_width,
-                });
+                };
+                let logical_left = x.saturating_sub((zoom * offset as f32) as i32);
                 let line_index = i32::try_from(line_index).unwrap_or(i32::MAX);
                 let logical_y = y.saturating_add(line_index.saturating_mul(line_height));
                 projection.project(logical_left, logical_y)
@@ -574,7 +582,7 @@ impl NativeClonkFont {
             || (!snaps && projection.requires_resampling(self.effective_scale))
         {
             self.draw_fractional_lines_at_origins(
-                surface, &origins, text, color, markup, gamma, images, projection,
+                surface, &origins, text, color, markup, gamma, images, projection, zoom,
             );
             return;
         }
@@ -587,8 +595,9 @@ impl NativeClonkFont {
                 surface, &origins, text, color, markup, gamma, images,
             );
         } else {
-            self.raster
-                .draw_lines_at_origins_with_gamma_to(surface, &origins, text, color, markup, gamma);
+            self.raster.draw_zoomed_lines_at_origins_with_gamma_to(
+                surface, &origins, text, color, markup, gamma, zoom,
+            );
         }
     }
 
@@ -739,6 +748,7 @@ impl NativeClonkFont {
                 None,
                 &mut Vec::new(),
                 projection,
+                1.0,
             );
             return;
         }
@@ -794,6 +804,7 @@ impl NativeClonkFont {
         gamma: Option<&GammaRamp>,
         images: Option<&dyn FontImageProvider>,
         projection: NativeDrawProjection,
+        zoom: f32,
     ) {
         let mut stack = Vec::new();
         for ((x, y), line) in origins
@@ -802,7 +813,7 @@ impl NativeClonkFont {
             .zip(text.split(|character: char| character == '\n' || (markup && character == '|')))
         {
             self.draw_fractional_line(
-                surface, x, y, line, color, markup, gamma, images, &mut stack, projection,
+                surface, x, y, line, color, markup, gamma, images, &mut stack, projection, zoom,
             );
         }
     }
@@ -825,17 +836,18 @@ impl NativeClonkFont {
         images: Option<&dyn FontImageProvider>,
         stack: &mut Vec<NativeMarkupTag>,
         projection: NativeDrawProjection,
+        zoom: f32,
     ) {
         // `Graphics.SnapTextToPixels` draws the atlas at its rasterized size
         // from a whole-pixel pen instead of rescaling every facet by
         // `scale / effective_scale` (StdFont.cpp:685,701,841).
         let snaps = self.snaps_to_physical_pixels(projection);
         let (quad_scale_x, quad_scale_y) = if snaps {
-            (1.0, 1.0)
+            (f64::from(zoom), f64::from(zoom))
         } else {
             (
-                projection.scale_x / f64::from(self.effective_scale),
-                projection.scale_y / f64::from(self.effective_scale),
+                f64::from(zoom) * projection.scale_x / f64::from(self.effective_scale),
+                f64::from(zoom) * projection.scale_y / f64::from(self.effective_scale),
             )
         };
         let physical_spacing = if snaps {
@@ -1464,7 +1476,7 @@ impl NativeClonkFontSet {
             }
             let font = self.font_for_role(command.role);
             if command.images.is_empty() {
-                font.draw_to_physical_surface_with_clipper_to(
+                font.draw_to_physical_surface_with_projection_impl(
                     surface,
                     command.x,
                     command.y,
@@ -1472,8 +1484,10 @@ impl NativeClonkFontSet {
                     command.color,
                     command.align,
                     command.markup,
-                    projection,
+                    NativeDrawProjection::clipper(projection),
                     command.gamma.as_ref(),
+                    None,
+                    command.zoom,
                 );
             } else {
                 let images = CapturedImageProvider(&command.images);
@@ -2854,6 +2868,7 @@ mod tests {
             clip: Some(clonk_graphics::Rect::new(1, 1, 2, 2)),
             gamma: None,
             images: Vec::new(),
+            zoom: 1.0,
         };
         let mut surface = Surface::new(6, 6, clonk_graphics::PixelFormat::Rgba8888);
 

@@ -1963,6 +1963,7 @@ mod tests {
             clip,
             gamma: None,
             images: Vec::new(),
+            zoom: 1.0,
         }
     }
 
