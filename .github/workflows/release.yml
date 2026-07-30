@@ -219,9 +219,6 @@ jobs:
 
   resolve:
     name: Resolve the version
-    needs: [prepare]
-    # `always()` keeps the push path working, where prepare is skipped.
-    if: always() && needs.prepare.result != 'failure' && needs.prepare.outputs.prepared != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Read-only: nothing is tagged or published until the builds have passed.
@@ -237,9 +234,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The commit prepare just created, or the triggering commit on the
-          # push path. Never `main`, whose tip moves while a build is running.
-          ref: ${{ needs.prepare.outputs.sha || github.sha }}
+          # The triggering commit, never `main`, whose tip moves while a build
+          # is running.
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Decide whether this commit releases
@@ -252,7 +249,7 @@ jobs:
           # schedule and dispatch paths `head_commit` is absent entirely, and
           # testing the subject there would reject every scheduled release.
           EVENT_NAME: ${{ github.event_name }}
-          RESOLVED_SHA: ${{ needs.prepare.outputs.sha || github.sha }}
+          RESOLVED_SHA: ${{ github.sha }}
         run: |
           subject=${HEAD_SUBJECT%%$'\n'*}
           if [[ "$EVENT_NAME" == "push" && "$subject" != "chore: release "* ]]; then
