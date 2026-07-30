@@ -1314,7 +1314,7 @@ fn blit_font_image<T: SurfaceDrawTarget + ?Sized>(
         for col in 0..width as usize {
             let sample_x = (col as f32 + 0.5) * image.width as f32 / width as f32 - 0.5;
             let sample_y = (row as f32 + 0.5) * image.height as f32 / height as f32 - 0.5;
-            let (Some(dx), Some(dy)) = (offset_coord(x as i32, col), offset_coord(y, row)) else {
+            let (Some(dx), Some(dy)) = (offset_coord(x, col), offset_coord(y, row)) else {
                 continue;
             };
             blend_font_sample(
