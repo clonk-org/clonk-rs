@@ -5221,6 +5221,50 @@ fn l097_options_gamepad_device_claim_switches_and_releases() {
     assert_eq!(app.gamepads.options_open_slot(), None);
 }
 
+// C4StartupOptionsDlg.cpp:176-177 substitutes `LoadKeyDescResStr(iKeyID)` into
+// IDS_MSG_PRESSKEY/IDS_MSG_PRESSBTN — the very same `IDS_CTL_*` string the key
+// button draws beside its cap (:242). The prompt must therefore quote the sheet's
+// own label, not a second hand-written name.
+#[test]
+fn control_capture_prompt_quotes_the_sheet_label_for_every_control() {
+    use clonk_frontend::startup_options_controls::{
+        ControlCaptureTarget, ControlDevice, CONTROL_KEY_COUNT,
+    };
+    use clonk_frontend::startup_options_dlg::OptionsDlgAction;
+
+    let mut app = new_classic_menu_app(640, 480);
+    app.open_options_menu();
+    let labels = app
+        .startup_options_dialog
+        .as_ref()
+        .expect("options dialog")
+        .labels()
+        .control_keys
+        .clone();
+
+    for (control, label) in labels.iter().enumerate().take(CONTROL_KEY_COUNT) {
+        let target = ControlCaptureTarget {
+            device: ControlDevice::Gamepad,
+            set: 0,
+            control,
+        };
+        app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
+            .expect("open gamepad capture");
+        let modal = app.message_dialogs.pop().expect("capture modal");
+        assert_eq!(
+            modal.state.message(),
+            format!("Press the button for \"{label}\" on gamepad 1."),
+            "control {control} quotes its own sheet label",
+        );
+    }
+    // The three that used to coincide are not the interesting ones; these are
+    // the labels the hand-written table got wrong.
+    assert_eq!(labels[0], "Select left");
+    assert_eq!(labels[4], "Up / Jump");
+    assert_eq!(labels[6], "Left");
+    assert_eq!(labels[10], "Special 1");
+}
+
 #[test]
 fn options_key_capture_matches_classic_modal_and_production_input_routing() {
     use clonk_frontend::message_dialog::MessageDialogIcon;

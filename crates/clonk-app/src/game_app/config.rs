@@ -1503,11 +1503,21 @@ impl GameApp {
         &mut self,
         target: clonk_frontend::startup_options_controls::ControlCaptureTarget,
     ) -> Result<(), EngineError> {
-        let control = ControlBindingId::ALL
-            .get(target.control)
-            .copied()
-            .map(binding_display_name)
-            .unwrap_or("Unknown control");
+        // `LoadKeyDescResStr(iKeyID)` — the same localized `IDS_CTL_*` string the
+        // key button draws beside its cap (C4StartupOptionsDlg.cpp:162-173,
+        // 176-177, 242), not a separate hand-written name.
+        let control = self
+            .startup_options_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.labels().control_keys.get(target.control))
+            .map(String::as_str)
+            .or_else(|| {
+                clonk_frontend::startup_options_controls::CONTROL_KEY_LABELS
+                    .get(target.control)
+                    .copied()
+            })
+            .unwrap_or_default()
+            .to_owned();
         let (message, icon) = match target.device {
             clonk_frontend::startup_options_controls::ControlDevice::Keyboard => (
                 clonk_app_menus::substitute_resource_arguments(
@@ -1515,7 +1525,7 @@ impl GameApp {
                         "IDS_MSG_PRESSKEY",
                         "Press the key for \"%s\" on keyboard block %d.",
                     ),
-                    &[control, &(target.set + 1).to_string()],
+                    &[&control, &(target.set + 1).to_string()],
                 ),
                 clonk_frontend::message_dialog::MessageDialogIcon::Standard(24),
             ),
@@ -1525,7 +1535,7 @@ impl GameApp {
                         "IDS_MSG_PRESSBTN",
                         "Press the button for \"%s\" on gamepad %d.",
                     ),
-                    &[control, &(target.set + 1).to_string()],
+                    &[&control, &(target.set + 1).to_string()],
                 ),
                 clonk_frontend::message_dialog::MessageDialogIcon::Standard(25),
             ),
