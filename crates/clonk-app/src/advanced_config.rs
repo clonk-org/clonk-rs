@@ -414,9 +414,10 @@ fn graphics(config: &Config) -> AdvancedConfigSection {
         bool_row(config, section, "DisableGamma", false),
         i32_row(config, section, "Monitor", 0),
         bool_row(config, section, "FireParticles", true),
-        // Keep the editor's materialized value aligned with Rust's intentional
-        // 60+ FPS presentation default. The C++ timer/divisor behavior is
-        // unchanged once this value is selected.
+        // The editor materializes the oracle's own default (C4Config.cpp:485),
+        // not the faster presentation cadence: that is opt-in through
+        // `Graphics.SmoothPresentation`, which deliberately leaves this key
+        // absent so an explicit value written here still wins.
         i32_row(
             config,
             section,

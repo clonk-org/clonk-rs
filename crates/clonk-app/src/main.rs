@@ -358,6 +358,18 @@ fn native_startup_dialog_sink() -> clonk_platform::startup_dialog::NoStartupDial
     clonk_platform::startup_dialog::NoStartupDialog
 }
 
+/// The active monitor's refresh period in whole milliseconds (120 Hz -> 8 ms),
+/// when winit can report it. Kept to a thin adapter because a `Window` cannot
+/// be constructed in a unit test; the policy it feeds is tested separately in
+/// `effective_max_refresh_delay_ms`.
+fn display_refresh_period_ms(window: &Window) -> Option<u64> {
+    window
+        .current_monitor()
+        .and_then(|monitor| monitor.refresh_rate_millihertz())
+        .filter(|millihertz| *millihertz > 0)
+        .map(|millihertz| (1_000_000 / u64::from(millihertz)).max(1))
+}
+
 fn run() -> Result<()> {
     // C++ recovers a translocated bundle path and chdirs to the directory
     // holding the .app before anything else (C4WinMain.cpp:233-238;
@@ -698,6 +710,14 @@ fn run() -> Result<()> {
 
     // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
     let render_inactive_mask = load_render_inactive_mask(app.app_paths.as_ref());
+    // `GameApp::new` resolves the refresh ceiling before any window exists, so
+    // the panel period can only be substituted here (opt-in; see
+    // `configured_smooth_presentation`).
+    app.display_refresh_period_ms = display_refresh_period_ms(&window);
+    app.startup_refresh_delay_ms = effective_max_refresh_delay_ms(
+        &load_native_config_bytes(app.app_paths.as_ref()),
+        app.display_refresh_period_ms,
+    );
     app.set_display_mode(display_options.mode);
     app.graphics
         .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
@@ -729,7 +749,7 @@ fn run() -> Result<()> {
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.refresh_ceilings(),
     );
     let mut next_graphics_deadline = previous_instant + frame_schedule.refresh_interval;
     let mut automatic_frame_skip = AutomaticFrameSkip::default();
@@ -874,7 +894,7 @@ fn run() -> Result<()> {
                     app.mode,
                     app.engine.game_tick_delay_ms(),
                     app.engine.game_tick_delay_revision(),
-                    app.max_refresh_delay_ms,
+                    app.refresh_ceilings(),
                     &mut frame_schedule,
                     &mut accumulator,
                     frame_time,
@@ -1959,6 +1979,8 @@ impl GameApp {
             auto_frame_skip: configured_auto_frame_skip(&native_config),
             presentation_detail: PresentationDetail::default(),
             max_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
+            startup_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
+            display_refresh_period_ms: None,
             network_stats: None,
             network_stats_clients: HashSet::new(),
             network_stats_players: HashSet::new(),
@@ -3351,6 +3373,15 @@ impl GameApp {
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         Ok(())
+    }
+
+    /// The refresh ceiling for each application timer. Only the startup one is
+    /// ever subdivided below the oracle default; see `RefreshCeilings`.
+    pub(crate) fn refresh_ceilings(&self) -> RefreshCeilings {
+        RefreshCeilings {
+            running_ms: self.max_refresh_delay_ms,
+            startup_ms: self.startup_refresh_delay_ms,
+        }
     }
 
     fn handle_focus_gained(&mut self) -> Result<(), EngineError> {

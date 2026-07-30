@@ -1006,6 +1006,114 @@
     }
 
     #[test]
+    fn smooth_presentation_substitutes_the_display_period_for_the_native_ceiling() {
+        use crate::effective_max_refresh_delay_ms;
+
+        // Nothing configured stays exactly on the C++ default, whatever the
+        // panel reports: the oracle's 30 ms ceiling is the parity default.
+        assert_eq!(effective_max_refresh_delay_ms(b"", None), 30);
+        assert_eq!(effective_max_refresh_delay_ms(b"", Some(8)), 30);
+
+        // The remaster master switch supplies the default, exactly like every
+        // other presentation-only divergence.
+        assert_eq!(
+            effective_max_refresh_delay_ms(b"[Graphics]\nRemaster=1\n", Some(8)),
+            8
+        );
+        assert_eq!(
+            effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", Some(8)),
+            8
+        );
+
+        // A key the player wrote explicitly wins in both directions.
+        assert_eq!(
+            effective_max_refresh_delay_ms(b"[Graphics]\nRemaster=1\nSmoothPresentation=0\n", Some(8)),
+            30
+        );
+        assert_eq!(
+            effective_max_refresh_delay_ms(
+                b"[Graphics]\nSmoothPresentation=1\nMaxRefreshDelay=30\n",
+                Some(8)
+            ),
+            30
+        );
+
+        // An unknown or slower-than-native panel must never make presentation
+        // slower than the oracle default.
+        assert_eq!(
+            effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", None),
+            16
+        );
+        assert_eq!(
+            effective_max_refresh_delay_ms(b"[Graphics]\nSmoothPresentation=1\n", Some(100)),
+            30
+        );
+    }
+
+    #[test]
+    fn smooth_presentation_subdivides_only_the_startup_timer() {
+        use crate::RefreshCeilings;
+
+        // Measured on an M4 Max at the reporter's own Scale=300 fullscreen
+        // settings: subdividing the *game* timer to 7 ms moved presentation
+        // from 35.66 to 36.30 FPS while the average graphics pass grew from
+        // 10.49 ms to 18.17 ms and automatic skips went from 2 to 98. In game
+        // the pass cost and swapchain back-pressure bind long before the timer
+        // does, so the game timer keeps the oracle ceiling and only the
+        // startup timer — which measured 62.88 FPS with a 0.83 ms GPU pass and
+        // a 96 %-idle event loop — is subdivided.
+        let ceilings = RefreshCeilings {
+            running_ms: 30,
+            startup_ms: 8,
+        };
+
+        let menu = frame_schedule_for_mode(AppMode::Menu, 28, 1, ceilings);
+        assert_eq!(menu.simulation_interval, Duration::from_millis(16));
+        assert_eq!(menu.refresh_interval, Duration::from_millis(8));
+
+        let running = frame_schedule_for_mode(AppMode::Running, 28, 1, ceilings);
+        assert_eq!(running.simulation_interval, Duration::from_millis(28));
+        assert_eq!(
+            running.refresh_interval,
+            Duration::from_millis(28),
+            "the game timer keeps the oracle ceiling even while the menu is subdivided"
+        );
+
+        // A bare ceiling still means "both", so every existing caller and the
+        // explicit `Graphics.MaxRefreshDelay` path are unchanged.
+        assert_eq!(
+            frame_schedule_for_mode(AppMode::Running, 28, 1, 16).refresh_interval,
+            Duration::from_millis(14)
+        );
+    }
+
+    #[test]
+    fn startup_refresh_honours_the_same_refresh_ceiling_as_the_game_timer() {
+        // The startup screens are where the pointer is used most, and their
+        // cursor is drawn into the frame, so its update rate is the refresh
+        // rate. The 16 ms startup timer was previously its own hard floor, so
+        // a configured ceiling below it was ignored and the menu stayed at
+        // 62.5 Hz on any display. Apply the same divisor the game timer uses.
+        for mode in [AppMode::Menu, AppMode::Loading] {
+            // At or above the startup interval the divisor is the identity, so
+            // the native default keeps the menu byte-for-byte as it was.
+            for ceiling in [16, 30, 100] {
+                let schedule = frame_schedule_for_mode(mode, 28, 1, ceiling);
+                assert_eq!(schedule.simulation_interval, Duration::from_millis(16));
+                assert_eq!(schedule.refresh_interval, Duration::from_millis(16));
+                assert_eq!(schedule.running_revision, None);
+            }
+
+            // A lower ceiling subdivides the startup timer without touching the
+            // 16 ms logic tick that ages menu animations.
+            let smooth = frame_schedule_for_mode(mode, 28, 1, 8);
+            assert_eq!(smooth.simulation_interval, Duration::from_millis(16));
+            assert_eq!(smooth.refresh_interval, Duration::from_millis(8));
+            assert_eq!(smooth.running_revision, None);
+        }
+    }
+
+    #[test]
     fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() {
         // C4Game freezes Config.General.Participants before OpenScenario;
         // InitLocal loads every valid module in order, assigns dense info IDs,

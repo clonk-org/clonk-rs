@@ -454,6 +454,13 @@ pub(crate) struct GameApp {
     /// Process-local Config.Graphics.MaxRefreshDelay used by the application
     /// timer divisor. It is read once, then refreshed only after Options saves.
     pub(crate) max_refresh_delay_ms: u64,
+    /// Ceiling for the startup timer alone. Equal to `max_refresh_delay_ms`
+    /// unless `Graphics.SmoothPresentation` substituted the panel period, which
+    /// deliberately leaves the game timer on the oracle value.
+    pub(crate) startup_refresh_delay_ms: u64,
+    /// Active monitor refresh period in whole milliseconds, once a window
+    /// exists. Retained so an Options save can re-resolve the startup ceiling.
+    pub(crate) display_refresh_period_ms: Option<u64>,
     /// C4Game::pNetworkStatistics exists for every running game. Only the
     /// Pings presentation tab is conditional on an enabled network session.
     pub(crate) network_stats: Option<NetworkStats>,
@@ -3397,52 +3404,88 @@ pub(crate) struct SimulationPassOutcome {
     pub(crate) yielded_for_render: bool,
 }
 
+/// The refresh ceilings in force, one per application timer.
+///
+/// C++ has a single `Graphics.MaxRefreshDelay` because both of its timers are
+/// welded to it. The port keeps `running_ms` on the oracle value and lets the
+/// startup timer be subdivided independently, because only the startup timer is
+/// actually timer-bound: see `smooth_presentation_subdivides_only_the_startup_timer`.
+/// `From<u64>` keeps a bare ceiling meaning "both", so every C++-faithful
+/// caller reads exactly as before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RefreshCeilings {
+    pub(crate) running_ms: u64,
+    pub(crate) startup_ms: u64,
+}
+
+impl From<u64> for RefreshCeilings {
+    fn from(max_refresh_delay_ms: u64) -> Self {
+        Self {
+            running_ms: max_refresh_delay_ms,
+            startup_ms: max_refresh_delay_ms,
+        }
+    }
+}
+
 pub(crate) fn frame_schedule_for_mode(
     mode: AppMode,
     game_tick_delay_ms: u64,
     game_tick_delay_revision: u64,
-    max_refresh_delay_ms: u64,
+    ceilings: impl Into<RefreshCeilings>,
 ) -> FrameSchedule {
+    let ceilings = ceilings.into();
     match mode {
         AppMode::Menu | AppMode::Loading => FrameSchedule {
             simulation_interval: STARTUP_FRAME_INTERVAL,
-            refresh_interval: STARTUP_FRAME_INTERVAL,
+            // The startup timer takes the same ceiling. The divisor is the
+            // identity for every ceiling at or above 16 ms, so the native
+            // default leaves the startup screens exactly as they were.
+            refresh_interval: refresh_interval_for_tick(
+                STARTUP_FRAME_INTERVAL.as_millis() as u64,
+                ceilings.startup_ms,
+            ),
             running_revision: None,
         },
         AppMode::Running => {
             let game_tick_delay_ms = game_tick_delay_ms.max(1);
-            let max_refresh_ms = max_refresh_delay_ms.max(1);
-            // C4Application::SetGameTickDelay keeps graphics/input wakeups
-            // responsive at slow game speeds by choosing a divisor no larger
-            // than the configured Graphics.MaxRefreshDelay.
-            let refresh_ms = if game_tick_delay_ms < max_refresh_ms {
-                game_tick_delay_ms
-            } else {
-                game_tick_delay_ms / game_tick_delay_ms.div_ceil(max_refresh_ms)
-            };
             FrameSchedule {
                 simulation_interval: Duration::from_millis(game_tick_delay_ms),
-                refresh_interval: Duration::from_millis(refresh_ms.max(1)),
+                refresh_interval: refresh_interval_for_tick(
+                    game_tick_delay_ms,
+                    ceilings.running_ms,
+                ),
                 running_revision: Some(game_tick_delay_revision),
             }
         }
     }
 }
 
+/// `C4Application::SetGameTickDelay`'s graphics divisor: keep graphics and
+/// input wakeups responsive at slow tick rates by dividing the logic tick into
+/// whole graphics periods no longer than the configured
+/// `Graphics.MaxRefreshDelay` (C4Application.cpp:510-531). Subdividing changes
+/// only how often the frame is presented; the caller's logic tick is untouched.
+fn refresh_interval_for_tick(tick_ms: u64, max_refresh_delay_ms: u64) -> Duration {
+    let tick_ms = tick_ms.max(1);
+    let max_refresh_ms = max_refresh_delay_ms.max(1);
+    let refresh_ms = if tick_ms < max_refresh_ms {
+        tick_ms
+    } else {
+        tick_ms / tick_ms.div_ceil(max_refresh_ms)
+    };
+    Duration::from_millis(refresh_ms.max(1))
+}
+
 pub(crate) fn synchronize_frame_schedule(
     mode: AppMode,
     game_tick_delay_ms: u64,
     game_tick_delay_revision: u64,
-    max_refresh_delay_ms: u64,
+    ceilings: impl Into<RefreshCeilings>,
     frame_schedule: &mut FrameSchedule,
     accumulator: &mut Duration,
 ) -> bool {
-    let next_schedule = frame_schedule_for_mode(
-        mode,
-        game_tick_delay_ms,
-        game_tick_delay_revision,
-        max_refresh_delay_ms,
-    );
+    let next_schedule =
+        frame_schedule_for_mode(mode, game_tick_delay_ms, game_tick_delay_revision, ceilings);
     if next_schedule == *frame_schedule {
         return false;
     }
@@ -3455,7 +3498,7 @@ pub(crate) fn accumulate_frame_time_for_mode(
     mode: AppMode,
     game_tick_delay_ms: u64,
     game_tick_delay_revision: u64,
-    max_refresh_delay_ms: u64,
+    ceilings: impl Into<RefreshCeilings>,
     frame_schedule: &mut FrameSchedule,
     accumulator: &mut Duration,
     elapsed: Duration,
@@ -3469,7 +3512,7 @@ pub(crate) fn accumulate_frame_time_for_mode(
         mode,
         game_tick_delay_ms,
         game_tick_delay_revision,
-        max_refresh_delay_ms,
+        ceilings,
         frame_schedule,
         accumulator,
     );
@@ -3578,7 +3621,7 @@ pub(crate) fn advance_simulation_pass_within(
             app.mode,
             app.engine.game_tick_delay_ms(),
             app.engine.game_tick_delay_revision(),
-            app.max_refresh_delay_ms,
+            app.refresh_ceilings(),
             frame_schedule,
             accumulator,
         );
