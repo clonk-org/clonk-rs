@@ -1303,11 +1303,67 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   already derived from `planet/Graphics.c4g/Logo.png` (`xtask/src/main.rs:31-32`),
   so the window icon comes from that same file and the bundle and window chrome
   keep one identity. The logo is embedded rather than read from the data root so
-  the window still has an icon when content is missing, and it is centred on a
-  transparent square before scaling to preserve its aspect ratio — the same fit
-  the bundle icon uses. A decode failure leaves the platform default, as C++
-  does with a null `HICON`. Pinned by
+  the window still has an icon when content is missing. A decode failure leaves
+  the platform default, as C++ does with a null `HICON`. Pinned by
   `classic_window_icon_decodes_and_is_attached_to_both_shells`.
+
+- Closed 2026-07-30: **The product had no icon anywhere it is actually drawn.**
+  Three independent defects behind one symptom, plus the artwork that made the
+  fourth invisible. `clonk-icon` now owns one derivation for every consumer.
+
+  - **`cargo run` on macOS had no Dock icon at all.** winit 0.28.7 accepts a
+    window icon on macOS and discards it: its platform impl is an empty body
+    (`winit-0.28.7/src/platform_impl/macos/window.rs:1152-1162`) and the macOS
+    builder never reads the attribute, so `window_icon.rs` was dead code on
+    darwin and only a packaged `.app` ever had a tile. `dock_icon.rs` calls
+    `-[NSApplication setApplicationIconImage:]` instead, after the event loop is
+    built — winit installs its own `NSApplication` subclass by being the first
+    sender of `sharedApplication`. No C++ counterpart: `WM_SETICON` is
+    Windows-only and the SDL build relies on the bundle.
+  - **No Windows executable carried an icon resource.** There was no `.rc`, no
+    `.ico` and no resource-compiler step anywhere, so Explorer, the Start Menu
+    shortcut and Add/Remove Programs all fell back to the toolchain stub — while
+    `clonk-platform`'s `file_classes` had been registering `DefaultIcon` values
+    pointing at exe icon ordinals 1..13 that did not exist. `clonk-icon::build`
+    now emits the port's `src/res/engine.rc`: 14 `ICON` entries at ids 4000..4013
+    in engine.rc order, embedded in `clonk-app` only, as CMake appends that
+    script to the `clonk` target alone (`cmake/filelists/EngineWin32.cmake`).
+    Verified by cross-compiling: 14 `RT_GROUP_ICON` resources over 84 `RT_ICON`
+    images, ids ascending, so every ordinal resolves. The thirteen file-class
+    icons are the engine's own, recovered from `src/res` at the pinned snapshot
+    (`crates/clonk-icon/res/windows`, licence in `res/COPYING`) — there is no
+    Clonk Rust artwork for a scenario or a definition. Slot 0 is the one
+    divergence and is generated from the logo. `clonk-game` carries the
+    application icon alone: C++ has no launcher, but it is the binary
+    `scripts/windows-installer.nsi:72,79` points the shortcut and `DisplayIcon`
+    at. The installer and uninstaller take it through an optional `-DICON`,
+    which `package` writes beside the staged payload.
+  - **The `.app` icon existed and was unusable.** The `.icns` was valid, sealed
+    and correctly named all along; the source was the 972x440 two-line wordmark,
+    and squaring it left 18% of a 16px tile inked — a beige smear that reads as
+    no icon. The icon is now cut from the wordmark's leading stone "C"
+    (`APP_MARK`, 170x176, near-square), which lifts that to 65%. Consequence
+    worth stating: the mark is 176px, so every slot above it is an upscale;
+    Lanczos holds up to 512 and the 1024 `.icns` slot is soft. Pinned by
+    `the_app_icon_fills_its_smallest_tile` and, so an artwork edit fails loudly
+    rather than shipping a clipped glyph, `the_crop_rectangle_is_tight_around_the_mark`.
+  - **Both resize paths filtered straight alpha**, so the transparent margin's
+    `RGB(0,0,0)` averaged into every antialiased edge — a visible edge pixel
+    measured 17/255 before the fix. Now premultiplied. Pinned by
+    `downscaling_does_not_bleed_the_transparent_margin_into_the_edge`.
+  - Two smaller gaps closed with them: winit's `with_window_icon` fills
+    `ICON_SMALL` only, so the Windows taskbar button stretched the 64px
+    title-bar image — `with_taskbar_icon` now supplies 256; and
+    `clonk-launcher-shell` built its window with no icon on any platform.
+  - **The updater threw the icon away.** `clonk-update` swaps only
+    `Contents/MacOS`, so the `.icns` the engine component ships was extracted
+    and discarded and an install updated in place kept its original icon for
+    ever. `install_bundle_icon` renames it in before `resign_bundle`, so the new
+    seal covers it, with the old one moved outside the `.app` for rollback.
+
+  Gap: `crates/clonk-network/src/client_mesh.rs:1` has a pre-existing
+  Windows-only `unused_imports` warning, unrelated to the icons but the only
+  thing standing between a Windows `cargo check` and clean output.
 
 - **Windows taskbar loading progress landed, with a real COM backend.**
   `clonk-platform::taskbar_progress` now carries C++'s logic: `LoaderTaskbarProgress`
