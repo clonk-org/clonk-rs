@@ -316,6 +316,45 @@ pub fn edit_press(control: bool, target: Option<ObjectId>, selection: &[ObjectId
     }
 }
 
+/// One step of the console's per-tick pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsoleTickStep {
+    /// `EditCursor.Execute()` — the held-move re-issue and drop-target update.
+    EditCursor,
+    /// `PropertyDlg.Execute()`. Windows only.
+    PropertyDialog,
+    /// `ObjectListDlg.Execute()`.
+    ObjectList,
+    /// `UpdateStatusBars()`.
+    StatusBars,
+    /// `Game.GraphicsSystem.Execute()` — the graphics pass is driven *by* the
+    /// console tick, after the edit cursor has run.
+    Graphics,
+}
+
+/// `C4Console::Execute` (`C4Console.cpp:1630-1639`).
+///
+/// The order matters and is not the obvious one: in console mode the **graphics
+/// pass is driven by the console tick, and runs last** — after the edit cursor.
+/// That is why a selection resolved this tick is visible in the same frame's
+/// overlay rather than the next one. In fullscreen the driver is
+/// `C4FullScreen::Execute` instead, and this sequence does not run at all.
+///
+/// `PropertyDlg.Execute()` is inside `#ifdef _WIN32`, so the arm64 macOS
+/// reference build runs four steps, not five.
+pub fn console_tick_steps(windows: bool) -> Vec<ConsoleTickStep> {
+    let mut steps = vec![ConsoleTickStep::EditCursor];
+    if windows {
+        steps.push(ConsoleTickStep::PropertyDialog);
+    }
+    steps.extend([
+        ConsoleTickStep::ObjectList,
+        ConsoleTickStep::StatusBars,
+        ConsoleTickStep::Graphics,
+    ]);
+    steps
+}
+
 /// One object considered for a rubber-band frame.
 ///
 /// It deliberately carries no shape. `C4EditCursor::FrameSelection` tests the
@@ -502,6 +541,41 @@ mod tests {
         for (control, target) in [(true, None), (false, Some(a))] {
             assert!(edit_press(control, target, &[a]).hold);
         }
+    }
+
+    // C4Console.cpp:1630-1639 — the console tick's order, and the fact that
+    // it is what drives the graphics pass.
+    #[test]
+    fn console_tick_runs_the_edit_cursor_before_the_graphics_pass() {
+        let reference = console_tick_steps(false);
+        assert_eq!(
+            reference,
+            vec![
+                ConsoleTickStep::EditCursor,
+                ConsoleTickStep::ObjectList,
+                ConsoleTickStep::StatusBars,
+                ConsoleTickStep::Graphics,
+            ],
+            "the reference build has no PropertyDlg step"
+        );
+        // The graphics pass is last, *after* the edit cursor — which is why a
+        // selection resolved this tick shows in the same frame's overlay.
+        assert_eq!(reference.last(), Some(&ConsoleTickStep::Graphics));
+        assert!(
+            reference
+                .iter()
+                .position(|step| *step == ConsoleTickStep::EditCursor)
+                < reference
+                    .iter()
+                    .position(|step| *step == ConsoleTickStep::Graphics)
+        );
+
+        // PropertyDlg.Execute is inside #ifdef _WIN32 and slots in second.
+        assert_eq!(
+            console_tick_steps(true)[..2],
+            [ConsoleTickStep::EditCursor, ConsoleTickStep::PropertyDialog]
+        );
+        assert_eq!(console_tick_steps(true).len(), reference.len() + 1);
     }
 
     // C4EditCursor.cpp:460-471 — which objects a rubber-band drag admits.

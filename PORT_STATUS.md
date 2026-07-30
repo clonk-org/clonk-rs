@@ -1094,13 +1094,15 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   live message's frame decoration and drop it when the reloaded definition no
   longer supplies it — the port names it in a doc comment and implements
   nothing;
-  (b) the console frame-tick order `C4Console::Execute`
-  (`C4Console.cpp:1630-1639`) — `EditCursor.Execute()`, `ObjectListDlg.Execute()`,
-  `UpdateStatusBars()`, then `GraphicsSystem.Execute()`. In console mode the
-  graphics pass is driven *by the console tick, after the edit-cursor tick*,
-  which is why a selection resolved this tick is visible in the same frame's
-  overlay; in fullscreen the driver is `C4FullScreen::Execute` instead. No test
-  pins it;
+  (b) **closed** — the console frame-tick order is ported as
+  `developer_cursor::console_tick_steps` (`C4Console.cpp:1630-1639`). The order
+  is not the obvious one: in console mode the **graphics pass is driven by the
+  console tick and runs last**, after the edit cursor, which is why a selection
+  resolved this tick shows in the same frame's overlay rather than the next. In
+  fullscreen the driver is `C4FullScreen::Execute` and this sequence does not
+  run at all. `PropertyDlg.Execute()` sits inside `#ifdef _WIN32`, so the
+  reference build runs four steps, not five. Pinned by
+  `console_tick_runs_the_edit_cursor_before_the_graphics_pass`;
   (c) `C4ViewportWindow::GetPositionData` is `#ifdef _WIN32` (`C4Viewport.h:39-49`;
   `StorePosition`/`RestorePosition` exist only in the HWND `StdWindow.cpp`), so
   the arm64 macOS reference build never remembers viewport geometry. The landed
