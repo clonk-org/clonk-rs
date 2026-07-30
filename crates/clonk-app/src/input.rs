@@ -1002,10 +1002,12 @@ pub(crate) fn legacy_gamepad_axis_alias_key(
 
 /// Human-readable gamepad key label from
 /// `C4KeyCodeEx::KeyCode2String(key, true, false)`. `None` represents the
-/// default `-1`/unassigned config value.
+/// default `-1`/unassigned config value, which is not a gamepad code and so
+/// reaches the SDL branch, where an out-of-range scancode yields a non-null
+/// empty name (C4KeyboardInput.cpp:375-381) — C++ prints nothing.
 pub fn legacy_gamepad_key_label(raw_key: Option<i32>) -> String {
     let Some(raw_key) = raw_key else {
-        return "invalid".to_string();
+        return String::new();
     };
     let raw = raw_key as u32;
     if raw & 0x00ff_0000 != LEGACY_GAMEPAD_KEY_PREFIX as u32 {
@@ -1574,6 +1576,26 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
 mod tests {
     use super::*;
     use crate::control_options::format_key_label;
+
+    // An unassigned gamepad button is the default `-1` (C4Config.cpp:591-602).
+    // `KeyCode2String` fails `Key_IsGamepad` for it and drops into the SDL arm,
+    // where `SDL_GetScancodeName` answers a non-null empty string for an
+    // out-of-range scancode (verified against the installed SDL2) — so C++
+    // prints nothing at all on the key button's second line
+    // (C4KeyboardInput.cpp:333-385).
+    #[test]
+    fn unassigned_gamepad_button_has_no_caption() {
+        assert_eq!(legacy_gamepad_key_label(None), "");
+        // Assigned codes still read exactly as C4KeyCodeEx spells them.
+        assert_eq!(
+            legacy_gamepad_key_label(legacy_gamepad_button_key(0, 0)),
+            "< 1 >"
+        );
+        assert_eq!(
+            legacy_gamepad_key_label(legacy_gamepad_key(1, 1)),
+            "Joy2Left"
+        );
+    }
 
     #[test]
     fn default_player_bindings_do_not_turn_space_into_clear_pressed() {
