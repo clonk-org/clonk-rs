@@ -60,9 +60,13 @@ impl PreparedInstalledScenario {
 
     /// Apply the immutable parsed inputs to a fresh simulation instance.
     pub fn instantiate(&self) -> Engine {
+        self.instantiate_with_system_scripts(self.system_scripts.clone())
+    }
+
+    fn instantiate_with_system_scripts(&self, scripts: Vec<(String, String)>) -> Engine {
         let mut engine = Engine::with_seed(self.seed);
         engine.configure_materials_from_library(&self.materials);
-        engine.install_global_scripts(&self.system_scripts);
+        engine.install_global_scripts(&scripts);
         engine.set_standard_names(self.standard_names.clone());
         self.scenario.apply(&mut engine).unwrap_or_else(|error| {
             panic!(
