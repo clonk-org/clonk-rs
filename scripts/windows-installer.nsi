@@ -8,6 +8,12 @@
 ;   VERSION  release version, e.g. 0.2.0
 ;   PAYLOAD  absolute path to the staged clonk-rust directory
 ;   OUTFILE  absolute path of the installer to write
+;
+; Optional defines:
+;   ICON     absolute path to the product .ico, which `cargo xtask package`
+;            writes beside the staged payload. Optional so a stand-in payload
+;            still compiles; without it the installer keeps the NSIS default
+;            icon, which is the only thing here that is not the product mark.
 
 !ifndef VERSION
   !error "VERSION must be defined (-DVERSION=x.y.z)"
@@ -44,6 +50,15 @@ VIAddVersionKey "FileDescription" "Clonk Rust installer"
 VIAddVersionKey "LegalCopyright" "See COPYING"
 
 !define MUI_ABORTWARNING
+
+; The installer and uninstaller are executables of their own, so they need the
+; icon compiled in; the payload's own resources cannot reach them. Must precede
+; the page macros — MUI2 reads these when the pages are inserted.
+!ifdef ICON
+  !define MUI_ICON "${ICON}"
+  !define MUI_UNICON "${ICON}"
+!endif
+
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH

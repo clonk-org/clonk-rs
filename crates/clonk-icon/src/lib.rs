@@ -11,6 +11,9 @@
 //! them. It is deliberately a leaf: `image` is its only dependency, so a build
 //! script can depend on it without dragging in the engine.
 
+#[cfg(feature = "build-script")]
+pub mod build;
+
 /// The image every icon is cut from. Embedded so consumers that have no data
 /// root — build scripts, and the game before its paths are resolved — still
 /// produce an icon.
@@ -78,6 +81,138 @@ pub fn resize_square(square: &image::RgbaImage, side: u32) -> image::RgbaImage {
     );
     straighten(&mut scaled);
     scaled
+}
+
+/// One `ICON` entry of the Windows executable's resource table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowsIconResource {
+    /// The `engine_resource.h` symbol, kept so the table can be read against the
+    /// C++ script it mirrors.
+    pub symbol: &'static str,
+    /// The numeric resource id. Windows orders icon groups by id, and a
+    /// `DefaultIcon` ordinal indexes that order.
+    pub id: u16,
+    /// The `.ico` under `res/windows`, or `None` for the application icon, which
+    /// is generated from the logo rather than shipped as a file.
+    pub file: Option<&'static str>,
+}
+
+/// The engine's icon resources, in `src/res/engine.rc:33-46` order.
+///
+/// The order is load-bearing: `clonk-platform`'s `file_classes` writes
+/// `DefaultIcon` values of the form `<exe>,<ordinal>`, and Windows reads a
+/// positive ordinal as an index into the executable's icon groups sorted by
+/// resource id. Reordering this table silently repoints every file association
+/// at the wrong picture.
+///
+/// Slot 0 is the application icon, and it is the one deliberate divergence:
+/// C++ puts `lc.ico` there, which carries LegacyClonk's branding, while this
+/// port generates its own mark from the logo. The thirteen file-class icons are
+/// the engine's own, recovered from `src/res` at the pinned snapshot — there is
+/// no Clonk Rust artwork for a scenario, a group or a definition.
+pub const WINDOWS_ICON_RESOURCES: [WindowsIconResource; 14] = [
+    WindowsIconResource {
+        symbol: "IDI_00_C4X",
+        id: 4000,
+        file: None,
+    },
+    WindowsIconResource {
+        symbol: "IDI_01_C4S",
+        id: 4001,
+        file: Some("c4s.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_02_C4G",
+        id: 4002,
+        file: Some("c4g.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_03_C4F",
+        id: 4003,
+        file: Some("c4f.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_04_C4P",
+        id: 4004,
+        file: Some("c4p.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_05_C4X",
+        id: 4005,
+        file: Some("c4x.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_06_C4D",
+        id: 4006,
+        file: Some("c4d.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_07_C4I",
+        id: 4007,
+        file: Some("c4i.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_08_C4M",
+        id: 4008,
+        file: Some("c4m.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_09_C4B",
+        id: 4009,
+        file: Some("c4b.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_10_C4V",
+        id: 4010,
+        file: Some("c4v.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_11_C4L",
+        id: 4011,
+        file: Some("c4l.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_12_C4K",
+        id: 4012,
+        file: Some("c4k.ico"),
+    },
+    WindowsIconResource {
+        symbol: "IDI_13_C4U",
+        id: 4013,
+        file: Some("c4u.ico"),
+    },
+];
+
+/// The sizes the Windows executable resource carries, ascending.
+///
+/// Explorer, the taskbar, Alt-Tab and the jumbo view all ask for different
+/// sizes and upscale whatever is nearest, so an `.ico` with one entry looks
+/// wrong in most of them. 256 is the largest an `ICONDIRENTRY` can address.
+pub const WINDOWS_ICON_SIDES: [u32; 6] = [16, 32, 48, 64, 128, 256];
+
+/// Encodes the product icon as a Windows `.ico` carrying every size in
+/// [`WINDOWS_ICON_SIDES`].
+pub fn app_ico_bytes() -> Option<Vec<u8>> {
+    let square = square_source(LOGO_PNG)?;
+    let frames = WINDOWS_ICON_SIDES
+        .iter()
+        .map(|&side| {
+            let icon = resize_square(&square, side);
+            image::codecs::ico::IcoFrame::as_png(
+                icon.as_raw(),
+                icon.width(),
+                icon.height(),
+                image::ColorType::Rgba8,
+            )
+            .ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut bytes = Vec::new();
+    image::codecs::ico::IcoEncoder::new(&mut bytes)
+        .encode_images(&frames)
+        .ok()?;
+    Some(bytes)
 }
 
 /// Encodes an icon as a PNG.
@@ -169,6 +304,100 @@ mod tests {
             coverage >= 50,
             "the 16px icon is only {coverage}% solid, which reads as no icon at all"
         );
+    }
+
+    // `DefaultIcon` values are written as `<exe>,<ordinal>`, and Windows reads a
+    // positive ordinal as an index into the exe's icon groups sorted by resource
+    // id. So the table's ORDER is the contract, and it has to be engine.rc's.
+    #[test]
+    fn the_resource_table_mirrors_the_engine_resource_script() {
+        // `src/res/engine.rc:33-46` at the pinned snapshot, in file order.
+        let engine_rc = [
+            "IDI_00_C4X",
+            "IDI_01_C4S",
+            "IDI_02_C4G",
+            "IDI_03_C4F",
+            "IDI_04_C4P",
+            "IDI_05_C4X",
+            "IDI_06_C4D",
+            "IDI_07_C4I",
+            "IDI_08_C4M",
+            "IDI_09_C4B",
+            "IDI_10_C4V",
+            "IDI_11_C4L",
+            "IDI_12_C4K",
+            "IDI_13_C4U",
+        ];
+
+        let symbols: Vec<&str> = WINDOWS_ICON_RESOURCES
+            .iter()
+            .map(|resource| resource.symbol)
+            .collect();
+
+        assert_eq!(symbols, engine_rc.to_vec());
+        // `src/res/engine_resource.h:61-74` numbers them 4000 upwards with no
+        // gaps, which is what makes the ordinals contiguous.
+        assert!(
+            WINDOWS_ICON_RESOURCES
+                .iter()
+                .enumerate()
+                .all(|(ordinal, resource)| resource.id == 4000 + ordinal as u16),
+            "the resource ids are no longer 4000.. in table order"
+        );
+    }
+
+    // The engine registers `<exe>,1` for `.c4s`, `<exe>,6` for `.c4d` and so on
+    // (`clonk-platform`'s `file_classes`), and the ordinals it picks skip 5 and
+    // 12. Those slots still have to exist or every later ordinal shifts down.
+    #[test]
+    fn the_ordinals_the_file_classes_register_all_exist() {
+        // `C4FileClasses.cpp:47-58` icon indices, plus the protocol's `,1`.
+        let registered = [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 13];
+
+        assert!(
+            registered
+                .iter()
+                .all(|ordinal| *ordinal < WINDOWS_ICON_RESOURCES.len()),
+            "a registered DefaultIcon ordinal has no resource behind it"
+        );
+        assert!(
+            !registered.contains(&5) && !registered.contains(&12),
+            "C++ deliberately skips ordinals 5 and 12"
+        );
+    }
+
+    // Explorer picks the nearest embedded size, so an `.ico` that carries only
+    // one size is upscaled in half the places it is drawn.
+    #[test]
+    fn the_windows_icon_carries_every_size_explorer_asks_for() {
+        let ico = app_ico_bytes().expect("the product icon encodes as an .ico");
+
+        // ICONDIR: reserved 0, type 1 (icon), then the entry count.
+        assert_eq!(&ico[..4], &[0, 0, 1, 0], "not an ICONDIR");
+        let entries = u16::from_le_bytes([ico[4], ico[5]]);
+        assert_eq!(usize::from(entries), WINDOWS_ICON_SIDES.len());
+
+        // Every entry must declare its side and point at bytes inside the file.
+        // `0` means 256 in an ICONDIRENTRY, which is the only way to spell it.
+        let declared: Vec<u32> = (0..usize::from(entries))
+            .map(|index| {
+                let entry = &ico[6 + index * 16..6 + (index + 1) * 16];
+                let length =
+                    u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]) as usize;
+                let offset =
+                    u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]) as usize;
+                assert!(
+                    offset + length <= ico.len(),
+                    "entry {index} points past the end of the file"
+                );
+                if entry[0] == 0 {
+                    256
+                } else {
+                    u32::from(entry[0])
+                }
+            })
+            .collect();
+        assert_eq!(declared, WINDOWS_ICON_SIDES.to_vec());
     }
 
     // AppKit and the icon containers take an encoded image, not a raw buffer.

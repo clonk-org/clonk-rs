@@ -20,6 +20,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 
+[build-dependencies]
+# Embeds the Windows executable icon resource. The `build-script` feature stays
+# out of the normal graph, so the shipped binary does not carry the `.ico` bytes.
+clonk-icon = { path = "../clonk-icon", features = ["build-script"] }
+
 [dev-dependencies]
 tempfile = "3"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }

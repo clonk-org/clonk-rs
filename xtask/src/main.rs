@@ -27,6 +27,12 @@ const CONTENT_GAME_PACKS: [&str; 4] = [
     "ClonkMars.c4f",
 ];
 
+/// The icon `scripts/windows-installer.nsi` picks up through `-DICON`.
+///
+/// `makensis` needs a file: it decorates the installer and uninstaller
+/// executables it generates, and cannot read a resource out of the payload.
+const WINDOWS_INSTALLER_ICON: &str = "clonk-rust-installer.ico";
+
 const MACOS_APP_NAME: &str = "Clonk Rust.app";
 const MACOS_ICON_STEM: &str = "ClonkRust";
 const MACOS_ICON_SOURCE: &str = "planet/Graphics.c4g/Logo.png";
@@ -1543,6 +1549,16 @@ enum PackageOutput {
     DiskImage,
 }
 
+/// Where the installer icon goes, or `None` on a target with no installer.
+///
+/// Beside the staged tree rather than inside it: anything under the payload is
+/// copied into the install directory by `File /r`.
+fn windows_installer_icon_path(dist_dir: &Path, target_triple: &str) -> Option<PathBuf> {
+    target_triple
+        .contains("windows")
+        .then(|| dist_dir.join(WINDOWS_INSTALLER_ICON))
+}
+
 fn package_output(target_triple: &str, archive: bool) -> PackageOutput {
     if !archive {
         return PackageOutput::StagedOnly;
@@ -1605,6 +1621,15 @@ fn package(options: PackageOptions) -> Result<()> {
             sha256 = %emitted.sha256,
             "emitted update component"
         );
+    }
+
+    if let Some(icon) =
+        windows_installer_icon_path(&paths.target_dir.join("dist"), &paths.target_triple)
+    {
+        let bytes = clonk_icon::app_ico_bytes()
+            .context("failed to render the product icon as a Windows .ico")?;
+        fs::write(&icon, bytes).with_context(|| format!("failed to write {}", icon.display()))?;
+        tracing::info!(path = %icon.display(), "wrote the installer icon");
     }
 
     match output {
@@ -2998,6 +3023,33 @@ mod tests {
         assert_eq!(
             executable_bit_for_component(Path::new("Contents/Resources/ClonkRust.icns")),
             0o644
+        );
+    }
+
+    // `makensis` resolves `MUI_ICON` against a file on disk; it cannot read a
+    // resource out of the executable it is wrapping. The icon must therefore be
+    // written next to the staged tree — never inside it, or the installer would
+    // lay a stray `.ico` down in the install directory and the uninstaller would
+    // leave it behind.
+    #[test]
+    fn the_installer_icon_is_written_beside_the_staged_tree_on_windows_only() {
+        let dist = Path::new("/w/target/dist");
+
+        let windows = windows_installer_icon_path(dist, "x86_64-pc-windows-msvc");
+        assert_eq!(windows, Some(dist.join(WINDOWS_INSTALLER_ICON)));
+        assert_eq!(
+            windows.as_deref().and_then(Path::parent),
+            Some(dist),
+            "the icon must sit beside the payload, not in it"
+        );
+
+        assert_eq!(
+            windows_installer_icon_path(dist, "aarch64-apple-darwin"),
+            None
+        );
+        assert_eq!(
+            windows_installer_icon_path(dist, "x86_64-unknown-linux-gnu"),
+            None
         );
     }
 

@@ -57,6 +57,11 @@ gethostname = "1.0"
 tempfile = "3.8"
 unicode-normalization = "0.1"
 
+[build-dependencies]
+# Embeds the Windows executable icon resources. The `build-script` feature stays
+# out of the normal graph, so the shipped binary does not carry the `.ico` bytes.
+clonk-icon = { path = "../clonk-icon", features = ["build-script"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # `MainThreadMarker` lives in `objc2` itself; the `objc2-foundation` re-export is
 # deprecated, and a deprecation warning fails the `-D warnings` lint gate.

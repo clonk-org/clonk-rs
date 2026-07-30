@@ -9,11 +9,21 @@ repository.workspace = true
 readme.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# Only a build script wants this: it pulls in a resource compiler wrapper and
+# embeds the file-class `.ico` files. Cargo's v2 resolver keeps build-dependency
+# features off the normal graph, so a run-time dependant does not pay for it.
+build-script = ["dep:embed-resource"]
+
 [dependencies]
-# Feature set matches every other consumer in the workspace so the shared
-# dependency graph stays unified. This crate is also a build-dependency, where
-# a divergent feature set would compile `image` twice.
-image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+# Matches every other consumer's feature set so the shared dependency graph
+# stays unified, plus `ico` for the Windows executable resource — which is
+# itself only `bmp` + `png`, both already requested workspace-wide.
+image = { version = "0.24", default-features = false, features = ["bmp", "ico", "jpeg", "png"] }
+# Finds `rc.exe` on an MSVC host and `windres` on a mingw one, so the same build
+# script works for the native CI build and a cross build.
+embed-resource = { version = "3", optional = true }
 
 [lib]
 doctest = false

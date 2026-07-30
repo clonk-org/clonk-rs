@@ -439,10 +439,14 @@ jobs:
           # would be rewritten as a path.
           payload=$(cygpath -w "$PWD/target/dist/clonk-rust")
           outfile=$(cygpath -w "$PWD/target/dist/clonk-rust-$VERSION-x86_64-windows-setup.exe")
+          # `package` writes this beside the payload; the installer and
+          # uninstaller are separate executables and need their own copy.
+          icon=$(cygpath -w "$PWD/target/dist/clonk-rust-installer.ico")
           makensis -NOCD \
             -DVERSION="$VERSION" \
             -DPAYLOAD="$payload" \
             -DOUTFILE="$outfile" \
+            -DICON="$icon" \
             scripts/windows-installer.nsi
 
       # One pass, not one per architecture: the two builds differ only in ~20 MB
