@@ -2777,7 +2777,7 @@ fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
                    }"#,
     );
     eligible.display_flags.scroll_smooth = 1;
-        eligible.graphics.set_scroll_smooth(1);
+    eligible.graphics.set_scroll_smooth(1);
     let mut hidden = vec![0_u8; 320 * 200 * 4];
     eligible
         .render(&mut hidden)
@@ -6392,7 +6392,10 @@ fn set_next_mission_omitted_labels_use_active_runtime_resources() {
     };
 
     // Omitted arguments take the active language table.
-    run(&mut app, r#"SetNextMission("Tutorial.c4f\\Tutorial02.c4s");"#);
+    run(
+        &mut app,
+        r#"SetNextMission("Tutorial.c4f\\Tutorial02.c4s");"#,
+    );
     assert_eq!(app.engine.next_mission().text, "&Naechstes Szenario");
     assert_eq!(
         app.engine.next_mission().description,
