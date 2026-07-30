@@ -263,7 +263,52 @@ pub fn drop_target(
         .map(|candidate| candidate.id)
 }
 
-/// What releasing the left button finishes (`C4EditCursor.cpp:672-702`).
+/// One object considered for a rubber-band frame.
+///
+/// It deliberately carries no shape. `C4EditCursor::FrameSelection` tests the
+/// object's own `x`/`y`, so a wide object whose position falls outside the band
+/// is not framed even when its graphic covers the band entirely.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameCandidate {
+    pub id: ObjectId,
+    /// `!cobj->Status` — deleted objects are skipped.
+    pub deleted: bool,
+    /// `cobj->Contained`. C++ tests `cobj->OCF & OCF_NotContained`, and that
+    /// bit is set exactly when `!Contained` (`C4Object.cpp:636-637,735-736`).
+    pub contained: bool,
+    /// `cobj->x`, `cobj->y`.
+    pub x: i32,
+    pub y: i32,
+}
+
+/// `C4EditCursor::FrameSelection` (`C4EditCursor.cpp:460-471`).
+///
+/// The band is normalised per axis — `Inside(cobj->x, min(X, X2), max(X, X2))`
+/// — so every drag direction frames the same objects, and `Inside` is
+/// `>= lbound && <= rbound` (`C4Math.h:22`), so an object exactly on an edge is
+/// admitted and a zero-area band still frames what sits under the cursor.
+///
+/// `candidates` must be in `Game.Objects` First -> Next order — see
+/// [`crate::developer_inspection::master_list_order`] — because the framed
+/// objects are appended with `C4ObjectList::stNone`, which does not sort.
+pub fn frame_selection(
+    anchor: (i32, i32),
+    cursor: (i32, i32),
+    candidates: &[FrameCandidate],
+) -> Vec<ObjectId> {
+    let (left, right) = (anchor.0.min(cursor.0), anchor.0.max(cursor.0));
+    let (top, bottom) = (anchor.1.min(cursor.1), anchor.1.max(cursor.1));
+    candidates
+        .iter()
+        .filter(|candidate| !candidate.deleted && !candidate.contained)
+        .filter(|candidate| (left..=right).contains(&candidate.x))
+        .filter(|candidate| (top..=bottom).contains(&candidate.y))
+        .map(|candidate| candidate.id)
+        .collect()
+}
+
+/// What releasing the left button finishes (`C4EditCursor.cpp:287-341`, whose
+/// Edit arm runs `FrameSelection()` then `PutContents()`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EditRelease {
     /// `FrameSelection()` — the rubber-band selection is applied.
@@ -286,6 +331,71 @@ pub fn edit_release(drag_frame: bool, drop_target: Option<ObjectId>) -> Vec<Edit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C4EditCursor.cpp:460-471 — which objects a rubber-band drag admits.
+    #[test]
+    fn frame_selection_admits_master_order_positions_inside_the_normalised_band() {
+        let candidate = |id: u64, x: i32, y: i32| FrameCandidate {
+            id: ObjectId(id),
+            deleted: false,
+            contained: false,
+            x,
+            y,
+        };
+        let candidates = [
+            // Inside, but deleted: `if (cobj->Status)` rejects it.
+            FrameCandidate {
+                deleted: true,
+                ..candidate(1, 50, 50)
+            },
+            // Inside, but contained: OCF_NotContained is set exactly when
+            // `!Contained` (C4Object.cpp:636-637).
+            FrameCandidate {
+                contained: true,
+                ..candidate(2, 50, 50)
+            },
+            candidate(3, 50, 50),
+            // Exactly on both bounds. `Inside` is `>= lbound && <= rbound`
+            // (C4Math.h:22) — inclusive, so this is admitted.
+            candidate(4, 20, 20),
+            candidate(5, 80, 80),
+            // Outside on one axis only.
+            candidate(6, 50, 81),
+            candidate(7, 19, 50),
+        ];
+
+        assert_eq!(
+            frame_selection((20, 20), (80, 80), &candidates),
+            vec![ObjectId(3), ObjectId(4), ObjectId(5)],
+            "master order is preserved and the bounds are inclusive"
+        );
+
+        // `Inside(cobj->x, min(X, X2), max(X, X2))` — the band is normalised
+        // per axis, so any drag direction frames the same objects.
+        for (anchor, cursor) in [
+            ((80, 80), (20, 20)),
+            ((20, 80), (80, 20)),
+            ((80, 20), (20, 80)),
+        ] {
+            assert_eq!(
+                frame_selection(anchor, cursor, &candidates),
+                vec![ObjectId(3), ObjectId(4), ObjectId(5)],
+                "dragging {anchor:?} -> {cursor:?} frames the same set"
+            );
+        }
+
+        // The test is on the object's own x/y, not on its shape rectangle: a
+        // wide object centred outside the band is not framed even though it
+        // covers it. This is why FrameCandidate carries no shape at all.
+        let wide = candidate(8, 200, 50);
+        assert!(frame_selection((20, 20), (80, 80), &[wide]).is_empty());
+
+        // A degenerate band still admits an object at exactly that point.
+        assert_eq!(
+            frame_selection((50, 50), (50, 50), &candidates),
+            vec![ObjectId(3)]
+        );
+    }
 
     // C4EditCursor.cpp:540-556,594-605,683-692 — the mode cycle, its editing
     // gate, and the context entries each mode and selection enables.
