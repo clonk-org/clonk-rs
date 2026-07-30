@@ -1011,7 +1011,13 @@ pub fn legacy_gamepad_key_label(raw_key: Option<i32>) -> String {
     };
     let raw = raw_key as u32;
     if raw & 0x00ff_0000 != LEGACY_GAMEPAD_KEY_PREFIX as u32 {
-        return "invalid".to_string();
+        // Not a gamepad code, so `KeyCode2String` skips the gamepad block and
+        // takes the platform branch — on the SDL build that names the scancode
+        // and answers an empty string for anything out of range
+        // (C4KeyboardInput.cpp:336,375-381).
+        return decode_platform_key_code(raw_key)
+            .map(crate::control_options::format_key_label)
+            .unwrap_or_default();
     }
     let gamepad = ((raw >> 8) & 0xff) + 1;
     let button = (raw & 0xff) as u8;
@@ -1025,10 +1031,15 @@ pub fn legacy_gamepad_key_label(raw_key: Option<i32>) -> String {
             let extent = if button & 1 == 0 { "Min" } else { "Max" };
             format!("[{axis}] {extent}")
         }
-        LEGACY_GAMEPAD_BUTTON_OFFSET..=LEGACY_GAMEPAD_BUTTON_MAX => {
-            format!("< {} >", 1 + button - LEGACY_GAMEPAD_BUTTON_OFFSET)
-        }
-        _ => "invalid".to_string(),
+        // A plain `else` over `Key_GetGamepadButtonIndex`, which subtracts
+        // `KEY_JOY_Button1` in `uint8` and therefore wraps
+        // (C4KeyboardInput.cpp:355-363, C4KeyboardInput.h:112-116). Codes below
+        // `KEY_JOY_Button1` or past `KEY_JOY_AxisMax` print the wrapped index,
+        // exactly as C++ does, rather than an invented sentinel.
+        _ => format!(
+            "< {} >",
+            1 + u32::from(button.wrapping_sub(LEGACY_GAMEPAD_BUTTON_OFFSET))
+        ),
     }
 }
 
@@ -1586,6 +1597,7 @@ mod tests {
     #[test]
     fn unassigned_gamepad_button_has_no_caption() {
         assert_eq!(legacy_gamepad_key_label(None), "");
+        assert_eq!(legacy_gamepad_key_label(Some(-1)), "");
         // Assigned codes still read exactly as C4KeyCodeEx spells them.
         assert_eq!(
             legacy_gamepad_key_label(legacy_gamepad_button_key(0, 0)),
@@ -1595,6 +1607,25 @@ mod tests {
             legacy_gamepad_key_label(legacy_gamepad_key(1, 1)),
             "Joy2Left"
         );
+
+        // `KeyCode2String`'s button arm is a plain `else` over a wrapping uint8
+        // index (C4KeyboardInput.cpp:355-363, C4KeyboardInput.h:112-116), so any
+        // gamepad code outside the four axis-direction and axis ranges reads as a
+        // button — including the wrapped nonsense C++ itself prints.
+        assert_eq!(legacy_gamepad_key_label(Some(0x0042_0000)), "< 247 >");
+        assert_eq!(legacy_gamepad_key_label(Some(0x0042_0005)), "< 252 >");
+        assert_eq!(legacy_gamepad_key_label(Some(0x0042_002a)), "< 33 >");
+        assert_eq!(legacy_gamepad_key_label(Some(0x0042_0051)), "< 72 >");
+        assert_eq!(legacy_gamepad_key_label(Some(0x0042_00ff)), "< 246 >");
+        // The named arms are unchanged.
+        assert_eq!(legacy_gamepad_key_label(Some(0x0042_0029)), "< 32 >");
+        assert_eq!(legacy_gamepad_key_label(Some(0x0042_0030)), "[1] Min");
+        assert_eq!(legacy_gamepad_key_label(Some(0x0042_0031)), "[1] Max");
+        assert_eq!(legacy_gamepad_key_label(Some(0x0042_0104)), "Joy2Down");
+
+        // A non-gamepad code names its scancode instead of a sentinel; SDL
+        // scancode 20 is Q (verified against the installed SDL2).
+        assert_eq!(legacy_gamepad_key_label(Some(20)), "Q");
     }
 
     #[test]

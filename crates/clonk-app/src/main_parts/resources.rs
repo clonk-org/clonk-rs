@@ -3413,7 +3413,7 @@ pub(crate) fn load_options_control_state(
                 .get(control)
                 .and_then(|id| keyboard.key_for_set(set, *id))
                 .map(format_key_label)
-                .unwrap_or_else(|| "Undefined".to_string())
+                .unwrap_or_default()
         })
     });
     let gamepad_labels = std::array::from_fn(|set| {
@@ -3421,7 +3421,7 @@ pub(crate) fn load_options_control_state(
             ControlBindingId::ALL
                 .get(control)
                 .map(|id| gamepad.key_label_for_set(set, *id))
-                .unwrap_or_else(|| "Undefined".to_string())
+                .unwrap_or_default()
         })
     });
     clonk_frontend::startup_options_controls::ControlSheetState::new(

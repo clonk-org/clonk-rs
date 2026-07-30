@@ -1590,7 +1590,7 @@ impl GameApp {
                         .bindings
                         .key_for_set(set, id)
                         .map(format_key_label)
-                        .unwrap_or_else(|| "Undefined".to_string()),
+                        .unwrap_or_default(),
                     clonk_frontend::startup_options_controls::ControlDevice::Gamepad => {
                         self.gamepad_bindings.key_label_for_set(set, id)
                     }
