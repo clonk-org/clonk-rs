@@ -5221,6 +5221,47 @@ fn l097_options_gamepad_device_claim_switches_and_releases() {
     assert_eq!(app.gamepads.options_open_slot(), None);
 }
 
+// `OnGUIGamepadCheckChange` ends in `RecreateDialog(false)`
+// (C4StartupOptionsDlg.cpp:429-438), which builds a brand-new dialog through
+// `SwitchDialog(SDID_Options)` (:1331) — so both `ControlConfigArea`s are
+// reconstructed and their `iSelectedCtrlSet` returns to `C4P_Control_Keyboard1`
+// (:284) — then restores the active sheet index (:1332).
+#[test]
+fn toggling_gamepad_gui_control_recreates_the_options_dialog() {
+    use clonk_frontend::startup_options_controls::ControlDevice;
+    use clonk_frontend::startup_options_dlg::{OptionsDlgAction, OptionsSheet};
+
+    let mut app = new_classic_menu_app(640, 480);
+    app.open_options_menu();
+    {
+        let dialog = app.startup_options_dialog.as_mut().expect("options dialog");
+        dialog.restore_sheet(OptionsSheet::Gamepad);
+        assert!(dialog.controls_mut().select_set(ControlDevice::Keyboard, 2));
+    }
+    app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadGuiControlChanged(true)])
+        .expect("recreate Options after toggling gamepad GUI control");
+
+    let dialog = app
+        .startup_options_dialog
+        .as_ref()
+        .expect("recreated options dialog");
+    assert_eq!(
+        dialog.active_sheet(),
+        OptionsSheet::Gamepad,
+        "SelectSheet(iPage, false) restores the page",
+    );
+    assert_eq!(
+        dialog.controls().selected_set(ControlDevice::Keyboard),
+        0,
+        "the rebuilt ControlConfigArea starts on set 0",
+    );
+    assert_eq!(dialog.controls().selected_set(ControlDevice::Gamepad), 0);
+    assert!(
+        dialog.controls().gamepad_gui_control(),
+        "the new dialog reads the flag it was rebuilt for",
+    );
+}
+
 // `KeySelButton::DrawElement` prints `KeyCode2String(key, true, false)` verbatim
 // (C4StartupOptionsDlg.cpp:243), and for the factory-default gamepad config every
 // button is `-1` (C4Config.cpp:591-602), which reaches the SDL branch and yields a
@@ -5705,13 +5746,18 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
         .expect("same-dialog Options reconstruction fades");
     assert_eq!(recreate.outgoing, Some(StartupDialog::Options));
     assert_eq!(recreate.incoming, StartupDialog::Options);
+    // `OnGUIGamepadCheckChange` calls `RecreateDialog(false)`
+    // (C4StartupOptionsDlg.cpp:437), which constructs a *new* dialog through
+    // `SwitchDialog` (:1331) and so re-reads Config — an unsaved dialog-local
+    // edit does not survive (:1325-1334).
     assert!(
-        options
+        !options
             .startup_options_dialog
             .as_ref()
             .expect("recreated Options dialog")
             .program()
-            .preloading
+            .preloading,
+        "the rebuilt dialog re-reads Config instead of keeping dialog-local state",
     );
     options
         .resize(400, 300)
@@ -5721,14 +5767,6 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
         .as_ref()
         .expect("same-dialog fade restarts after resize");
     assert_eq!((resized.width, resized.height, resized.step), (400, 300, 0));
-    assert!(
-        options
-            .startup_options_dialog
-            .as_ref()
-            .expect("resized Options dialog")
-            .program()
-            .preloading
-    );
     options.open_network_lobby();
     assert!(
         options.startup_dialog_fade.is_none(),

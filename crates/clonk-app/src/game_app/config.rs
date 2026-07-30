@@ -1059,7 +1059,26 @@ impl GameApp {
                 OptionsDlgAction::GamepadGuiControlChanged(enabled) => {
                     self.gamepad_gui_control = enabled;
                     self.play_ui_sound("ArrowHit");
+                    // `RecreateDialog(false)` (C4StartupOptionsDlg.cpp:437)
+                    // constructs a whole new dialog through `SwitchDialog`
+                    // (:1331), then restores only the active sheet index (:1332)
+                    // — every other child, including both `ControlConfigArea`s,
+                    // is rebuilt from Config.
+                    let return_sheet = self
+                        .startup_options_dialog
+                        .as_ref()
+                        .map(|dialog| dialog.active_sheet());
+                    self.startup_tooltip.pointer_left();
+                    // `RecreateDialog` forces `fFade = true` (:1328), so the old
+                    // dialog is retained to fade out before the new one appears.
                     self.begin_startup_dialog_fade(StartupDialog::Options);
+                    self.open_options_menu();
+                    if let (Some(dialog), Some(sheet)) =
+                        (self.startup_options_dialog.as_mut(), return_sheet)
+                    {
+                        dialog.restore_sheet(sheet);
+                    }
+                    self.sync_options_gamepad_device();
                 }
                 OptionsDlgAction::OpenNetworkText(field) => {
                     self.open_options_network_input(field)?;
