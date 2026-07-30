@@ -1293,6 +1293,7 @@ impl GameApp {
                 scenario_path,
                 &savegame.runtime_players,
                 &savegame.external_player_paths,
+                savegame.save_game,
             )
             .map_err(EngineError::from)?;
         let mut local_players = Vec::new();
