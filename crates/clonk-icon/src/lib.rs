@@ -16,25 +16,50 @@
 /// produce an icon.
 pub const LOGO_PNG: &[u8] = include_bytes!("../../../planet/Graphics.c4g/Logo.png");
 
-/// Composites the logo onto a transparent square.
+/// The leading stone "C" of the wordmark, as `(x, y, width, height)` in
+/// [`LOGO_PNG`] pixels.
 ///
-/// The logo is wider than it is tall, so it is centred rather than stretched.
+/// The wordmark is 2.2:1, so squaring the whole of it letterboxes the mark into
+/// a strip that is illegible below about 48px — which is most of the places an
+/// icon is drawn. Its first glyph is a near-square stone "C" that reads at every
+/// size, and cutting the icon from it keeps one product identity in one source
+/// image. The glyphs overlap, so the right edge is the narrowest column between
+/// the "C" and the "L" rather than a transparent gap.
+const APP_MARK: (u32, u32, u32, u32) = (134, 30, 170, 176);
+
+/// Cuts the icon's mark out of the logo and composites it onto a transparent
+/// square.
+///
 /// Padding with a background colour is not an option: the icon has to sit on
 /// whatever the Dock, the taskbar or a file manager puts behind it.
 pub fn square_source(png: &[u8]) -> Option<image::RgbaImage> {
     let logo = image::load_from_memory(png).ok()?.to_rgba8();
-    let side = logo.width().max(logo.height());
+    let mark = app_mark(&logo);
+    let side = mark.width().max(mark.height());
     if side == 0 {
         return None;
     }
     let mut square = image::RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 0, 0]));
     image::imageops::overlay(
         &mut square,
-        &logo,
-        i64::from((side - logo.width()) / 2),
-        i64::from((side - logo.height()) / 2),
+        &mark,
+        i64::from((side - mark.width()) / 2),
+        i64::from((side - mark.height()) / 2),
     );
     Some(square)
+}
+
+/// Crops [`APP_MARK`] out of the logo.
+///
+/// A source that does not contain the rectangle is used whole: the rectangle
+/// describes one specific image, and a caller handing over another one wants
+/// that image scaled, not an empty icon.
+fn app_mark(logo: &image::RgbaImage) -> image::RgbaImage {
+    let (x, y, width, height) = APP_MARK;
+    if logo.width() < x + width || logo.height() < y + height {
+        return logo.clone();
+    }
+    image::imageops::crop_imm(logo, x, y, width, height).to_image()
 }
 
 /// Scales a square icon source to `side` pixels.
@@ -103,6 +128,63 @@ mod tests {
             .filter_map(|pixel| pixel.0[..3].iter().copied().min())
             .min()
             .expect("the scaled icon has visible pixels")
+    }
+
+    /// The share of a tile the viewer sees as solid, which is what makes an icon
+    /// read as a mark rather than as a smudge.
+    fn solid_coverage_percent(icon: &image::RgbaImage) -> u32 {
+        let solid = icon.pixels().filter(|pixel| pixel.0[3] >= 128).count();
+        (100 * solid as u32) / (icon.width() * icon.height())
+    }
+
+    // The smallest tile is the honest test of an app icon: a Finder list row and
+    // a crowded taskbar both draw it at 16px. A wordmark squared up covers 18%
+    // of that tile and reads as a beige smear; a real mark fills it.
+    #[test]
+    fn the_app_icon_fills_its_smallest_tile() {
+        let square = square_source(LOGO_PNG).expect("the embedded product logo decodes");
+
+        let coverage = solid_coverage_percent(&resize_square(&square, 16));
+
+        assert!(
+            coverage >= 50,
+            "the 16px icon is only {coverage}% solid, which reads as no icon at all"
+        );
+    }
+
+    // `APP_MARK` is tied to one specific image. If the logo is ever redrawn or
+    // repositioned, the mark stops touching its own crop edges — clipped on one
+    // side, floating on another — and that has to fail here rather than ship.
+    #[test]
+    fn the_crop_rectangle_is_tight_around_the_mark() {
+        let logo = image::load_from_memory(LOGO_PNG)
+            .expect("the embedded product logo decodes")
+            .to_rgba8();
+        let mark = app_mark(&logo);
+        assert_ne!(
+            mark.dimensions(),
+            logo.dimensions(),
+            "the crop rectangle no longer fits inside the logo"
+        );
+
+        let (width, height) = mark.dimensions();
+        let inked = |x: u32, y: u32| mark.get_pixel(x, y).0[3] >= 8;
+        assert!(
+            (0..width).any(|x| inked(x, 0)),
+            "the mark does not reach the top of its crop"
+        );
+        assert!(
+            (0..width).any(|x| inked(x, height - 1)),
+            "the mark does not reach the bottom of its crop"
+        );
+        assert!(
+            (0..height).any(|y| inked(0, y)),
+            "the mark does not reach the left of its crop"
+        );
+        assert!(
+            (0..height).any(|y| inked(width - 1, y)),
+            "the mark does not reach the right of its crop"
+        );
     }
 
     // A hard edge between opaque white and transparent black. Filtering straight
