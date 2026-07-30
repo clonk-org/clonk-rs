@@ -95,6 +95,52 @@ on budget exhaustion. Run it by hand before opening a pull request.
 Hooks are advisory (`--no-verify` exists, and agents drive git
 non-interactively). CI remains the gate.
 
+## Pull requests — how work lands
+
+`main` is protected and lands through a **merge queue**. Do not push to `main`.
+Admin bypass makes it possible, which is exactly why this is written down: at
+~150 commits a day from parallel worktree sessions, a direct push is a change
+verified against a base that was already stale. On 2026-07-29 `fix: install
+Pillow for CI script tests` landed at 22:50 and was gone from `main` by 23:09,
+pushed away by a session that had merged `main` into a branch predating it. CI
+was red for hours over a fix that had already been written.
+
+One pull request per worktree session:
+
+```sh
+git push -u origin "$(git branch --show-current)"
+gh pr create --fill        # subject line only, exactly like the commit
+gh pr merge --auto         # queues it; the queue owns the merge method
+```
+
+`--auto` is the point. The queue rebases your branch onto `main` *plus every
+entry ahead of you*, runs the long gates against that exact result, and
+fast-forwards only if they pass — so two independently green pull requests can
+no longer break `main` together, and nothing serialises on you rebasing by
+hand. Because it rebases, your commits land individually: the structural /
+behavioural split survives, so keep making it.
+
+What runs where:
+
+| | Jobs | When |
+|---|---|---|
+| Per pull request | formatting, workspace lints, focused feedback, macOS material-order oracles, Windows launcher and installer | every push to the branch, ~14 min |
+| In the queue | full parity gate, code coverage, MSVC runtime builds | once per batch of up to 10 |
+
+A green pull request is therefore **not** a green parity gate, and an entry can
+be evicted from the queue after the pull request itself went green. That is the
+system working: the determinism gates are proven against what actually lands.
+
+- Run the [required gates](#done--all-required-gates-green) locally *before*
+  opening the pull request. The queue is a safety net, not your test runner —
+  an eviction costs the whole batch a re-run.
+- Expect `--no-verify` on push. `rustfmt-pushed-commits` runs rustfmt over
+  `crates/clonk-app/src/main_tests/*.rs`, which are `include!` fragments that
+  `cargo fmt --all` never descends into, so it reports drift the CI gate does
+  not have. Confirm with `cargo fmt --all -- --check`, then push through it.
+- Pushing straight to `main` is break-glass for a broken queue only. If you
+  take it, say so in the pull request or commit that follows.
+
 ## Rust style
 
 - Prefer functional combinators (`map`/`and_then`/`unwrap_or`/`ok_or`/`filter`)
