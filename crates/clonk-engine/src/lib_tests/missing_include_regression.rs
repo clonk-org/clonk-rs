@@ -322,6 +322,38 @@ fn appendto_nowarn_suppresses_only_its_missing_target_warning() {
     assert_eq!(loud_messages, ["script to #appendto not found"]);
 }
 
+/// The port's own `planet/System.c4g` appends target EkeReloaded-only
+/// definitions (SF5B `EkeReloaded.c4d/Creatures.c4d/SFT.c4d`, RL5B
+/// `EkeReloaded.c4d/Weapons.c4d/RocketLauncher.c4d`), which every other
+/// scenario leaves unloaded. C4Aul's `nowarn` suffix is exactly the marker for
+/// an optional target (C4AulLink.cpp:42-49), so an engine-global append that
+/// omits it warns on every single launch.
+#[test]
+fn shipped_global_appends_stay_quiet_without_their_optional_targets() {
+    let sources: Vec<(String, String)> = [
+        (
+            "EkeSftRelease.c",
+            include_str!("../../../../planet/System.c4g/EkeSftRelease.c"),
+        ),
+        (
+            "EkeGuidedMissile.c",
+            include_str!("../../../../planet/System.c4g/EkeGuidedMissile.c"),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, source)| (name.to_owned(), source.to_owned()))
+    .collect();
+
+    let mut engine = Engine::new();
+    assert_eq!(engine.install_global_scripts(&sources), sources.len());
+
+    let messages = capture_warnings(|| engine.resolve_appends());
+    assert!(
+        messages.is_empty(),
+        "shipped global appends must not warn without EkeReloaded: {messages:?}"
+    );
+}
+
 #[test]
 fn circular_includes_follow_definition_load_order_and_warn_once() {
     for order in [["CYCA", "CYCB"], ["CYCB", "CYCA"]] {
