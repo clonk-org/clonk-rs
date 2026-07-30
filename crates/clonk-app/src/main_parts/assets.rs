@@ -7927,6 +7927,20 @@ pub(crate) fn run_sandbox_dump(
     Ok(())
 }
 
+/// The Options tab named by an `options:<sheet>` menu view.
+fn options_sheet_by_name(name: &str) -> Option<clonk_frontend::startup_options_dlg::OptionsSheet> {
+    use clonk_frontend::startup_options_dlg::OptionsSheet;
+    match name.to_ascii_lowercase().as_str() {
+        "program" => Some(OptionsSheet::Program),
+        "graphics" => Some(OptionsSheet::Graphics),
+        "sound" => Some(OptionsSheet::Sound),
+        "keyboard" => Some(OptionsSheet::Keyboard),
+        "gamepad" => Some(OptionsSheet::Gamepad),
+        "network" => Some(OptionsSheet::Network),
+        _ => None,
+    }
+}
+
 /// Headless: boot to the startup main menu (`AppMode::Menu`), render one frame to
 /// the renderer's CPU surface, and write it as a PNG. Counterpart of
 /// `run_sandbox_dump` for startup-menu rendering-parity checks against the C++
@@ -8004,6 +8018,20 @@ pub(crate) fn run_menu_dump(
     if let Some(item) = item {
         app.handle_main_menu_activation(item)
             .map_err(|err| anyhow::anyhow!("activating menu view `{menu_view}`: {err}"))?;
+    }
+    // "options:<sheet>" opens the named tab, the way clicking its tab clip does,
+    // so a capture can target one sheet instead of the default Program page.
+    if view_name == "options" {
+        if let Some(name) = folder_path {
+            let sheet = options_sheet_by_name(name)
+                .ok_or_else(|| anyhow::anyhow!("unknown Options sheet `{name}`"))?;
+            app.startup_options_dialog
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("Options dialog is not open"))?
+                .restore_sheet(sheet);
+            app.mark_menu_dirty();
+        }
+        return finish_menu_dump(&mut app, dump_path);
     }
     if let Some(path) = folder_path {
         for segment in path.split('/').filter(|segment| !segment.is_empty()) {
