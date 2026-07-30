@@ -911,7 +911,7 @@ fn apply_live_target_bounds(
 /// map-border limits gated on `Def->BorderBound` — landscape solidity never
 /// enters it. Runs Contact callbacks, so callers must hold no object-scope
 /// borrow across it.
-fn bounds_check_live_object(target: ObjectId, position: &mut Vector2) {
+pub(crate) fn bounds_check_live_object(target: ObjectId, position: &mut Vector2) {
     let layer_side = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()

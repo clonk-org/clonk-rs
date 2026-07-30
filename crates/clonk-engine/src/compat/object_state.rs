@@ -5210,75 +5210,8 @@ pub(crate) fn get_def_bottom(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-fn apply_position_bounds(
-    desired: Vector2,
-    vertices: &[ObjectVertex],
-    landscape: Option<&Landscape>,
-) -> Vector2 {
-    let mut bounded = desired;
-    let Some(landscape) = landscape else {
-        return bounded;
-    };
-
-    let width = landscape.width() as i32;
-    if width > 0 {
-        let (mut min_allowed, mut max_allowed) = if vertices.is_empty() {
-            (0, width.saturating_sub(1))
-        } else {
-            vertices
-                .iter()
-                .fold((i32::MIN, i32::MAX), |(min_acc, max_acc), vertex| {
-                    (
-                        min_acc.max(-vertex.x),
-                        max_acc.min(width.saturating_sub(1).saturating_sub(vertex.x)),
-                    )
-                })
-        };
-
-        if min_allowed == i32::MIN {
-            min_allowed = 0;
-        }
-        if max_allowed == i32::MAX {
-            max_allowed = width.saturating_sub(1);
-        }
-
-        if min_allowed <= max_allowed {
-            bounded.x = bounded.x.clamp(min_allowed, max_allowed);
-        } else {
-            bounded.x = bounded.x.clamp(0, width.saturating_sub(1));
-        }
-    }
-
-    let min_y_allowed = if vertices.is_empty() {
-        0
-    } else {
-        vertices.iter().map(|vertex| -vertex.y).max().unwrap_or(0)
-    };
-
-    let mut max_y_allowed = i32::MAX;
-    if vertices.is_empty() {
-        if let Some(surface_y) = landscape.surface_height(bounded.x) {
-            max_y_allowed = surface_y;
-        }
-    } else {
-        for vertex in vertices {
-            let world_x = bounded.x.saturating_add(vertex.x);
-            if let Some(surface_y) = landscape.surface_height(world_x) {
-                max_y_allowed = max_y_allowed.min(surface_y - vertex.y);
-            }
-        }
-    }
-
-    if max_y_allowed < min_y_allowed {
-        max_y_allowed = min_y_allowed;
-    }
-
-    bounded.y = bounded.y.clamp(min_y_allowed, max_y_allowed);
-    bounded
-}
-
 pub(crate) fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
-    // Unfilled iX/iY are nil -> 0 (FnSetPosition, C4Script.cpp:462).
+    // Unfilled iX/iY are nil -> 0 (FnSetPosition, C4Script.cpp:465).
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetPosition", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetPosition", "y")?;
 
@@ -5312,34 +5245,35 @@ pub(crate) fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    try_with_host_context_mut("SetPosition requires an active engine context", |context| {
-        let landscape_snapshot = if check_bounds {
-            context.landscape_ref().cloned()
-        } else {
-            None
-        };
+    // FnSetPosition (C4Script.cpp:465-481): no pObj means the caller,
+    // and ANY object force-positions live (`pObj->ForcePosition`) — the
+    // BAS7 MoveOutClonk loop repositions a FOREIGN stuck object and
+    // re-reads it within the same call.
+    let target =
+        try_with_host_context_mut("SetPosition requires an active engine context", |context| {
+            let active = context.object_context().map(|object| object.id());
+            Ok(target_id
+                .or(active)
+                .filter(|target| context.ensure_object_scope(*target)))
+        })?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
 
-        // FnSetPosition (C4Script.cpp:462-477): no pObj means the caller,
-        // and ANY object force-positions live (`pObj->ForcePosition`) — the
-        // BAS7 MoveOutClonk loop repositions a FOREIGN stuck object and
-        // re-reads it within the same call.
-        let active = context.object_context().map(|object| object.id());
-        let Some(target) = target_id.or(active) else {
-            return Ok(Value::Bool(false));
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
+    let mut position = Vector2::new(x, y);
+    if check_bounds {
+        // fCheckBounds is C4Object::BoundsCheck (C4Script.cpp:470-476) —
+        // pLayer and map-border limits under Def->BorderBound, never
+        // landscape solidity. It can run Contact callbacks, so it must not
+        // hold an object scope.
+        bounds_check_live_object(target, &mut position);
+    }
+
+    try_with_host_context_mut("SetPosition requires an active engine context", |context| {
         let changed = {
             let Some(scope) = context.object_scope_mut(target) else {
                 return Ok(Value::Bool(false));
             };
-
-            let mut position = Vector2::new(x, y);
-            if check_bounds {
-                let vertices: Vec<ObjectVertex> = scope.vertices().to_vec();
-                position = apply_position_bounds(position, &vertices, landscape_snapshot.as_ref());
-            }
 
             let changed = scope.effective_position() != position;
             scope.set_position(position);
@@ -5348,7 +5282,7 @@ pub(crate) fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
         if changed {
             // C4Object::ForcePosition removes and re-puts the live mask only
             // after the integer X/Y early-return gate (C4Movement.cpp:
-            // 536-545). The C4SolidMask instance itself survives.
+            // 552-561). The C4SolidMask instance itself survives.
             context.update_live_solid_mask(target, false);
         }
         Ok(Value::Bool(true))
