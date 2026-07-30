@@ -32,6 +32,17 @@ class ReleasePrepareWorkflowTests(unittest.TestCase):
         self.assertNotIn("schedule:", publish)
         self.assertNotIn("workflow_dispatch:", publish)
 
+    def test_publish_resolver_does_not_depend_on_the_skipped_legacy_job(self):
+        workflow = PUBLISH.read_text(encoding="utf-8")
+        resolve = workflow.split("\n  resolve:\n", 1)[1].split(
+            "\n  build:\n", 1
+        )[0]
+
+        self.assertNotIn("needs: [prepare]", resolve)
+        self.assertNotIn("needs.prepare", resolve)
+        self.assertIn("ref: ${{ github.sha }}", resolve)
+        self.assertIn("RESOLVED_SHA: ${{ github.sha }}", resolve)
+
     def test_app_created_pr_runs_the_repository_checks(self):
         workflow = PREPARE.read_text(encoding="utf-8")
 
