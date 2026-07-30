@@ -913,13 +913,28 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   the projection each window was last drawn with, keyed by physical identity.
   That is the port's form of C++ getting it for free from the `C4Viewport`
   object that both draws and handles input.
+  The overlay hook is wired too: `render_console_viewport` calls
+  `developer_overlay`'s draw list where `C4Viewport::Draw` calls
+  `Console.EditCursor.Draw(cgo)` — after the foreground objects, before the
+  per-player HUD, gated on `!Application.isFullScreen`
+  (`C4Viewport.cpp:1102-1108`). Only `SelectMark` is painted; the other
+  commands need the drag gestures, and drawing half a rubber band would be
+  worse than drawing none.
+  Resolving the mark's rectangle needed one addition. `DrawSelectMark` frames
+  the object's **live** `C4Shape` — stretched by `Con`, rotated by `r` — and
+  `ObjectSnapshot::current_shape` carries that only when it is not
+  reconstructible, so it is usually `None`. `EditCursorHitTest::shape_rect`
+  resolves it through the *same* world view the hit test uses, which is what
+  makes the mark and the click agree about what was clicked.
+  **Not yet verified:** that the mark is *visible*. A test proves the shape
+  resolves non-empty, but a frame drawn with a selection was byte-identical to
+  one without — consistent with the mark landing outside an ownerless
+  viewport's view rather than with a computation failure, though that has not
+  been confirmed. Do not assume this renders until someone has seen it.
   **Still open:** motion and release. `edit_move`, `edit_tick_move`,
   `edit_release`, `drop_target` and `frame_selection` are ported and tested but
   still uncalled, so a drag neither moves a selection nor completes a rubber
-  band, and no `EMMO_Move`/`EMMO_Enter` control is ever emitted. The overlay is
-  likewise undrawn: `developer_overlay` has the draw list and
-  `viewport_draw_order` has its insertion point, but the detached render does
-  not yet call the hook.
+  band, and no `EMMO_Move`/`EMMO_Enter` control is ever emitted.
 
 - **Most of the edit-cursor interaction layer still has no production caller.**
   Worth
