@@ -292,6 +292,11 @@ pub enum ControlMessage {
     /// case, so a stock peer ignores the ID entirely. See
     /// [`crate::capabilities`].
     PortCapabilities(crate::PortCapabilities),
+    /// The host announcing that the session about to close is being restarted,
+    /// not lost. See [`crate::host_restart`].
+    HostRestarting {
+        rejoin_seconds: u16,
+    },
 }
 
 #[derive(Debug)]
@@ -638,6 +643,9 @@ impl<S> ControlTransport<S> {
             ControlMessage::PortCapabilities(capabilities) => {
                 frame.extend(crate::encode_port_capabilities(capabilities));
             }
+            ControlMessage::HostRestarting { rejoin_seconds } => {
+                frame.extend(crate::encode_host_restart_notice(rejoin_seconds));
+            }
             ControlMessage::ExecSync { control_tick } => {
                 frame.push(PID_EXEC_SYNC_CTRL);
                 let control_tick = i32::try_from(control_tick)
@@ -814,6 +822,11 @@ fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> 
             .map(ControlMessage::PortCapabilities)
             .ok_or(TransportError::UnsupportedPacket(
                 crate::PID_PORT_CAPABILITIES,
+            )),
+        crate::PID_PORT_HOST_RESTARTING => crate::decode_host_restart_notice(body)
+            .map(|rejoin_seconds| ControlMessage::HostRestarting { rejoin_seconds })
+            .ok_or(TransportError::UnsupportedPacket(
+                crate::PID_PORT_HOST_RESTARTING,
             )),
         other => Err(TransportError::UnsupportedPacket(other)),
     }
@@ -1322,6 +1335,28 @@ mod tests {
             parse_control_message(&frame[FRAME_HEADER_LEN..]).expect("announcement decodes");
 
         assert_eq!(decoded, ControlMessage::PortCapabilities(announced));
+    }
+
+    /// The restart notice rides the ordinary frame codec for the same reason
+    /// the capability announcement does. A host tears its whole session down to
+    /// restart a round, and the socket close alone is indistinguishable from a
+    /// dead host (src/C4Network2.cpp:1826-1832), so the intent has to be stated
+    /// on the wire before the teardown.
+    #[test]
+    fn a_host_restart_notice_round_trips_through_the_frame_codec() {
+        let frame = ControlTransport::<tokio::io::DuplexStream>::encode_message_frame(
+            ControlMessage::HostRestarting { rejoin_seconds: 30 },
+        )
+        .expect("notice encodes");
+
+        assert_eq!(frame[FRAME_HEADER_LEN], crate::PID_PORT_HOST_RESTARTING);
+
+        let decoded = parse_control_message(&frame[FRAME_HEADER_LEN..]).expect("notice decodes");
+
+        assert_eq!(
+            decoded,
+            ControlMessage::HostRestarting { rejoin_seconds: 30 }
+        );
     }
 
     /// A stock C++ peer never sends this, so the port must never *require* it —

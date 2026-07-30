@@ -578,6 +578,12 @@ fn plan_test_path(plan: &mut CheckPlan, path: &str, reason: &str) -> bool {
     let Some(package) = crate_package(&format!("{prefix}/src/lib.rs")) else {
         return false;
     };
+    // clonk-network disables Cargo's automatic integration targets and
+    // includes every tests/*.rs file from its single declared harness.
+    if package == "clonk-network" {
+        add_test_target(plan, &package, "integration", None, reason);
+        return true;
+    }
     let parts: Vec<&str> = tail.split('/').collect();
     match parts.as_slice() {
         [file] if file.ends_with(".rs") => {
@@ -1908,6 +1914,33 @@ mod tests {
             "real_alchemy_revision::",
         ]));
         assert_eq!(plan.commands.len(), 2, "hygiene plus the focused module");
+    }
+
+    #[test]
+    fn declared_main_harness_owns_its_sibling_test_modules() {
+        // `crates/clonk-network/Cargo.toml` declares the sole `integration`
+        // target at `tests/main.rs`; sibling `.rs` files are modules in that
+        // harness, not standalone Cargo integration-test targets.
+        let plan = plan_for_paths(
+            &["crates/clonk-network/tests/initial_network_dynamic.rs"],
+            false,
+        );
+        assert!(plan.has_args(&[
+            "nextest",
+            "run",
+            "-p",
+            "clonk-network",
+            "--test",
+            "integration",
+        ]));
+        assert!(!plan.has_args(&[
+            "nextest",
+            "run",
+            "-p",
+            "clonk-network",
+            "--test",
+            "initial_network_dynamic",
+        ]));
     }
 
     #[test]

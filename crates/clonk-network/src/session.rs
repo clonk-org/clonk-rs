@@ -665,6 +665,7 @@ mod tests {
                     outbound,
                 },
             )]),
+            accepted_route_waiters: Vec::new(),
             control_send_time_epoch: 0,
             closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
             pending_sync: Vec::new(),
@@ -2167,6 +2168,66 @@ mod tests {
         drop(alice);
         drop(bob);
         host.shutdown().await.unwrap();
+    }
+
+    /// A restart notice is only meaningful from the host, and the client can
+    /// only judge that by which route it arrived on. `PID_FwdReq` relays a
+    /// client's opaque nested packet onto the host's own route
+    /// (src/C4Network2IO.cpp:1066-1082), so the relay — not the receiver — is
+    /// the only place that can tell the two apart. Left open, any admitted peer
+    /// could tear down another player's round.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_cannot_forge_a_restart_notice_through_the_forward_relay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut attacker, _attacker_id) = raw_client_transport(address, b"Mallory").await;
+        let (mut victim, _victim_id) = raw_client_transport(address, b"Alice").await;
+        drain_raw_client(&mut attacker).await;
+        drain_raw_client(&mut victim).await;
+
+        attacker
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: crate::encode_host_restart_notice(30),
+            }))
+            .await
+            .unwrap();
+
+        let forged = ControlMessage::HostRestarting { rejoin_seconds: 30 };
+        assert!(
+            !raw_client_received_message(&mut victim, &forged, Duration::from_millis(200)).await,
+            "the host relayed a peer's restart notice as its own"
+        );
+
+        drop(attacker);
+        drop(victim);
+        host.shutdown().await.unwrap();
+    }
+
+    /// The restart notice exists only to be read *before* the disconnect it
+    /// predicts, and the host sends it while already on its way down. If the
+    /// teardown could overtake it, every client would still see a bare socket
+    /// close and fall back to the native dead-host path
+    /// (src/C4Network2.cpp:1826-1832) — the notice has to survive the shutdown
+    /// that immediately follows it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restart_notice_outruns_the_host_shutdown_behind_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut alice, _) = raw_client_transport(address, b"Alice").await;
+        let (mut bob, _) = raw_client_transport(address, b"Bob").await;
+        drain_raw_client(&mut alice).await;
+        drain_raw_client(&mut bob).await;
+
+        host.broadcast_host_restarting(30).await.unwrap();
+        host.shutdown().await.unwrap();
+
+        let expected = ControlMessage::HostRestarting { rejoin_seconds: 30 };
+        assert!(raw_client_received_message(&mut alice, &expected, EVENT_WAIT).await);
+        assert!(raw_client_received_message(&mut bob, &expected, EVENT_WAIT).await);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5266,7 +5327,7 @@ mod tests {
     async fn dual_client_reconnects_a_missing_tcp_route() {
         let host_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let host_tcp_address = host_listener.local_addr().unwrap();
-        let host = start_host(
+        let mut host = start_host(
             host_listener,
             HostConfig {
                 udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
@@ -5279,6 +5340,8 @@ mod tests {
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_address = proxy_listener.local_addr().unwrap();
         let (cut_first, cut_first_rx) = oneshot::channel();
+        let (first_cut, first_cut_rx) = oneshot::channel();
+        let (resume_reconnect, resume_reconnect_rx) = oneshot::channel();
         let proxy = tokio::spawn(async move {
             let (mut client, _) = proxy_listener.accept().await.unwrap();
             let mut host = TcpStream::connect(host_tcp_address).await.unwrap();
@@ -5289,6 +5352,8 @@ mod tests {
             let _ = cut_first_rx.await;
             first.abort();
             let _ = first.await;
+            let _ = first_cut.send(());
+            let _ = resume_reconnect_rx.await;
 
             let (mut client, _) = proxy_listener.accept().await.unwrap();
             let mut host = TcpStream::connect(host_tcp_address).await.unwrap();
@@ -5301,15 +5366,17 @@ mod tests {
         )
         .await
         .unwrap();
-        let initial_routes = timeout(EVENT_WAIT, async {
-            loop {
-                let routes = host.accepted_routes().await;
-                if routes.len() == 2 {
-                    break routes;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
+        let mut host_events = host.take_event_receiver();
+        // This is a deadlock guard at native C4NetPingTimeout, not a
+        // reconnect-performance assertion. Native retries are timer-driven
+        // and may legitimately wait beyond five seconds
+        // (oracle-src-pinned src/C4Network2Client.cpp:126-184;
+        // src/C4Network2IO.cpp:1155-1182).
+        let route_lifecycle_wait = Duration::from_millis(crate::PING_TIMEOUT_MS as u64);
+        let initial_routes = timeout(
+            route_lifecycle_wait,
+            host.wait_for_accepted_routes_change(BTreeSet::new(), 2),
+        )
         .await
         .expect("dual routes were not established");
         let initial_ids = initial_routes
@@ -5317,22 +5384,60 @@ mod tests {
             .map(|(connection_id, _, _)| *connection_id)
             .collect::<BTreeSet<_>>();
         cut_first.send(()).unwrap();
+        // C4Network2IO reports a disconnect only after the socket has closed,
+        // then C4Network2 removes that route before recovery can reconnect it
+        // (oracle-src-pinned src/C4Network2IO.cpp:533-567;
+        // src/C4Network2.cpp:866-905). Start the recovery deadline at that
+        // same observable boundary, not when this task merely asks the proxy
+        // task to cut the route.
+        timeout(route_lifecycle_wait, first_cut_rx)
+            .await
+            .expect("proxy did not cut the initial TCP route")
+            .expect("proxy dropped the route-cut acknowledgement");
 
-        timeout(EVENT_WAIT, async {
+        let surviving_routes = timeout(
+            route_lifecycle_wait,
+            host.wait_for_accepted_routes_change(initial_ids.clone(), 1),
+        )
+        .await
+        .expect("host did not retire the cut TCP route");
+        assert_eq!(surviving_routes.len(), 1);
+
+        while host_events.try_recv().is_ok() {}
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: 17,
+        };
+        client.submit_status_ack(status).await.unwrap();
+        timeout(route_lifecycle_wait, async {
             loop {
-                let routes = host.accepted_routes().await;
-                let route_ids = routes
-                    .iter()
-                    .map(|(connection_id, _, _)| *connection_id)
-                    .collect::<BTreeSet<_>>();
-                if routes.len() == 2 && route_ids != initial_ids {
+                if matches!(
+                    host_events.recv().await,
+                    Some(HostEvent::StatusAck {
+                        client_id,
+                        status: received,
+                    }) if client_id == client.client_id() && received == status
+                ) {
                     break;
                 }
-                tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("missing TCP protocol was not reconnected");
+        .expect("the surviving UDP route did not carry message traffic");
+
+        resume_reconnect.send(()).unwrap();
+        let reconnected_routes = timeout(
+            route_lifecycle_wait,
+            host.wait_for_accepted_routes_change(initial_ids.clone(), 2),
+        )
+        .await
+        .expect("missing TCP protocol was not eventually reconnected");
+        let reconnected_ids = reconnected_routes
+            .iter()
+            .map(|(connection_id, _, _)| *connection_id)
+            .collect::<BTreeSet<_>>();
+        assert_ne!(reconnected_ids, initial_ids);
 
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
@@ -13775,12 +13880,43 @@ mod tests {
         host.submit_exec_sync(2)
             .await
             .expect("empty sync release is accepted");
-        assert!(timeout(Duration::from_millis(50), host_events.recv())
+        // ExecSyncControl returns before sending PID_ExecSyncCtrl when the
+        // synchronized queue is empty (src/C4GameControlNetwork.cpp:267-269,
+        // 281-283). ReadyCheck is an ordered message-stream sentinel: seeing
+        // it proves the preceding host command and every earlier wire packet
+        // have been handled without mistaking a delayed StatusAck or ping for
+        // an empty Sync release.
+        let empty_release_barrier = ReadyCheckPacket {
+            client_id: HOST_CLIENT_ID as i32,
+            data: crate::ReadyCheckData::Other(0x5359),
+        };
+        host.submit_ready_check(empty_release_barrier)
             .await
-            .is_err());
-        assert!(timeout(Duration::from_millis(50), client_events.recv())
-            .await
-            .is_err());
+            .expect("submit empty-release barrier");
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client empty-release barrier wait")
+            {
+                Some(ClientEvent::ReadyCheck { packet }) if packet == empty_release_barrier => {
+                    break;
+                }
+                Some(ClientEvent::SyncScheduled { .. } | ClientEvent::ExecSync { .. }) => {
+                    panic!("empty Sync release reached the client")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before empty-release barrier"),
+            }
+        }
+        while let Ok(event) = host_events.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::SyncScheduled { .. } | HostEvent::ExecSync { .. }
+                ),
+                "empty Sync release reached the host"
+            );
+        }
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
@@ -15263,6 +15399,7 @@ mod tests {
                 | ClientEvent::ResourceLoadFailed { .. }
                 | ClientEvent::ResourceDeriveUnsupported { .. }
                 | ClientEvent::LeagueRoundResults { .. }
+                | ClientEvent::HostRestarting { .. }
                 | ClientEvent::UnhandledPacket { .. }
                 | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
@@ -15856,6 +15993,38 @@ mod tests {
         assert_eq!(departures, 1);
 
         host.shutdown().await.unwrap();
+    }
+
+    /// The notice has to reach the app as its own event while the connection
+    /// is still up, because the disconnect that follows carries no reason a
+    /// client could act on.
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_surfaces_a_host_restart_notice_before_the_disconnect() {
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+
+        host_transport
+            .send_message(ControlMessage::HostRestarting { rejoin_seconds: 30 })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::HostRestarting { rejoin_seconds: 30 })
+        ));
+
+        drop(host_transport);
+        let _ = timeout(EVENT_WAIT, client_loop).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17536,6 +17705,7 @@ mod tests {
                 | Ok(Some(ClientEvent::ResourceLoadFailed { .. }))
                 | Ok(Some(ClientEvent::ResourceDeriveUnsupported { .. })) => continue,
                 Ok(Some(ClientEvent::LeagueRoundResults { .. })) => continue,
+                Ok(Some(ClientEvent::HostRestarting { .. })) => continue,
                 Ok(Some(ClientEvent::UnhandledPacket { .. })) => continue,
                 Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {

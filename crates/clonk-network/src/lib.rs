@@ -14,6 +14,7 @@ mod forward_packet;
 mod host_game_reference;
 mod host_initial_resources;
 mod host_resource_core;
+mod host_restart;
 mod http_backend;
 mod initial_network_dynamic;
 mod initial_network_metadata;
@@ -70,6 +71,10 @@ pub use capabilities::{
 };
 pub use clonk_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 pub use control_latency::ControlLatencyEstimator;
+pub use host_restart::{
+    decode_host_restart_notice, encode_host_restart_notice, DEFAULT_HOST_RESTART_REJOIN_SECONDS,
+    PID_PORT_HOST_RESTARTING,
+};
 pub use join_client_registry::{reconcile_join_client_registry, JoinClientRegistrySnapshot};
 pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};
 pub use join_team_registry::{JoinTeamListSnapshot, JoinTeamSnapshot};

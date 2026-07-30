@@ -745,6 +745,17 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `FnGainMissionAccess` (`C4Script.cpp:2466-2471`) and the cheat-code
   add/remove (`C4StartupScenSelDlg.cpp:1838-1856`), change the string in memory
   and return; `C4StartupScenSelDlg.cpp` contains no `Config.Save()` at all.
+  Only the cheat-code site could *queue* that write, though — `GainMissionAccess`
+  grows the list inside the engine, through the store both share — so both flush
+  points now snapshot the live `General.MissionAccess`, exactly as `Config.Save()`
+  writes the whole in-memory config. An empty list is skipped: C++ suppresses
+  `Save()` when the config never loaded (`C4Application.cpp:367`), which is the
+  state a failed read leaves here. The same list is what `CanOpen` tests
+  (`C4StartupScenSelDlg.cpp:743`); the network branch used to re-read the config
+  *file* instead, so every password earned this session stayed locked in the
+  network selector while the local selector already honoured it. Pinned by
+  `script_earned_mission_access_reaches_the_saved_config` and
+  `network_mission_access_gate_honours_memory_only_grant`.
   The four `[Sound]` toggles defer too: `C4SoundSystem::ToggleOnOff` is
   `enabled = !enabled` with no save (`C4SoundSystem.cpp:138-142`), and neither
   `C4SoundSystem.cpp` nor `C4MainMenu.cpp` contains a `Config.Save()`.
@@ -1674,13 +1685,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   test wants an injectable send seam so the congested case can be simulated
   without a real blocked socket.
 
-- Flaky test (observed 2026-07-24, not fixed): `clonk-network`
-  `session::tests::dual_client_reconnects_a_missing_tcp_route` failed once in a
-  full `cargo nextest run --workspace` and was not reproducible — 5/5 green in
-  isolation and the immediately following full workspace run was 8828/8828. It
-  is a real-socket reconnect test, so it is load/timing sensitive like the
-  `control_sync_and_reconnect_smoke` case that already carries `retries = 2` in
-  `.config/nextest.toml`. Root-cause it rather than adding another retry.
+- Flaky test (fixed 2026-07-29): `clonk-network`
+  `session::tests::dual_client_reconnects_a_missing_tcp_route` started its
+  reconnect deadline as soon as it asked the proxy task to cut TCP, before
+  that task had been scheduled to abort and await its copier and thereby drop
+  both sockets. It then polled the host through its command channel on every
+  scheduler yield; those queued inspection commands deliberately take priority
+  over network arms and could starve the very disconnect/admission events the
+  test awaited. The proxy now acknowledges completed cancellation, an
+  event-driven host barrier observes route removal and replacement without
+  command flooding, and the test proves UDP traffic remains live while TCP is
+  held absent. Its only lifecycle deadline is the native 30-second ping-timeout
+  horizon, not a Rust-only immediate-redial requirement; no retry was added.
 - Flaky test (observed 2026-07-24, not fixed): `clonk-network`
   `session::tests::sync_controls_wait_for_status_barrier_and_keep_fifo_order`
   failed once in a full workspace run at `session.rs:13493`, asserting that no
@@ -2524,6 +2540,48 @@ an ordered-map model gap.
   (quiet inside the window, strictly higher holes continue immediately, the
   first ask's deadline survives continuations) remains C++'s and is still
   asserted.
+
+- **Restarting a network round returns every client to the lobby**
+  (`clonk-network/src/host_restart.rs` PID `0x71`,
+  `GameApp::announce_network_round_restart`,
+  `GameApp::begin_pending_host_rejoin`,
+  `GameApp::poll_pending_host_rejoin`; C++ `C4Application::QuitGame`
+  src/C4Application.cpp:373-405, `C4Network2::Clear` src/C4Network2.cpp:748-796,
+  `C4Network2::OnClientDisconnect` src/C4Network2.cpp:1802-1834). Approved
+  2026-07-29. A restart re-hosts from scratch — C++ backs up only
+  `NetworkActive` and the password, runs `Game.Clear()` (which closes `NetIO`
+  and drops every connection), then re-enters `Game::Init` with `fLobby` set.
+  Clients therefore observe nothing but a closed socket, which
+  `OnClientDisconnect` reads as a dead host: it records `NR_NetError` and calls
+  `Clear()`, so each client is left alone in the abandoned round with
+  `ChangeToLocal` while the host's new lobby comes up empty. Nothing in C++ can
+  distinguish this from a crash — there is no restart packet, and `C4Game::Clear`
+  zeroes `DirectJoinAddress` (src/C4Game.cpp:648-651), so a native client can
+  only rejoin by hand. The port states the intent on the wire instead: the host
+  broadcasts `PID_PortHostRestarting` before tearing down, and a client that
+  receives it leaves the round and reconnects to the address it already joined,
+  retrying once a second across the host's re-bind window (30 s by default,
+  carried in the packet and clamped locally to 120 s) before falling back to the
+  ordinary join failure. The reconnect repeats the *same join* — the retained
+  `ClientSettings`, so the password, netpuncher brokerage and full route list
+  survive — rather than rebuilding one from config. This is a
+  lobby/session-lifecycle change only: the notice never enters the control
+  queue, so control ticks, `RandomCount` and simulation state are untouched.
+  **Note on the port-only ID range:** the rationale in
+  `crates/clonk-network/src/capabilities.rs` — that C++ silently ignores an
+  unknown packet ID — is wrong. `C4IDPacket::CompileFunc` `excCorrupt`s on an ID
+  with no `FnUnpack` and `C4Network2IO::HandlePacket` catches that and closes
+  the connection in a release build (src/C4Network2IO.cpp:820-834,
+  src/C4Packet2.cpp:210-217). That is harmless for *this* packet, because the
+  host sends it immediately before closing the session anyway, so a C++ client
+  loses the connection it was about to lose and keeps native behavior. It is not
+  a general licence, and `capabilities.rs`'s own claim should be revisited.
+  Because a relayed `PID_FwdReq` reaches its target on the host's route and is
+  indistinguishable from a host-authored packet, the host refuses to relay the
+  whole `0x7x` port-only range
+  (`a_client_cannot_forge_a_restart_notice_through_the_forward_relay`).
+  Without the notice the client path is byte-identical to today's, pinned by
+  `client_host_socket_loss_continues_the_running_round_locally`.
 
 ## Preserve
 

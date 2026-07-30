@@ -96,6 +96,8 @@ pub(crate) struct HostState {
     pub(crate) scheduler: ResyncScheduler,
     pub(crate) clients: BTreeMap<ClientId, ClientConnection>,
     pub(crate) accepted_routes: BTreeMap<u32, AcceptedConnectionRoute>,
+    #[cfg(test)]
+    pub(crate) accepted_route_waiters: Vec<AcceptedRouteWaiter>,
     pub(crate) control_send_time_epoch: u64,
     pub(crate) closed_routes: crate::post_mortem::ClosedConnectionRouter,
     pub(crate) pending_sync: Vec<clonk_engine::ControlPacket>,
@@ -130,6 +132,14 @@ pub(crate) struct HostState {
     /// Bounded, presentation-only NORMAL/ME controls for late lobby joiners.
     pub(crate) lobby_chat_history: VecDeque<Vec<u8>>,
     pub(crate) event_tx: mpsc::Sender<HostEvent>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct AcceptedRouteWaiter {
+    pub(crate) initial_ids: BTreeSet<u32>,
+    pub(crate) expected_count: usize,
+    pub(crate) completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
 }
 
 impl HostState {

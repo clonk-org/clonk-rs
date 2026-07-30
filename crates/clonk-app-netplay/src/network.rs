@@ -1642,6 +1642,16 @@ impl TestNetworkCommands {
         ticks
     }
 
+    pub fn take_host_restart_broadcasts(&mut self) -> Vec<u16> {
+        let mut observed = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::BroadcastHostRestarting { rejoin_seconds } = command {
+                observed.push(rejoin_seconds);
+            }
+        }
+        observed
+    }
+
     pub fn take_lobby_start_commands(&mut self) -> Vec<TestLobbyStartCommand> {
         let mut observed = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -2567,6 +2577,12 @@ pub enum NetworkEvent {
     PeerConnectionFailed {
         client_id: ClientId,
     },
+    /// The host is closing this session to restart the round and expects to be
+    /// reachable again at the same address. Always precedes the matching
+    /// `PeerDisconnected`. See [`clonk_network::host_restart`].
+    HostRestarting {
+        rejoin_seconds: u16,
+    },
     NetpuncherStateChanged {
         game_ids: clonk_network::NetpuncherGameIds,
         local_addresses: Vec<NetworkAddress>,
@@ -2826,6 +2842,9 @@ enum NetworkCommand {
     SubmitVoteEnd(clonk_engine::VoteControlData),
     SubmitReadyCheck(clonk_network::ReadyCheckPacket),
     SubmitLobbyCountdown(clonk_network::LobbyCountdownPacket),
+    BroadcastHostRestarting {
+        rejoin_seconds: u16,
+    },
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -3742,6 +3761,25 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitLobbyCountdown(packet))
             .map_err(|_| anyhow!("network worker is not accepting lobby countdowns"))
+    }
+
+    /// Announces that this session is closing to restart the round, so clients
+    /// follow the host into the new lobby instead of reading the imminent
+    /// disconnect as a dead host.
+    ///
+    /// Deliberately does not wait for the notice to reach the wire: the app
+    /// tears the manager down immediately afterwards, and `Drop` queues
+    /// `Shutdown` behind this on the same channel. The worker's own await of
+    /// the session broadcast is what orders the bytes ahead of the teardown.
+    pub fn broadcast_host_restarting(&self, rejoin_seconds: u16) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may announce a round restart"
+            ));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::BroadcastHostRestarting { rejoin_seconds })
+            .map_err(|_| anyhow!("network worker is not accepting a restart notice"))
     }
 
     pub fn publish_runtime_dynamic(
@@ -6604,6 +6642,15 @@ async fn run_host_worker(
                             .await
                             .map_err(|error| anyhow!("host lobby-countdown submission failed: {error}"))?;
                     }
+                    // Awaited, not fired and forgotten: the app queues Shutdown
+                    // directly behind this, and only the resolved broadcast
+                    // guarantees the notice is on every route before the host
+                    // loop is torn down.
+                    NetworkCommand::BroadcastHostRestarting { rejoin_seconds } => {
+                        host.broadcast_host_restarting(rejoin_seconds)
+                            .await
+                            .map_err(|error| anyhow!("host restart notice failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -7619,6 +7666,11 @@ async fn run_client_worker(
                             "client attempted to submit an authoritative vote result".to_string(),
                         ));
                     }
+                    NetworkCommand::BroadcastHostRestarting { .. } => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to announce a host round restart".to_string(),
+                        ));
+                    }
                     NetworkCommand::SubmitReadyCheck(packet) => {
                         client
                             .submit_ready_check(packet)
@@ -8012,6 +8064,9 @@ async fn handle_client_event(
         }
         ClientEvent::LobbyCountdown { packet } => {
             let _ = event_tx.send(NetworkEvent::LobbyCountdown(packet));
+        }
+        ClientEvent::HostRestarting { rejoin_seconds } => {
+            let _ = event_tx.send(NetworkEvent::HostRestarting { rejoin_seconds });
         }
         ClientEvent::ReadyCheck { packet } => {
             let _ = event_tx.send(NetworkEvent::ReadyCheck(packet));
@@ -13323,6 +13378,48 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(
             event_rx.recv().expect("status event"),
             NetworkEvent::StatusCommitted(status)
+        );
+    }
+
+    /// The notice is queued on the same command channel the teardown uses, so
+    /// FIFO ordering — not a completion the app would have to block on — is
+    /// what keeps `Shutdown` behind it.
+    #[test]
+    fn only_a_host_broadcasts_a_restart_notice() {
+        let (host, _host_events, mut host_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        let (client, _client_events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+
+        host.broadcast_host_restarting(30)
+            .expect("host queues the restart notice");
+        assert!(client.broadcast_host_restarting(30).is_err());
+
+        assert_eq!(host_commands.take_host_restart_broadcasts(), vec![30]);
+        assert!(client_commands.take_host_restart_broadcasts().is_empty());
+    }
+
+    /// The app is the only layer that can act on a restart notice — it owns the
+    /// round teardown and the rejoin — so the worker must surface it verbatim
+    /// rather than folding it into the disconnect that follows.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_host_restart_notice_is_forwarded_to_the_app() {
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+
+        handle_client_event(
+            ClientEvent::HostRestarting { rejoin_seconds: 30 },
+            0,
+            7,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward host restart notice");
+
+        assert_eq!(
+            event_rx.recv().expect("restart notice event"),
+            NetworkEvent::HostRestarting { rejoin_seconds: 30 }
         );
     }
 
