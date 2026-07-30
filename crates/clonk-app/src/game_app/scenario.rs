@@ -782,12 +782,16 @@ impl GameApp {
                 match preflight_offline_startup(&path) {
                     Ok(preflight) => {
                         let configured = load_snapshotted_client_players(paths, &selection);
-                        if preflight.save_game {
+                        // `InitPlayers` enters the recreation branch on the
+                        // restore list alone, "for savegames or regular
+                        // scenarios with restore infos" (C4Game.cpp:2841-2843).
+                        if preflight.save_game || preflight.restore_player_infos {
                             let language_packs = classic_language_packs(paths);
                             let (startup, savegame) = prepare_offline_savegame_startup(
                                 &path,
                                 configured,
                                 preflight.max_players,
+                                preflight.save_game,
                                 &languages,
                                 &language_packs,
                             )?;

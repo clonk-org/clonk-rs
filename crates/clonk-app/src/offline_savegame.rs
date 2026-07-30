@@ -36,6 +36,7 @@ pub(super) fn prepare_offline_savegame_startup(
     scenario_path: &Path,
     configured: ConfiguredClientPlayers,
     declared_max_players: i32,
+    save_game: bool,
     languages: &[String],
     language_packs: &LanguagePacks,
 ) -> Result<(OfflineStartupPlayers, OfflineSavegameStartup), String> {
@@ -75,15 +76,13 @@ pub(super) fn prepare_offline_savegame_startup(
         .iter()
         .map(|client| client.players.len())
         .sum::<usize>();
-    let effective_max_players =
-        declared_max_players.max(i32::try_from(restore_count).unwrap_or(i32::MAX));
     let mut startup = OfflineStartupPlayers::new_after_player_id(
         configured,
-        effective_max_players,
+        effective_offline_max_players(declared_max_players, restore_count, save_game),
         restore.last_player_id,
     );
     let (runtime_players, external_player_paths, wild_takeovers) =
-        associate_offline_savegame_players(&mut startup, &restore);
+        associate_offline_savegame_players(&mut startup, &restore, save_game);
 
     Ok((
         startup,
@@ -96,11 +95,21 @@ pub(super) fn prepare_offline_savegame_startup(
     ))
 }
 
+/// `C4Game::Init` raises the frozen player capacity to the restore-row count
+/// behind `if (C4S.Head.SaveGame)`, so a regular scenario shipping restore
+/// infos keeps its declared C4S/Parameters capacity (C4Game.cpp:242-250).
+fn effective_offline_max_players(declared: i32, restore_count: usize, save_game: bool) -> i32 {
+    save_game
+        .then(|| declared.max(i32::try_from(restore_count).unwrap_or(i32::MAX)))
+        .unwrap_or(declared)
+}
+
 /// Mirrors `InitLocal`, `CreateRestoreInfosForJoinedScriptPlayers`, and the
 /// automatic non-network passes in `RestoreSavegameInfos`.
 fn associate_offline_savegame_players(
     startup: &mut OfflineStartupPlayers,
     restore: &clonk_network::PlayerInfoListSnapshot,
+    save_game: bool,
 ) -> (
     Vec<RuntimeJoinPlayerSource>,
     HashMap<i32, PathBuf>,
@@ -118,6 +127,7 @@ fn associate_offline_savegame_players(
             startup.player_info.clone(),
             &configured_paths,
             restore,
+            save_game,
         );
     startup.replace_player_info(player_info);
     (runtime_players, external_player_paths, wild_takeovers)
@@ -127,6 +137,7 @@ fn associate_offline_savegame_player_info(
     mut player_info: clonk_engine::PlayerInfoControlData,
     configured_paths: &[PathBuf],
     restore: &clonk_network::PlayerInfoListSnapshot,
+    save_game: bool,
 ) -> (
     clonk_engine::PlayerInfoControlData,
     Vec<RuntimeJoinPlayerSource>,
@@ -156,8 +167,11 @@ fn associate_offline_savegame_player_info(
         player_info.players.push(script);
     }
 
+    // The automatic passes run for non-network savegames only; a regular
+    // scenario shipping restore infos keeps its participants unassociated
+    // (C4PlayerInfo.cpp:1372).
     let mut wild_takeovers = Vec::new();
-    for matching_level in 0..=3 {
+    for matching_level in save_game.then_some(0..=3).unwrap_or(1..=0) {
         for player_index in 0..player_info.players.len() {
             if player_info.players[player_index].savegame_player != 0 {
                 continue;
@@ -367,6 +381,7 @@ mod tests {
                 PathBuf::from("Players/Dave.c4p"),
             ],
             &restore,
+            true,
         );
 
         // Every participant is still assigned; the warning changes nothing.
@@ -449,6 +464,7 @@ mod tests {
                 PathBuf::from("Players/New.c4p"),
             ],
             &restore,
+            true,
         );
 
         assert_eq!(player_info.players.len(), 3);
@@ -464,6 +480,84 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![7, 9]
         );
+    }
+
+    /// `RestoreSavegameInfos` runs its automatic association passes only for
+    /// non-network *savegames* (C4PlayerInfo.cpp:1372). A regular scenario
+    /// shipping restore infos leaves its participants unassociated; only the
+    /// unconditional script copy made by
+    /// `CreateRestoreInfosForJoinedScriptPlayers` survives
+    /// (C4PlayerInfo.cpp:1288,1326-1358).
+    #[test]
+    fn regular_scenario_restore_infos_skip_automatic_savegame_matching() {
+        let player_info = PlayerInfoControlData {
+            client_id: 0,
+            players: vec![ControlPlayerInfoEntry {
+                name: c4("Alice"),
+                filename: c4("Players/Alice.c4p"),
+                id: 41,
+                original_color: 0x11,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // An exact filename+name match: a savegame would grab it on the first
+        // pass, so only the SaveGame gate can keep it unassociated.
+        let alice = ControlPlayerInfoEntry {
+            name: c4("Alice"),
+            filename: c4("Players/Alice.c4p"),
+            flags: PLAYER_INFO_FLAG_JOINED,
+            id: 1,
+            original_color: 0x11,
+            ..Default::default()
+        };
+        let script = ControlPlayerInfoEntry {
+            name: c4("$TeamEnemy$"),
+            filename: c4("ScriptPlr-1.c4p"),
+            flags: PLAYER_INFO_FLAG_JOINED,
+            id: 2,
+            player_type: PLAYER_INFO_TYPE_SCRIPT,
+            ..Default::default()
+        };
+        let restore = PlayerInfoListSnapshot {
+            last_player_id: 2,
+            clients: vec![ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![alice, script],
+            }],
+        };
+
+        let (player_info, sources, paths, wild) = associate_offline_savegame_player_info(
+            player_info,
+            &[PathBuf::from("Players/Alice.c4p")],
+            &restore,
+            false,
+        );
+
+        assert_eq!(
+            player_info.players[0].savegame_player, 0,
+            "a non-savegame never takes over a saved user player",
+        );
+        assert!(wild.is_empty());
+        assert!(paths.is_empty());
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.info.id)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "only the copied script player is recreated",
+        );
+    }
+
+    /// `C4Game::Init` raises the frozen capacity to the restore-row count
+    /// behind `if (C4S.Head.SaveGame)` (C4Game.cpp:242-250).
+    #[test]
+    fn restore_rows_raise_the_player_capacity_only_for_savegames() {
+        assert_eq!(effective_offline_max_players(2, 4, true), 4);
+        assert_eq!(effective_offline_max_players(2, 4, false), 2);
+        assert_eq!(effective_offline_max_players(6, 4, true), 6);
     }
 
     #[test]
