@@ -352,7 +352,8 @@ jobs:
             libxmp4 \
             libudev-dev \
             mesa-vulkan-drivers \
-            pkg-config
+            pkg-config \
+            python3-pil
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1

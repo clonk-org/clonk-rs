@@ -62,6 +62,15 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn(f"run: {command}", lint_block)
         self.assertNotIn(command, full_parity)
 
+    def test_full_parity_installs_script_runtime_dependencies(self):
+        workflow = WORKFLOWS[0].read_text(encoding="utf-8")
+        full_parity = workflow[workflow.index("  full-parity:") :]
+        script_tests = full_parity.index(
+            "- name: Run repository script tests"
+        )
+
+        self.assertIn("python3-pil", full_parity[:script_tests])
+
 
 if __name__ == "__main__":
     unittest.main()
