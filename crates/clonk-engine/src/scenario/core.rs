@@ -4430,6 +4430,15 @@ impl Scenario {
             }
             compiled.set_components(definition.components.clone());
             compiled.set_line_connect(definition.line_connect);
+            // `C4Def::Load` stores the group's own full name as `Filename`
+            // (`C4Def.cpp:550`); a console reload re-opens exactly that, and it
+            // is what `AddDirectoryForMonitoring` watches.
+            compiled.set_source_path(
+                definition
+                    .resource_group
+                    .as_ref()
+                    .map(|group| group.root().to_path_buf()),
+            );
             engine.register_definition(compiled)?;
         }
 

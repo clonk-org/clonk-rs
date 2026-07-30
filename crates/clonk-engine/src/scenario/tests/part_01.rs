@@ -1,6 +1,33 @@
 // Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    // C4Def.cpp:547-560 — `C4Def::Load` stores the group's own full name as
+    // `Filename`. `C4DefList::Reload` re-opens exactly that, `C4Def::Clear`
+    // deliberately preserves it ("Assume filename is being kept"), and
+    // `AddDirectoryForMonitoring` watches it. A definition with no group
+    // behind it carries none, which is the case a reload must refuse rather
+    // than attempt.
+    #[test]
+    fn definitions_carry_the_group_they_were_loaded_from() {
+        let mut definition =
+            crate::Definition::from_script("TEST".to_string(), "Test".to_string(), "")
+                .expect("script-only definition compiles");
+        assert!(
+            definition.source_path().is_none(),
+            "a definition built from script alone has no group to reload from"
+        );
+
+        let group = std::path::PathBuf::from("/content/Objects.c4d/Rock.c4d");
+        definition.set_source_path(Some(group.clone()));
+        assert_eq!(definition.source_path(), Some(group.as_path()));
+
+        // Clearing it is not the same as never having had one, but both refuse
+        // a reload — C++ tests `if (!Filename[0])` (C4Particles.cpp:197 for the
+        // particle sibling; the def path re-opens Filename directly).
+        definition.set_source_path(None);
+        assert!(definition.source_path().is_none());
+    }
+
     #[test]
     fn legacy_string_table_reuses_identity_and_overwrites_repeated_line_id() {
         let directory = tempdir().expect("string-table directory");
