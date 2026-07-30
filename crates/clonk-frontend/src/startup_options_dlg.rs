@@ -35,6 +35,7 @@ use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::startup_options_controls::{
     control_facets, control_sheet_hit_test, key_button_facets, ControlCaptureTarget, ControlDevice,
     ControlSheetHit, ControlSheetLayout, ControlSheetState, CONTROL_KEY_COUNT, CONTROL_KEY_LABELS,
+    CONTROL_SET_COUNT,
 };
 use crate::startup_options_graphics::{
     graphics_hit_test, graphics_sheet_layout, GraphicsCheckboxId, GraphicsHitTarget,
@@ -138,6 +139,8 @@ pub struct OptionsLabels {
     pub apply_scale: String,
     /// `IDS_BTN_RESETKEYBOARD`.
     pub reset_keyboard: String,
+    /// `IDS_CTL_GAMEPADFORMENU`.
+    pub gamepad_gui_control: String,
     /// `IDS_NET_PORT_REFERENCE` / `IDS_NET_PORT_DISCOVERY`.
     pub port_reference: String,
     pub port_discovery: String,
@@ -187,6 +190,7 @@ impl Default for OptionsLabels {
             effects_high: "High".into(),
             apply_scale: "Apply".into(),
             reset_keyboard: "Reset all".into(),
+            gamepad_gui_control: "Use gamepad for menu control.".into(),
             port_reference: "Reference port".into(),
             port_discovery: "Discovery port".into(),
             active: "Active".into(),
@@ -360,6 +364,25 @@ impl Aligner {
         self.area.y += d;
         self.area.h -= d;
         out
+    }
+
+    /// C4Gui.cpp:975-990 with `iWdt >= 0`, which centres the cut horizontally.
+    pub(crate) fn get_from_top_centered(&mut self, hgt: i32, wdt: i32) -> IntRect {
+        let mut out = self.get_from_top(hgt);
+        out.x += (out.w - wdt) / 2;
+        out.w = wdt;
+        out
+    }
+
+    /// C4Gui.h:1922 (`ExpandTop`).
+    pub(crate) fn expand_top(&mut self, by: i32) {
+        self.area.y -= by;
+        self.area.h += by;
+    }
+
+    /// C4Gui.h:1925 (`ExpandBottom`).
+    pub(crate) fn expand_bottom(&mut self, by: i32) {
+        self.area.h += by;
     }
 
     /// C4Gui.cpp:992-1007 (`iHgt = -1` keeps the full height).
@@ -562,8 +585,24 @@ pub struct OptionsDlgLayout {
     /// Sound sheet groups and children (`C4StartupOptionsDlg.cpp:921-985`).
     pub sound: SoundSheetLayout,
     pub graphics: GraphicsSheetLayout,
+    /// Keyboard sheet — `new ControlConfigArea(..., false, this)`
+    /// (`C4StartupOptionsDlg.cpp:994`).
     pub controls: ControlSheetLayout,
+    /// Gamepad sheet — the same area with `fGamepad` set (`:997`), which changes
+    /// the selector count and adds the GUI-control checkbox.
+    pub controls_gamepad: ControlSheetLayout,
     pub network: NetworkSheetLayout,
+}
+
+impl OptionsDlgLayout {
+    /// The control area belonging to `device`; the two sheets are separate
+    /// `ControlConfigArea` instances in C++.
+    pub fn controls_for(&self, device: ControlDevice) -> &ControlSheetLayout {
+        match device {
+            ControlDevice::Keyboard => &self.controls,
+            ControlDevice::Gamepad => &self.controls_gamepad,
+        }
+    }
 }
 
 /// Computes the dialog layout, mirroring C4StartupOptionsDlg.cpp:609-985.
@@ -578,6 +617,11 @@ pub fn options_dlg_layout(
     options_dlg_layout_with_labels(w, h, gui, book, &OptionsLabels::default())
 }
 
+/// `iMaxControlSets` when no gamepad is attached: `Application.pGamePadControl`
+/// is null, so the gamepad area still lays out one selector
+/// (`C4StartupOptionsDlg.cpp:265-266`).
+const DEFAULT_GAMEPAD_SETS: usize = 1;
+
 /// The measured widths of the Program sheet's labels and buttons come from the
 /// resolved resource text, so a longer translation widens its column exactly as
 /// `GetTextExtent` does in C++ (C4StartupOptionsDlg.cpp:687-697).
@@ -587,6 +631,20 @@ pub fn options_dlg_layout_with_labels(
     gui: &ClonkFontSet,
     book: &BookFonts,
     labels: &OptionsLabels,
+) -> OptionsDlgLayout {
+    options_dlg_layout_for(w, h, gui, book, labels, DEFAULT_GAMEPAD_SETS)
+}
+
+/// As [`options_dlg_layout_with_labels`], but with the live pad count that
+/// `C4GamePadControl::GetGamePadCount` feeds the gamepad `ControlConfigArea`
+/// (`C4StartupOptionsDlg.cpp:265-266`).
+pub fn options_dlg_layout_for(
+    w: i32,
+    h: i32,
+    gui: &ClonkFontSet,
+    book: &BookFonts,
+    labels: &OptionsLabels,
+    gamepad_sets: usize,
 ) -> OptionsDlgLayout {
     // FullscreenDialog margins (C4GuiDialogs.cpp:816-823).
     let margin_x = if w < 500 { 2 } else { w / 50 };
@@ -960,7 +1018,31 @@ pub fn options_dlg_layout_with_labels(
         sliders,
     };
     let graphics = graphics_sheet_layout(sheet);
-    let controls = ControlSheetLayout::from_sheet(sheet, book.book.line_height);
+    // Both control areas are built from the sheet client rect with the dialog's
+    // own `caMain` margins (C4StartupOptionsDlg.cpp:994,997). The reset caption
+    // is measured in the GUI CaptionFont (`:346`) and the gamepad checkbox in
+    // BookFont (`:335`), with `GetStandardCheckBoxSize`'s box + 4px spacing
+    // (C4GuiCheckBox.cpp:151-162).
+    let control_h_margin = ca_main.width() / 20;
+    let control_v_margin = ca_main.height() / 40;
+    let reset_text = gui.caption.measure(&labels.reset_keyboard, true);
+    let controls = ControlSheetLayout::from_sheet(
+        sheet,
+        control_h_margin,
+        control_v_margin,
+        CONTROL_SET_COUNT,
+        reset_text,
+        None,
+    );
+    let (check_text_w, check_text_h) = book.book.measure(&labels.gamepad_gui_control, true);
+    let controls_gamepad = ControlSheetLayout::from_sheet(
+        sheet,
+        control_h_margin,
+        control_v_margin,
+        gamepad_sets,
+        reset_text,
+        Some((check_text_w + check_text_h + 4, check_text_h)),
+    );
     let network = NetworkSheetLayout::from_sheet(sheet, book.book.line_height);
 
     OptionsDlgLayout {
@@ -995,6 +1077,7 @@ pub fn options_dlg_layout_with_labels(
         sound,
         graphics,
         controls,
+        controls_gamepad,
         network,
     }
 }
@@ -1660,12 +1743,13 @@ impl OptionsDlgState {
     }
 
     pub fn resize(&mut self, width: i32, height: i32, gui: &ClonkFontSet, book: &BookFonts) {
-        self.layout = Some(options_dlg_layout_with_labels(
+        self.layout = Some(options_dlg_layout_for(
             width.max(1),
             height.max(1),
             gui,
             book,
             &self.labels,
+            self.controls.visible_sets(ControlDevice::Gamepad),
         ));
         self.captured_fair_crew_slider = false;
         self.pressed_fair_crew_arrow = None;
@@ -3394,8 +3478,8 @@ fn options_tooltip_at(
             } else {
                 ControlDevice::Gamepad
             };
-            for bounds in layout
-                .controls
+            let controls_layout = layout.controls_for(device);
+            for bounds in controls_layout
                 .set_buttons
                 .iter()
                 .take(controls.visible_sets(device))
@@ -3404,18 +3488,18 @@ fn options_tooltip_at(
                     return resource("IDS_MSG_SELECTKEYSET");
                 }
             }
-            for (index, bounds) in layout.controls.key_buttons.iter().enumerate() {
+            for (index, bounds) in controls_layout.key_buttons.iter().enumerate() {
                 if rect_contains(bounds, point) {
                     return resource(CONTROL_KEY_TOOLTIP_KEYS[index]);
                 }
             }
             if active_sheet == OptionsSheet::Gamepad
                 && controls.gamepad_gui_checkbox_visible()
-                && rect_contains(&layout.controls.gamepad_gui_check, point)
+                && rect_contains(&controls_layout.gamepad_gui_check, point)
             {
                 return resource("IDS_DESC_GAMEPADFORMENU");
             }
-            if rect_contains(&layout.controls.reset_button, point) {
+            if rect_contains(&controls_layout.reset_button, point) {
                 return resource("IDS_MSG_RESETKEYSETS");
             }
         }
@@ -3595,7 +3679,9 @@ fn options_hit_test(
         _ => None,
     };
     if let Some(device) = control_device {
-        if let Some(hit) = control_sheet_hit_test(&layout.controls, controls, device, point) {
+        if let Some(hit) =
+            control_sheet_hit_test(layout.controls_for(device), controls, device, point)
+        {
             return Some(OptionsHit::Control(hit));
         }
     }
@@ -4358,7 +4444,17 @@ impl OptionsDlgScreen {
         draw_focus: bool,
     ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
-        let layout = options_dlg_layout(w, h, gui, book);
+        // Measure with the state's resolved labels and live pad count, exactly
+        // as `resize` does — drawing from a default-label layout would disagree
+        // with the rects hit testing uses.
+        let layout = options_dlg_layout_for(
+            w,
+            h,
+            gui,
+            book,
+            &state.labels,
+            state.controls.visible_sets(ControlDevice::Gamepad),
+        );
 
         // 1. Loader background, stretched fullscreen (C4Gui.cpp:669-682).
         let full = GuiRect::new(0.0, 0.0, w as f32, h as f32);
@@ -4478,7 +4574,7 @@ impl OptionsDlgScreen {
                     surface,
                     assets,
                     book,
-                    &layout.controls,
+                    layout.controls_for(ControlDevice::Keyboard),
                     state,
                     ControlDevice::Keyboard,
                     gamma,
@@ -4491,7 +4587,7 @@ impl OptionsDlgScreen {
                     surface,
                     assets,
                     book,
-                    &layout.controls,
+                    layout.controls_for(ControlDevice::Gamepad),
                     state,
                     ControlDevice::Gamepad,
                     gamma,
@@ -6135,21 +6231,26 @@ mod tests {
             state.handle_ctrl_tab(false),
             vec![OptionsDlgAction::SheetChanged(OptionsSheet::Gamepad)]
         );
+        // The gamepad sheet is its own `ControlConfigArea`: with one attached
+        // pad, `iCtrlSetHMargin = (iCtrlSetWdt - iCtrlSetBtnWdt)/2` centres the
+        // lone selector rather than reusing the keyboard row
+        // (`C4StartupOptionsDlg.cpp:265-276`).
+        let gamepad = layout.controls_for(ControlDevice::Gamepad);
         assert_resource_tooltip(
             &state,
             &book,
-            rect_center(layout.controls.set_buttons[0]),
+            rect_center(gamepad.set_buttons[0]),
             "IDS_MSG_SELECTKEYSET",
         );
         assert_eq!(
-            state.tooltip_at(rect_center(layout.controls.set_buttons[1]), &book),
+            state.tooltip_at(rect_center(gamepad.set_buttons[1]), &book),
             None,
             "disconnected gamepad selectors are not visible targets",
         );
         assert_resource_tooltip(
             &state,
             &book,
-            right_inside(layout.controls.gamepad_gui_check),
+            right_inside(gamepad.gamepad_gui_check),
             "IDS_DESC_GAMEPADFORMENU",
         );
 
@@ -6462,7 +6563,9 @@ mod tests {
             NetworkSheetState::default(),
         );
         state.resize(1280, 720, &gui, &book);
-        let layout = options_dlg_layout(1280, 720, &gui, &book);
+        // Three attached pads, so the gamepad area lays out three selectors
+        // (`C4StartupOptionsDlg.cpp:265-266`).
+        let layout = options_dlg_layout_for(1280, 720, &gui, &book, &OptionsLabels::default(), 3);
 
         for expected in [
             OptionsSheet::Graphics,
@@ -6487,7 +6590,7 @@ mod tests {
             (1, vec![OptionsDlgAction::GamepadDeviceSelected(1)]),
             (1, Vec::new()),
         ] {
-            let point = rect_center(layout.controls.set_buttons[set]);
+            let point = rect_center(layout.controls_gamepad.set_buttons[set]);
             assert!(state.handle_pointer_down(point).is_empty());
             assert_eq!(state.handle_pointer_up(point), expected);
         }
