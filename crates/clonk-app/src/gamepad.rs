@@ -262,8 +262,29 @@ impl GamepadManager {
         output
     }
 
+    /// `C4GamePadControl::GetGamePadCount()` — `SDL_NumJoysticks()`
+    /// (C4GamePadCon.cpp:437-440), an instantaneous enumeration. An
+    /// event-derived tally would report zero for a pad attached before launch
+    /// until it was first touched, hiding its bindings and mis-sizing the Options
+    /// selector row.
     pub(crate) fn connected_count(&self) -> usize {
-        self.states.len()
+        let enumerated = self
+            .gilrs
+            .as_ref()
+            .map(|gilrs| {
+                gilrs
+                    .gamepads()
+                    .filter(|(id, pad)| {
+                        pad.is_connected() && GamepadSlot::from_gamepad_id(*id).is_some()
+                    })
+                    .count()
+            })
+            .unwrap_or_default();
+        // A pad that has already produced events counts even if the enumeration
+        // lags behind it, so the two views never disagree downwards.
+        enumerated
+            .max(self.states.len())
+            .min(GAMEPAD_SLOT_COUNT as usize)
     }
 
     /// `C4GamePadControl::FeedEvent` (C4GamePadCon.cpp:335-435) is public
@@ -988,6 +1009,30 @@ impl GamepadEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `GetGamePadCount()` is `SDL_NumJoysticks()` (C4GamePadCon.cpp:437-440): an
+    // enumeration, so a pad that has never produced an event still counts, and
+    // the tally is capped at the four configurable blocks.
+    #[test]
+    fn connected_count_enumerates_instead_of_tallying_events() {
+        let mut manager = GamepadManager::disabled();
+        assert_eq!(
+            manager.connected_count(),
+            0,
+            "no gamepad context enumerates nothing",
+        );
+        for index in 0..GAMEPAD_SLOT_COUNT {
+            manager.states.entry(GamepadSlot::new(index)).or_default();
+        }
+        assert_eq!(manager.connected_count(), GAMEPAD_SLOT_COUNT as usize);
+        // A slot beyond the configurable blocks cannot inflate the count; the
+        // Options sheet only has four `Config.Gamepads` entries to show.
+        manager
+            .states
+            .entry(GamepadSlot::new(GAMEPAD_SLOT_COUNT))
+            .or_default();
+        assert_eq!(manager.connected_count(), GAMEPAD_SLOT_COUNT as usize);
+    }
 
     #[test]
     fn sourced_clusters_keep_gui_aliases_together_and_split_directions_and_clear() {
