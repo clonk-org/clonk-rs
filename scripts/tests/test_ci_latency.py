@@ -66,15 +66,17 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn(f"run: {command}", lint_block)
         self.assertNotIn(command, full_parity)
 
-    def test_only_focused_feedback_fetches_the_complete_commit_graph(self):
+    def test_history_consumers_fetch_the_complete_commit_graph(self):
         workflow = WORKFLOWS[0].read_text(encoding="utf-8")
         focused_start = workflow.index("  focused-feedback:")
         recording_start = workflow.index("  recording-host-oracles:")
         focused_feedback = workflow[focused_start:recording_start]
+        full_parity = workflow[workflow.index("  full-parity:") :]
 
-        self.assertEqual(workflow.count("fetch-depth: 0"), 1)
+        self.assertEqual(workflow.count("fetch-depth: 0"), 2)
         self.assertIn("fetch-depth: 0", focused_feedback)
         self.assertIn("filter: blob:none", focused_feedback)
+        self.assertIn("fetch-depth: 0", full_parity)
 
     def test_full_parity_installs_script_runtime_dependencies(self):
         workflow = WORKFLOWS[0].read_text(encoding="utf-8")
