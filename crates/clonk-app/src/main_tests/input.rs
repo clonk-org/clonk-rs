@@ -5221,6 +5221,47 @@ fn l097_options_gamepad_device_claim_switches_and_releases() {
     assert_eq!(app.gamepads.options_open_slot(), None);
 }
 
+// `KeySelButton::DrawElement` prints `KeyCode2String(key, true, false)` verbatim
+// (C4StartupOptionsDlg.cpp:243), and for the factory-default gamepad config every
+// button is `-1` (C4Config.cpp:591-602), which reaches the SDL branch and yields a
+// non-null empty name (C4KeyboardInput.cpp:375-381). There is no "Undefined"
+// sentinel anywhere in C++.
+#[test]
+fn factory_default_control_sheets_show_empty_captions_for_unbound_slots() {
+    use clonk_frontend::startup_options_controls::{
+        ControlCaptureTarget, ControlDevice, CONTROL_KEY_COUNT, CONTROL_SET_COUNT,
+    };
+
+    let mut app = new_classic_menu_app(640, 480);
+    app.open_options_menu();
+    let dialog = app.startup_options_dialog.as_ref().expect("options dialog");
+    for set in 0..CONTROL_SET_COUNT {
+        for control in 0..CONTROL_KEY_COUNT {
+            assert_eq!(
+                dialog.controls().label(ControlCaptureTarget {
+                    device: ControlDevice::Gamepad,
+                    set,
+                    control,
+                }),
+                Some(""),
+                "gamepad {set} control {control} has no default binding",
+            );
+            // The four keyboard blocks ship fully bound, so those stay named.
+            assert!(
+                dialog
+                    .controls()
+                    .label(ControlCaptureTarget {
+                        device: ControlDevice::Keyboard,
+                        set,
+                        control,
+                    })
+                    .is_some_and(|label| !label.is_empty() && label != "Undefined"),
+                "keyboard {set} control {control} keeps its scancode name",
+            );
+        }
+    }
+}
+
 // C4StartupOptionsDlg.cpp:176-177 substitutes `LoadKeyDescResStr(iKeyID)` into
 // IDS_MSG_PRESSKEY/IDS_MSG_PRESSBTN — the very same `IDS_CTL_*` string the key
 // button draws beside its cap (:242). The prompt must therefore quote the sheet's

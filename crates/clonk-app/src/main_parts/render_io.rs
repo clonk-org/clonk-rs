@@ -2188,11 +2188,7 @@ fn collect_player_overlays_filtered(
                         .unwrap_or_default()
                 } else if (4..8).contains(&control_set) {
                     let gamepad_set = (control_set - 4) as usize;
-                    gamepad_bindings
-                        .raw_key_for_set(gamepad_set, binding)
-                        .map(|_| gamepad_bindings.key_label_for_set(gamepad_set, binding))
-                        .filter(|label| label != "invalid")
-                        .unwrap_or_default()
+                    gamepad_bindings.key_label_for_set(gamepad_set, binding)
                 } else {
                     String::new()
                 }
