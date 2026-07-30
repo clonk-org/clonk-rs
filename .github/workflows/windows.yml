@@ -24,8 +24,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # Preserve the exact-SHA verdict recorded for a release commit. Ordinary
+  # pushes and pull requests supersede stale work on the same ref.
+  group: "windows-${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
 
 env:
   CARGO_INCREMENTAL: '0'

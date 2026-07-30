@@ -17,8 +17,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: rust-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # Preserve the exact-SHA verdict recorded for a release commit. Ordinary
+  # pushes and pull requests supersede stale work on the same ref.
+  group: "rust-${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
 
 env:
   CARGO_INCREMENTAL: '0'
@@ -174,18 +176,15 @@ jobs:
       # carrying the recording-host ignore marker to appear in this block.
       - name: Run recording-host material-order oracles
         run: |
-          cargo nextest run -p clonk-app --bin clonk-app --locked -- \
-            tests::app_virtual_keyboard_completes_real_tutorial02_route --exact
-          cargo nextest run -p clonk-engine-integration-tests --test engine_it --locked -- \
-            real_tutorial02_virtual_play::tutorial02_virtual_player_completes_the_real_tutorial_route --exact
-          cargo nextest run -p clonk-engine-integration-tests --test engine_it --locked -- \
-            dev_feedback_replay::committed_real_scenario_replays_are_deterministic --exact
-          cargo nextest run -p clonk-engine-integration-tests --test engine_it --locked -- \
-            elevator_motion_oracle::tutorial07_seed_zero_landscape_matches_cpp_surface8 --exact
-          cargo nextest run -p clonk-engine-integration-tests --test engine_it --locked -- \
-            real_scenario_harness::alchemy_real_scenario_subcases_batch_4 --exact
-          cargo nextest run -p clonk-frontend-unit-tests --test frontend_inline --locked -- \
-            tests::real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence --exact
+          cargo nextest run \
+            -p clonk-app \
+            -p clonk-engine-integration-tests \
+            -p clonk-frontend-unit-tests \
+            --bin clonk-app \
+            --test engine_it \
+            --test frontend_inline \
+            --locked \
+            -E 'test(/(alchemy_real_scenario_subcases_batch_4|app_virtual_keyboard_completes_real_tutorial02_route|committed_real_scenario_replays_are_deterministic|real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence|tutorial02_virtual_player_completes_the_real_tutorial_route|tutorial07_seed_zero_landscape_matches_cpp_surface8)$/)'
 
   coverage:
     name: Rust code coverage
@@ -283,6 +282,48 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  workspace-lints:
+    name: Rust workspace lints
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install native Rust dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libfreetype6-dev \
+            libvulkan1 \
+            libxmp4 \
+            libudev-dev \
+            mesa-vulkan-drivers \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          components: clippy
+
+      # The full-parity job owns this cache. Lints restore the same dependency
+      # graph without racing it to save a smaller concurrent build.
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: . -> target
+          shared-key: full-parity
+          save-if: false
+
+      - name: Run workspace lints
+        run: cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
+
   full-parity:
     name: Full Rust parity gate
     runs-on: ubuntu-latest
@@ -333,9 +374,6 @@ jobs:
       - name: Run repository script tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
-      - name: Run packaging and release-tool tests
-        run: cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
-
       # nextest, not `cargo test`: this job already installs cargo-nextest, and
       # only nextest reads `.config/nextest.toml`, where the retries for the
       # known load-sensitive socket tests and the priority order that front-loads
@@ -343,13 +381,16 @@ jobs:
       # inert. `--no-fail-fast` reports every failure instead of stopping at the
       # first failing binary, which is what CLAUDE.md documents as the gate.
       - name: Run workspace tests
-        run: cargo nextest run --workspace --no-fail-fast --locked
+        run: cargo nextest run --workspace --no-fail-fast --features xtask/engine-tools --locked
 
-      - name: Run workspace lints
-        run: cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
+      # Keep this immediately after the workspace test graph. The differential
+      # lives in that graph, so the named command can reuse it before the
+      # engine-tools-only commands select their narrower feature set.
+      - name: Verify pinned C++ oracle parity
+        run: cargo xtask parity verify
+
+      - name: Run packaging and release-tool tests
+        run: cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
 
       - name: Verify deterministic engine snapshots
         run: cargo xtask engine-snapshots verify
-
-      - name: Verify pinned C++ oracle parity
-        run: cargo xtask parity verify
