@@ -489,24 +489,35 @@ impl CameraState {
     /// No-owner fullscreen viewports are not player-locked. Without an
     /// explicit FreeScroll input they retain their centered position, and
     /// UpdateViewPosition hard-clamps large worlds while centering small ones.
+    /// `C4Viewport::UpdateViewPosition`'s ownerless arm
+    /// (`C4Viewport.cpp:1234-1254`).
+    ///
+    /// Centring an undersized map is gated on `Application.isFullScreen`
+    /// (`:1237`, `:1246`). A detached console viewport window takes the other
+    /// arm — `min(ViewX, GBackWdt - ViewWdt)` then `max(ViewX, 0)` — which
+    /// pins the origin at 0 rather than scrolling the map into the middle of
+    /// a window larger than the world.
     pub(crate) fn no_owner_position(
         &mut self,
         view_width: i32,
         view_height: i32,
         world_width: i32,
         world_height: i32,
+        fullscreen: bool,
     ) -> (i32, i32) {
         self.resize_output(view_width, view_height);
-        if world_width < view_width {
-            self.view_x = (world_width - view_width) / 2;
+        self.view_x = if fullscreen && world_width < view_width {
+            (world_width - view_width) / 2
         } else {
-            self.view_x = self.view_x.clamp(0, world_width - view_width);
-        }
-        if world_height < view_height {
-            self.view_y = (world_height - view_height) / 2;
+            // `min` then `max`, as C++ writes it: `clamp` would panic once the
+            // world is narrower than the view.
+            self.view_x.min(world_width - view_width).max(0)
+        };
+        self.view_y = if fullscreen && world_height < view_height {
+            (world_height - view_height) / 2
         } else {
-            self.view_y = self.view_y.clamp(0, world_height - view_height);
-        }
+            self.view_y.min(world_height - view_height).max(0)
+        };
         (self.view_x, self.view_y)
     }
 

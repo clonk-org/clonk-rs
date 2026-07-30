@@ -1172,8 +1172,11 @@ impl GraphicsSystem {
 
         state.view_x = state.view_x.saturating_add(delta.x);
         state.view_y = state.view_y.saturating_add(delta.y);
+        // Fullscreen layout maintenance: this reads `active_viewports`, which
+        // only the fullscreen pass populates. A detached window's scrolling is
+        // driven through its own frame.
         let (view_x, view_y) =
-            state.no_owner_position(view_width, view_height, world_width, world_height);
+            state.no_owner_position(view_width, view_height, world_width, world_height, true);
 
         // C4Viewport::UpdateViewPosition changes the live projection in the
         // same call. Keep pointer routing and another edge tick observable
@@ -2111,6 +2114,7 @@ impl GraphicsSystem {
                         logical_height,
                         viewport.world_width,
                         viewport.world_height,
+                        true,
                     );
                 } else {
                     state.resize_output(logical_width, logical_height);
@@ -2431,6 +2435,9 @@ impl GraphicsSystem {
             SurfaceRect::new(0, 0, world_width as u32, world_height as u32),
             &owner_colors,
             fragment_gamma,
+            // The full-map capture retargets a fullscreen viewport; it is not
+            // a detached console window.
+            true,
         );
         let mut rendered = std::mem::replace(&mut self.surface, saved_surface);
         if self.advanced_renderer_config.uses_monitor_gamma() {
@@ -2538,6 +2545,7 @@ impl GraphicsSystem {
             SurfaceRect::new(0, 0, width, height),
             &owner_colors,
             fragment_gamma,
+            false,
         );
         // C4Viewport::Draw draws the foreground/parallax objects inside the
         // same pass (`C4Viewport.cpp:1102`), not on a later fullscreen layer.
@@ -2641,6 +2649,7 @@ impl GraphicsSystem {
                     SurfaceRect::new(0, 0, self.surface_width, self.surface_height),
                     owner_colors,
                     gamma,
+                    true,
                 );
             }
             return;
@@ -2652,7 +2661,15 @@ impl GraphicsSystem {
             let slot = owner_slots.entry(input.owner).or_default();
             let camera_slot = *slot;
             *slot += 1;
-            self.render_viewport(snapshot, input, camera_slot, rect, owner_colors, gamma);
+            self.render_viewport(
+                snapshot,
+                input,
+                camera_slot,
+                rect,
+                owner_colors,
+                gamma,
+                true,
+            );
         }
     }
 
@@ -2664,6 +2681,10 @@ impl GraphicsSystem {
         rect: SurfaceRect,
         owner_colors: &HashMap<i32, Color>,
         gamma: Option<&clonk_graphics::GammaRamp>,
+        // `Application.isFullScreen`. The fullscreen layout cap and the
+        // ownerless centring arm are both gated on it, and a detached console
+        // viewport window takes neither.
+        fullscreen: bool,
     ) {
         if rect.width == 0 || rect.height == 0 {
             return;
@@ -2684,7 +2705,15 @@ impl GraphicsSystem {
         self.surface_height = rect.height;
         self.update_world_dimensions(snapshot.landscape.as_ref());
 
-        let rect = self.centered_viewport_rect(rect);
+        // `C4GraphicsSystem::RecalculateViewports` returns immediately when
+        // the application is not fullscreen (C4GraphicsSystem.cpp:335-336), so
+        // a console viewport window is never capped to the landscape and never
+        // centred inside a layout cell — it owns its whole target.
+        let rect = if fullscreen {
+            self.centered_viewport_rect(rect)
+        } else {
+            rect
+        };
         let format = self.surface.format();
         self.surface_width = rect.width;
         self.surface_height = rect.height;
@@ -2718,7 +2747,13 @@ impl GraphicsSystem {
         });
         let (mut view_x, mut view_y) = if input.owner == OWNER_NONE {
             if input.is_no_owner_viewport {
-                state.no_owner_position(view_width, view_height, world_width, world_height)
+                state.no_owner_position(
+                    view_width,
+                    view_height,
+                    world_width,
+                    world_height,
+                    fullscreen,
+                )
             } else {
                 state.stationary_position(view_width, view_height)
             }
@@ -2742,8 +2777,13 @@ impl GraphicsSystem {
         if pending_observer_scroll != Vector2::ZERO {
             state.view_x = state.view_x.saturating_add(pending_observer_scroll.x);
             state.view_y = state.view_y.saturating_add(pending_observer_scroll.y);
-            (view_x, view_y) =
-                state.no_owner_position(view_width, view_height, world_width, world_height);
+            (view_x, view_y) = state.no_owner_position(
+                view_width,
+                view_height,
+                world_width,
+                world_height,
+                fullscreen,
+            );
         }
         let offset = if input.owner == OWNER_NONE {
             Vector2::ZERO

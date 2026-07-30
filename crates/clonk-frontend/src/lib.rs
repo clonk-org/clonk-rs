@@ -10859,6 +10859,58 @@ mod tests {
         );
     }
 
+    // Two `Application.isFullScreen` gates decide what a console viewport
+    // window looks like on a map smaller than itself, and both of them are
+    // easy to lose because the fullscreen arm is the one a port writes first.
+    //
+    // `C4GraphicsSystem::RecalculateViewports` — the only writer of the
+    // landscape-extent cap, the layout cell and `DrawX`/`DrawY` — opens with
+    // `if (!Application.isFullScreen) return;` (C4GraphicsSystem.cpp:335-336),
+    // so a console viewport is never capped to the landscape and always draws
+    // at its target's origin. And `C4Viewport::UpdateViewPosition` centres an
+    // ownerless view on an undersized map only `if (Application.isFullScreen)`
+    // (C4Viewport.cpp:1237,1246); otherwise it runs
+    // `min(ViewX, GBackWdt - ViewWdt)` then `max(ViewX, 0)` and pins it at 0.
+    #[test]
+    fn detached_viewport_window_is_never_capped_or_centred_on_a_small_map() {
+        let mut snapshot = camera_world_snapshot();
+        // A map smaller than the window is what makes both gates observable.
+        snapshot.landscape = Some(Landscape::flat(200, 150));
+        let mut graphics = test_graphics(320, 200, 80, "Small map");
+        let inputs = || {
+            vec![ViewportInput::ownerless(Vector2::new(100, 75), 1.0)
+                .with_physical_camera_identity(7, 0)]
+        };
+
+        let detached = graphics
+            .render_detached_viewport(&snapshot, &inputs(), 7, 320, 200)
+            .expect("identity 7 is in the supplied list");
+        assert_eq!(
+            detached.projection.rect,
+            SurfaceRect::new(0, 0, 320, 200),
+            "RecalculateViewports never runs in console mode, so no landscape cap"
+        );
+        assert_eq!(
+            (detached.projection.target_x, detached.projection.target_y),
+            (0, 0),
+            "an undersized map pins a detached ownerless view at the origin"
+        );
+
+        // The fullscreen pass keeps both behaviours: it caps the output to the
+        // landscape plus its scroll borders and centres the view on the map.
+        graphics.render_frame(&snapshot, &inputs());
+        let fullscreen = graphics.active_viewport_projections()[0];
+        assert_ne!(
+            fullscreen.rect,
+            SurfaceRect::new(0, 0, 320, 200),
+            "the fullscreen layout still caps a viewport to the landscape"
+        );
+        assert!(
+            fullscreen.target_x < 0,
+            "the fullscreen arm centres an undersized map, giving a negative origin"
+        );
+    }
+
     #[test]
     fn observer_scroll_queued_before_projection_moves_the_first_rendered_camera() {
         let snapshot = camera_world_snapshot();
