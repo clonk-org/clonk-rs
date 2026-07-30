@@ -1,10 +1,17 @@
 //! Retained Keyboard/Gamepad page model for `C4StartupOptionsDlg`.
 
 use crate::classic_gui::IntRect;
+use crate::startup_options_dlg::Aligner;
 use crate::GuiPoint;
 
 pub const CONTROL_SET_COUNT: usize = 4;
 pub const CONTROL_KEY_COUNT: usize = 12;
+
+/// `iKeyPosMaxX` / `iKeyPosMaxY` (`C4StartupOptionsDlg.cpp:207`). `iKeyPosis`
+/// (`:208-214`) is the identity table, so key `n` sits at row `n / 3`,
+/// column `n % 3`.
+const KEY_COLUMNS: i32 = 3;
+const KEY_ROWS: i32 = 4;
 
 pub const CONTROL_KEY_LABELS: [&str; CONTROL_KEY_COUNT] = [
     "Select left",
@@ -276,69 +283,152 @@ impl ControlSheetState {
     }
 }
 
+/// `C4GUI_ButtonHgt` (`C4Gui.h:119`) — the height of the bottom button strip.
+const BUTTON_HEIGHT: i32 = 32;
+
+/// The margins `ControlConfigArea` uses for the control-set selector row
+/// (`C4StartupOptionsDlg.cpp:273`). The horizontal one is recomputed once the
+/// button width is known.
+const SET_MARGIN: i32 = 5;
+
+/// `iKeyMargin` before the key area is scaled to fit
+/// (`C4StartupOptionsDlg.cpp:298`).
+const KEY_MARGIN: i32 = 20;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControlSheetLayout {
     pub set_buttons: [IntRect; CONTROL_SET_COUNT],
+    /// The `C4GUI::HorizontalLine` under the selector row
+    /// (`C4StartupOptionsDlg.cpp:292`).
+    pub separator: IntRect,
+    /// The `KeySelButton` bounds — square `iKeyWdt` caps. The action and key
+    /// labels are drawn beside them, outside these rects
+    /// (`IsComponentOutsideClientArea`, `C4StartupOptionsDlg.h:184`).
     pub key_buttons: [IntRect; CONTROL_KEY_COUNT],
     pub reset_button: IntRect,
     pub gamepad_gui_check: IntRect,
 }
 
 impl ControlSheetLayout {
-    pub fn from_sheet(sheet: IntRect, line_height: i32) -> Self {
-        let mx = (sheet.w / 20).max(8);
-        let my = (sheet.h / 40).max(4);
-        let inner = IntRect {
-            x: sheet.x + mx,
-            y: sheet.y + my,
-            w: sheet.w - mx * 2,
-            h: sheet.h - my * 2,
-        };
-        let set_gap = 10;
-        let set_w = ((inner.w - set_gap * 3) / 4).max(20);
-        let set_h = (line_height * 2).max(36);
-        let set_buttons = std::array::from_fn(|index| IntRect {
-            x: inner.x + index as i32 * (set_w + set_gap),
-            y: inner.y,
-            w: set_w,
-            h: set_h,
-        });
-
-        let grid_top = inner.y + set_h + my + 4;
-        let footer_h = (line_height * 2).max(32);
-        let grid_h = (inner.y + inner.h - footer_h - my - grid_top).max(4);
-        let col_gap = 12;
-        let row_gap = 8;
-        let cell_w = ((inner.w - col_gap * 2) / 3).max(20);
-        let cell_h = ((grid_h - row_gap * 3) / 4).max(line_height + 4);
-        let key_buttons = std::array::from_fn(|control| {
-            let row = control / 3;
-            let column = control % 3;
+    /// `C4StartupOptionsDlg::ControlConfigArea::ControlConfigArea`
+    /// (`C4StartupOptionsDlg.cpp:257-352`). `sheet` is the tabular sheet's
+    /// client rect in screen coordinates; C++ passes it as the window bounds and
+    /// then zeroes the aligner's origin, so the walk runs sheet-relative and the
+    /// origin is added back at the end.
+    ///
+    /// `h_margin`/`v_margin` are the dialog's `caMain.GetWidth()/20` and
+    /// `caMain.GetHeight()/40` (`:994`, `:997`). `sets` is `iMaxControlSets`,
+    /// `reset_text` is `CaptionFont.GetTextExtent(IDS_BTN_RESETKEYBOARD)`, and
+    /// `gamepad_check` carries `CheckBox::GetStandardCheckBoxSize` on the gamepad
+    /// tab only — the keyboard tab has no checkbox (`:332`).
+    pub fn from_sheet(
+        sheet: IntRect,
+        h_margin: i32,
+        v_margin: i32,
+        sets: usize,
+        reset_text: (i32, i32),
+        gamepad_check: Option<(i32, i32)>,
+    ) -> Self {
+        let sets = sets.clamp(1, CONTROL_SET_COUNT);
+        let mut area = Aligner::new(
             IntRect {
-                x: inner.x + column as i32 * (cell_w + col_gap),
-                y: grid_top + row as i32 * (cell_h + row_gap),
-                w: cell_w,
-                h: cell_h,
+                x: 0,
+                y: 0,
+                w: sheet.w,
+                h: sheet.h,
+            },
+            h_margin,
+            v_margin,
+        );
+
+        // Selector row (`:271-289`). The button width is clamped to the facet's
+        // own width, and the slack that leaves is redistributed as the row's
+        // horizontal margin rather than stretching the buttons.
+        let set_row_width = area.width() - h_margin * 2;
+        let set_button_width = ((set_row_width - sets as i32 * SET_MARGIN * 2) / sets as i32)
+            .clamp(5, control_facets::KEYBOARD.w);
+        let set_button_height =
+            set_button_width * control_facets::KEYBOARD.h / control_facets::KEYBOARD.w;
+        let set_h_margin = (set_row_width - set_button_width * sets as i32) / (sets as i32 * 2);
+        let mut set_row = Aligner::new(
+            area.get_from_top(2 * SET_MARGIN + set_button_height),
+            set_h_margin,
+            SET_MARGIN,
+        );
+        let mut set_buttons = [IntRect::default(); CONTROL_SET_COUNT];
+        for button in set_buttons.iter_mut().take(sets) {
+            *button = set_row.get_from_left(set_button_width, -1);
+        }
+
+        // The separator is bracketed by two `ExpandTop`s, so it costs the area
+        // exactly its own two pixels (`:291-293`).
+        area.expand_top(v_margin);
+        let separator = area.get_from_top(2);
+        area.expand_top(v_margin);
+
+        // Key grid (`:294-327`). The natural size is three columns of
+        // `iKeyUseWdt` and four rows of `iKeyHgt`, each with `iKeyMargin` on
+        // both sides; when that overflows, every dimension is scaled by the
+        // tighter of the two ratios and truncated.
+        let max_width = area.width() - 2 * h_margin;
+        let max_height = area.height() - 2 * v_margin;
+        let mut key_margin = KEY_MARGIN;
+        let mut key_width = control_facets::KEY.w * 3 / 2;
+        let mut key_height = control_facets::KEY.h * 3 / 2;
+        let mut key_use_width = key_width + key_height * 3;
+        let mut grid_width = (key_use_width + 2 * key_margin) * KEY_COLUMNS;
+        let mut grid_height = (key_height + 2 * key_margin) * KEY_ROWS;
+        if grid_width > max_width || grid_height > max_height {
+            let scale_x = max_width as f32 / grid_width.max(1) as f32;
+            let scale_y = max_height as f32 / grid_height.max(1) as f32;
+            let scale = if scale_x > scale_y { scale_y } else { scale_x };
+            let apply = |value: i32| (scale * value as f32) as i32;
+            key_margin = apply(key_margin);
+            key_width = apply(key_width);
+            key_use_width = apply(key_use_width);
+            key_height = apply(key_height);
+            grid_width = apply(grid_width);
+            grid_height = apply(grid_height);
+        }
+        let mut grid = Aligner::new(
+            area.get_from_top_centered(grid_height, grid_width),
+            0,
+            key_margin,
+        );
+        let mut key_buttons = [IntRect::default(); CONTROL_KEY_COUNT];
+        for row in 0..KEY_ROWS {
+            let mut line = Aligner::new(grid.get_from_top(key_height), key_margin, 0);
+            for column in 0..KEY_COLUMNS {
+                let rect = line.get_from_left(key_width, -1);
+                // The remaining `iKeyUseWdt - iKeyWdt` of the cell is the label
+                // space to the button's right (`:321`).
+                line.expand_left(key_width - key_use_width);
+                key_buttons[(row * KEY_COLUMNS + column) as usize] = rect;
             }
-        });
-        let footer_y = inner.y + inner.h - footer_h;
-        let gamepad_gui_check = IntRect {
-            x: inner.x,
-            y: footer_y + (footer_h - line_height) / 2,
-            w: inner.w / 2,
-            h: line_height,
-        };
-        let reset_button = IntRect {
-            x: inner.x + inner.w * 3 / 5,
-            y: footer_y,
-            w: inner.w * 2 / 5,
-            h: footer_h,
+        }
+
+        // Bottom strip (`:329-348`).
+        area.expand_bottom(-(key_height / 2));
+        let mut bottom = Aligner::new(area.get_from_bottom(BUTTON_HEIGHT), 2, 0);
+        let gamepad_gui_check = gamepad_check
+            .map(|(w, h)| bottom.get_from_left(w, h))
+            .unwrap_or_default();
+        let reset_width = (reset_text.0 + reset_text.1 * 4).min(bottom.inner_width());
+        let reset_button = bottom.get_from_right(reset_width, -1);
+
+        let on_sheet = |rect: IntRect| IntRect {
+            x: rect.x + sheet.x,
+            y: rect.y + sheet.y,
+            ..rect
         };
         Self {
-            set_buttons,
-            key_buttons,
-            reset_button,
-            gamepad_gui_check,
+            set_buttons: set_buttons.map(on_sheet),
+            separator: on_sheet(separator),
+            key_buttons: key_buttons.map(on_sheet),
+            reset_button: on_sheet(reset_button),
+            gamepad_gui_check: gamepad_check
+                .map(|_| on_sheet(gamepad_gui_check))
+                .unwrap_or_default(),
         }
     }
 }
@@ -527,6 +617,116 @@ mod tests {
         assert!(!state.gamepad_gui_checkbox_visible());
     }
 
+    /// `ControlConfigArea`'s constructor is one `C4GUI::ComponentAligner` walk
+    /// (`C4StartupOptionsDlg.cpp:257-352`) over the tabular sheet's client rect,
+    /// with the margins the two call sites pass (`:994`, `:997`). At 1280x720
+    /// that sheet is `(356, 108, 644, 462)` and the margins are
+    /// `caMain.GetWidth()/20 = 61` and `caMain.GetHeight()/40 = 13`.
+    #[test]
+    fn control_layout_matches_the_cpp_component_aligner_at_1280x720() {
+        let sheet = IntRect {
+            x: 356,
+            y: 108,
+            w: 644,
+            h: 462,
+        };
+        let layout = ControlSheetLayout::from_sheet(sheet, 61, 13, 4, (100, 20), None);
+
+        // `iCtrlSetBtnWdt` clamps to `fctKeyboard.Wdt` (80) and the leftover is
+        // redistributed as `iCtrlSetHMargin` (`:274-276`), so the selectors keep
+        // the facet's own size rather than stretching over the sheet.
+        let expected_sets = [442, 572, 702, 832];
+        for (set, x) in expected_sets.into_iter().enumerate() {
+            assert_eq!(
+                layout.set_buttons[set],
+                IntRect {
+                    x,
+                    y: 126,
+                    w: 80,
+                    h: 36
+                },
+                "selector {set}"
+            );
+        }
+
+        // `caArea.ExpandTop(vM); GetFromTop(2); ExpandTop(vM)` (`:291-293`).
+        assert_eq!(
+            layout.separator,
+            IntRect {
+                x: 417,
+                y: 180,
+                w: 522,
+                h: 2
+            }
+        );
+
+        // The key grid is `(iKeyUseWdt + 2*iKeyMargin) * 3` by
+        // `(iKeyHgt + 2*iKeyMargin) * 4` scaled down by `min(fScaleX, fScaleY)`
+        // (`:294-312`); each button is the *square* `iKeyWdt`, and the label
+        // space `iKeyUseWdt - iKeyWdt` sits outside it (`:320-321`).
+        for control in 0..CONTROL_KEY_COUNT {
+            let expected = IntRect {
+                x: [425, 598, 771][control % 3],
+                y: [203, 258, 313, 368][control / 3],
+                w: 39,
+                h: 39,
+            };
+            assert_eq!(layout.key_buttons[control], expected, "key {control}");
+        }
+
+        // `caArea.ExpandBottom(-iKeyHgt/2)`, then a `C4GUI_ButtonHgt` strip whose
+        // right end holds `min(txtW + txtH*4, GetInnerWidth())` (`:329-347`).
+        assert_eq!(
+            layout.reset_button,
+            IntRect {
+                x: 757,
+                y: 506,
+                w: 180,
+                h: 32
+            }
+        );
+    }
+
+    /// The gamepad tab differs only in its selector count and in the
+    /// `IDS_CTL_GAMEPADFORMENU` checkbox that consumes the bottom strip from the
+    /// left before the reset button is taken from the right (`:332-347`).
+    #[test]
+    fn gamepad_control_layout_centres_one_selector_and_seats_the_gui_checkbox() {
+        let sheet = IntRect {
+            x: 356,
+            y: 108,
+            w: 644,
+            h: 462,
+        };
+        let layout = ControlSheetLayout::from_sheet(sheet, 61, 13, 1, (100, 20), Some((150, 20)));
+
+        // `iCtrlSetHMargin = (522 - 80) / 2 = 221`, so the lone pad is centred.
+        assert_eq!(
+            layout.set_buttons[0],
+            IntRect {
+                x: 638,
+                y: 126,
+                w: 80,
+                h: 36
+            }
+        );
+        // `caKeyBottomBtns.GetFromLeft(iWdt, iHgt)` vertically centres the box.
+        assert_eq!(
+            layout.gamepad_gui_check,
+            IntRect {
+                x: 419,
+                y: 512,
+                w: 150,
+                h: 20
+            }
+        );
+        // `GetFromRight` only shrinks `Wdt`, never moves `x` (`C4Gui.cpp:1119`),
+        // so the checkbox eats into the strip's *left* and the reset button
+        // lands exactly where the keyboard tab puts it.
+        assert_eq!(layout.reset_button.x, 757);
+        assert_eq!(layout.reset_button.w, 180);
+    }
+
     #[test]
     fn layout_routes_all_twelve_key_buttons() {
         let state = ControlSheetState::default();
@@ -537,7 +737,11 @@ mod tests {
                 w: 600,
                 h: 400,
             },
-            20,
+            30,
+            10,
+            4,
+            (100, 20),
+            None,
         );
         for control in 0..CONTROL_KEY_COUNT {
             let rect = layout.key_buttons[control];

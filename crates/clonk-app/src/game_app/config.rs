@@ -1783,6 +1783,7 @@ impl GameApp {
             effects_high: text("IDS_CTL_SMOKEHI", "High"),
             apply_scale: text("IDS_BTN_TESTGRAPHICSSCALE", "Apply"),
             reset_keyboard: text("IDS_BTN_RESETKEYBOARD", "Reset all"),
+            gamepad_gui_control: text("IDS_CTL_GAMEPADFORMENU", "Use gamepad for menu control."),
             port_reference: text("IDS_NET_PORT_REFERENCE", "Reference port"),
             port_discovery: text("IDS_NET_PORT_DISCOVERY", "Discovery port"),
             active: text("IDS_CTL_ACTIVE", "Active"),
