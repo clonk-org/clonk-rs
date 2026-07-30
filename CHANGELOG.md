@@ -4,6 +4,274 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-30
+
+### Bug fixes
+
+- Size the options key labels with the C++ font zoom
+- Draw the options key labels separator and glyph modulation
+- Lay out the options control sheets with the C++ aligner walk
+- Point the updater at the repository's new home
+- Title the update check and name the version it found
+- Preserve pinned history for script tests
+- Install Pillow for CI script tests
+- Stop an inactive shell from banking unbounded graphics deadline debt
+- Resolve consolidated integration test targets
+- Persist script-earned mission access at the config save surfaces
+- Gate the network scenario selector on the live mission-access list
+- Clamp script SetPosition by BorderBound, not the landscape surface
+- Install the bundle icon when a macOS update is applied in place
+- Give the launcher window and the Windows taskbar the product icon
+- Give an unbundled macOS run the product Dock icon
+- Cut the product icon from the logo's leading stone glyph
+- Premultiply alpha across the product-icon downscale
+- Flash the observer-menu hint when the ownerless viewport takes over
+- Bind the local presentation to a synchronized join's own player
+- Restore the lobby resource transfer window to the C++ byte budget
+- Bound served resource chunks by the resource chunk size
+- Report the packed group maker in network dynamic metadata
+- Stop planning a bare package run for crates that own no test binary
+- Acknowledge flushed part before route retirement
+- Clear league status before shutdown completes
+- Mark the shipped Eke global appends nowarn
+- Break both presentation detail streaks on an in-budget pass
+- Restore CI and automated releases
+- Write the update package contents checksums
+- Write a correct update-entry manifest instead of uninitialised bytes
+- Keep SDL keydowns fresh on the macOS backend
+- Defer participants and read the pending value first
+- Defer the startup warning preferences to a save surface
+- Defer the sound option writes to a save surface
+- Flush deferred config when leaving the options dialog
+- Defer mission access writes to a clean shutdown
+- Widen overflowing ingame menus for the scroll bar
+- Re-expand the user path on every native lookup
+- Apply native recording and screenshot folder semantics
+- Route debug log output by runtime debug mode
+- Honor the RenderInactive bitmask when unfocused
+- Size the async worker runtime from the configured thread count
+- Title the native window with the engine caption
+- Read runtime config scalars with the native numeric grammar
+- Read runtime config booleans with the native grammar
+- Resolve sound discovery from the selected config paths
+- Stage network resources under the configured work path
+- Wire the configured max resource search recursion
+- Apply the configured ScrollSmooth to the runtime camera
+- Stop clearing player controls on window focus loss
+- Route F11 through the classic key registry
+- Size Context ObjectRank rows by the live item height
+- Show live remapped key names in the F1 help
+- Localize omitted SetNextMission labels
+- Fail closed on every mandatory HUD graphics facet
+- Keep network test hooks out of release builds
+- Fall back to the classic loader wildcard at startup
+- Preserve literal IRC transcript text and query routing
+- Match C4ChatControl input parsing and send errors
+- Localize the IRC status transcript
+- Make the IRC transcript scrollbar pointer-operable [M09-P3-L193-irc-native-scroll-windows.md]
+- Bound IRC transcripts and scroll the channel nick list [M09-P3-L193-irc-native-scroll-windows.md]
+- Show live protocol rates in the network status overlay [M09-P3-L190-network-overlay-protocol-rates.md]
+- Draw evaluation goal pictures from the live goal object [M09-P3-L185-gameover-live-goal-picture.md]
+- Give league evaluation rows their own rank icon column [M09-P3-L183-gameover-evaluation-row-parity.md]
+- Lead each two-team evaluation list with its native team header [M09-P3-L183-gameover-evaluation-row-parity.md]
+- Overlay the joined savegame crew on evaluation rows [M09-P3-L183-gameover-evaluation-row-parity.md]
+- Draw the native scrollbar for overflowing evaluation text [M09-P3-L183-gameover-evaluation-row-parity.md]
+- Compose the native league and settlement evaluation score labels [M09-P3-L183-gameover-evaluation-row-parity.md]
+- Freeze player BigIcons at evaluation time [M09-P3-L182-gameover-early-bigicon-snapshot.md]
+- Give SetMenuSize rows the native C4Menu Lines lifetime [M09-P3-L177-menu-setmenusize-rows.md]
+- Localize every in-game menu caption and tooltip at runtime [M09-P3-L176-mainmenu-runtime-localization.md]
+- Give the team menus the native normal grid and Tick35 refill [M09-P3-L175-mainmenu-team-style-refill.md]
+- Show unknown client ids and the host acknowledgement marker [M09-P3-L174-client-info-unknown-ack.md]
+- Expose the read-only joined lobby Options sheet [M09-P3-L171-joined-lobby-options-sheet.md]
+- Accept the full classic gamepad raw event space [M09-P3-L163-gamepad-full-raw-event-space.md]
+- Package a single macOS architecture when the second is not installed
+- Verify the published content archive before publishing a release
+- Refuse an uppercase content pin
+- Carry a component's source release into the update plan
+- Keep the retired Windows gnu triple on the update path
+- Compile the packaging tool for Windows
+- Show the event target on the diagnostic sinks
+- Log fail-safe script recovery at debug level
+- Keep the usable parts of a log filter directive
+- Keep dependency log suppression when a filter is set
+- Write default subscriber output to stderr
+- Claim the logging init slot before opening the session log
+- Keep the previous session log
+- Mark debug and trace lines in the gui sinks
+- Project message board prefixes from the event level
+
+### Continuous integration
+
+- Prepare releases through the GitHub App
+- Gate the long jobs on the merge queue instead of every pull request
+- Add Rust code coverage gate
+- Resolve content from the content repository's own release
+- Package macOS once as a universal build
+- Gate releases on Windows and prove the crt against release binaries
+- Gate the Windows configuration a release ships
+- Build and package Windows on a native runner
+
+### Documentation
+
+- Record the options control sheet parity result and gamepad gap
+- Require pull requests and describe the merge queue
+- Log the unported SetPosition liquid update and the invented surface snap
+- Record the icon defects closed across the three launch paths
+- Log the unported join capacity gate and client deactivation
+- Record identity-addressed viewport projections
+- Record the console script-edit relink path
+- Correct the shipped triple and engine build counts
+- Record the completed evaluation-row parity [M09-P3-L183-gameover-evaluation-row-parity.md]
+- Correct the shipped triple and engine build counts
+
+### Features
+
+- Compose the landscape in the fragment shader when opted in
+- Build a shader landscape plan from resolved texmap slots
+- Add the shader landscape and detail config seam to the retained renderer
+- Target one options sheet from the headless menu dump
+- Return network clients to the lobby when the host restarts
+- Point content at the high-resolution crew sheets
+- Install graphics variants and re-flow a definition's auxiliary sheets
+- Install rendered high-resolution sprite packs into shipped definitions
+- Embed the Windows executable icon resources in engine.rc order
+- Present the startup screens at the display refresh period
+- Port the definition reload load-what flags
+- Port the definition file-monitor registration rule
+- Port the definition reload sequence
+- Implement the c4group update apply command
+- Implement the c4group update generation command
+- Port the update package entry diff
+- Verify the update package group file checksum
+- Read and write the c4u update core
+- Project edited component hosts onto the scenario save
+- Port the tools dialog open, clear and default state
+- Address viewport projections by physical identity
+- Port the console viewport window spec
+- Publish the edit cursor mode change to the toolbox and cursor
+- Port the edit cursor overlay draw list
+- Port the viewport draw order and console overlay hook
+- Port the freedesktop notification action encoding
+- Install the Windows taskbar sink once the window exists
+- Add the Windows taskbar progress COM sink
+- Route changed files and particle reloads like the console
+- Fan the console script over the selection and coalesce refreshes
+- Port the tools page control order and enable rules
+- Port the developer toolbox notebook and its hide lifecycle
+- Port the definition reload refusal and object sweeps
+- Resolve the ready check exactly once across dialog and toast
+- Commit an edited scenario script and relink like the console
+- Select the HTTP backend from Network.UseCurl
+- Register the console shell as a developer window record
+- Route landscape-mode changes through the draw-tool control
+- Port the edit cursor's targeting, drag and drop-target gestures
+- Expose the ordered object-inspection read model
+- Compose the developer property panel text
+- Gate the file monitor and validate reload payloads
+- Model viewport player lock scroll ranges and input routing
+- Model the console component host commit and save rules
+- Add edit cursor mode cycling and context enablement
+- Project viewport pointer coordinates per window identity
+- Match changed paths to definitions like getbypath
+- Defer runtime config toggles to a clean shutdown
+- Add the keyed developer window registry
+- Add the developer draw tool state machine
+- Blit the device selector facets on the options control sheets
+- Blit the classic key facets on the options control sheets
+- Localize options control labels and port the key facet geometry
+- Draw pressed scrollbar arrows and raise their gui sounds
+- Repeat held scrollbar arrows and jump the thumb on track clicks
+- Draw the overflow scrollbar in both menu paths
+- Route engine object menu overflow through the shared scrollbar
+- Unregister the windows file classes from c4group
+- Complete the c4group command set except update packages
+- Implement the c4group mutating commands and install it
+- Add a c4group command line with the native parser
+- Own the developer ordered edit selection
+- Expose the developer landscape tool read model
+- Register the windows file classes and clonk protocol
+- Open a versioned about modal from the console help menu
+- Report pre-window startup failures natively
+- Persist the developer console window position
+- Attach the product icon to both window shells
+- Mirror loader progress to a taskbar adapter
+- Show runtime log lines on the loading screen
+- Honor graphics verbose object loading levels
+- Honor the classic windows allocconsole policy
+- Refuse effective-root startup on unix
+- Install the Windows unhandled-exception crash handler
+- Launch the classic editor from startup F6
+- Accept the debug host and client classic shortcuts
+- Apply the classic startup screen argument
+- Apply the shared config Logging section to tracing filters
+- Write Unix fatal-signal diagnostics before reraising
+- Recover the original bundle path when macOS translocates it
+- Warn on wild savegame player takeover
+- Accept the extended SDL scancode name space in KeyConfig
+- Honor the C4Object ViewEnergy bar timer
+- Capture startup screenshots with bare F9
+- Load About chrome captions from runtime resources
+- Load startup options text from runtime resources
+- Write FolderMap image dumps and resolve title fonts by height
+- Activate the advertised NetDlg Alt mnemonics
+- Port the netgetscen running chat command [M09-P3-L187-chat-netgetscen-command.md]
+- Reference the content archive the content repository publishes
+- Let a manifest entry name the release that publishes it
+- Fuse the macOS release into one universal build
+- Log a startup banner
+- Log panics to the session log
+
+### Performance
+
+- Cut cold workspace builds below one minute
+- Avoid unused full-history checkouts
+- Preserve the default parity test graph
+- Avoid duplicate dependency guard codegen
+- Reduce CI rebuild and queue latency
+
+### Refactoring
+
+- Extract the texmap slot resolution from the landscape composer
+- Drop a redundant cast in the font image blit
+- Share the DrawLineDw port across the frontend crate
+- Share the options ComponentAligner port across the crate
+- Route parity through lightweight dispatcher
+- Name the live bounds-check helpers for any caller, not just Exit
+- Extract the shared product-icon composition into its own crate
+- Rename the runtime flash builder to its resource-generic name
+- Expose the maker MutableGroup will pack
+- Wrap an over-long assertion in the refresh ceiling test
+- Satisfy platform-specific clippy
+- Move the scrollbar drawing into the shared module
+- Share one classic scrollbar model across menus
+- Format touched app test fragments
+- Name the triple-alias pass for what it serves
+- Make the content archive unbuildable by construction
+- Share one lowercase-hex predicate
+- Name the shipped executables in one place
+- Test the engine debug gates before reading the environment
+- Install one layered subscriber for every sink
+- Define the script log target once
+- Commit captured console bytes on flush
+
+### Testing
+
+- Synchronize empty sync release assertion
+- Refresh the character-menu hashes for the high-resolution crew pictures
+- Locate the owner-overlay reference crop instead of assuming the sheet origin
+- Pin high-resolution crew art to one authored texel per device pixel
+- Pin the high-resolution definition path against a real crew pack
+- Synchronize dual-route reconnect lifecycle
+- Detach allocconsole child before allocation
+- Report a per-segment frame-time trend from the scenario profiler
+- Expect the implemented update generation command
+- Pin the native MaxRefreshDelay default across resolvers
+- Pin Sec1 timer coalescing across long stalls
+- Pin joined-lobby tooltip ownership across frames
+- Regenerate the shared manifest fixture from the shipped triples
+- Pin the level of the fail-safe script path
+- Feed the message board the projected gui sink line
+
 ## [0.4.0] - 2026-07-28
 
 ### Bug fixes
