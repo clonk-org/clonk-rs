@@ -5729,12 +5729,21 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     options
         .render(&mut scratch)
         .expect("present Options immediately");
+    // `Config.General.Preloading` defaults to false on macOS and true everywhere
+    // else (`C4Config.cpp:400-403`), so the dialog-local edit has to be the
+    // opposite of whatever this platform loaded for the revert to be visible.
+    let config_preloading = options
+        .startup_options_dialog
+        .as_ref()
+        .expect("Options dialog")
+        .program()
+        .preloading;
     options
         .startup_options_dialog
         .as_mut()
         .expect("Options dialog")
         .program_mut()
-        .preloading = true;
+        .preloading = !config_preloading;
     options
         .process_options_dialog_actions(vec![
             clonk_frontend::startup_options_dlg::OptionsDlgAction::GamepadGuiControlChanged(true),
@@ -5750,13 +5759,14 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     // (C4StartupOptionsDlg.cpp:437), which constructs a *new* dialog through
     // `SwitchDialog` (:1331) and so re-reads Config — an unsaved dialog-local
     // edit does not survive (:1325-1334).
-    assert!(
-        !options
+    assert_eq!(
+        options
             .startup_options_dialog
             .as_ref()
             .expect("recreated Options dialog")
             .program()
             .preloading,
+        config_preloading,
         "the rebuilt dialog re-reads Config instead of keeping dialog-local state",
     );
     options

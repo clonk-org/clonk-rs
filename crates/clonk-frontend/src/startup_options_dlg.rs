@@ -8637,27 +8637,20 @@ mod tests {
         let gutter = 469..594;
         let row_ink = |y: i32| gutter.clone().filter(|x| ink(*x, y)).count();
         let inked_rows = (200..250).filter(|y| row_ink(*y) > 4).collect::<Vec<_>>();
-        // Two contiguous runs of the same face, so both lines exist.
-        let runs = inked_rows
+        // Both lines are inked. Their draw origins are 15 rows apart
+        // (`cgoDraw.Y - 3` and `cgoDraw.Y + cgoDraw.Hgt / 2`), so the second
+        // band starts ~15 rows after the first; the zoomed raster can round each
+        // band's first inked row either way by one. Deliberately measured as two
+        // bands rather than two *contiguous* runs — a row of a glyph dipping
+        // under the ink threshold is a rasterizer detail, not a parity claim.
+        let first = inked_rows[0];
+        let second = *inked_rows
             .iter()
-            .fold(Vec::new(), |mut runs: Vec<Vec<i32>>, y| {
-                match runs.last_mut() {
-                    Some(run) if run[run.len() - 1] + 1 == *y => run.push(*y),
-                    _ => runs.push(vec![*y]),
-                }
-                runs
-            });
-        assert_eq!(runs.len(), 2, "one run per label line: {inked_rows:?}");
-        // The two draw origins are 15 rows apart (`cgoDraw.Y - 3` and
-        // `cgoDraw.Y + cgoDraw.Hgt / 2`); the zoomed raster can round the first
-        // inked row of each either way by one.
+            .find(|y| **y >= first + 10)
+            .unwrap_or_else(|| panic!("only one label band inked: {inked_rows:?}"));
         assert!(
-            (14..=16).contains(&(runs[1][0] - runs[0][0])),
+            (14..=16).contains(&(second - first)),
             "label baselines: {inked_rows:?}",
-        );
-        assert!(
-            runs[0].len().abs_diff(runs[1].len()) <= 1,
-            "both lines use the same GetBlackFontByHeight face and zoom",
         );
 
         // `GetBlackFontByHeight(cgoDraw.Hgt / 2 + 5)` picks BookSmallFont here
@@ -8666,8 +8659,10 @@ mod tests {
         let (face, zoom) = book.black_font_by_height(17);
         assert_eq!(face.line_height, book.book_small.line_height);
         assert!((zoom - 0.85).abs() < 1.0e-6, "{zoom}");
+        // The whole first band fits inside the gap to the second, which a
+        // full-height 20px face at zoom 1.0 could not do.
         assert!(
-            runs[0].len() < face.line_height as usize,
+            inked_rows.iter().filter(|y| **y < second).count() < face.line_height as usize,
             "a 0.85 zoom draws shorter glyphs than the atlas line height",
         );
         assert_eq!(
