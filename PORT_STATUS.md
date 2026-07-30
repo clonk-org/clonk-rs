@@ -886,13 +886,16 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
     the open/close decision is pinned by
     `console_viewport_windows_open_per_identity_and_close_only_their_own`; the
     draw by `console_viewport_render_uses_the_windows_own_extent_and_identity`.
-  Verified live: `--sandbox /console` opens a window titled after the player at
-  exactly 400x250 and presents a full-extent frame every graphics tick. **What
-  a live run could not confirm** is the drawn *content*: the sandbox player has
-  no crew, so the frame is a uniform `fow_color` fill — correct for an
-  unexplored map, but it means a viewport window showing real revealed world
-  has not been observed. Confirming that needs a scenario started with a real
-  player file, which this environment has none of.
+  **Verified live, drawing real world.** `/console <scenario> <player.c4p>`
+  opens a window titled after the player at exactly 400x250 and presents the
+  revealed landscape, sky, structures and per-viewport HUD every graphics tick.
+  An earlier `--sandbox` run showed only a uniform `fow_color` fill, which was
+  correct — that player has no crew, so nothing is revealed — but it meant the
+  content was unconfirmed until a real player joined. A player file needs no
+  tooling to make: it is an unpacked directory holding `Player.txt` with a
+  `[Player]` section, plus one `<Name>.c4i/ObjectInfo.txt` per crew member.
+  That is worth knowing, because "no player file available" is what blocked
+  every headed check of this subsystem.
   **Still open on this card:** routing the window's pointer and key input into
   the edit-cursor sink. The window delivers events and
   `ActiveViewportProjection::pointer_projection` converts them, but nothing
@@ -937,7 +940,8 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   *outward* — they reach one pixel beyond the shape on each side and no
   further, which is what catches a displaced mark.
   **Still not verified:** the mark on screen in a running editor. The maths is
-  pinned; nobody has seen it drawn.
+  pinned and the viewport around it is now known to draw correctly, so what is
+  left is a click in a live window rather than a question about the code.
   **Still open:** motion and release. `edit_move`, `edit_tick_move`,
   `edit_release`, `drop_target` and `frame_selection` are ported and tested but
   still uncalled, so a drag neither moves a selection nor completes a rubber
