@@ -14,12 +14,30 @@
 //! `WM_SETICON`, which is Windows-only, and the SDL build relies on the bundle.
 //! It is a port-only addition, not a parity gap.
 
+/// Whether the pending Dock tile is due on this event.
+///
+/// The image only sticks once the process *has* a Dock tile, and it does not
+/// have one until AppKit raises it to a foreground application. winit defers
+/// that to `applicationDidFinishLaunching`
+/// (`winit-0.28.7/src/platform_impl/macos/app_state.rs:275-287`), which runs
+/// inside `[NSApp run]` — after the window is built and after everything else
+/// startup does. An image handed over before then has no tile to land on, and
+/// the tile the Dock subsequently creates is drawn from the bundle; an
+/// unbundled binary has none, so the generic executable icon stands. `Resumed`
+/// is emitted immediately after that transition (`app_state.rs:302`) and is the
+/// first moment the icon survives.
+pub(crate) fn should_attach_dock_tile<T>(
+    event: &winit::event::Event<'_, T>,
+    attached: bool,
+) -> bool {
+    !attached && matches!(event, winit::event::Event::Resumed)
+}
+
 /// Attaches the product icon to the running application's Dock tile.
 ///
-/// Must be called *after* the event loop exists. winit installs its own
-/// `NSApplication` subclass by being the first sender of `sharedApplication`,
-/// and an earlier call would leave the wrong class installed and mark the wrong
-/// thread as main.
+/// Must be called from inside the running event loop — see
+/// [`should_attach_dock_tile`] for why, and for why nothing may reach AppKit
+/// before winit has installed its own `NSApplication` subclass.
 #[cfg(target_os = "macos")]
 pub(crate) fn set_dock_icon() {
     macos::set_dock_icon();
@@ -29,6 +47,32 @@ pub(crate) fn set_dock_icon() {
 /// `startup_window_builder` already attaches.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn set_dock_icon() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::event::Event;
+
+    // A tile attached before `[NSApp run]` is discarded by the foreground
+    // transition that creates the real one
+    // (winit-0.28.7/src/platform_impl/macos/app_state.rs:275-287), leaving an
+    // unbundled run with the generic executable icon.
+    #[test]
+    fn the_dock_tile_is_attached_on_the_first_resume_only() {
+        assert!(
+            should_attach_dock_tile(&Event::<()>::Resumed, false),
+            "the first resume is the earliest moment the Dock keeps the image"
+        );
+        assert!(
+            !should_attach_dock_tile(&Event::<()>::Resumed, true),
+            "re-cutting a 512px tile on every resume is pure waste"
+        );
+        assert!(
+            !should_attach_dock_tile(&Event::<()>::MainEventsCleared, false),
+            "the tile is not re-attached on every pass through the loop"
+        );
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod macos {
