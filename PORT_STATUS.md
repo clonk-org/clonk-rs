@@ -1189,10 +1189,13 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `AddDirectoryForMonitoring` watches — so it unblocks the watcher's
   registration as well as the reload. A definition built from script alone
   carries none, which is the case a reload must refuse rather than attempt.
-  Pinned by `definitions_carry_the_group_they_were_loaded_from`, which covers
-  the accessor contract; **end-to-end coverage that a definition loaded from a
-  real shipped group carries a usable path is still owed** — the existing
-  scenario fixtures are JSON-backed and have no group behind them.
+  Pinned by `definitions_carry_the_group_they_were_loaded_from` for the
+  accessor contract and, against real content, by
+  `reloading_a_shipped_definition_group_rebuilds_it_from_disk`: it points a
+  definition at the shipped `Wipf.c4d`, registers it under a placeholder name,
+  reloads, and asserts the name came back from `DefCore.txt` — so the rebuild
+  demonstrably re-read the group rather than keeping what was registered. That
+  closes the coverage this note previously recorded as owed.
   **The reload body landed.** `Engine::reload_definition` re-opens the group
   from the definition's own stored path, rebuilds it through the same
   `ResourceDefinition::load` + `Definition::from_resource` pair production

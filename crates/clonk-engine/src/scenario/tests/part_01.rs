@@ -1,6 +1,42 @@
 // Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    // The reload against a *real shipped group*, not a synthetic DefCore:
+    // C4DefList::Reload re-opens the definition's own path and rebuilds it
+    // through the same loader production uses (C4Def.cpp:1191-1213).
+    #[test]
+    fn reloading_a_shipped_definition_group_rebuilds_it_from_disk() {
+        let group = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../content/Objects.c4d/Animals.c4d/Wipf.c4d");
+        if !group.is_dir() {
+            // The content submodule is not materialised in this checkout.
+            return;
+        }
+
+        let mut engine = crate::Engine::new();
+        let mut definition =
+            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "")
+                .expect("script definition compiles");
+        definition.set_source_path(Some(group.clone()));
+        engine
+            .register_definition(definition)
+            .expect("register definition");
+        assert_eq!(engine.definition("WIPF").map(crate::Definition::name), Some("placeholder"));
+
+        assert!(
+            engine.reload_definition("WIPF", false),
+            "a real shipped group reloads"
+        );
+        let reloaded = engine.definition("WIPF").expect("the definition survives");
+        assert_eq!(reloaded.source_path(), Some(group.as_path()));
+        // The name came from DefCore.txt on disk, replacing the placeholder —
+        // so the rebuild really re-read the group rather than keeping what was
+        // registered.
+        assert_ne!(reloaded.name(), "placeholder");
+        // And the group is offered to the file monitor, since it is unpacked.
+        assert_eq!(engine.monitored_definition_directories(), vec![group]);
+    }
+
     // C4Def.cpp:547-560 — only unpacked definition groups are watched, and
     // each group is registered once.
     #[test]
