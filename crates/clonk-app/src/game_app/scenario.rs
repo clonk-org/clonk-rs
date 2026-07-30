@@ -1162,7 +1162,7 @@ impl GameApp {
         let initial_game_data = prepared_initial_game_data.as_ref().or_else(|| {
             offline_savegame
                 .as_ref()
-                .map(|save| &save.initial_game_data)
+                .and_then(|save| save.initial_game_data.as_ref())
         });
         let network_game = self.network.is_some();
         let replay = scenario_data

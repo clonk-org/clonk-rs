@@ -14,7 +14,9 @@ use crate::offline_startup::OfflineStartupPlayers;
 /// `InitPlayers` boundary. User profiles stay external; script profiles keep
 /// the filenames embedded by `C4GameSaveSavegame`.
 pub(super) struct OfflineSavegameStartup {
-    pub(super) initial_game_data: InitialNetworkGameData,
+    /// `None` when the scenario ships no `Game.txt`: `CompileRuntimeData` over
+    /// a null `GameText` leaves every live value alone (C4Game.cpp:224,267).
+    pub(super) initial_game_data: Option<InitialNetworkGameData>,
     pub(super) runtime_players: Vec<RuntimeJoinPlayerSource>,
     pub(super) external_player_paths: HashMap<i32, PathBuf>,
     /// One entry per assignment made beyond `PML_PlrName`. C++ logs each and,
@@ -53,13 +55,7 @@ pub(super) fn prepare_offline_savegame_startup(
                 scenario_path.display()
             )
         })?;
-    let initial_game_data = game_source
-        .as_deref()
-        .map(clonk_engine::parse_initial_network_game_data)
-        .unwrap_or_default();
-    initial_game_data
-        .validate_runtime_application()
-        .map_err(|error| format!("invalid offline savegame Game.txt: {error}"))?;
+    let initial_game_data = offline_savegame_initial_game_data(game_source.as_deref())?;
 
     // A present SavePlayerInfos owns the result even when malformed. Only an
     // absent component permits C4GameParameters::Load's old Game.txt
@@ -93,6 +89,22 @@ pub(super) fn prepare_offline_savegame_startup(
             wild_takeovers,
         },
     ))
+}
+
+/// `C4Game::OpenScenario` compiles runtime data only from a `Game.txt` it
+/// actually found; over a null `GameText` every `CompileRuntimeData` caller is
+/// a no-op and the live scenario state stands (C4Game.cpp:224,267;
+/// C4Player.cpp:1652-1656).
+fn offline_savegame_initial_game_data(
+    game_source: Option<&[u8]>,
+) -> Result<Option<InitialNetworkGameData>, String> {
+    let Some(source) = game_source else {
+        return Ok(None);
+    };
+    let data = clonk_engine::parse_initial_network_game_data(source);
+    data.validate_runtime_application()
+        .map(|()| Some(data))
+        .map_err(|error| format!("invalid offline savegame Game.txt: {error}"))
 }
 
 /// `C4Game::Init` raises the frozen player capacity to the restore-row count
@@ -549,6 +561,21 @@ mod tests {
             vec![2],
             "only the copied script player is recreated",
         );
+    }
+
+    /// `C4Game::OpenScenario` only reads `Game.txt` into `GameText`, and
+    /// `CompileRuntimeData` is a no-op over a null buffer (C4Game.cpp:224,267;
+    /// C4Player.cpp:1652-1656). A regular scenario shipping restore infos has
+    /// no `Game.txt`, so the live C4S-derived rules, music and section state
+    /// must survive untouched instead of being overwritten by a default.
+    #[test]
+    fn a_restore_scenario_without_game_txt_has_no_runtime_data() {
+        assert!(offline_savegame_initial_game_data(None)
+            .expect("an absent Game.txt is not an error")
+            .is_none());
+        assert!(offline_savegame_initial_game_data(Some(b"[Game]\r\n"))
+            .expect("an empty runtime section compiles")
+            .is_some());
     }
 
     /// `C4Game::Init` raises the frozen capacity to the restore-row count
