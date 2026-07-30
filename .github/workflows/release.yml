@@ -449,7 +449,7 @@ jobs:
         if: matrix.runner == 'macos-latest'
         run: |
           shopt -s nullglob
-          engines=(target/dist/components/clonk-rust-*-engine-universal-apple-darwin.zip)
+          engines=(target/dist/components/update-engine-*-universal-apple-darwin.zip)
           if [[ ${#engines[@]} -ne 1 ]]; then
             echo "expected exactly one universal engine component, found ${#engines[@]}" >&2
             exit 1
@@ -503,13 +503,13 @@ jobs:
           for component in "${components[@]}"; do
             name=$(basename "$component")
             case "$name" in
-              planet-*)   floor=10000000 ;;
+              update-planet-*) floor=10000000 ;;
               # The macOS engine carries two architectures, so its floor is
               # twice the others'. Still only an empty-container check — that
               # both slices are really present is what `lipo -info` proves, in
               # the step above.
-              *-engine-universal-*) floor=10000000 ;;
-              *-engine-*) floor=5000000 ;;
+              update-engine-*-universal-*) floor=10000000 ;;
+              update-engine-*) floor=5000000 ;;
               # `content-*` is deliberately not here: that archive is built and
               # published by clonk-org/clonk-rs-content, and a second builder of
               # content-addressed bytes is exactly what must not exist. The

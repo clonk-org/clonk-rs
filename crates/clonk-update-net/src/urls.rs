@@ -272,7 +272,7 @@ mod tests {
     fn an_ordinary_archive_name_is_accepted() {
         for name in [
             "content-0123456789abcdef.zip",
-            "clonk-rust-0.4.0-engine-x86_64-pc-windows-gnu.zip",
+            "update-engine-0.4.0-x86_64-pc-windows-gnu.zip",
             "planet_1.zip",
         ] {
             assert!(
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(
             archive_url_for(&manifest, target).expect("plain name"),
             "https://github.com/clonk-org/clonk-rs/releases/download/v0.4.0/\
-             clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip"
+             update-engine-0.4.0-x86_64-unknown-linux-gnu.zip"
         );
     }
 
@@ -353,7 +353,7 @@ mod tests {
           "name": "engine",
           "targets": {
             "x86_64-unknown-linux-gnu": {
-              "archive": "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+              "archive": "update-engine-0.4.0-x86_64-unknown-linux-gnu.zip",
               "sha256": "aa00112233445566778899aabbccddeeff00112233445566778899aabbccddee",
               "size": 24000000,
               "install": ""

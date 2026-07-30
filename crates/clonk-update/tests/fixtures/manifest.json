@@ -79,37 +79,37 @@
       "name": "planet",
       "targets": {
         "aarch64-apple-darwin": {
-          "archive": "planet-ee.zip",
+          "archive": "update-planet-ee.zip",
           "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
           "size": 49000000,
           "install": "Contents/Resources/planet"
         },
         "universal-apple-darwin": {
-          "archive": "planet-ee.zip",
+          "archive": "update-planet-ee.zip",
           "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
           "size": 49000000,
           "install": "Contents/Resources/planet"
         },
         "x86_64-apple-darwin": {
-          "archive": "planet-ee.zip",
+          "archive": "update-planet-ee.zip",
           "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
           "size": 49000000,
           "install": "Contents/Resources/planet"
         },
         "x86_64-pc-windows-gnu": {
-          "archive": "planet-ee.zip",
+          "archive": "update-planet-ee.zip",
           "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
           "size": 49000000,
           "install": "planet"
         },
         "x86_64-pc-windows-msvc": {
-          "archive": "planet-ee.zip",
+          "archive": "update-planet-ee.zip",
           "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
           "size": 49000000,
           "install": "planet"
         },
         "x86_64-unknown-linux-gnu": {
-          "archive": "planet-ee.zip",
+          "archive": "update-planet-ee.zip",
           "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
           "size": 49000000,
           "install": "planet"
@@ -120,37 +120,37 @@
       "name": "engine",
       "targets": {
         "aarch64-apple-darwin": {
-          "archive": "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+          "archive": "update-engine-0.4.0-universal-apple-darwin.zip",
           "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
           "size": 34000000,
           "install": ""
         },
         "universal-apple-darwin": {
-          "archive": "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+          "archive": "update-engine-0.4.0-universal-apple-darwin.zip",
           "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
           "size": 34000000,
           "install": ""
         },
         "x86_64-apple-darwin": {
-          "archive": "clonk-rust-0.4.0-engine-universal-apple-darwin.zip",
+          "archive": "update-engine-0.4.0-universal-apple-darwin.zip",
           "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
           "size": 34000000,
           "install": ""
         },
         "x86_64-pc-windows-gnu": {
-          "archive": "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+          "archive": "update-engine-0.4.0-x86_64-pc-windows-msvc.zip",
           "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
           "size": 26000000,
           "install": ""
         },
         "x86_64-pc-windows-msvc": {
-          "archive": "clonk-rust-0.4.0-engine-x86_64-pc-windows-msvc.zip",
+          "archive": "update-engine-0.4.0-x86_64-pc-windows-msvc.zip",
           "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
           "size": 26000000,
           "install": ""
         },
         "x86_64-unknown-linux-gnu": {
-          "archive": "clonk-rust-0.4.0-engine-x86_64-unknown-linux-gnu.zip",
+          "archive": "update-engine-0.4.0-x86_64-unknown-linux-gnu.zip",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size": 24000000,
           "install": ""
