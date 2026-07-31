@@ -1704,6 +1704,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ipv4_wildcard_bind_still_reaches_an_ipv6_netpuncher() {
+        // A dual-stack socket pinned to `::ffff:0.0.0.0` is IPv4 as far as the
+        // kernel is concerned, and Linux answers EAFNOSUPPORT for every IPv6
+        // destination sent over it. A host whose netpuncher resolved from an
+        // AAAA record could then not start a game at all.
+        let puncher = ReliableUdpSocketDriver::bind(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::LOCALHOST,
+            0,
+            0,
+            0,
+        )))
+        .unwrap();
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))
+                .unwrap();
+        driver
+            .init_puncher(puncher.local_addr().unwrap(), NetpuncherRole::Host)
+            .await
+            .unwrap();
+    }
+
     fn handshake_pair() -> (
         SocketAddr,
         SocketAddr,
