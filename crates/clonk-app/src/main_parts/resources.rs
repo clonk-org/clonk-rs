@@ -3841,14 +3841,34 @@ pub(crate) fn load_render_inactive_mask(paths: Option<&AppPaths>) -> u32 {
     .map_or(RENDER_INACTIVE_CONSOLE, |value| value as u32)
 }
 
+/// `Application.Active` as `C4Application::DoInit` leaves it: set, until an OS
+/// deactivation message clears it (`CStdApp` activation handling).
+///
+/// Deliberately *not* the windowing system's focus report. A Wayland surface
+/// cannot hold focus before it has committed its first buffer, so seeding the
+/// flag from `Window::has_focus` starts the session inactive on every Wayland
+/// compositor — and an inactive session that never draws never becomes active.
+pub(crate) const fn initial_window_active() -> bool {
+    true
+}
+
 /// `C4GraphicsSystem::StartDrawing`'s inactive gate: an active window always
 /// draws; an inactive one only when its own shell's bit is set.
+///
+/// `has_presented` carries the one condition C++ never had to state. Win32 and
+/// SDL show a window whether or not the application has drawn into it, so
+/// withholding a frame there only ever costs a repaint. Wayland maps a surface
+/// on its first committed buffer and never focuses an unmapped one, so
+/// withholding frame *one* is unrecoverable: no frame, no map, no focus, no
+/// frame. The gate therefore guards repaints of a window already on screen,
+/// which is exactly what `StartDrawing` guards on Windows.
 pub(crate) fn render_inactive_allows_drawing(
     mask: u32,
     window_active: bool,
     console_shell: bool,
+    has_presented: bool,
 ) -> bool {
-    if window_active {
+    if window_active || !has_presented {
         return true;
     }
     let bit = if console_shell {

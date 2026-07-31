@@ -683,7 +683,7 @@ fn run() -> Result<()> {
     if classic.console {
         arm_configured_engine_debug_mode(&mut app.engine, app_paths.as_deref(), true);
     }
-    app.window_active = window.has_focus();
+    app.window_active = initial_window_active();
     // C++ only has an `ITaskbarList3` once `CStdWindow` owns a handle, so the
     // real sink replaces the no-op one here rather than in `GameApp::new`
     // (M10-P4-L079). Everything but Windows keeps the no-op, matching the SDL
@@ -1022,6 +1022,7 @@ fn run() -> Result<()> {
                         render_inactive_mask,
                         app.window_active,
                         app.console_mode,
+                        render_floor.has_presented(),
                     ) =>
             {
                 // The opportunity was still consumed. Leaving the repaint floor

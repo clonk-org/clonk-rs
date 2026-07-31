@@ -912,6 +912,28 @@ fn a_refused_presentation_rearms_the_repaint_floor() {
 }
 
 #[test]
+fn only_a_real_presentation_marks_the_window_as_having_drawn() {
+    // The inactive gate is allowed to withhold frames only from a window the
+    // compositor is already showing. Refusals must therefore not count as
+    // presentations, or the very first refusal would report a window that has
+    // never put a pixel on screen as drawn.
+    let mut floor = RenderFloor::default();
+    let base = Instant::now();
+    assert!(!floor.has_presented());
+
+    floor.note_refused_presentation(base);
+    assert!(
+        !floor.has_presented(),
+        "a refused opportunity drew nothing, whatever it did to the floor"
+    );
+    let _ = floor.must_present(base);
+    assert!(!floor.has_presented(), "arming the floor is not drawing");
+
+    floor.record_presentation(base, Duration::from_millis(5));
+    assert!(floor.has_presented());
+}
+
+#[test]
 fn automatic_frame_skip_never_skips_two_consecutive_graphics_passes() {
     let mut frame_skip = AutomaticFrameSkip::default();
     frame_skip.finish_graphics_pass(true, Duration::from_millis(29), Duration::from_millis(28));

@@ -2885,12 +2885,22 @@ impl PresentationDetailGovernor {
 pub(crate) struct RenderFloor {
     last_graphics: Duration,
     last_presented: Option<Instant>,
+    presented: bool,
 }
 
 impl RenderFloor {
     pub(crate) fn record_presentation(&mut self, at: Instant, graphics_duration: Duration) {
         self.last_graphics = graphics_duration;
         self.last_presented = Some(at);
+        self.presented = true;
+    }
+
+    /// Whether a frame has ever reached the screen. Refusals and floor arming
+    /// both move `last_presented` without drawing anything, so neither can
+    /// answer this — and the inactive gate needs the honest answer to keep its
+    /// hands off the frame that maps the window.
+    pub(crate) const fn has_presented(&self) -> bool {
+        self.presented
     }
 
     /// How long one `advance_simulation_pass` may run before yielding so the
