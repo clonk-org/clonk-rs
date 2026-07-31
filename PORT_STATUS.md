@@ -425,6 +425,28 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Closed 2026-07-30: **Terrain saved under a put SolidMask survives a blast —
+  oracle-faithful, not a port gap.** Reported as issue #43: a flint thrown at an
+  elevator case parked on stone blows up everything visible, but moving the case
+  reveals untouched stone under its floor. C++ does the same. `C4Game::Explosion`
+  reaches `C4Landscape::BlastFree` directly (`C4Effect.cpp:919`), and unlike
+  `ClearRect` (`C4Landscape.cpp:2171-2181`) `BlastFree` carries no
+  `PrepareChange`/`FinishChange` bracket (`C4Landscape.cpp:1022-1062`), so it
+  scans the *masked* Surface8. Every put mask pixel reads `MCVehic`, i.e.
+  material `MVehic`, and `BlastFreePix` clears only when
+  `Game.Material.Map[mat].BlastFree` is set (`C4Landscape.cpp:941-960`) —
+  `Material.c4g/Vehicle.c4m` sets neither `BlastFree` nor `BlastShiftTo`, and
+  `C4Material.cpp:105` defaults `BlastFree` to 0, so the masked pixels are
+  counted into `BlastMatCount[MVehic]` and otherwise skipped, consuming no
+  `Random()`. `C4SolidMask::Remove` then restores the background byte saved
+  before the blast (`C4SolidMask.cpp:241-260`). `DigFree` shields the same
+  pixels by the same mechanism, which is why a lift floor is undiggable.
+  Bracketing the blast would free that material, shift `Random()` call order for
+  every `BlastShiftTo` material in the crater, and desync against the oracle.
+  Pinned by `blast_free_leaves_the_landscape_under_a_solid_mask_intact_like_cpp`
+  next to the existing `dig_free_runs_before_movers_own_baked_mask_is_removed`
+  (`crates/clonk-engine-unit-tests/tests/unit/parts/solidmask_shape.rs`).
+
 - Closed 2026-07-30: **Every preplaced object whose saved `DrawTransform`
   carried the FlipDir mirror rendered exactly backwards.** Reported as the
   Dragon Rock intro dragon facing right while it flew left. `C4Object::
