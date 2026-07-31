@@ -1863,6 +1863,116 @@ Basement=-18\nConSizeOff=-20\n",
     }
 
     #[test]
+    fn blast_free_leaves_the_landscape_under_a_solid_mask_intact_like_cpp() {
+        // A flint thrown at an elevator case resting on stone leaves the
+        // stone under the case's floor behind. That is what C++ does, so it
+        // is pinned rather than fixed. C4Game::Explosion reaches BlastFree
+        // directly (C4Effect.cpp:919) and BlastFree — unlike ClearRect
+        // (C4Landscape.cpp:2171-2181) — carries no PrepareChange/FinishChange
+        // bracket (C4Landscape.cpp:1022-1062), so it scans the *masked*
+        // plane. Every put SolidMask pixel reads MCVehic, i.e. material
+        // MVehic, and BlastFreePix clears only when
+        // Game.Material.Map[mat].BlastFree is set (C4Landscape.cpp:941-960);
+        // the engine's Vehicle material never sets it. C4SolidMask::Remove
+        // then restores the background byte saved before the blast
+        // (C4SolidMask.cpp:241-260).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Rock]
+            Name=Rock
+            Density=50
+            BlastFree=1
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let rock = materials.id_of("Rock").expect("rock exists");
+
+        let grid = landscape::PixelGrid::new(
+            20,
+            20,
+            vec![0u8; 400],
+            vec![0, 50, 100],
+            vec![None, Some("Rock".into()), Some("Vehicle".into())],
+            vec![None; 3],
+        );
+        let mut world = Landscape::new(20, vec![0; 20]).expect("landscape builds");
+        world.set_world_height(20);
+        world.set_pixel_grid(grid);
+        // One undiggable seam: the r=2 crater around (10,10) exposes
+        // (8,10)/(9,10), shields (10,10)/(11,10) under the case floor, and
+        // never reaches the (12,10) sentinel.
+        for x in 8..13 {
+            world.grid_write_byte(x, 10, 1);
+        }
+
+        let mut case = simple_definition("ELEV");
+        case.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 1)));
+        case.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 2, 1, 0, 0)));
+
+        let mut engine = Engine::with_seed(43);
+        engine.set_materials(materials);
+        engine.set_landscape(world);
+        engine.register_definition(case).expect("case registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("ELEV").with_position(Vector2::new(10, 10)))
+            .expect("case spawns");
+        let index = engine.find_object_index(id).expect("case exists");
+        // Park the case flush on the seam, the way an elevator sits at its
+        // lowest position; spawn placement would otherwise lift it clear.
+        engine.objects[index].state.position = Vector2::new(10, 10);
+        engine.objects[index].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.update_solid_mask(index);
+        assert_eq!(vehicle_pixels(&engine), vec![(10, 10), (11, 10)]);
+        assert_eq!(
+            engine.debug_solid_mask_buffer(id.as_u64()),
+            Some(vec![1; 2])
+        );
+
+        let result = engine
+            .blast_circle(Vector2::new(10, 10), 2, None)
+            .expect("blast applies");
+
+        let vehicle = engine.materials().id_of("Vehicle").expect("vehicle exists");
+        assert_eq!(result.pixel_count_by_material.get(&rock), Some(&2));
+        assert_eq!(
+            result.pixel_count_by_material.get(&vehicle),
+            Some(&2),
+            "BlastMatCount books the masked pixels as MVehic, not as Rock"
+        );
+        assert_eq!(result.removed_by_material.get(&rock), Some(&2));
+
+        let landscape = engine.landscape().expect("landscape remains set");
+        for x in [8, 9] {
+            assert_eq!(
+                landscape.material_at(x, 10),
+                None,
+                "exposed Rock inside the crater is blasted free at ({x}, 10)"
+            );
+        }
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![(10, 10), (11, 10)],
+            "BlastFreePix leaves MCVehic alone"
+        );
+
+        engine.remove_solid_mask(index);
+        let landscape = engine.landscape().expect("landscape remains set");
+        for x in [10, 11] {
+            assert_eq!(
+                landscape.material_at(x, 10),
+                Some(rock),
+                "mask removal re-exposes the Rock the blast never saw at ({x}, 10)"
+            );
+        }
+        assert_eq!(landscape.material_at(12, 10), Some(rock));
+    }
+
+    #[test]
     fn mover_contact_switches_own_mask_at_first_domotion() {
         // Before the first successful DoMotion, ContactCheck sees the own
         // bake. DoMotion removes it before changing x, so every later step
