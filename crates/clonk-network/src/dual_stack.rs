@@ -7,19 +7,128 @@
 //! live together rather than being repeated per transport.
 
 use std::io;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-/// Creates one dual-stack socket, the shape every transport in this crate
-/// binds.
-pub(crate) fn create_dual_stack_socket(
+/// Destination families a bound socket can actually carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SocketFamily {
+    /// AF_INET6 with `IPV6_V6ONLY` cleared, bound to an address that is not
+    /// v4-mapped. Both families reach their peers over it.
+    DualStack,
+    /// AF_INET, or AF_INET6 pinned to a v4-mapped address. Linux answers
+    /// `EAFNOSUPPORT` for every IPv6 destination sent over such a socket, so
+    /// callers must not offer it one.
+    Ipv4Only,
+}
+
+/// The `socket(2)` seam. Production passes [`new_socket`]; tests substitute a
+/// constructor that refuses `AF_INET6` the way a kernel booted with
+/// `ipv6.disable=1` does.
+pub(crate) type SocketConstructor<'a> =
+    &'a dyn Fn(Domain, Type, Option<Protocol>) -> io::Result<Socket>;
+
+pub(crate) fn new_socket(
+    domain: Domain,
     kind: Type,
     protocol: Option<Protocol>,
 ) -> io::Result<Socket> {
-    let socket = Socket::new(Domain::IPV6, kind, protocol)?;
-    socket.set_only_v6(false)?;
-    Ok(socket)
+    Socket::new(domain, kind, protocol)
+}
+
+/// Error codes with which a host reports that it has no IPv6 stack at all,
+/// rather than a transient failure worth retrying.
+#[cfg(unix)]
+const IPV6_UNAVAILABLE_CODES: &[i32] = &[
+    libc::EAFNOSUPPORT,
+    libc::EPFNOSUPPORT,
+    libc::EPROTONOSUPPORT,
+];
+#[cfg(windows)]
+const IPV6_UNAVAILABLE_CODES: &[i32] = &[
+    10_047, // WSAEAFNOSUPPORT
+    10_046, // WSAEPFNOSUPPORT
+    10_043, // WSAEPROTONOSUPPORT
+];
+#[cfg(not(any(unix, windows)))]
+const IPV6_UNAVAILABLE_CODES: &[i32] = &[];
+
+fn ipv6_stack_unavailable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Unsupported
+        || error
+            .raw_os_error()
+            .is_some_and(|code| IPV6_UNAVAILABLE_CODES.contains(&code))
+}
+
+/// The error a host without an IPv6 stack answers `socket(AF_INET6, ...)`
+/// with. Only tests build one; production reads it from the kernel.
+#[cfg(test)]
+pub(crate) fn ipv6_unavailable_error() -> io::Error {
+    IPV6_UNAVAILABLE_CODES.first().map_or_else(
+        || io::Error::from(io::ErrorKind::Unsupported),
+        |code| io::Error::from_raw_os_error(*code),
+    )
+}
+
+/// Creates the socket `bind_address` needs, together with the address it must
+/// actually be bound to.
+///
+/// A host whose kernel has no IPv6 stack fails `socket(AF_INET6, ...)` outright
+/// with `EAFNOSUPPORT`, and a hard failure there leaves it unable to host a game
+/// at all. Degrading to plain IPv4 keeps every IPv4 peer reachable; the caller
+/// reads back [`bound_socket_family`] to learn that IPv6 destinations are not.
+pub(crate) fn create_bound_socket_with(
+    bind_address: SocketAddr,
+    kind: Type,
+    protocol: Option<Protocol>,
+    constructor: SocketConstructor<'_>,
+) -> io::Result<(Socket, SocketAddr)> {
+    match constructor(Domain::IPV6, kind, protocol) {
+        Ok(socket) => socket
+            .set_only_v6(false)
+            .map(|()| (socket, dual_stack_bind_address(bind_address))),
+        Err(error) if ipv6_stack_unavailable(&error) => ipv4_bind_address(bind_address)
+            .ok_or(error)
+            .and_then(|address| {
+                constructor(Domain::IPV4, kind, protocol).map(|socket| (socket, address))
+            }),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn create_bound_socket(
+    bind_address: SocketAddr,
+    kind: Type,
+    protocol: Option<Protocol>,
+) -> io::Result<(Socket, SocketAddr)> {
+    create_bound_socket_with(bind_address, kind, protocol, &new_socket)
+}
+
+/// Which destination families a socket already bound to `local` can carry.
+pub(crate) fn bound_socket_family(local: SocketAddr) -> SocketFamily {
+    match local {
+        SocketAddr::V6(address) if address.ip().to_ipv4_mapped().is_none() => {
+            SocketFamily::DualStack
+        }
+        _ => SocketFamily::Ipv4Only,
+    }
+}
+
+/// IPv4 form of `requested`, or `None` when it names an endpoint only IPv6 can
+/// carry and an IPv4 socket therefore cannot serve at all.
+fn ipv4_bind_address(requested: SocketAddr) -> Option<SocketAddr> {
+    match requested {
+        SocketAddr::V4(address) => Some(SocketAddr::V4(address)),
+        SocketAddr::V6(address) if address.ip().is_unspecified() => Some(SocketAddr::new(
+            Ipv4Addr::UNSPECIFIED.into(),
+            address.port(),
+        )),
+        SocketAddr::V6(address) => address
+            .ip()
+            .to_ipv4_mapped()
+            .map(|ip| SocketAddr::new(ip.into(), address.port())),
+    }
 }
 
 /// Address a dual-stack socket must actually bind in order to serve

@@ -4,6 +4,7 @@
 mod client_player_resource;
 mod exact_game_reference;
 mod host_initial_resources;
+mod host_netpuncher_families;
 mod host_resource_core;
 mod initial_network_dynamic;
 mod initial_network_metadata;

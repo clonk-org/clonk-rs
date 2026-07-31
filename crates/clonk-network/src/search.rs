@@ -1325,26 +1325,25 @@ async fn execute_search_command(
 
 fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
     let requested = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0));
-    let socket = crate::dual_stack::create_dual_stack_socket(Type::DGRAM, Some(Protocol::UDP))?;
+    let (socket, address) =
+        crate::dual_stack::create_bound_socket(requested, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;
-    socket.set_multicast_hops_v6(16)?;
-    socket.set_multicast_loop_v6(true)?;
-    socket.bind(&crate::dual_stack::dual_stack_bind_address(requested).into())?;
-    let mut multicast_interfaces = Vec::new();
-    for interface in multicast_interface_indices() {
-        if socket
-            .join_multicast_v6(&DISCOVERY_MULTICAST, interface)
-            .is_ok()
-        {
-            multicast_interfaces.push(interface);
-        }
+    // A host without an IPv6 stack cannot reach the C++ discovery group at all.
+    // Keeping the degraded socket leaves masterserver and direct queries
+    // working instead of failing the whole search.
+    let dual_stack = crate::dual_stack::bound_socket_family(address)
+        == crate::dual_stack::SocketFamily::DualStack;
+    if dual_stack {
+        socket.set_multicast_hops_v6(16)?;
+        socket.set_multicast_loop_v6(true)?;
     }
-    if multicast_interfaces.is_empty() {
-        socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
-        multicast_interfaces.push(0);
-    }
+    socket.bind(&address.into())?;
+    let multicast_interfaces = dual_stack
+        .then(|| crate::advertise::join_discovery_multicast(&socket))
+        .transpose()?
+        .unwrap_or_default();
     socket.set_nonblocking(true)?;
     Ok(DiscoverySocket {
         socket: UdpSocket::from_std(socket.into())?,

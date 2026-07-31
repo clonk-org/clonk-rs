@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use clonk_engine::LegacyCString;
-use socket2::{Protocol, SockRef, Type};
+use socket2::{Protocol, SockRef, Socket, Type};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -601,9 +601,10 @@ Server: ClonkRust/{engine}\r\n\r\n",
 
 fn create_reference_listener(port: u16) -> io::Result<std::net::TcpListener> {
     let requested = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0));
-    let socket = crate::dual_stack::create_dual_stack_socket(Type::STREAM, Some(Protocol::TCP))?;
+    let (socket, address) =
+        crate::dual_stack::create_bound_socket(requested, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
-    socket.bind(&crate::dual_stack::dual_stack_bind_address(requested).into())?;
+    socket.bind(&address.into())?;
     socket.listen(128)?;
     socket.set_nonblocking(true)?;
     Ok(socket.into())
@@ -611,26 +612,44 @@ fn create_reference_listener(port: u16) -> io::Result<std::net::TcpListener> {
 
 fn create_discovery_socket(port: u16) -> io::Result<(std::net::UdpSocket, Vec<u32>)> {
     let requested = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0));
-    let socket = crate::dual_stack::create_dual_stack_socket(Type::DGRAM, Some(Protocol::UDP))?;
+    let (socket, address) =
+        crate::dual_stack::create_bound_socket(requested, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;
-    socket.set_multicast_hops_v6(16)?;
-    socket.set_multicast_loop_v6(true)?;
-    socket.bind(&crate::dual_stack::dual_stack_bind_address(requested).into())?;
-    let mut multicast_interfaces = Vec::new();
-    for interface in multicast_interface_indices() {
-        if socket
-            .join_multicast_v6(&DISCOVERY_MULTICAST, interface)
-            .is_ok()
-        {
-            multicast_interfaces.push(interface);
-        }
+    // C++ discovery is IPv6 multicast only (C4NetIO.cpp:1617-1633), so a host
+    // without an IPv6 stack simply cannot be found on the LAN. It still has to
+    // be able to host: keep the degraded socket and leave its group list empty
+    // instead of failing the advertiser outright.
+    let dual_stack = crate::dual_stack::bound_socket_family(address)
+        == crate::dual_stack::SocketFamily::DualStack;
+    if dual_stack {
+        socket.set_multicast_hops_v6(16)?;
+        socket.set_multicast_loop_v6(true)?;
     }
+    socket.bind(&address.into())?;
+    let multicast_interfaces = dual_stack
+        .then(|| join_discovery_multicast(&socket))
+        .transpose()?
+        .unwrap_or_default();
+    socket.set_nonblocking(true)?;
+    Ok((socket.into(), multicast_interfaces))
+}
+
+/// Joins the C++ discovery group on every candidate interface, falling back to
+/// the platform default when none of them accepted the join.
+pub(crate) fn join_discovery_multicast(socket: &Socket) -> io::Result<Vec<u32>> {
+    let mut multicast_interfaces = multicast_interface_indices()
+        .into_iter()
+        .filter(|interface| {
+            socket
+                .join_multicast_v6(&DISCOVERY_MULTICAST, *interface)
+                .is_ok()
+        })
+        .collect::<Vec<_>>();
     if multicast_interfaces.is_empty() {
         socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
         multicast_interfaces.push(0);
     }
-    socket.set_nonblocking(true)?;
-    Ok((socket.into(), multicast_interfaces))
+    Ok(multicast_interfaces)
 }
