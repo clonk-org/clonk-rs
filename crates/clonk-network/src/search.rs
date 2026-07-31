@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use socket2::{Domain, Protocol, SockRef, Socket, Type};
+use socket2::{Protocol, SockRef, Type};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
@@ -1324,14 +1324,14 @@ async fn execute_search_command(
 }
 
 fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
-    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_only_v6(false)?;
+    let requested = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0));
+    let socket = crate::dual_stack::create_dual_stack_socket(Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;
     socket.set_multicast_hops_v6(16)?;
     socket.set_multicast_loop_v6(true)?;
-    socket.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
+    socket.bind(&crate::dual_stack::dual_stack_bind_address(requested).into())?;
     let mut multicast_interfaces = Vec::new();
     for interface in multicast_interface_indices() {
         if socket

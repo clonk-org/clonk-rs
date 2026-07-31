@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Protocol, Type};
 use thiserror::Error;
 use tokio::{net::UdpSocket, time::Instant};
 
@@ -1035,10 +1035,9 @@ impl ReliableUdpSocketDriver {
         tokio::runtime::Handle::try_current().map_err(|_| {
             io::Error::other("reliable-UDP driver requires an entered Tokio runtime")
         })?;
-        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-        socket.set_only_v6(false)?;
+        let socket = crate::dual_stack::create_dual_stack_socket(Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_nonblocking(true)?;
-        socket.bind(&reliable_udp_bind_address(bind_address).into())?;
+        socket.bind(&crate::dual_stack::dual_stack_bind_address(bind_address).into())?;
         let socket = UdpSocket::from_std(socket.into())?;
         let started_at = Instant::now();
         Ok(Self {
@@ -1560,18 +1559,6 @@ pub enum ReliableUdpDriverError {
     Runtime(#[from] ReliableUdpRuntimeError),
     #[error(transparent)]
     Io(#[from] io::Error),
-}
-
-fn reliable_udp_bind_address(address: SocketAddr) -> SocketAddr {
-    match address {
-        SocketAddr::V4(address) => SocketAddr::V6(SocketAddrV6::new(
-            address.ip().to_ipv6_mapped(),
-            address.port(),
-            0,
-            0,
-        )),
-        SocketAddr::V6(address) => SocketAddr::V6(address),
-    }
 }
 
 fn reliable_udp_unreachable_error(error: &io::Error) -> bool {
