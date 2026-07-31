@@ -9,13 +9,13 @@ use std::thread;
 use std::time::Duration;
 
 use clonk_engine::LegacyCString;
-use socket2::{Protocol, SockRef, Socket, Type};
+use socket2::{Protocol, SockRef, Type};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 use crate::host_game_reference::{quote_legacy, serialize_reference_parameters};
-use crate::search::{multicast_interface_indices, multicast_targets, DISCOVERY_MULTICAST};
+use crate::search::{join_discovery_multicast, multicast_targets, DISCOVERY_MULTICAST};
 use crate::{
     HostGameReference, HostGameReferenceError, NetworkAddress, NetworkGameReference,
     NetworkProtocol,
@@ -634,22 +634,4 @@ fn create_discovery_socket(port: u16) -> io::Result<(std::net::UdpSocket, Vec<u3
         .unwrap_or_default();
     socket.set_nonblocking(true)?;
     Ok((socket.into(), multicast_interfaces))
-}
-
-/// Joins the C++ discovery group on every candidate interface, falling back to
-/// the platform default when none of them accepted the join.
-pub(crate) fn join_discovery_multicast(socket: &Socket) -> io::Result<Vec<u32>> {
-    let mut multicast_interfaces = multicast_interface_indices()
-        .into_iter()
-        .filter(|interface| {
-            socket
-                .join_multicast_v6(&DISCOVERY_MULTICAST, *interface)
-                .is_ok()
-        })
-        .collect::<Vec<_>>();
-    if multicast_interfaces.is_empty() {
-        socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
-        multicast_interfaces.push(0);
-    }
-    Ok(multicast_interfaces)
 }

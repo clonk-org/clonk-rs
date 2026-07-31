@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use socket2::{Protocol, SockRef, Type};
+use socket2::{Protocol, SockRef, Socket, Type};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
@@ -1341,7 +1341,7 @@ fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
     }
     socket.bind(&address.into())?;
     let multicast_interfaces = dual_stack
-        .then(|| crate::advertise::join_discovery_multicast(&socket))
+        .then(|| join_discovery_multicast(&socket))
         .transpose()?
         .unwrap_or_default();
     socket.set_nonblocking(true)?;
@@ -1353,6 +1353,24 @@ fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
 
 pub(crate) fn multicast_targets(target: SocketAddrV6, _interfaces: &[u32]) -> Vec<SocketAddrV6> {
     vec![target]
+}
+
+/// Joins the C++ discovery group on every candidate interface, falling back to
+/// the platform default when none of them accepted the join.
+pub(crate) fn join_discovery_multicast(socket: &Socket) -> io::Result<Vec<u32>> {
+    let mut multicast_interfaces = multicast_interface_indices()
+        .into_iter()
+        .filter(|interface| {
+            socket
+                .join_multicast_v6(&DISCOVERY_MULTICAST, *interface)
+                .is_ok()
+        })
+        .collect::<Vec<_>>();
+    if multicast_interfaces.is_empty() {
+        socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
+        multicast_interfaces.push(0);
+    }
+    Ok(multicast_interfaces)
 }
 
 pub(crate) fn multicast_interface_indices() -> Vec<u32> {
