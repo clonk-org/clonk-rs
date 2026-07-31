@@ -4,6 +4,17 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-07-31
+
+### Bug fixes
+
+- Bind the IPv4 wildcard as the IPv6 wildcard so hosts reach IPv6 netpunchers (#49)
+- Mute the unmappable Vulkan enum warnings (#46)
+
+### Testing
+
+- Pin oracle-faithful solid-mask shielding through a blast (#48)
+
 ## [0.6.0] - 2026-07-31
 
 ### Bug fixes
