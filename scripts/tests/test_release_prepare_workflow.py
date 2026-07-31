@@ -24,6 +24,21 @@ class ReleasePrepareWorkflowTests(unittest.TestCase):
         self.assertIn("gh pr merge", workflow)
         self.assertIn("--auto --squash", workflow)
 
+    def test_branch_seeding_survives_a_ref_left_by_an_earlier_run(self):
+        # A failure between seeding `release/next` and opening the pull request
+        # leaves the branch behind: on 2026-07-31 a GitHub 504 did exactly
+        # that. A ruleset forbids deleting the branch, so a create-only seed
+        # then fails every later run with "Reference already exists" — the
+        # daily schedule included. Seeding must reset an existing ref to the
+        # base commit so the force-with-lease push still holds its lease.
+        workflow = PREPARE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'gh api --method PATCH "repos/${REPOSITORY}/git/refs/heads/${branch}"',
+            workflow,
+        )
+        self.assertIn("-F force=true", workflow)
+
     def test_schedule_prepares_a_pr_and_release_only_reacts_to_main(self):
         prepare = PREPARE.read_text(encoding="utf-8")
         publish = PUBLISH.read_text(encoding="utf-8")
