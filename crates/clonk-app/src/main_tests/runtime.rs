@@ -7294,15 +7294,15 @@
         for shell_is_console in [false, true] {
             for configured in [0, 1, 2, 3] {
                 assert!(
-                    render_inactive_allows_drawing(configured, true, shell_is_console),
+                    render_inactive_allows_drawing(configured, true, shell_is_console, true),
                     "an active window always draws (mask={configured}, console={shell_is_console})"
                 );
             }
         }
 
         // Inactive: each shell consults only its own bit.
-        let game = |mask| render_inactive_allows_drawing(mask, false, false);
-        let console = |mask| render_inactive_allows_drawing(mask, false, true);
+        let game = |mask| render_inactive_allows_drawing(mask, false, false, true);
+        let console = |mask| render_inactive_allows_drawing(mask, false, true, true);
         assert!(!game(0) && !console(0), "an empty mask suppresses both");
         assert!(game(RENDER_INACTIVE_FULLSCREEN));
         assert!(!console(RENDER_INACTIVE_FULLSCREEN));
@@ -7317,6 +7317,51 @@
         assert!(console(RENDER_INACTIVE_CONSOLE));
     
 }
+
+    /// The gate withholds frames from a window the display server is already
+    /// showing; it must never withhold the *first* one.
+    ///
+    /// Win32 and SDL show a window whether or not the application has drawn
+    /// into it, so C++ cannot observe the difference. Wayland can: a surface is
+    /// mapped by its first committed buffer, and an unmapped surface is never
+    /// given keyboard focus — so suppressing frame one there deadlocks the
+    /// window into permanent invisibility (no frame → no map → no focus → no
+    /// frame). The same holds for any backend that maps on first content.
+    #[test]
+    fn the_inactive_gate_never_withholds_the_first_frame() {
+        for shell_is_console in [false, true] {
+            for configured in [0, 1, 2, 3] {
+                assert!(
+                    render_inactive_allows_drawing(configured, false, shell_is_console, false),
+                    "frame one maps the window (mask={configured}, console={shell_is_console})"
+                );
+            }
+        }
+
+        // Once a frame is on screen the configured mask governs again.
+        assert!(!render_inactive_allows_drawing(
+            RENDER_INACTIVE_CONSOLE,
+            false,
+            false,
+            true
+        ));
+    }
+
+    /// `C4Application::DoInit` leaves `Application.Active` set: only an OS
+    /// deactivation message clears it (C4Application.cpp; `CStdApp` activation
+    /// handling). Seeding it from the windowing system's focus report instead
+    /// starts every Wayland session inactive, because a surface cannot hold
+    /// focus before it has committed its first buffer.
+    #[test]
+    fn startup_activity_matches_native_rather_than_the_windowing_systems_focus_report() {
+        assert!(initial_window_active());
+        assert!(render_inactive_allows_drawing(
+            RENDER_INACTIVE_CONSOLE,
+            initial_window_active(),
+            false,
+            true
+        ));
+    }
 
     /// `C4ConfigLogging` (C4Config.cpp:699-718) carries a stdout level plus one
     /// nested section per component, each with its own `LogLevel`. The port
