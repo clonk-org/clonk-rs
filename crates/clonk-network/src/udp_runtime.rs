@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Protocol, Type};
 use thiserror::Error;
 use tokio::{net::UdpSocket, time::Instant};
 
@@ -860,6 +860,9 @@ pub fn reliable_udp_send_address(address: SocketAddr) -> SocketAddr {
 /// receive or timer transition; callers can keep polling in their own task.
 pub struct ReliableUdpSocketDriver {
     socket: UdpSocket,
+    /// What the bound socket can actually address. A host without an IPv6
+    /// stack degrades to IPv4 rather than losing the UDP transport entirely.
+    family: crate::dual_stack::SocketFamily,
     core: ReliableUdpEndpointCore,
     punchers: ReliableUdpPuncherRoutes,
     statistics: Option<crate::NetworkIoStatistics>,
@@ -1032,17 +1035,30 @@ pub(crate) enum ReliableUdpPollReady {
 
 impl ReliableUdpSocketDriver {
     pub fn bind(bind_address: SocketAddr) -> io::Result<Self> {
+        Self::bind_with_socket_constructor(bind_address, &crate::dual_stack::new_socket)
+    }
+
+    pub(crate) fn bind_with_socket_constructor(
+        bind_address: SocketAddr,
+        constructor: crate::dual_stack::SocketConstructor<'_>,
+    ) -> io::Result<Self> {
         tokio::runtime::Handle::try_current().map_err(|_| {
             io::Error::other("reliable-UDP driver requires an entered Tokio runtime")
         })?;
-        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-        socket.set_only_v6(false)?;
+        let (socket, address) = crate::dual_stack::create_bound_socket_with(
+            bind_address,
+            Type::DGRAM,
+            Some(Protocol::UDP),
+            constructor,
+        )?;
         socket.set_nonblocking(true)?;
-        socket.bind(&reliable_udp_bind_address(bind_address).into())?;
+        socket.bind(&address.into())?;
         let socket = UdpSocket::from_std(socket.into())?;
+        let family = crate::dual_stack::bound_socket_family(socket.local_addr()?);
         let started_at = Instant::now();
         Ok(Self {
             socket,
+            family,
             core: ReliableUdpEndpointCore::new_at(Duration::ZERO),
             punchers: ReliableUdpPuncherRoutes::default(),
             statistics: None,
@@ -1052,6 +1068,29 @@ impl ReliableUdpSocketDriver {
             receive_buffer: vec![0; u16::MAX as usize + 1],
             last_send: None,
         })
+    }
+
+    /// Form `destination` must take to leave this socket.
+    ///
+    /// An IPv4-only socket has no route to an IPv6 peer at all. Reporting that
+    /// as unreachable rather than letting the kernel answer `EAFNOSUPPORT`
+    /// keeps the failure scoped to that one peer: the reliable layer closes it,
+    /// where a raw socket error takes down the whole hub.
+    fn socket_destination(&self, destination: SocketAddr) -> io::Result<SocketAddr> {
+        match self.family {
+            crate::dual_stack::SocketFamily::DualStack => {
+                Ok(reliable_udp_send_address(destination))
+            }
+            crate::dual_stack::SocketFamily::Ipv4Only => {
+                match canonical_reliable_udp_peer_address(destination) {
+                    destination @ SocketAddr::V4(_) => Ok(destination),
+                    destination => Err(io::Error::new(
+                        io::ErrorKind::NetworkUnreachable,
+                        format!("this host has no IPv6 route to reliable-UDP peer {destination}"),
+                    )),
+                }
+            }
+        }
     }
 
     /// Binds a driver whose statistics are measured at the physical UDP
@@ -1146,6 +1185,15 @@ impl ReliableUdpSocketDriver {
             SocketAddr::V4(_) => NetpuncherAddressFamily::Ipv4,
             SocketAddr::V6(_) => NetpuncherAddressFamily::Ipv6,
         };
+        // Reserving a route this socket cannot address only defers the same
+        // refusal to the first datagram, where it arrives as a bare socket
+        // error and takes the hub's other peers with it.
+        self.socket_destination(puncher_address).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("this host cannot reach netpuncher {puncher_address}"),
+            )
+        })?;
         if self
             .punchers
             .route(family)
@@ -1201,12 +1249,11 @@ impl ReliableUdpSocketDriver {
     /// Sends C4Network2IO::Punch's raw application-level Pong without adding
     /// a reliable-UDP peer or data envelope.
     pub async fn punch(&mut self, punchee_address: SocketAddr) -> io::Result<()> {
+        let destination = self.socket_destination(punchee_address)?;
         let sent_at_ms = self.elapsed().as_millis() as u32;
         let wire = encode_netpuncher_punch(sent_at_ms);
         self.last_send = Some(ReliableUdpLastSend::BestEffort);
-        self.socket
-            .send_to(&wire, reliable_udp_send_address(punchee_address))
-            .await?;
+        self.socket.send_to(&wire, destination).await?;
         Ok(())
     }
 
@@ -1497,14 +1544,17 @@ impl ReliableUdpSocketDriver {
         // refuses to let one peer own the hub: a writable socket completes on
         // the first poll without the timer ever arming, and a congested one is
         // dropped like C++ once the budget expires.
-        let result = match tokio::time::timeout(
-            RELIABLE_UDP_SEND_BUDGET,
-            self.socket.send_to(&datagram.payload, datagram.destination),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_elapsed) => Ok(datagram.payload.len()),
+        let result = match self.socket_destination(datagram.destination) {
+            Ok(destination) => match tokio::time::timeout(
+                RELIABLE_UDP_SEND_BUDGET,
+                self.socket.send_to(&datagram.payload, destination),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => Ok(datagram.payload.len()),
+            },
+            Err(error) => Err(error),
         };
         (peer, peer_backed, result)
     }
@@ -1562,18 +1612,6 @@ pub enum ReliableUdpDriverError {
     Io(#[from] io::Error),
 }
 
-fn reliable_udp_bind_address(address: SocketAddr) -> SocketAddr {
-    match address {
-        SocketAddr::V4(address) => SocketAddr::V6(SocketAddrV6::new(
-            address.ip().to_ipv6_mapped(),
-            address.port(),
-            0,
-            0,
-        )),
-        SocketAddr::V6(address) => SocketAddr::V6(address),
-    }
-}
-
 fn reliable_udp_unreachable_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -1612,6 +1650,8 @@ mod tests {
         collections::VecDeque,
         net::{Ipv4Addr, Ipv6Addr},
     };
+
+    use socket2::{Domain, Socket};
 
     use super::*;
     use crate::udp::{
@@ -1714,6 +1754,76 @@ mod tests {
         assert_eq!(
             routes.route(NetpuncherAddressFamily::Ipv6).unwrap().address,
             ipv6.address
+        );
+    }
+
+    #[tokio::test]
+    async fn ipv4_wildcard_bind_still_reaches_an_ipv6_netpuncher() {
+        // A dual-stack socket pinned to `::ffff:0.0.0.0` is IPv4 as far as the
+        // kernel is concerned, and Linux answers EAFNOSUPPORT for every IPv6
+        // destination sent over it. A host whose netpuncher resolved from an
+        // AAAA record could then not start a game at all.
+        let puncher = ReliableUdpSocketDriver::bind(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::LOCALHOST,
+            0,
+            0,
+            0,
+        )))
+        .unwrap();
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))
+                .unwrap();
+        driver
+            .init_puncher(puncher.local_addr().unwrap(), NetpuncherRole::Host)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_host_without_ipv6_binds_ipv4_and_refuses_the_ipv6_puncher() {
+        // A kernel booted with `ipv6.disable=1` fails `socket(AF_INET6, ...)`
+        // itself, which used to take down the host's whole UDP transport.
+        let without_ipv6 = |domain: Domain, kind: Type, protocol: Option<Protocol>| {
+            (domain == Domain::IPV6)
+                .then(crate::dual_stack::ipv6_unavailable_error)
+                .map_or_else(|| Socket::new(domain, kind, protocol), Err)
+        };
+        let mut driver = ReliableUdpSocketDriver::bind_with_socket_constructor(
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+            &without_ipv6,
+        )
+        .unwrap();
+        assert_eq!(
+            driver.local_addr().unwrap().ip(),
+            std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+
+        // Nothing may be sent to the IPv6 puncher afterwards: trading the bind
+        // failure for an EAFNOSUPPORT on the first datagram would only move the
+        // same failure later, where it kills the hub instead of one route.
+        let error = driver
+            .init_puncher(
+                SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 11_115, 0, 0)),
+                NetpuncherRole::Host,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(driver
+            .puncher_address(NetpuncherAddressFamily::Ipv6)
+            .is_none());
+
+        // The IPv4 half of the same netpuncher still works.
+        let ipv4_puncher =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        let ipv4_address = canonical_reliable_udp_peer_address(ipv4_puncher.local_addr().unwrap());
+        driver
+            .init_puncher(ipv4_address, NetpuncherRole::Host)
+            .await
+            .unwrap();
+        assert_eq!(
+            driver.puncher_address(NetpuncherAddressFamily::Ipv4),
+            Some(ipv4_address)
         );
     }
 

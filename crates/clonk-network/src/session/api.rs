@@ -552,16 +552,14 @@ pub(crate) async fn bind_client_mesh_tcp_listener(
     if !bind_address.ip().is_unspecified() {
         return TcpListener::bind(bind_address).await;
     }
-    let socket = socket2::Socket::new(
-        socket2::Domain::IPV6,
+    let (socket, address) = crate::dual_stack::create_bound_socket(
+        SocketAddr::from(([0_u16; 8], bind_address.port())),
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )?;
-    socket.set_only_v6(false)?;
     socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
-    let dual_stack_address = SocketAddr::from(([0_u16; 8], bind_address.port()));
-    socket.bind(&dual_stack_address.into())?;
+    socket.bind(&address.into())?;
     socket.listen(128)?;
     let listener = std::net::TcpListener::from(socket);
     TcpListener::from_std(listener)

@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use socket2::{Domain, Protocol, SockRef, Socket, Type};
+use socket2::{Protocol, SockRef, Socket, Type};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
@@ -1324,27 +1324,26 @@ async fn execute_search_command(
 }
 
 fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
-    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_only_v6(false)?;
+    let requested = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0));
+    let (socket, address) =
+        crate::dual_stack::create_bound_socket(requested, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;
-    socket.set_multicast_hops_v6(16)?;
-    socket.set_multicast_loop_v6(true)?;
-    socket.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
-    let mut multicast_interfaces = Vec::new();
-    for interface in multicast_interface_indices() {
-        if socket
-            .join_multicast_v6(&DISCOVERY_MULTICAST, interface)
-            .is_ok()
-        {
-            multicast_interfaces.push(interface);
-        }
+    // A host without an IPv6 stack cannot reach the C++ discovery group at all.
+    // Keeping the degraded socket leaves masterserver and direct queries
+    // working instead of failing the whole search.
+    let dual_stack = crate::dual_stack::bound_socket_family(address)
+        == crate::dual_stack::SocketFamily::DualStack;
+    if dual_stack {
+        socket.set_multicast_hops_v6(16)?;
+        socket.set_multicast_loop_v6(true)?;
     }
-    if multicast_interfaces.is_empty() {
-        socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
-        multicast_interfaces.push(0);
-    }
+    socket.bind(&address.into())?;
+    let multicast_interfaces = dual_stack
+        .then(|| join_discovery_multicast(&socket))
+        .transpose()?
+        .unwrap_or_default();
     socket.set_nonblocking(true)?;
     Ok(DiscoverySocket {
         socket: UdpSocket::from_std(socket.into())?,
@@ -1354,6 +1353,24 @@ fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
 
 pub(crate) fn multicast_targets(target: SocketAddrV6, _interfaces: &[u32]) -> Vec<SocketAddrV6> {
     vec![target]
+}
+
+/// Joins the C++ discovery group on every candidate interface, falling back to
+/// the platform default when none of them accepted the join.
+pub(crate) fn join_discovery_multicast(socket: &Socket) -> io::Result<Vec<u32>> {
+    let mut multicast_interfaces = multicast_interface_indices()
+        .into_iter()
+        .filter(|interface| {
+            socket
+                .join_multicast_v6(&DISCOVERY_MULTICAST, *interface)
+                .is_ok()
+        })
+        .collect::<Vec<_>>();
+    if multicast_interfaces.is_empty() {
+        socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
+        multicast_interfaces.push(0);
+    }
+    Ok(multicast_interfaces)
 }
 
 pub(crate) fn multicast_interface_indices() -> Vec<u32> {

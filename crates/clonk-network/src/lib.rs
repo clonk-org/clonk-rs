@@ -10,6 +10,7 @@ mod connection_liveness;
 mod control;
 mod control_latency;
 mod control_record;
+mod dual_stack;
 mod forward_packet;
 mod host_game_reference;
 mod host_initial_resources;
