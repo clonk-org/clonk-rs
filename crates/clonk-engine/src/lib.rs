@@ -7426,6 +7426,8 @@ struct HostRequestQueues {
     /// Particle names `FnReloadParticle` accepted during a script call,
     /// applied by the engine once the call has returned.
     particle_reload_requests: Rc<RefCell<Vec<String>>>,
+    /// Definition ids `FnReloadDef` accepted during a script call.
+    definition_reload_requests: Rc<RefCell<Vec<String>>>,
     network_target_fps_requests: Rc<RefCell<Vec<NetworkTargetFpsRequest>>>,
     viewport_presentation_requests: Rc<RefCell<Vec<ViewportPresentationRequest>>>,
 }
@@ -9979,6 +9981,7 @@ impl Engine {
                 pending_game_goal_menu_requests: Vec::new(),
                 pause_game_requests: Rc::new(RefCell::new(Vec::new())),
                 particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
+                definition_reload_requests: Rc::new(RefCell::new(Vec::new())),
                 network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
                 viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             },
@@ -10503,6 +10506,15 @@ impl Engine {
     /// a packed installation watches nothing however `Developer.AutoFileReload`
     /// is set. `definition_registers_for_monitoring` carries that rule; here
     /// "unpacked" is simply the stored path being a directory.
+    /// The definitions a reload could re-open — those holding a `Filename`.
+    pub fn reloadable_definition_ids(&self) -> std::collections::HashSet<String> {
+        self.definitions
+            .iter()
+            .filter(|(_, definition)| definition.source_path().is_some())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     pub fn monitored_definition_directories(&self) -> Vec<std::path::PathBuf> {
         let mut directories = Vec::new();
         for id in self.definition_load_order.iter() {

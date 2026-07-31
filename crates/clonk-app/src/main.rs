@@ -6426,9 +6426,14 @@ impl GameApp {
         self.apply_engine_pause_game_requests();
         // `FnReloadParticle` answered the script synchronously from pre-seeded
         // state; the reload itself happens here, once the call has returned.
-        let reloaded = self.engine.apply_particle_reload_requests();
+        // `FnReloadParticle`/`FnReloadDef` answered the script synchronously
+        // from pre-seeded state; the reloads themselves happen here, once the
+        // call has returned. C++ reloads inside the call, so this defers the
+        // *work* by one pass — the script's answer is unaffected.
+        let reloaded = self.engine.apply_particle_reload_requests()
+            + self.engine.apply_definition_reload_requests();
         if reloaded > 0 {
-            tracing::debug!(reloaded, "applied script-driven particle reloads");
+            tracing::debug!(reloaded, "applied script-driven reloads");
         }
         let goal_menu_result = self.apply_game_goal_menu_requests();
         if result.is_ok() {

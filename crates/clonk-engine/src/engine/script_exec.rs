@@ -1138,6 +1138,18 @@ impl Engine {
     /// here still clears every particle and drops the definition, exactly as
     /// the direct call does — the script simply saw the optimistic answer,
     /// which is the one narrow divergence this design accepts.
+    /// Apply the reloads `FnReloadDef` accepted during the last script call
+    /// (`C4Game::ReloadDef`, `C4Game.cpp:2322-2367`).
+    pub fn apply_definition_reload_requests(&mut self) -> usize {
+        let requests =
+            std::mem::take(&mut *self.host_requests.definition_reload_requests.borrow_mut());
+        let network_game = self.network_game;
+        requests
+            .into_iter()
+            .filter(|id| self.reload_definition(id, network_game))
+            .count()
+    }
+
     pub fn apply_particle_reload_requests(&mut self) -> usize {
         let requests =
             std::mem::take(&mut *self.host_requests.particle_reload_requests.borrow_mut());

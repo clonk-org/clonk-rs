@@ -130,6 +130,76 @@
         );
     }
 
+    // C4Script.cpp:5143-5159 -> C4Game::ReloadDef (C4Game.cpp:2322-2367).
+    #[test]
+    fn reload_def_answers_synchronously_and_defaults_to_the_callers_definition() {
+        let dir = tempfile::tempdir().expect("temp group root");
+        let group = dir.path().join("Rock.c4d");
+        std::fs::create_dir_all(&group).expect("create definition group");
+        std::fs::write(
+            group.join("DefCore.txt"),
+            "[DefCore]\nid=ROCK\nVersion=4,9,8\nName=Rock\n",
+        )
+        .expect("write DefCore");
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Known() { return ReloadDef(ROCK); }\n\
+                 func Pathless() { return ReloadDef(STON); }\n\
+                 func Own() { return ReloadDef(); }",
+            )
+            .expect("ReloadDef probes compile");
+
+        let mut engine = crate::Engine::new();
+        for (id, path) in [("ROCK", Some(group.clone())), ("STON", None)] {
+            let mut definition =
+                crate::Definition::from_script(id.to_string(), id.to_string(), "")
+                    .expect("script definition compiles");
+            definition.set_source_path(path);
+            engine
+                .register_definition(definition)
+                .expect("register definition");
+        }
+
+        let world = engine.host_world_context();
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            // A definition with a group answers true before the work happens.
+            assert_eq!(
+                script.call("Known", &[]).expect("known probe executes"),
+                Value::Int(1)
+            );
+            // One with no Filename can never reload.
+            assert_eq!(
+                script.call("Pathless", &[]).expect("pathless probe executes"),
+                Value::Int(0)
+            );
+            // `ReloadDef()` with no id and no calling object is a plain false,
+            // not an error (`C4Script.cpp:5146-5151`).
+            assert_eq!(
+                script.call("Own", &[]).expect("own probe executes"),
+                Value::Int(0)
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("live ReloadDef probes execute");
+
+        // Only the accepted id was staged, and the engine does the work once.
+        assert_eq!(engine.apply_definition_reload_requests(), 1);
+        assert_eq!(
+            engine.definition("ROCK").map(crate::Definition::name),
+            Some("Rock"),
+            "the reload rebuilt the definition from DefCore.txt on disk"
+        );
+        assert_eq!(
+            engine.apply_definition_reload_requests(),
+            0,
+            "the request is drained once, not replayed"
+        );
+    }
+
     #[test]
     fn pause_game_requests_halt_and_toggle_but_is_a_replay_noop() {
         let mut script = ScriptEngine::new();

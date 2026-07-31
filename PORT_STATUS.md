@@ -1164,10 +1164,16 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `reload_particle_reports_false_for_every_name_cpp_cannot_reload`, which still
   passes — so the change could only ever turn a successful reload from `false`
   into `true`, which is what it did.
-  **Still open:** `FnReloadDef` (`C4Script.cpp:5143-5159`,
-  `compat/world.rs:4669`) is registered and still returns false. It asks the
-  identical question and `Engine::reload_definition` already exists, so it is
-  now the same shape as this one: seed the reloadable ids, answer, stage, apply.
+  `FnReloadDef` (`C4Script.cpp:5143-5159`) landed with it, on the same channel
+  and with two details of its own: with **no id** the caller reloads its *own*
+  definition (`ctx->Obj->Def`, `:5146-5151`), and a missing definition is a
+  plain `false` rather than an error. Pinned by
+  `reload_def_answers_synchronously_and_defaults_to_the_callers_definition`.
+  One divergence applies to both and is worth stating plainly: C++ reloads
+  *inside* the call, while the port does the work on the next pass, drained
+  beside `apply_engine_pause_game_requests`. The script's answer is unaffected —
+  only the moment the definition changes moves, by at most one pass, and a
+  console reload is not a synchronised operation.
 
 - **Live-reload path matching landed; the reload itself is open.**
   `clonk-engine::developer_reload` ports `C4DefList::GetByPath`

@@ -1,20 +1,21 @@
 use super::*;
 
 /// `FnReloadParticle` (`C4Script.cpp:5161-5165`) — it forwards straight to
-/// `Game.ReloadParticle(FnStringPar(szParticleName))`.
+/// `Game.ReloadParticle(FnStringPar(szParticleName))` and returns its result
+/// **synchronously**.
 ///
-/// `Engine::reload_particle` carries that behaviour, but the staged-command
-/// channel cannot deliver it: `FnReloadParticle` returns
-/// `Game.ReloadParticle`'s result **synchronously**, and a staged command is
-/// applied after the script call has already returned. So the port would have
-/// to answer the script before doing the work — which is not a wiring gap but
-/// a design question about synchronous engine access from a host function, the
-/// same one `FnReloadDef` will ask.
+/// A staged command cannot produce that value: it is applied after the call has
+/// already returned. So the answer comes from state seeded *before* the call —
+/// the definitions holding a `Filename` plus the network flag — which is the
+/// same shape the port uses to let `CreateObject` return a reference to an
+/// object the engine has not made yet (`next_object_id`). The accepted name is
+/// staged on the `host_requests` channel and the engine reloads it afterwards.
 ///
-/// Until that is decided this keeps the native nullable-string conversion and
-/// reports `false`, which is what C++ returns for every name it *cannot*
-/// reload — so the divergence is confined to a script-driven reload that would
-/// have succeeded.
+/// Every `false` C++ produces is reproduced: network game, nil name, unknown
+/// name, and a definition with no `Filename` (`C4Particles.cpp:197`). One case
+/// diverges — a reload that passes all four checks and then fails on I/O
+/// answers `true` where C++ answers `false`. The engine still runs the full
+/// failure arm; only the value the script already received is optimistic.
 pub(crate) fn reload_particle(args: &[Value]) -> Result<Value, RuntimeError> {
     let name = parse_native_c4_string_argument(args.first(), "ReloadParticle", "name")?;
     // `if (!szName) return false;` — the nil safety check comes before the
