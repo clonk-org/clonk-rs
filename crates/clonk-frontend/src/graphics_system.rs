@@ -1172,8 +1172,11 @@ impl GraphicsSystem {
 
         state.view_x = state.view_x.saturating_add(delta.x);
         state.view_y = state.view_y.saturating_add(delta.y);
+        // Fullscreen layout maintenance: this reads `active_viewports`, which
+        // only the fullscreen pass populates. A detached window's scrolling is
+        // driven through its own frame.
         let (view_x, view_y) =
-            state.no_owner_position(view_width, view_height, world_width, world_height);
+            state.no_owner_position(view_width, view_height, world_width, world_height, true);
 
         // C4Viewport::UpdateViewPosition changes the live projection in the
         // same call. Keep pointer routing and another edge tick observable
@@ -2111,6 +2114,7 @@ impl GraphicsSystem {
                         logical_height,
                         viewport.world_width,
                         viewport.world_height,
+                        true,
                     );
                 } else {
                     state.resize_output(logical_width, logical_height);
@@ -2431,6 +2435,9 @@ impl GraphicsSystem {
             SurfaceRect::new(0, 0, world_width as u32, world_height as u32),
             &owner_colors,
             fragment_gamma,
+            // The full-map capture retargets a fullscreen viewport; it is not
+            // a detached console window.
+            true,
         );
         let mut rendered = std::mem::replace(&mut self.surface, saved_surface);
         if self.advanced_renderer_config.uses_monitor_gamma() {
@@ -2450,6 +2457,118 @@ impl GraphicsSystem {
         self.fog_suppression_depth = saved_fog_suppression_depth;
 
         Some(rendered)
+    }
+
+    /// Draw exactly one physical viewport identity into its own window-sized
+    /// target, the way a console viewport draws itself.
+    ///
+    /// `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each viewport
+    /// (`C4GraphicsSystem.cpp:167-169`) and `C4Viewport::Execute` selects that
+    /// viewport's own rendering context before drawing
+    /// (`C4Viewport.cpp:1126-1155`), so one identity reaches one target. Two
+    /// details separate this from the fullscreen pass:
+    ///
+    /// - the `cgo` covers the **whole** window (`:1146`), so the target is
+    ///   never split between viewports, and
+    /// - the message board and upper board are gated on
+    ///   `Application.isFullScreen` (`C4GraphicsSystem.cpp:171-177`), so a
+    ///   detached window reserves no height for them.
+    ///
+    /// `viewports` is the caller's whole physical list; only the record
+    /// carrying `identity` is drawn. An identity that is not in the list draws
+    /// nothing rather than falling back to the first viewport — a closed
+    /// viewport's window must go blank, not show somebody else's view.
+    pub fn render_detached_viewport(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        viewports: &[ViewportInput<'_>],
+        identity: u64,
+        width: u32,
+        height: u32,
+    ) -> Option<DetachedViewportFrame> {
+        let _renderer_config = activate_advanced_renderer_config(self.advanced_renderer_config);
+        let gamma = self.active_gamma_ramp(&snapshot.environment.gamma);
+        self.render_detached_viewport_with_gamma(
+            snapshot, viewports, identity, width, height, &gamma,
+        )
+    }
+
+    fn render_detached_viewport_with_gamma(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        viewports: &[ViewportInput<'_>],
+        identity: u64,
+        width: u32,
+        height: u32,
+        gamma: &clonk_graphics::GammaRamp,
+    ) -> Option<DetachedViewportFrame> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let (input, camera_slot) =
+            viewports
+                .iter()
+                .find_map(|input| match input.camera_identity {
+                    Some(CameraKey::Physical {
+                        identity: candidate,
+                        slot,
+                    }) if candidate == identity => Some((input, slot)),
+                    _ => None,
+                })?;
+        let owner_colors = Self::collect_owner_colors(snapshot);
+        let fragment_gamma = self
+            .advanced_renderer_config
+            .uses_fragment_gamma()
+            .then_some(gamma);
+
+        // The fullscreen records belong to the other windows and to the
+        // audibility reduction that runs after the completed pass; a detached
+        // draw borrows the renderer, it does not replace that frame.
+        let saved_surface = std::mem::replace(
+            &mut self.surface,
+            Surface::new(width, height, PixelFormat::Rgba8888),
+        );
+        let saved_surface_width = self.surface_width;
+        let saved_surface_height = self.surface_height;
+        let saved_viewports = std::mem::take(&mut self.active_viewports);
+        let saved_foregrounds = std::mem::take(&mut self.pending_viewport_foregrounds);
+        let saved_audibility = std::mem::take(&mut self.rendered_object_audibility_calls);
+        let saved_fog_map = self.active_fog_map.take();
+        let saved_fog_suppression_depth = self.fog_suppression_depth;
+
+        self.surface_width = width;
+        self.surface_height = height;
+        self.render_viewport(
+            snapshot,
+            input,
+            camera_slot,
+            SurfaceRect::new(0, 0, width, height),
+            &owner_colors,
+            fragment_gamma,
+            false,
+        );
+        // C4Viewport::Draw draws the foreground/parallax objects inside the
+        // same pass (`C4Viewport.cpp:1102`), not on a later fullscreen layer.
+        self.draw_pending_viewport_foregrounds();
+
+        let projection = self.active_viewport_projections().into_iter().next();
+        let mut rendered = std::mem::replace(&mut self.surface, saved_surface);
+        if self.advanced_renderer_config.uses_monitor_gamma() {
+            gamma.apply_to_surface(&mut rendered);
+        }
+
+        self.surface_width = saved_surface_width;
+        self.surface_height = saved_surface_height;
+        self.active_viewports = saved_viewports;
+        self.pending_viewport_foregrounds = saved_foregrounds;
+        self.rendered_object_audibility_calls = saved_audibility;
+        self.active_fog_map = saved_fog_map;
+        self.fog_suppression_depth = saved_fog_suppression_depth;
+
+        projection.map(|projection| DetachedViewportFrame {
+            surface: rendered,
+            projection,
+        })
     }
 
     /// Compatibility completion for callers that do not need ordered seams.
@@ -2530,6 +2649,7 @@ impl GraphicsSystem {
                     SurfaceRect::new(0, 0, self.surface_width, self.surface_height),
                     owner_colors,
                     gamma,
+                    true,
                 );
             }
             return;
@@ -2541,7 +2661,15 @@ impl GraphicsSystem {
             let slot = owner_slots.entry(input.owner).or_default();
             let camera_slot = *slot;
             *slot += 1;
-            self.render_viewport(snapshot, input, camera_slot, rect, owner_colors, gamma);
+            self.render_viewport(
+                snapshot,
+                input,
+                camera_slot,
+                rect,
+                owner_colors,
+                gamma,
+                true,
+            );
         }
     }
 
@@ -2553,6 +2681,10 @@ impl GraphicsSystem {
         rect: SurfaceRect,
         owner_colors: &HashMap<i32, Color>,
         gamma: Option<&clonk_graphics::GammaRamp>,
+        // `Application.isFullScreen`. The fullscreen layout cap and the
+        // ownerless centring arm are both gated on it, and a detached console
+        // viewport window takes neither.
+        fullscreen: bool,
     ) {
         if rect.width == 0 || rect.height == 0 {
             return;
@@ -2573,7 +2705,15 @@ impl GraphicsSystem {
         self.surface_height = rect.height;
         self.update_world_dimensions(snapshot.landscape.as_ref());
 
-        let rect = self.centered_viewport_rect(rect);
+        // `C4GraphicsSystem::RecalculateViewports` returns immediately when
+        // the application is not fullscreen (C4GraphicsSystem.cpp:335-336), so
+        // a console viewport window is never capped to the landscape and never
+        // centred inside a layout cell — it owns its whole target.
+        let rect = if fullscreen {
+            self.centered_viewport_rect(rect)
+        } else {
+            rect
+        };
         let format = self.surface.format();
         self.surface_width = rect.width;
         self.surface_height = rect.height;
@@ -2607,7 +2747,13 @@ impl GraphicsSystem {
         });
         let (mut view_x, mut view_y) = if input.owner == OWNER_NONE {
             if input.is_no_owner_viewport {
-                state.no_owner_position(view_width, view_height, world_width, world_height)
+                state.no_owner_position(
+                    view_width,
+                    view_height,
+                    world_width,
+                    world_height,
+                    fullscreen,
+                )
             } else {
                 state.stationary_position(view_width, view_height)
             }
@@ -2631,8 +2777,13 @@ impl GraphicsSystem {
         if pending_observer_scroll != Vector2::ZERO {
             state.view_x = state.view_x.saturating_add(pending_observer_scroll.x);
             state.view_y = state.view_y.saturating_add(pending_observer_scroll.y);
-            (view_x, view_y) =
-                state.no_owner_position(view_width, view_height, world_width, world_height);
+            (view_x, view_y) = state.no_owner_position(
+                view_width,
+                view_height,
+                world_width,
+                world_height,
+                fullscreen,
+            );
         }
         let offset = if input.owner == OWNER_NONE {
             Vector2::ZERO

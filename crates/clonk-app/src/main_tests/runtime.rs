@@ -4886,6 +4886,432 @@
         assert!(app.physical_viewports[0].is_no_owner_viewport);
     }
 
+    // Two console/fullscreen asymmetries that a port loses by sharing one
+    // creation helper between them.
+    //
+    // `C4Console::ViewportNew` is just `Game.CreateViewport(NO_OWNER)`
+    // (C4Console.cpp:1203-1206), and `fSilent` defaults to false
+    // (C4Game.h:222) — so the console's *ownerless* viewport announces itself,
+    // where `C4FullScreen::ViewportCheck` explicitly passes
+    // `iPlrNum == NO_OWNER` to silence exactly that case
+    // (C4FullScreen.cpp:517). The per-player console rows default the same way
+    // (C4Console.cpp:223, :1828).
+    //
+    // And `C4GraphicsSystem::RecalculateViewports` opens with
+    // `if (!Application.isFullScreen) return;` (C4GraphicsSystem.cpp:335-336),
+    // before `SortViewportsByPlayerControl()` at :339 — so a console viewport
+    // never reorders the list it joins, however the players are controlled.
+    #[test]
+    fn console_viewport_creation_announces_itself_and_keeps_list_order() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        // Layout order 3 then 1 (C4Console-side control sets 1 and 2), so a
+        // fullscreen sort would swap them and a console one must not.
+        let late_layout = app.local_owner + 1;
+        let early_layout = app.local_owner + 2;
+        for (player, name, control_set) in
+            [(late_layout, "Late layout", 1), (early_layout, "Early layout", 2)]
+        {
+            app.engine
+                .register_player(PlayerConfig::new(player, name))
+                .expect("register console viewport player");
+            app.engine
+                .set_player_runtime_control(
+                    player,
+                    clonk_engine::PlayerRuntimeControl::new(control_set, 0),
+                )
+                .expect("install console viewport control");
+        }
+
+        app.ui_sound_log.clear();
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        assert_eq!(
+            app.ui_sound_log,
+            ["CloseViewport"],
+            "the console's ownerless viewport is not silent"
+        );
+
+        let before = app
+            .physical_viewports
+            .iter()
+            .map(|viewport| viewport.displayed_player)
+            .collect::<Vec<_>>();
+        // One menu activation per dispatch, as the console produces them.
+        for player in [late_layout, early_layout] {
+            app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(
+                Some(player),
+            )])
+            .expect("console player viewport");
+        }
+        let mut expected = before;
+        expected.extend([late_layout, early_layout]);
+        assert_eq!(
+            app.physical_viewports
+                .iter()
+                .map(|viewport| viewport.displayed_player)
+                .collect::<Vec<_>>(),
+            expected,
+            "console mode never runs SortViewportsByPlayerControl"
+        );
+    }
+
+    // C4Viewport.cpp:1126-1155 — a windowed viewport draws the one viewport
+    // its window owns, at that window's own extent, and hands the pixels back
+    // for the window to blit (`BlitOutput`, :1121-1124).
+    #[test]
+    fn console_viewport_render_uses_the_windows_own_extent_and_identity() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        let second = app.local_owner + 1;
+        app.engine
+            .register_player(PlayerConfig::new(second, "Second window"))
+            .expect("register second window player");
+        app.snapshot = app.engine.snapshot();
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(Some(
+            second,
+        ))])
+        .expect("console player viewport");
+
+        let identities = app
+            .physical_viewports
+            .iter()
+            .map(|viewport| viewport.physical_identity)
+            .collect::<Vec<_>>();
+        assert!(identities.len() >= 2);
+
+        // Every live viewport draws, each into its own window extent — the
+        // windows are deliberately different sizes so a shared surface or a
+        // fullscreen layout split would show up here.
+        for (index, identity) in identities.iter().enumerate() {
+            let width = 320 + index as u32 * 16;
+            let height = 200 + index as u32 * 8;
+            let surface = app
+                .render_console_viewport(*identity, width, height)
+                .unwrap_or_else(|| panic!("viewport {identity} is live"));
+            assert_eq!((surface.width(), surface.height()), (width, height));
+        }
+
+        // A closed viewport's window goes blank rather than adopting the
+        // remaining viewport's view.
+        let closed = identities[0];
+        app.physical_viewports
+            .retain(|viewport| viewport.physical_identity != closed);
+        assert!(app.render_console_viewport(closed, 320, 200).is_none());
+        assert!(app.render_console_viewport(u64::MAX, 320, 200).is_none());
+    }
+
+    // The editor's first end-to-end gesture: a window-local click reaches the
+    // selection. C4Viewport converts the pointer through that viewport's own
+    // ViewX/ViewY (C4Viewport.cpp:181), C4EditCursor::Move picks the target
+    // with Game.FindObject (C4EditCursor.cpp:150), and LeftButtonDown edits
+    // the selection (:201-229).
+    // C4Viewport.cpp:1107 — Console.EditCursor.Draw runs inside the viewport
+    // pass, so a selection mark is part of the frame the window blits. This is
+    // the mark reaching pixels, not just the geometry being right.
+    #[test]
+    fn a_selected_object_draws_its_mark_into_the_viewport_frame() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        // An owned viewport follows the player, so the crew object it follows
+        // is inside the view — an ownerless one is centred on the map and the
+        // mark would legitimately fall outside it.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(Some(
+            app.local_owner,
+        ))])
+        .expect("console player viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+
+        let unmarked = app
+            .render_console_viewport(identity, 320, 200)
+            .expect("the viewport draws");
+        let projection = app.console_viewport_projections[&identity];
+
+        // Select whatever sits under the view's own centre.
+        let object = app
+            .snapshot
+            .objects
+            .iter()
+            .find(|object| {
+                let x = object.position.x - projection.target_x;
+                let y = object.position.y - projection.target_y;
+                (0..320).contains(&x) && (0..200).contains(&y)
+            })
+            .map(|object| object.id)
+            .expect("an object inside the view");
+        app.developer_selection
+            .replace(clonk_engine::developer_selection::SelectionWriter::EditCursor, object);
+
+        let marked = app
+            .render_console_viewport(identity, 320, 200)
+            .expect("the viewport draws");
+        assert_ne!(
+            marked.pixels(),
+            unmarked.pixels(),
+            "the select mark is drawn into the frame"
+        );
+
+        // And it goes away again, so the difference is the mark and not some
+        // unrelated per-frame drift.
+        app.developer_selection
+            .clear(clonk_engine::developer_selection::SelectionWriter::EditCursor);
+        let cleared = app
+            .render_console_viewport(identity, 320, 200)
+            .expect("the viewport draws");
+        assert_eq!(
+            cleared.pixels(),
+            unmarked.pixels(),
+            "clearing the selection restores the unmarked frame"
+        );
+    }
+
+    // C4Game.cpp:2413-2424,2738 + :2306-2320 — the monitor arms only in a
+    // windowed dev session, registers before it starts, and its callback is
+    // bound straight to ReloadFile's dispatcher.
+    #[test]
+    fn developer_file_monitor_arms_registers_then_dispatches_definition_reloads() {
+        let dir = tempfile::tempdir().expect("temp group root");
+        let group = dir.path().join("Rock.c4d");
+        std::fs::create_dir_all(&group).expect("create definition group");
+        std::fs::write(
+            group.join("DefCore.txt"),
+            "[DefCore]\nid=ROCK\nVersion=4,9,8\nName=Rock\n",
+        )
+        .expect("write DefCore");
+
+        let mut app = new_lightweight_running_sandbox_app();
+        let mut definition =
+            clonk_engine::Definition::from_script("ROCK".to_string(), "Rock".to_string(), "")
+                .expect("script definition compiles");
+        definition.set_source_path(Some(group.clone()));
+        app.engine
+            .register_definition(definition)
+            .expect("register definition");
+
+        // A fullscreen session never watches, however the key is set.
+        app.console_mode = false;
+        app.arm_developer_file_monitor(true);
+        assert!(app.file_monitor.is_none());
+
+        // Nor does a console session with the key off.
+        app.console_mode = true;
+        app.arm_developer_file_monitor(false);
+        assert!(app.file_monitor.is_none());
+
+        app.arm_developer_file_monitor(true);
+        let monitor = app.file_monitor.as_ref().expect("the monitor armed");
+        assert_eq!(monitor.watched(), std::slice::from_ref(&group));
+        assert!(
+            monitor.started(),
+            "registration closes before the first poll"
+        );
+
+        // Arming twice does not replace a running monitor.
+        app.arm_developer_file_monitor(true);
+        assert_eq!(
+            app.file_monitor.as_ref().expect("still armed").watched(),
+            std::slice::from_ref(&group)
+        );
+
+        // A quiet tree dispatches nothing.
+        app.poll_developer_file_monitor();
+        assert!(app.engine.definition("ROCK").is_some());
+
+        // Breaking the group and touching it routes to ReloadDef, whose
+        // failure arm removes the definition.
+        std::fs::write(group.join("DefCore.txt"), "not a defcore").expect("corrupt DefCore");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        let _ = std::fs::File::open(group.join("DefCore.txt")).map(|file| file.set_modified(later));
+        app.poll_developer_file_monitor();
+        assert!(
+            app.engine.definition("ROCK").is_none(),
+            "a watched change reached ReloadDef and its failure arm"
+        );
+    }
+
+    #[test]
+    fn console_viewport_pointer_gestures_select_move_and_frame() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        // Drawing is what publishes this window's own projection.
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        let projection = app.console_viewport_projections[&identity];
+
+        let subject = app.snapshot.objects.first().expect("a live object");
+        let (id, position) = (subject.id, subject.position);
+        let local = (
+            position.x - projection.target_x,
+            position.y - projection.target_y,
+        );
+
+        assert_eq!(
+            app.console_viewport_press(identity, local, 1.0, false, false)
+                .expect("the click changed the selection")
+                .objects,
+            vec![id],
+            "a plain click selects the object under the cursor"
+        );
+        assert!(app.edit_cursor_hold, "a press always holds");
+
+        // A held drag over a selected object moves it: C4EditCursor::Move's
+        // Edit arm sends MoveSelection(xoff, yoff), and MoveSelection is
+        // EMMoveObject(EMMO_Move, ...) — a control, not a direct mutation, so
+        // a network game stays in lockstep.
+        // Offline the control is applied straight away, so the object itself
+        // is the observable: it moves by the pointer delta.
+        let before = app.engine.snapshot().object(id).expect("the object is live").position;
+        app.console_viewport_motion(identity, (local.0 + 7, local.1 - 3), 1.0, false, false);
+        let after = app.engine.snapshot().object(id).expect("the object is live").position;
+        assert_ne!(before, after, "a held drag moves the selection");
+
+        // A motion that does not move the pointer emits nothing: the
+        // zero-offset re-issue is `Execute`'s per-tick path, not this one.
+        let settled = app.engine.snapshot().object(id).expect("the object is live").position;
+        app.console_viewport_motion(identity, (local.0 + 7, local.1 - 3), 1.0, false, false);
+        assert_eq!(
+            app.engine.snapshot().object(id).map(|object| object.position),
+            Some(settled),
+            "a zero-delta motion emits no move"
+        );
+
+
+        // The mark frames the object's *live* shape, which
+        // `ObjectSnapshot::current_shape` carries only when it is not
+        // reconstructible. Resolving it through the same world view the hit
+        // test uses is what makes the two agree about what was clicked.
+        let shape = clonk_engine::EditCursorHitTest::new(&app.snapshot)
+            .shape_rect(id)
+            .expect("the selected object has a live shape");
+        assert!(
+            shape.width > 0 && shape.height > 0,
+            "a clickable object has a shape to frame"
+        );
+
+        // `DrawSelectMark` frames `cobj->x + cobj->Shape.x` relative to the
+        // view origin. `object_live_shape_rect` already returns that left-hand
+        // side in world coordinates, so the mark is the shape minus ViewX/ViewY
+        // — adding the object's position again would double-count it, which is
+        // exactly the bug this pins.
+        assert_eq!(
+            (shape.x, shape.y),
+            (position.x, position.y),
+            "the live shape rect is in world coordinates, not object-relative"
+        );
+
+        // Drawn into a viewport whose origin is the object's own position, the
+        // mark lands at the frame origin rather than one object-width away.
+        let marks = clonk_engine::developer_overlay::select_mark_pixels(
+            shape.x - position.x,
+            shape.y - position.y,
+            shape.width,
+            shape.height,
+        );
+        assert!(!marks.is_empty(), "a shape at least a pixel wide marks");
+        // The corner Ls point outward, so they reach one pixel beyond the
+        // shape on each side — but no further. This is what catches a mark
+        // computed an object-width away from where it belongs.
+        assert!(
+            marks
+                .iter()
+                .all(|(x, y)| (-1..=shape.width).contains(x)
+                    && (-1..=shape.height).contains(y)),
+            "the mark frames the shape it belongs to: {marks:?}"
+        );
+
+        // Clicking the same object again changes nothing, which is what keeps
+        // a selection draggable rather than collapsing it.
+        assert!(app
+            .console_viewport_press(identity, local, 1.0, false, false)
+            .is_none());
+
+        // A plain click on empty space clears and arms the rubber band, and
+        // the anchor is in world coordinates.
+        let empty = (local.0 + 100_000, local.1 + 100_000);
+        assert!(app
+            .console_viewport_press(identity, empty, 1.0, false, false)
+            .expect("clearing the selection is a change")
+            .objects
+            .is_empty());
+        // `DragFrame = true; X2 = X; Y2 = Y` — both corners start at the press.
+        let world_empty = (
+            projection.target_x + empty.0,
+            projection.target_y + empty.1,
+        );
+        assert_eq!(
+            app.edit_cursor_drag_frame,
+            Some((world_empty, world_empty))
+        );
+
+        // `C4EditCursor::Execute` re-issues a zero-offset EMMO_Move every
+        // tick while Hold is set (C4EditCursor.cpp:65-69), so a stationary
+        // held selection still produces control traffic — but once per engine
+        // tick, not once per event-loop wake.
+        assert!(app.edit_cursor_hold);
+        app.console_edit_cursor_tick();
+        let ticked = app.edit_cursor_tick_frame;
+        assert!(ticked.is_some(), "a held selection ticks");
+        app.console_edit_cursor_tick();
+        assert_eq!(
+            app.edit_cursor_tick_frame, ticked,
+            "a second wake in the same tick emits nothing further"
+        );
+
+        // A rubber band drawn over the object frames it on release.
+        // C4EditCursor::LeftButtonUp runs FrameSelection() then clears Hold and
+        // DragFrame regardless (C4EditCursor.cpp:287-341).
+        let corner = (local.0 + 40, local.1 + 40);
+        app.console_viewport_motion(identity, corner, 1.0, false, false);
+        let (anchor, live) = app
+            .edit_cursor_drag_frame
+            .expect("the band is still armed while the button is down");
+        assert_eq!(
+            live,
+            (
+                projection.target_x + corner.0,
+                projection.target_y + corner.1
+            ),
+            "the band's live corner follows the pointer"
+        );
+        assert_ne!(anchor, live, "the anchor stays at the press");
+
+        // Drag the band back so it spans the object, then release.
+        app.console_viewport_motion(identity, (local.0 - 40, local.1 - 40), 1.0, false, false);
+        let framed = app
+            .console_viewport_release()
+            .expect("the frame changed the selection");
+        assert!(
+            framed.objects.contains(&id),
+            "an object inside the band is framed: {:?}",
+            framed.objects
+        );
+        assert!(!app.edit_cursor_hold, "the release always clears Hold");
+        assert!(
+            app.edit_cursor_drag_frame.is_none(),
+            "the release always clears DragFrame"
+        );
+
+        // Play mode is ordinary mouse control, not the editor sink.
+        app.developer_console_edit_mode = ConsoleEditMode::Play;
+        assert!(app
+            .console_viewport_press(identity, local, 1.0, false, false)
+            .is_none());
+    }
+
     #[test]
     fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
         // FinishDerive returns on the main thread before its forwarded

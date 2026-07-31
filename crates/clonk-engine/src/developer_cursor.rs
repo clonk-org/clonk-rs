@@ -263,7 +263,144 @@ pub fn drop_target(
         .map(|candidate| candidate.id)
 }
 
-/// What releasing the left button finishes (`C4EditCursor.cpp:672-702`).
+/// What a left-button press does to the selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectionEdit {
+    /// Ctrl-click on a selected object — `Selection.Remove(Target)`.
+    Remove(ObjectId),
+    /// Ctrl-click on an unselected object — `Selection.Add(Target, stNone)`.
+    /// The rest of the selection is untouched.
+    Add(ObjectId),
+    /// Plain click on an unselected object — `Selection.Clear()` then
+    /// `Selection.Add(Target, stNone)`.
+    Replace(ObjectId),
+    /// Plain click on empty space — `Selection.Clear()` and arm the rubber
+    /// band from the press position (`DragFrame = true; X2 = X; Y2 = Y`).
+    ClearAndDragFrame,
+}
+
+/// The result of one left-button press in Edit mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditPress {
+    /// `Hold = true` (`C4EditCursor.cpp:203`). It is assigned *before* the
+    /// mode switch, so every press holds — including the two that change no
+    /// selection at all.
+    pub hold: bool,
+    /// The selection change, if any.
+    pub selection: Option<SelectionEdit>,
+}
+
+/// `C4EditCursor::LeftButtonDown`'s Edit arm (`C4EditCursor.cpp:201-229`).
+///
+/// Two details a plausible port loses. A plain click on an object that is
+/// *already* selected changes nothing — C++ guards the replace on
+/// `!Selection.GetLink(Target)` — which is what lets a multi-object selection
+/// be dragged as a unit instead of collapsing to the object under the cursor.
+/// And the whole Ctrl branch is inside `if (Target)`, so Ctrl-clicking empty
+/// space neither clears the selection nor starts a rubber band, where a plain
+/// click there does both.
+pub fn edit_press(control: bool, target: Option<ObjectId>, selection: &[ObjectId]) -> EditPress {
+    let edit = match (control, target) {
+        // `if (!Selection.Remove(Target)) Selection.Add(Target, stNone)` —
+        // Remove reports whether it found the object.
+        (true, Some(target)) if selection.contains(&target) => Some(SelectionEdit::Remove(target)),
+        (true, Some(target)) => Some(SelectionEdit::Add(target)),
+        (true, None) => None,
+        (false, Some(target)) if selection.contains(&target) => None,
+        (false, Some(target)) => Some(SelectionEdit::Replace(target)),
+        (false, None) => Some(SelectionEdit::ClearAndDragFrame),
+    };
+    EditPress {
+        hold: true,
+        selection: edit,
+    }
+}
+
+/// One step of the console's per-tick pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsoleTickStep {
+    /// `EditCursor.Execute()` — the held-move re-issue and drop-target update.
+    EditCursor,
+    /// `PropertyDlg.Execute()`. Windows only.
+    PropertyDialog,
+    /// `ObjectListDlg.Execute()`.
+    ObjectList,
+    /// `UpdateStatusBars()`.
+    StatusBars,
+    /// `Game.GraphicsSystem.Execute()` — the graphics pass is driven *by* the
+    /// console tick, after the edit cursor has run.
+    Graphics,
+}
+
+/// `C4Console::Execute` (`C4Console.cpp:1630-1639`).
+///
+/// The order matters and is not the obvious one: in console mode the **graphics
+/// pass is driven by the console tick, and runs last** — after the edit cursor.
+/// That is why a selection resolved this tick is visible in the same frame's
+/// overlay rather than the next one. In fullscreen the driver is
+/// `C4FullScreen::Execute` instead, and this sequence does not run at all.
+///
+/// `PropertyDlg.Execute()` is inside `#ifdef _WIN32`, so the arm64 macOS
+/// reference build runs four steps, not five.
+pub fn console_tick_steps(windows: bool) -> Vec<ConsoleTickStep> {
+    let mut steps = vec![ConsoleTickStep::EditCursor];
+    if windows {
+        steps.push(ConsoleTickStep::PropertyDialog);
+    }
+    steps.extend([
+        ConsoleTickStep::ObjectList,
+        ConsoleTickStep::StatusBars,
+        ConsoleTickStep::Graphics,
+    ]);
+    steps
+}
+
+/// One object considered for a rubber-band frame.
+///
+/// It deliberately carries no shape. `C4EditCursor::FrameSelection` tests the
+/// object's own `x`/`y`, so a wide object whose position falls outside the band
+/// is not framed even when its graphic covers the band entirely.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameCandidate {
+    pub id: ObjectId,
+    /// `!cobj->Status` — deleted objects are skipped.
+    pub deleted: bool,
+    /// `cobj->Contained`. C++ tests `cobj->OCF & OCF_NotContained`, and that
+    /// bit is set exactly when `!Contained` (`C4Object.cpp:636-637,735-736`).
+    pub contained: bool,
+    /// `cobj->x`, `cobj->y`.
+    pub x: i32,
+    pub y: i32,
+}
+
+/// `C4EditCursor::FrameSelection` (`C4EditCursor.cpp:460-471`).
+///
+/// The band is normalised per axis — `Inside(cobj->x, min(X, X2), max(X, X2))`
+/// — so every drag direction frames the same objects, and `Inside` is
+/// `>= lbound && <= rbound` (`C4Math.h:22`), so an object exactly on an edge is
+/// admitted and a zero-area band still frames what sits under the cursor.
+///
+/// `candidates` must be in `Game.Objects` First -> Next order — see
+/// [`crate::developer_inspection::master_list_order`] — because the framed
+/// objects are appended with `C4ObjectList::stNone`, which does not sort.
+pub fn frame_selection(
+    anchor: (i32, i32),
+    cursor: (i32, i32),
+    candidates: &[FrameCandidate],
+) -> Vec<ObjectId> {
+    let (left, right) = (anchor.0.min(cursor.0), anchor.0.max(cursor.0));
+    let (top, bottom) = (anchor.1.min(cursor.1), anchor.1.max(cursor.1));
+    candidates
+        .iter()
+        .filter(|candidate| !candidate.deleted && !candidate.contained)
+        .filter(|candidate| (left..=right).contains(&candidate.x))
+        .filter(|candidate| (top..=bottom).contains(&candidate.y))
+        .map(|candidate| candidate.id)
+        .collect()
+}
+
+/// What releasing the left button finishes (`C4EditCursor.cpp:287-341`, whose
+/// Edit arm runs `FrameSelection()` then `PutContents()`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EditRelease {
     /// `FrameSelection()` — the rubber-band selection is applied.
@@ -286,6 +423,225 @@ pub fn edit_release(drag_frame: bool, drop_target: Option<ObjectId>) -> Vec<Edit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C4EditCursor.cpp:143-151 — `edit_target` walking a real world through
+    // the bridge that supplies its `find_next`. This is the seam that had no
+    // implementation: the picking rule was ported, the hit test it calls was
+    // reachable only from inside a script call.
+    #[test]
+    fn edit_target_walks_the_live_object_stack_through_the_hit_test() {
+        let recording = crate::fixtures::basic_movement_recording(2).expect("fixture recording");
+        let snapshot = recording.frames().last().expect("a recorded frame");
+        let subject = snapshot.objects.first().expect("a live object");
+        let (x, y) = (subject.position.x, subject.position.y);
+        let hit_test = crate::EditCursorHitTest::new(snapshot);
+
+        // With nothing selected the cursor takes the first object under it,
+        // which is `Game.FindObject`'s master-order first hit.
+        let picked = edit_target(false, &[], |after| hit_test.object_at(x, y, after));
+        assert_eq!(
+            picked,
+            Some(subject.id),
+            "an unmodified click picks the object under the cursor"
+        );
+
+        // Without Shift the pick does not advance, however many times it runs:
+        // C++ restarts from the top every time.
+        assert_eq!(
+            edit_target(false, &[subject.id], |after| hit_test
+                .object_at(x, y, after)),
+            Some(subject.id)
+        );
+
+        // Shift resumes *after* the selection and keeps advancing past
+        // anything already selected — and there is no wrap-around, so a
+        // fully-selected stack ends at `None` rather than cycling forever.
+        assert_eq!(
+            edit_target(true, &[subject.id], |after| hit_test.object_at(x, y, after)),
+            None,
+            "shift past the only object under the cursor ends the stack"
+        );
+
+        // Empty space picks nothing rather than falling back to any object.
+        assert_eq!(
+            edit_target(false, &[], |after| hit_test.object_at(
+                i32::MIN / 2,
+                i32::MIN / 2,
+                after
+            )),
+            None
+        );
+    }
+
+    // C4EditCursor.cpp:201-229 — what pressing the left button does to the
+    // selection in Edit mode.
+    #[test]
+    fn edit_press_selects_toggles_and_arms_the_rubber_band_like_cpp() {
+        let a = ObjectId(1);
+        let b = ObjectId(2);
+
+        // Plain click on an unselected object replaces the whole selection.
+        assert_eq!(
+            edit_press(false, Some(a), &[b]),
+            EditPress {
+                hold: true,
+                selection: Some(SelectionEdit::Replace(a)),
+            }
+        );
+
+        // Plain click on an *already selected* object changes nothing. This is
+        // what lets a multi-object selection be dragged as a unit: C++ guards
+        // the replace on `!Selection.GetLink(Target)`.
+        assert_eq!(
+            edit_press(false, Some(a), &[a, b]),
+            EditPress {
+                hold: true,
+                selection: None,
+            }
+        );
+
+        // Plain click on empty space clears and arms the rubber band.
+        assert_eq!(
+            edit_press(false, None, &[a]),
+            EditPress {
+                hold: true,
+                selection: Some(SelectionEdit::ClearAndDragFrame),
+            }
+        );
+
+        // Ctrl toggles one object without disturbing the rest:
+        // `if (!Selection.Remove(Target)) Selection.Add(Target, stNone)`.
+        assert_eq!(
+            edit_press(true, Some(a), &[a, b]),
+            EditPress {
+                hold: true,
+                selection: Some(SelectionEdit::Remove(a)),
+            }
+        );
+        assert_eq!(
+            edit_press(true, Some(a), &[b]),
+            EditPress {
+                hold: true,
+                selection: Some(SelectionEdit::Add(a)),
+            }
+        );
+
+        // Ctrl on empty space does nothing at all — the whole Ctrl branch is
+        // guarded on `if (Target)`, so it never clears and never drags a frame.
+        assert_eq!(
+            edit_press(true, None, &[a]),
+            EditPress {
+                hold: true,
+                selection: None,
+            }
+        );
+
+        // `Hold = true` runs *before* the mode switch, so every press holds —
+        // including the two that change no selection at all.
+        for (control, target) in [(true, None), (false, Some(a))] {
+            assert!(edit_press(control, target, &[a]).hold);
+        }
+    }
+
+    // C4Console.cpp:1630-1639 — the console tick's order, and the fact that
+    // it is what drives the graphics pass.
+    #[test]
+    fn console_tick_runs_the_edit_cursor_before_the_graphics_pass() {
+        let reference = console_tick_steps(false);
+        assert_eq!(
+            reference,
+            vec![
+                ConsoleTickStep::EditCursor,
+                ConsoleTickStep::ObjectList,
+                ConsoleTickStep::StatusBars,
+                ConsoleTickStep::Graphics,
+            ],
+            "the reference build has no PropertyDlg step"
+        );
+        // The graphics pass is last, *after* the edit cursor — which is why a
+        // selection resolved this tick shows in the same frame's overlay.
+        assert_eq!(reference.last(), Some(&ConsoleTickStep::Graphics));
+        assert!(
+            reference
+                .iter()
+                .position(|step| *step == ConsoleTickStep::EditCursor)
+                < reference
+                    .iter()
+                    .position(|step| *step == ConsoleTickStep::Graphics)
+        );
+
+        // PropertyDlg.Execute is inside #ifdef _WIN32 and slots in second.
+        assert_eq!(
+            console_tick_steps(true)[..2],
+            [ConsoleTickStep::EditCursor, ConsoleTickStep::PropertyDialog]
+        );
+        assert_eq!(console_tick_steps(true).len(), reference.len() + 1);
+    }
+
+    // C4EditCursor.cpp:460-471 — which objects a rubber-band drag admits.
+    #[test]
+    fn frame_selection_admits_master_order_positions_inside_the_normalised_band() {
+        let candidate = |id: u64, x: i32, y: i32| FrameCandidate {
+            id: ObjectId(id),
+            deleted: false,
+            contained: false,
+            x,
+            y,
+        };
+        let candidates = [
+            // Inside, but deleted: `if (cobj->Status)` rejects it.
+            FrameCandidate {
+                deleted: true,
+                ..candidate(1, 50, 50)
+            },
+            // Inside, but contained: OCF_NotContained is set exactly when
+            // `!Contained` (C4Object.cpp:636-637).
+            FrameCandidate {
+                contained: true,
+                ..candidate(2, 50, 50)
+            },
+            candidate(3, 50, 50),
+            // Exactly on both bounds. `Inside` is `>= lbound && <= rbound`
+            // (C4Math.h:22) — inclusive, so this is admitted.
+            candidate(4, 20, 20),
+            candidate(5, 80, 80),
+            // Outside on one axis only.
+            candidate(6, 50, 81),
+            candidate(7, 19, 50),
+        ];
+
+        assert_eq!(
+            frame_selection((20, 20), (80, 80), &candidates),
+            vec![ObjectId(3), ObjectId(4), ObjectId(5)],
+            "master order is preserved and the bounds are inclusive"
+        );
+
+        // `Inside(cobj->x, min(X, X2), max(X, X2))` — the band is normalised
+        // per axis, so any drag direction frames the same objects.
+        for (anchor, cursor) in [
+            ((80, 80), (20, 20)),
+            ((20, 80), (80, 20)),
+            ((80, 20), (20, 80)),
+        ] {
+            assert_eq!(
+                frame_selection(anchor, cursor, &candidates),
+                vec![ObjectId(3), ObjectId(4), ObjectId(5)],
+                "dragging {anchor:?} -> {cursor:?} frames the same set"
+            );
+        }
+
+        // The test is on the object's own x/y, not on its shape rectangle: a
+        // wide object centred outside the band is not framed even though it
+        // covers it. This is why FrameCandidate carries no shape at all.
+        let wide = candidate(8, 200, 50);
+        assert!(frame_selection((20, 20), (80, 80), &[wide]).is_empty());
+
+        // A degenerate band still admits an object at exactly that point.
+        assert_eq!(
+            frame_selection((50, 50), (50, 50), &candidates),
+            vec![ObjectId(3)]
+        );
+    }
 
     // C4EditCursor.cpp:540-556,594-605,683-692 — the mode cycle, its editing
     // gate, and the context entries each mode and selection enables.

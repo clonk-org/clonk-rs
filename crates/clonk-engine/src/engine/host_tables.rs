@@ -615,6 +615,14 @@ impl Engine {
                 .is_some_and(|index| self.objects[index].state.status != ObjectStatus::Inactive)
         }))
         .with_particle_defs(self.particle_system.def_names())
+        .with_particle_reloads(
+            self.particle_system.reloadable_def_names(),
+            Rc::clone(&self.host_requests.particle_reload_requests),
+        )
+        .with_definition_reloads(
+            self.reloadable_definition_ids(),
+            Rc::clone(&self.host_requests.definition_reload_requests),
+        )
         .with_crew_ranks(Rc::clone(&self.crew_ranks))
         .with_crew_infos(Rc::clone(&self.crew_object_infos))
         .with_crew_info_links(Rc::clone(&self.crew_info_links))

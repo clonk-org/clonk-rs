@@ -22,11 +22,13 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod advanced_config;
 mod classic_record_stream;
+mod console_viewport_windows;
 mod console_window_position;
 mod control_options;
 mod deferred_config;
 mod desktop_notification;
 mod developer_console_save;
+mod developer_host;
 mod developer_toolbox;
 mod developer_tools_page;
 mod developer_windows;
@@ -57,6 +59,7 @@ mod shell_window_host;
 mod startup_player_files;
 mod system_fonts;
 mod update_check;
+mod viewport_window_host;
 mod window_icon;
 
 // Step 6a of the decomposition campaign (rust/REFACTOR_PLAN.md): per-area
@@ -765,22 +768,83 @@ fn run() -> Result<()> {
     // The shell is a registry record like every other developer window, so a
     // WindowId arriving from winit resolves to a purpose before it is routed
     // (M10-P4-L081). It is the only record until the console opens its own.
-    let mut developer_windows: developer_windows::DeveloperWindows<
-        shell_window_host::ShellWindowHost,
-    > = developer_windows::DeveloperWindows::new();
+    let mut developer_windows: developer_windows::DeveloperWindows<developer_host::DeveloperHost> =
+        developer_windows::DeveloperWindows::new();
     developer_windows.insert(
         developer_windows::SHELL_WINDOW,
         developer_windows::HostPurpose::Shell,
-        shell_window_host::ShellWindowHost::new(window, pixels, presenter, retained_gpu_renderer),
+        developer_host::DeveloperHost::Shell(shell_window_host::ShellWindowHost::new(
+            window,
+            pixels,
+            presenter,
+            retained_gpu_renderer,
+        )),
     );
+    // The next viewport window's key. `SHELL_WINDOW` is 0, so console windows
+    // start above it; the value is a registry key, not a viewport identity.
+    let mut next_developer_window_key = 1u64;
+    // Set when the shell takes a graphics pass; consumed on the next event
+    // loop entry, before the shell record is borrowed.
+    let mut viewport_redraw_pending = false;
 
     let mut dock_tile_attached = false;
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, event_target, control_flow| {
         // Before the window borrow below, because the Dock tile belongs to the
         // application rather than to any one window.
         if dock_icon::should_attach_dock_tile(&event, dock_tile_attached) {
             dock_icon::set_dock_icon();
             dock_tile_attached = true;
+        }
+        // `C4GraphicsSystem` opens and closes a viewport's window inside
+        // Create/CloseViewport (`C4GraphicsSystem.cpp:229-240,205-224`). winit
+        // can only create a window from the event loop's target, so the same
+        // decisions are taken here instead, before the shell record is
+        // borrowed for the rest of the pass.
+        if app.console_mode && matches!(event, Event::MainEventsCleared) {
+            let scale = developer_windows
+                .shell_mut()
+                .and_then(developer_host::DeveloperHost::as_shell_mut)
+                .map_or(1.0, |shell| shell.presenter.scale());
+            console_viewport_windows::reconcile_console_viewport_windows(
+                &mut app,
+                &mut developer_windows,
+                &mut next_developer_window_key,
+                scale,
+                event_target,
+            );
+        }
+        // Every viewport window redraws with the shell and only with it, the
+        // way `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
+        // viewport inside one graphics pass (`:167-169`). Redrawing them per
+        // event-loop pass instead would ignore the frame schedule, the
+        // automatic frame skip and the repaint floor, and spin.
+        if std::mem::take(&mut viewport_redraw_pending) {
+            for key in developer_windows.keys().collect::<Vec<_>>() {
+                if developer_windows
+                    .host(key)
+                    .and_then(developer_host::DeveloperHost::viewport_identity)
+                    .is_some()
+                {
+                    developer_windows.request_redraw(key);
+                }
+            }
+        }
+        // An event naming a viewport window is that window's alone. Resolving
+        // it before the shell destructure keeps the shell arms — all of which
+        // already guard on `window.id()` — exactly as they were.
+        if let Some(os_window) = console_viewport_windows::event_window_id(&event) {
+            if let Some(key) = developer_windows
+                .find_key(|host| host.window().id() == os_window)
+                .filter(|key| *key != developer_windows::SHELL_WINDOW)
+            {
+                console_viewport_windows::handle_console_viewport_event(
+                    key,
+                    &event,
+                    &mut app,
+                    &mut developer_windows,
+                );
+                return;
+            }
         }
         let shell_window_host::ShellWindowHost {
             window,
@@ -790,7 +854,9 @@ fn run() -> Result<()> {
             ..
         } = developer_windows
             .shell_mut()
-            .expect("the console shell record lives for the whole process");
+            .expect("the console shell record lives for the whole process")
+            .as_shell_mut()
+            .expect("the reserved shell key holds the shell host");
         match event {
             Event::Resumed => {
                 if reconcile_deferred_fullscreen(window, display_options.mode) {
@@ -849,6 +915,8 @@ fn run() -> Result<()> {
                 if close_console_commands {
                     console_commands = None;
                 }
+                app.console_edit_cursor_tick();
+                app.poll_developer_file_monitor();
                 app.drain_console_log_capture();
                 app.drain_game_log_capture();
                 if app.sync_developer_console_view() {
@@ -995,6 +1063,7 @@ fn run() -> Result<()> {
                             app.frames_since_redraw = 0;
                         }
                         window.request_redraw();
+                        viewport_redraw_pending = true;
                     }
                 }
                 if app.mode != AppMode::Running {
@@ -1940,6 +2009,14 @@ impl GameApp {
             console_mode: false,
             developer_console: DeveloperConsole::new(),
             developer_console_edit_mode: ConsoleEditMode::Play,
+            developer_selection: Default::default(),
+            console_viewport_projections: Default::default(),
+            edit_cursor_drop_target: None,
+            edit_cursor_tick_frame: None,
+            file_monitor: None,
+            edit_cursor_hold: false,
+            edit_cursor_last_world: None,
+            edit_cursor_drag_frame: None,
             developer_console_editing_enabled: true,
             developer_console_pointer: GuiPoint::new(0.0, 0.0),
             console_log_capture: None,
@@ -6348,6 +6425,17 @@ impl GameApp {
         // game frame still runs to completion. Apply those app-owned requests
         // now; the caller advances its cadence clock after this method.
         self.apply_engine_pause_game_requests();
+        // `FnReloadParticle` answered the script synchronously from pre-seeded
+        // state; the reload itself happens here, once the call has returned.
+        // `FnReloadParticle`/`FnReloadDef` answered the script synchronously
+        // from pre-seeded state; the reloads themselves happen here, once the
+        // call has returned. C++ reloads inside the call, so this defers the
+        // *work* by one pass — the script's answer is unaffected.
+        let reloaded = self.engine.apply_particle_reload_requests()
+            + self.engine.apply_definition_reload_requests();
+        if reloaded > 0 {
+            tracing::debug!(reloaded, "applied script-driven reloads");
+        }
         let goal_menu_result = self.apply_game_goal_menu_requests();
         if result.is_ok() {
             result = goal_menu_result;

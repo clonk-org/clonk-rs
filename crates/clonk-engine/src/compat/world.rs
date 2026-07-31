@@ -2057,6 +2057,20 @@ pub struct HostWorldContext {
     /// return false exactly like the C++ GetDef-failure paths
     /// (C4Script.cpp:4874,4893,4917,4932).
     particle_defs: Option<Rc<std::collections::HashSet<String>>>,
+    /// The particle definitions a reload could actually re-open — those
+    /// carrying a `Filename` (`C4Particles.cpp:197`). Seeded before the
+    /// call so `FnReloadParticle` can answer *synchronously*, the way the
+    /// port pre-allocates `next_object_id` so `CreateObject` can return a
+    /// reference to an object the engine has not made yet.
+    reloadable_particle_defs: Option<Rc<std::collections::HashSet<String>>>,
+    /// Names `FnReloadParticle` accepted, drained by the engine after the
+    /// call (`Engine::take_particle_reload_requests`).
+    pub(crate) particle_reload_requests: Rc<RefCell<Vec<String>>>,
+    /// The definitions a reload could actually re-open — those holding a
+    /// `Filename` (`C4Def.cpp:550`), for `FnReloadDef`'s synchronous answer.
+    reloadable_definitions: Option<Rc<std::collections::HashSet<String>>>,
+    /// Definition ids `FnReloadDef` accepted, drained after the call.
+    pub(crate) definition_reload_requests: Rc<RefCell<Vec<String>>>,
     /// Compiled definition scripts, shared from `Engine.definitions`, so host
     /// functions can run script functions on other objects mid-VM-call
     /// (Find_Func/Sort_Func, GameCall). Empty in legacy fixture contexts.
@@ -2194,6 +2208,10 @@ impl Default for HostWorldContext {
             construction_check_strings: Rc::new(crate::ConstructionCheckStrings::default()),
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             particle_defs: None,
+            reloadable_particle_defs: None,
+            particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
+            reloadable_definitions: None,
+            definition_reload_requests: Rc::new(RefCell::new(Vec::new())),
             definition_scripts: Rc::new(HashMap::new()),
             reference_parameter_slots: Rc::new(HashMap::new()),
             direct_call_function_names: Rc::new(HashSet::new()),
@@ -2566,6 +2584,10 @@ impl HostWorldContext {
             definition_crew_names: Rc::new(HashMap::new()),
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             particle_defs: None,
+            reloadable_particle_defs: None,
+            particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
+            reloadable_definitions: None,
+            definition_reload_requests: Rc::new(RefCell::new(Vec::new())),
             definition_scripts: Rc::new(HashMap::new()),
             reference_parameter_slots: Rc::new(HashMap::new()),
             direct_call_function_names: Rc::new(HashSet::new()),
@@ -3198,6 +3220,56 @@ impl HostWorldContext {
     pub(crate) fn with_particle_defs(mut self, defs: std::collections::HashSet<String>) -> Self {
         self.particle_defs = Some(Rc::new(defs));
         self
+    }
+
+    /// Seed the synchronous answer for `FnReloadParticle` and the channel its
+    /// accepted names travel back on.
+    pub(crate) fn with_particle_reloads(
+        mut self,
+        reloadable: std::collections::HashSet<String>,
+        requests: Rc<RefCell<Vec<String>>>,
+    ) -> Self {
+        self.reloadable_particle_defs = Some(Rc::new(reloadable));
+        self.particle_reload_requests = requests;
+        self
+    }
+
+    /// Whether `Game.ReloadParticle(name)` would reload this definition.
+    ///
+    /// `C4Game::ReloadParticle` returns false for a network game, a null name,
+    /// a name no definition answers to, and a definition with no `Filename`
+    /// (`C4Game.cpp:2371-2380`, `C4Particles.cpp:197`). All four are decidable
+    /// before the call; only an I/O failure at reload time is not.
+    /// Seed `FnReloadDef`'s synchronous answer and its request channel.
+    pub(crate) fn with_definition_reloads(
+        mut self,
+        reloadable: std::collections::HashSet<String>,
+        requests: Rc<RefCell<Vec<String>>>,
+    ) -> Self {
+        self.reloadable_definitions = Some(Rc::new(reloadable));
+        self.definition_reload_requests = requests;
+        self
+    }
+
+    /// Whether `Game.ReloadDef(id, C4D_Load_RX)` would reload this definition.
+    ///
+    /// `C4Game::ReloadDef` refuses a network game outright as its first line
+    /// and needs the definition to exist with a `Filename` to re-open
+    /// (`C4Game.cpp:2324-2330`, `C4Def.cpp:1191-1213`).
+    pub(crate) fn definition_reload_accepted(&self, id: &str) -> bool {
+        !self.network_game
+            && self
+                .reloadable_definitions
+                .as_ref()
+                .is_some_and(|defs| defs.contains(id))
+    }
+
+    pub(crate) fn particle_reload_accepted(&self, name: &str) -> bool {
+        !self.network_game
+            && self
+                .reloadable_particle_defs
+                .as_ref()
+                .is_some_and(|defs| defs.contains(name))
     }
 
     /// Attach the material table (FnMaterial name lookups).
@@ -4622,13 +4694,41 @@ pub(crate) fn is_network(_args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnReloadDef (C4Script.cpp:4974-4990). The engine has a source-backed
-/// script relink core, but no runtime resource path from which this native can
-/// safely reload graphics/script data. Preserve the typed tooling surface and
-/// report the unsupported reload as C4ValueInt false.
+/// `FnReloadDef` (`C4Script.cpp:5143-5159`) — `Game.ReloadDef(pDef->id,
+/// C4D_Load_RX)`, returned **synchronously**.
+///
+/// Same shape as `FnReloadParticle`: the answer comes from state seeded before
+/// the call and the work is staged for afterwards. Two details of its own —
+/// with **no id** the caller reloads its own definition (`ctx->Obj->Def`), and
+/// a missing definition is a plain `false` rather than an error.
 pub(crate) fn reload_def(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _definition = parse_native_c4id_argument(args.first(), "ReloadDef")?;
-    Ok(Value::Int(0))
+    let requested = parse_native_c4id_argument(args.first(), "ReloadDef")?;
+    let accepted = with_host_context(false, |context| {
+        // `if (!idDef) { if (ctx->Obj) pDef = ctx->Obj->Def; }` — with no id
+        // the caller reloads its **own** definition (`C4Script.cpp:5146-5151`).
+        let id = match requested {
+            Some(id) => Some(id.to_string()),
+            None => context
+                .script_object_context
+                .and_then(|caller| context.get_world_object(caller))
+                .map(|object| object.definition_id().to_string()),
+        };
+        // `if (!pDef) return false;` — no id and no calling object is a plain
+        // false, not an error.
+        let Some(id) = id else {
+            return false;
+        };
+        if !context.world.definition_reload_accepted(&id) {
+            return false;
+        }
+        context
+            .world
+            .definition_reload_requests
+            .borrow_mut()
+            .push(id);
+        true
+    });
+    Ok(Value::Int(i32::from(accepted)))
 }
 
 /// FnPauseGame (C4Script.cpp:6042-6051). Console pausing is process-local:

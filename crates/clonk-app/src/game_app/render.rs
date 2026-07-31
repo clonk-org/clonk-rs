@@ -332,7 +332,15 @@ impl GameApp {
     /// `C4GraphicsSystem::RecalculateViewports` sorts the physical list by
     /// the currently displayed player's control layout. `SetFilmView` itself
     /// deliberately does not call this; create/close do.
+    ///
+    /// It is fullscreen-only: the function's first statement is
+    /// `if (!Application.isFullScreen) return;` (C4GraphicsSystem.cpp:335-336)
+    /// and the sort follows at `:339`, so in console mode every viewport keeps
+    /// the position it was created at.
     fn sort_physical_viewports_by_player_control(&mut self) {
+        if self.console_mode {
+            return;
+        }
         let engine = &self.engine;
         self.physical_viewports.sort_by_key(|viewport| {
             engine
@@ -450,6 +458,35 @@ impl GameApp {
         if !silent {
             self.play_viewport_feedback_sound_for_game_state(game_running);
         }
+        true
+    }
+
+    /// `C4GraphicsSystem::CloseViewport(C4Viewport *cvp)`
+    /// (`C4GraphicsSystem.cpp:205-224`) — the path a viewport window's own
+    /// close button takes (`C4ViewportWindow::Close`, `C4Viewport.cpp:775-778`).
+    ///
+    /// Two things separate it from its player-keyed sibling (`:314-331`): it
+    /// erases **exactly one** viewport, found by pointer, so closing one window
+    /// never takes a sibling viewport of the same player with it; and it has no
+    /// `fSilent` parameter at all, so it always plays.
+    pub(crate) fn close_physical_viewport_identity(&mut self, identity: u64) -> bool {
+        let primary_removed = self
+            .physical_viewports
+            .first()
+            .is_some_and(|viewport| viewport.physical_identity == identity);
+        let previous_count = self.physical_viewports.len();
+        self.physical_viewports
+            .retain(|viewport| viewport.physical_identity != identity);
+        if self.physical_viewports.len() == previous_count {
+            return false;
+        }
+        self.graphics.drop_physical_camera(identity);
+        if primary_removed {
+            self.film_view_player = None;
+        }
+        self.sort_physical_viewports_by_player_control();
+        self.update_film_viewport_availability();
+        self.play_viewport_feedback_sound_for_game_state(self.mode == AppMode::Running);
         true
     }
 
@@ -2555,6 +2592,509 @@ impl GameApp {
         self.retained_native_capture_surface = Some(physical_surface);
         result?;
         Ok(RetainedGpuFrame { layers })
+    }
+
+    /// A left-button press inside a console viewport window.
+    ///
+    /// This is `C4EditCursor::LeftButtonDown`'s Edit arm reached from a real
+    /// window: `C4Viewport`'s handler converts the window-local pointer through
+    /// *that viewport's* `ViewX`/`ViewY` and scale (`C4Viewport.cpp:181`),
+    /// `Move` picks the target with `Game.FindObject(..., OCF_NotContained,
+    /// ..., Target)` (`C4EditCursor.cpp:150`), and the press then edits the
+    /// selection (`:201-229`).
+    ///
+    /// Returns the new selection when it actually changed, so a caller
+    /// forwards at most one notification per click and a no-op stays silent.
+    pub(crate) fn console_viewport_press(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+        scale: f32,
+        control: bool,
+        shift: bool,
+    ) -> Option<clonk_engine::developer_selection::SelectionSnapshot> {
+        use clonk_engine::developer_cursor::{edit_press, edit_target, SelectionEdit};
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        // Edit-mode only. Play routes to ordinary mouse control and Draw to the
+        // tools, both of which are their own paths
+        // (`developer_viewport::route_viewport_event`).
+        if self.developer_console_edit_mode != ConsoleEditMode::Edit {
+            return None;
+        }
+        let projection = *self.console_viewport_projections.get(&identity)?;
+        let (x, y) = projection
+            .pointer_projection(scale)
+            .world_position(local.0, local.1);
+
+        // One world view per gesture: `edit_target` calls the hit test
+        // repeatedly to walk a shift-click stack.
+        let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
+        let selection = self.developer_selection.objects().to_vec();
+        let target = edit_target(shift, &selection, |after| hit_test.object_at(x, y, after));
+
+        let press = edit_press(control, target, &selection);
+        self.edit_cursor_hold = press.hold;
+        self.edit_cursor_last_world = Some((x, y));
+        match press.selection {
+            Some(SelectionEdit::Replace(object)) => self
+                .developer_selection
+                .replace(SelectionWriter::EditCursor, object),
+            Some(SelectionEdit::Remove(object)) | Some(SelectionEdit::Add(object)) => self
+                .developer_selection
+                .toggle(SelectionWriter::EditCursor, object),
+            Some(SelectionEdit::ClearAndDragFrame) => {
+                // `DragFrame = true; X2 = X; Y2 = Y` — the band is anchored at
+                // the press, in world coordinates.
+                self.edit_cursor_drag_frame = Some(((x, y), (x, y)));
+                self.developer_selection.clear(SelectionWriter::EditCursor)
+            }
+            None => None,
+        }
+    }
+
+    /// Pointer motion inside a console viewport window.
+    ///
+    /// `C4EditCursor::Move`'s Edit arm (`C4EditCursor.cpp:129-152`). While a
+    /// rubber band is armed the band's live corner follows the pointer
+    /// (`X2 = X; Y2 = Y`); otherwise the hovered target is re-picked, which is
+    /// what a later shift-click resumes from.
+    pub(crate) fn console_viewport_motion(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+        scale: f32,
+        control: bool,
+        shift: bool,
+    ) {
+        use clonk_engine::developer_cursor::edit_target;
+
+        if self.developer_console_edit_mode != ConsoleEditMode::Edit {
+            return;
+        }
+        let Some(projection) = self.console_viewport_projections.get(&identity).copied() else {
+            return;
+        };
+        let (x, y) = projection
+            .pointer_projection(scale)
+            .world_position(local.0, local.1);
+
+        // `UpdateDropTarget` runs on every move, before the drag arms decide
+        // anything (`C4EditCursor.cpp:653-670`).
+        self.edit_cursor_drop_target = self.console_drop_target(control, (x, y));
+        if let Some((_, corner)) = self.edit_cursor_drag_frame.as_mut() {
+            *corner = (x, y);
+            return;
+        }
+        // `edit_move` decides between moving the selection and re-picking the
+        // hovered target; the offset is the delta from the previous message.
+        let previous = self.edit_cursor_last_world.replace((x, y));
+        if let clonk_engine::developer_cursor::EditMove::MoveSelection { dx, dy } =
+            clonk_engine::developer_cursor::edit_move(
+                self.edit_cursor_hold,
+                false,
+                previous.map_or(0, |(px, _)| x - px),
+                previous.map_or(0, |(_, py)| y - py),
+                || None,
+            )
+        {
+            self.submit_editor_move_selection(dx, dy);
+            return;
+        }
+        let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
+        let selection = self.developer_selection.objects().to_vec();
+        let target = edit_target(shift, &selection, |after| hit_test.object_at(x, y, after));
+        self.developer_selection.set_hover(target);
+    }
+
+    /// Releasing the left button inside a console viewport window.
+    ///
+    /// `C4EditCursor::LeftButtonUp`'s Edit arm runs `FrameSelection()` then
+    /// `PutContents()`, both optional and in that order, and clears `Hold`,
+    /// `DragFrame`, `DragLine` and `DropTarget` regardless
+    /// (`C4EditCursor.cpp:287-341`).
+    pub(crate) fn console_viewport_release(
+        &mut self,
+    ) -> Option<clonk_engine::developer_selection::SelectionSnapshot> {
+        use clonk_engine::developer_cursor::{
+            edit_release, frame_selection, EditRelease, FrameCandidate,
+        };
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let band = self.edit_cursor_drag_frame.take();
+        let drop_target = self.edit_cursor_drop_target.take();
+        self.edit_cursor_hold = false;
+        self.edit_cursor_last_world = None;
+        if self.developer_console_edit_mode != ConsoleEditMode::Edit {
+            return None;
+        }
+
+        let mut result = None;
+        for action in edit_release(band.is_some(), drop_target) {
+            match action {
+                EditRelease::FrameSelection => {
+                    let (anchor, corner) = band?;
+                    // `Game.Objects` master order, which is the reverse of the
+                    // snapshot's draw order.
+                    let candidates = self
+                        .snapshot
+                        .render_order
+                        .iter()
+                        .rev()
+                        .filter_map(|id| {
+                            let object = self.snapshot.object(*id)?;
+                            Some(FrameCandidate {
+                                id: *id,
+                                deleted: false,
+                                contained: object.container.is_some(),
+                                x: object.position.x,
+                                y: object.position.y,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let framed = frame_selection(anchor, corner, &candidates);
+                    result = self
+                        .developer_selection
+                        .select_frame(SelectionWriter::EditCursor, framed);
+                }
+                // `PutContents` — `EMMoveObject(EMMO_Enter, 0, 0, DropTarget,
+                // &Selection)` (`C4EditCursor.cpp:674-677`).
+                EditRelease::Enter { target } => self.submit_editor_enter(target),
+            }
+        }
+        result
+    }
+
+    /// `C4EditCursor::MoveSelection` — `EMMoveObject(EMMO_Move, xoff, yoff,
+    /// nullptr, &Selection)` (`C4EditCursor.cpp`).
+    ///
+    /// Editing is a *control*, not a direct mutation: it goes through the same
+    /// queue as every other player action so a network game stays in lockstep,
+    /// which is why `EMMO_Script` already takes this path.
+    fn submit_editor_move_selection(&mut self, dx: i32, dy: i32) {
+        if dx == 0 && dy == 0 {
+            // C++ still re-issues a zero-offset EMMO_Move every tick from
+            // Execute while Hold is set (`edit_tick_move`); a *motion* message
+            // that moved nothing is not that path and emits nothing.
+            return;
+        }
+        let objects = self
+            .developer_selection
+            .objects()
+            .iter()
+            .map(|id| id.as_u64() as i32)
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_selection_script(clonk_engine::EmMoveObjectControlData {
+                action: clonk_engine::EMMO_MOVE,
+                tx: dx,
+                ty: dy,
+                objects,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor move");
+        }
+    }
+
+    /// `C4EditCursor::UpdateDropTarget` (`C4EditCursor.cpp:653-670`).
+    fn console_drop_target(
+        &self,
+        control: bool,
+        cursor: (i32, i32),
+    ) -> Option<clonk_engine::ObjectId> {
+        use clonk_engine::developer_cursor::{drop_target, DropCandidate};
+
+        let selection = self.developer_selection.objects();
+        if !control || selection.is_empty() {
+            return None;
+        }
+        let shapes = clonk_engine::EditCursorHitTest::new(&self.snapshot);
+        // `Game.Objects` master order, the reverse of the draw order.
+        let candidates = self
+            .snapshot
+            .render_order
+            .iter()
+            .rev()
+            .filter_map(|id| {
+                let object = self.snapshot.object(*id)?;
+                let shape = shapes.shape_rect(*id)?;
+                Some(DropCandidate {
+                    id: *id,
+                    deleted: false,
+                    contained: object.container.is_some(),
+                    // `object_live_shape_rect` is already
+                    // `cobj->x + cobj->Shape.x`.
+                    shape_x: shape.x,
+                    shape_y: shape.y,
+                    shape_width: shape.width,
+                    shape_height: shape.height,
+                })
+            })
+            .collect::<Vec<_>>();
+        drop_target(control, selection, cursor, &candidates)
+    }
+
+    /// `C4EditCursor::PutContents` — `EMMoveObject(EMMO_Enter, 0, 0,
+    /// DropTarget, &Selection)`.
+    fn submit_editor_enter(&mut self, target: clonk_engine::ObjectId) {
+        let objects = self
+            .developer_selection
+            .objects()
+            .iter()
+            .map(|id| id.as_u64() as i32)
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_selection_script(clonk_engine::EmMoveObjectControlData {
+                action: clonk_engine::EMMO_ENTER,
+                target_object: target.as_u64() as i32,
+                objects,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor enter");
+        }
+    }
+
+    /// `C4EditCursor::Execute`'s Edit arm (`C4EditCursor.cpp:65-69`) — while
+    /// `Hold` is set it re-issues a **zero-offset** `EMMO_Move` every tick, so
+    /// a stationary held selection still produces control traffic.
+    pub(crate) fn console_edit_cursor_tick(&mut self) {
+        use clonk_engine::developer_cursor::{edit_tick_move, CursorMode};
+
+        let mode = match self.developer_console_edit_mode {
+            ConsoleEditMode::Play => CursorMode::Play,
+            ConsoleEditMode::Edit => CursorMode::Edit,
+            ConsoleEditMode::Draw => CursorMode::Draw,
+        };
+        if edit_tick_move(mode, self.edit_cursor_hold).is_none() {
+            self.edit_cursor_tick_frame = None;
+            return;
+        }
+        // Once per engine tick, not once per event-loop wake.
+        let frame = self.engine.frame();
+        if self.edit_cursor_tick_frame == Some(frame) {
+            return;
+        }
+        self.edit_cursor_tick_frame = Some(frame);
+        let objects = self
+            .developer_selection
+            .objects()
+            .iter()
+            .map(|id| id.as_u64() as i32)
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_selection_script(clonk_engine::EmMoveObjectControlData {
+                action: clonk_engine::EMMO_MOVE,
+                objects,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit the held editor move");
+        }
+    }
+
+    /// `Config.Developer.AutoFileReload`, defaulting true (`C4Config.cpp:434`).
+    pub(crate) fn configured_auto_file_reload(&self) -> bool {
+        crate::configured_auto_file_reload(&crate::load_native_config_bytes(
+            self.app_paths.as_ref(),
+        ))
+    }
+
+    /// `C4Game::InitGame`'s monitor arming plus `InitGameFinal`'s start
+    /// (`C4Game.cpp:2413-2424`, `:2738`).
+    ///
+    /// The ordering is the whole contract: create the monitor, register every
+    /// unpacked definition group, *then* start it. `C4FileMonitor::AddDirectory`
+    /// on the reference backend is `if (!started) paths.emplace_back(...)`
+    /// (`C4FileMonitor.cpp:299-305`), so a directory registered after the start
+    /// is silently dropped — which is safe only because C++ registers during
+    /// definition loading and starts afterwards.
+    pub(crate) fn arm_developer_file_monitor(&mut self, auto_file_reload: bool) {
+        use clonk_engine::developer_file_monitor::should_arm_file_monitor;
+
+        // `Application.isFullScreen` is the negation of console mode: a
+        // fullscreen session never watches, however the key is set.
+        if !should_arm_file_monitor(
+            auto_file_reload,
+            !self.console_mode,
+            self.file_monitor.is_some(),
+        ) {
+            return;
+        }
+        let mut monitor = clonk_platform::file_monitor::DirectoryMonitor::new();
+        for directory in self.engine.monitored_definition_directories() {
+            monitor.add_directory(directory);
+        }
+        monitor.start();
+        tracing::debug!(
+            watched = monitor.watched().len(),
+            "armed the developer file monitor"
+        );
+        self.file_monitor = Some(monitor);
+    }
+
+    /// Deliver whatever the monitor saw to `C4Game::ReloadFile`'s dispatcher.
+    ///
+    /// `C4FileMonitor`'s callback is bound straight to `C4Game::ReloadFile`
+    /// (`C4Game.cpp:2418`), which refuses in a network game, routes a matched
+    /// definition to `ReloadDef`, and offers everything else to the script
+    /// host — the fallback, not a sibling branch.
+    pub(crate) fn poll_developer_file_monitor(&mut self) {
+        use clonk_engine::developer_reload::{changed_file_route, ChangedFileRoute};
+
+        let Some(monitor) = self.file_monitor.as_mut() else {
+            return;
+        };
+        let changed = monitor.poll();
+        if changed.is_empty() {
+            return;
+        }
+        let network_game = self.network.is_some();
+        for path in changed {
+            let path = path.to_string_lossy().into_owned();
+            let route = changed_file_route(network_game, &path, |candidate| {
+                self.engine.definition_id_for_source_path(candidate)
+            });
+            match route {
+                ChangedFileRoute::RefusedInNetwork => return,
+                ChangedFileRoute::Definition { definition } => {
+                    let reloaded = self.engine.reload_definition(&definition, network_game);
+                    tracing::debug!(%definition, reloaded, "developer reload dispatched");
+                }
+                ChangedFileRoute::Script { relative_path } => {
+                    tracing::debug!(%relative_path, "developer reload found no definition");
+                }
+            }
+        }
+    }
+
+    /// Draw one console viewport window's frame.
+    ///
+    /// This is `C4Viewport::Execute` (`C4Viewport.cpp:1126-1155`) for a
+    /// windowed viewport: it draws the one viewport its window owns, at that
+    /// window's own extent, and hands the result back for the window to blit —
+    /// `BlitOutput` page-flips immediately for a windowed viewport and defers
+    /// only for a fullscreen one (`:1121-1124`).
+    ///
+    /// `width`/`height` are the window's logical extent. C++ derives them in
+    /// `UpdateOutputSize` as `ceilf(rect.Wdt / scale)` (`:798`) from the
+    /// window's own drawable, so the caller converts before calling.
+    ///
+    /// Returns `None` when the identity no longer has a physical viewport —
+    /// a closed viewport's window goes blank rather than adopting another
+    /// viewport's view.
+    pub(crate) fn render_console_viewport(
+        &mut self,
+        identity: u64,
+        width: u32,
+        height: u32,
+    ) -> Option<clonk_graphics::Surface> {
+        let Self {
+            snapshot,
+            graphics,
+            physical_viewports,
+            ..
+        } = self;
+        let inputs =
+            collect_viewport_inputs_from_physical_state(snapshot, physical_viewports).ok()?;
+        let mut frame =
+            graphics.render_detached_viewport(snapshot, &inputs, identity, width, height)?;
+        // `C4Viewport::Draw` calls `Console.EditCursor.Draw(cgo)` after the
+        // foreground objects and before the per-player HUD, gated on
+        // `!Application.isFullScreen` (`C4Viewport.cpp:1102-1108`). It draws
+        // through the engine's own rasterizer, so it lands on this surface.
+        Self::draw_console_overlay(
+            &mut frame.surface,
+            snapshot,
+            frame.projection,
+            self.developer_selection.objects(),
+            self.edit_cursor_drag_frame,
+        );
+        // The frame a window drew is what its pointer input must be converted
+        // through; nothing else records this viewport's own ViewX/ViewY.
+        self.console_viewport_projections
+            .insert(identity, frame.projection);
+        Some(frame.surface)
+    }
+
+    /// Paint `C4EditCursor::Draw`'s command list onto a finished viewport
+    /// frame (`clonk_engine::developer_overlay`).
+    ///
+    /// Selection marks are twelve individual pixels per corner, not a
+    /// rectangle outline, and nothing at all when the shape is under a pixel
+    /// wide or tall — `select_mark_pixels` owns that rule. Coordinates are
+    /// viewport-space: `cobj->x + cobj->Shape.x - ViewX`.
+    fn draw_console_overlay(
+        surface: &mut clonk_graphics::Surface,
+        snapshot: &SimulationSnapshot,
+        projection: clonk_frontend::ActiveViewportProjection,
+        selection: &[clonk_engine::ObjectId],
+        drag_frame: Option<((i32, i32), (i32, i32))>,
+    ) {
+        use clonk_engine::developer_overlay::{
+            console_overlay_commands, ConsoleOverlayCommand, OverlaySelection,
+        };
+
+        // The same world view the hit test uses, so the mark frames exactly
+        // the shape a click resolves against.
+        let shapes = clonk_engine::EditCursorHitTest::new(snapshot);
+        let entries = selection
+            .iter()
+            .filter_map(|id| {
+                let shape = shapes.shape_rect(*id)?;
+                Some(OverlaySelection {
+                    object: *id,
+                    // `object_live_shape_rect` already returns the shape in
+                    // *world* coordinates — `cobj->x + cobj->Shape.x`, the
+                    // whole left-hand side of C++'s expression — so only the
+                    // view origin is subtracted here. Adding the position
+                    // again would double-count it.
+                    x: shape.x - projection.target_x,
+                    y: shape.y - projection.target_y,
+                    width: shape.width,
+                    height: shape.height,
+                })
+            })
+            .collect::<Vec<_>>();
+        // `DrawFrame` normalises the corners, so the band is the same
+        // rectangle whichever way the drag went (`developer_overlay`).
+        let band = drag_frame.map(|(anchor, corner)| {
+            (
+                (
+                    anchor.0 - projection.target_x,
+                    anchor.1 - projection.target_y,
+                ),
+                (
+                    corner.0 - projection.target_x,
+                    corner.1 - projection.target_y,
+                ),
+            )
+        });
+        let commands = console_overlay_commands(false, false, &entries, band, None, None);
+
+        let white = clonk_graphics::Color::opaque(255, 255, 255);
+        for command in commands {
+            // Only the select mark is drawn: the remaining commands need the
+            // drag gestures that are not wired yet, and drawing half a rubber
+            // band would be worse than drawing none.
+            if let ConsoleOverlayCommand::SelectMark { pixels, .. } = command {
+                for (x, y) in pixels {
+                    if x >= 0 && y >= 0 {
+                        let _ = surface.set_pixel(x as u32, y as u32, white);
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn render_running(

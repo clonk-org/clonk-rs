@@ -650,6 +650,50 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   window host M10-P4-L081), and wiring the engine's live function tables into
   `completion_functions`.
 
+- **The watcher itself landed.** `clonk-platform::file_monitor::DirectoryMonitor`
+  is the reference backend's behaviour, not a richer one. `C4FileMonitor`'s
+  macOS backend is FSEvents with **latency 1.0 s and flags 0**
+  (`C4FileMonitor.cpp:287`) — flags 0 is `kFSEventStreamCreateFlagNone`, *not*
+  `kFileEvents`, so events are **directory-granular**: the path handed to the
+  callback is always a directory, never the file that changed. Linux inotify is
+  the same, pushing `watchDescriptors[event->wd]` and ignoring `event->name`
+  (`:80-126`); only Windows reports a child file path. A one-second poll
+  therefore reproduces it exactly, and no file-watching dependency was added —
+  which also keeps `clonk-engine`'s dependency mirroring in
+  `clonk-engine-unit-tests` untouched.
+  Two behaviours it keeps deliberately: **a directory registered after the
+  monitor starts is silently dropped** (`if (!started) paths.emplace_back(...)`,
+  `:299-305`), which is safe only because the lifecycle is create in
+  `InitGame`, register while definitions load, start in `InitGameFinal`
+  (`C4Game.cpp:2413-2424,2738,4445`); and **dropped events are not recovered** —
+  the callback skips the `UserDropped|KernelDropped` flags and does nothing
+  else (`:256-273`), so adding a rescan would be stricter than C++. Pinned by
+  `file_monitor_reports_directories_and_refuses_late_registration`.
+  **Now wired end to end.** `GameApp::arm_developer_file_monitor` runs as
+  `C4Game::InitGameFinal`'s last act — after viewports exist and definitions
+  have loaded (`C4Game.cpp:2738`) — because registration closes at the start.
+  It arms only when `Config.Developer.AutoFileReload` (default **true**,
+  `C4Config.cpp:434`) is set, the app is windowed, and no monitor is already
+  running; `Engine::monitored_definition_directories` supplies only **unpacked**
+  groups, each once. `poll_developer_file_monitor` then feeds
+  `changed_file_route`, which refuses in a network game, routes a matched
+  definition to `reload_definition`, and offers everything else to the script
+  host. Pinned end to end by
+  `developer_file_monitor_arms_registers_then_dispatches_definition_reloads`,
+  which corrupts a real group on disk and watches the definition disappear
+  through the failure arm.
+  The dependency this note previously recorded was real and is now discharged: `C4Def::Load` registers
+  `Filename`, the group's own full name (`C4Def.cpp:547-560`), which is exactly
+  the source provenance **M10-P4-L086** exists to retain: the port resolves a
+  definition group to a `Group`, builds the runtime definition and drops the
+  path. So the watcher's registration genuinely blocks on L086, unlike the
+  particle half above, whose stated dependency on it was false. Do the
+  provenance thread first and registration becomes a two-line consequence of
+  it; do the wiring first and there is nothing to register.
+  The delivery half is independent: a poll on the event loop's own cadence
+  feeding `developer_reload::changed_file_route`, whose dispatch, network
+  refusal and script-host fallback are already ported.
+
 - **File-monitor arming and the external reload trigger landed; the watcher is
   open.** `clonk-engine::developer_file_monitor` ports the two gates.
   A monitor starts only when `Developer.AutoFileReload` is set, the app is
@@ -813,10 +857,40 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   caller. Pinned by
   `detached_viewport_projection_is_addressable_by_physical_identity`, which
   renders two same-owner viewports, swaps their layout order, and checks the
-  indices move while the identities do not. **Still open:** drawing a single
-  identity into a supplied target — the part that touches the rasterizer.
+  indices move while the identities do not.
 
-- **Per-viewport pointer projection landed; identity-addressed rendering open.**
+- **Identity-addressed detached rendering landed (M10-P4-L082 is complete).**
+  `GraphicsSystem::render_detached_viewport` draws exactly one physical
+  identity into a window-sized target and hands back the pixels plus the
+  `ActiveViewportProjection` they were drawn with, the way `C4Viewport::Execute`
+  selects that viewport's own context, sets `cgo` from its own six numbers and
+  blits it (`C4Viewport.cpp:1126-1155`). Selecting a context is literally what
+  the Rust surface swap models — `CStdGLCtx::Select` rewrites the primary
+  surface's `Wdt`/`Hgt` to the window's own extent (`StdGLCtx.cpp:467-476`).
+  An identity that is not in the supplied list draws **nothing** rather than
+  falling back to the first viewport, so a closed viewport's window goes blank
+  instead of showing somebody else's view. The pass saves and restores the
+  fullscreen records, which is C++-faithful rather than merely defensive:
+  fullscreen and console viewports are mutually exclusive in one process
+  (`C4GraphicsSystem.cpp:231-234`).
+  Three fullscreen-only behaviours had leaked into it and are now gated on
+  `Application.isFullScreen`, all three verified against the oracle:
+  `C4GraphicsSystem::RecalculateViewports` — the sole writer of the
+  landscape-extent cap, the layout cell and `DrawX`/`DrawY` — opens with
+  `if (!Application.isFullScreen) return;` (`C4GraphicsSystem.cpp:335-336`), so
+  a console viewport is never capped to the landscape and always draws at its
+  target's origin; the message board and upper board are inside the same gate
+  (`:171-183`), so a detached window reserves no height for them; and
+  `C4Viewport::UpdateViewPosition` centres an ownerless view on an undersized
+  map only `if (Application.isFullScreen)` (`C4Viewport.cpp:1237,1246`) —
+  otherwise it runs `min` then `max` and pins the origin at 0. Pinned by
+  `detached_viewport_render_targets_only_requested_physical_identity` and
+  `detached_viewport_window_is_never_capped_or_centred_on_a_small_map`.
+  `ActiveViewportProjection::pointer_projection` closes the loop: the frame a
+  window drew is the frame its pointer input converts through.
+  **Still open:** the OS windows that would consume it (M10-P4-L047).
+
+- **Per-viewport pointer projection landed.**
   `clonk-frontend::viewport_projection` ports `C4Viewport`'s local-to-world
   conversion (`C4Viewport.cpp:112,181,192`):
   `ViewX + static_cast<int32_t>(local / scale)`. Two details a from-scratch
@@ -826,10 +900,280 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   truncation. A non-finite or non-positive scale yields the view origin rather
   than a wild coordinate. Pinned by
   `detached_viewport_pointer_projection_uses_window_identity_and_scale`.
-  **Still open:** rendering one physical identity into a supplied target,
-  keying camera state by identity rather than the last global layout, and the
-  console-overlay hook that must run after world/foreground and before the
-  per-viewport HUD (`C4Viewport.cpp:1023-1110`).
+
+- **Console viewport windows now open (M10-P4-L047 criteria 1-3).** The
+  console's Viewport menu already created the *logical* physical viewport; it
+  now materialises as a real OS window. `clonk-app::console_viewport_windows`
+  reconciles the open windows against the physical list each pass and
+  `viewport_window_host` is the port's `C4ViewportWindow`. C++ has no
+  reconciliation step — `CreateViewport` builds the window inside the same call
+  that appends the viewport (`C4GraphicsSystem.cpp:229-240`) — but winit can
+  only create a window from the event loop's target, so the same decisions are
+  taken once per pass instead. Details worth keeping:
+  - **Identity is the C++ pointer.** Opens and closes address one viewport by
+    `physical_identity`, never by owner, so two windows on the same player stay
+    distinct. `GameApp::close_physical_viewport_identity` is
+    `CloseViewport(C4Viewport *)` (`:205-224`): it erases exactly one, and it
+    has no `fSilent` parameter at all, so it always plays — unlike the
+    player-keyed overload (`:314-331`) that erases every match.
+  - **Redraws ride the graphics tick**, the way `C4GraphicsSystem::Execute`
+    runs `cvp->Execute()` for every viewport inside one pass (`:167-169`).
+    Redrawing per event-loop pass instead ignores the frame schedule, the
+    automatic frame skip and the repaint floor, and spins — that was written
+    and fixed before landing.
+  - **The window is not a child.** `C4Viewport::Init` passes the console shell
+    as `pParent` (`C4Viewport.cpp:1351`), and the reference `CStdWindow::Init`
+    accepts it and ignores it entirely (`StdSDLWindow.cpp:52-66`).
+  - The buffer extent is `ceilf(drawable / scale)` (`C4Viewport.cpp:798`),
+    pinned by
+    `viewport_logical_extent_is_a_ceiling_division_by_the_application_scale`;
+    the open/close decision is pinned by
+    `console_viewport_windows_open_per_identity_and_close_only_their_own`; the
+    draw by `console_viewport_render_uses_the_windows_own_extent_and_identity`.
+  **Verified live, drawing real world.** `/console <scenario> <player.c4p>`
+  opens a window titled after the player at exactly 400x250 and presents the
+  revealed landscape, sky, structures and per-viewport HUD every graphics tick.
+  An earlier `--sandbox` run showed only a uniform `fow_color` fill, which was
+  correct — that player has no crew, so nothing is revealed — but it meant the
+  content was unconfirmed until a real player joined. A player file needs no
+  tooling to make: it is an unpacked directory holding `Player.txt` with a
+  `[Player]` section, plus one `<Name>.c4i/ObjectInfo.txt` per crew member.
+  That is worth knowing, because "no player file available" is what blocked
+  every headed check of this subsystem.
+  **Still open on this card:** routing the window's pointer and key input into
+  the edit-cursor sink. The window delivers events and
+  `ActiveViewportProjection::pointer_projection` converts them, but nothing
+  consumes them yet — see the next entry.
+
+- **Clicking inside a console viewport window now selects (M10-P4-L043's
+  gesture, reached from a real window).** `GameApp::console_viewport_press`
+  joins the four pieces: a window-local pointer converted through *that*
+  viewport's own `ViewX`/`ViewY` (`C4Viewport.cpp:181`), the target picked by
+  `edit_target` over `EditCursorHitTest` (`C4EditCursor.cpp:150`), the press
+  applied by `edit_press` (`:201-229`), and the result written to the shared
+  `DeveloperSelection` as `SelectionWriter::EditCursor`. Pinned end to end by
+  `console_viewport_pointer_gestures_select_move_and_frame`.
+  One design point the port had to settle: `viewport_projection_for_identity`
+  reads `GraphicsSystem::active_viewports`, which is the **fullscreen** layout
+  and is never populated in console mode — so a detached window had no source
+  for its own view origin. `GameApp::console_viewport_projections` now retains
+  the projection each window was last drawn with, keyed by physical identity.
+  That is the port's form of C++ getting it for free from the `C4Viewport`
+  object that both draws and handles input.
+  The overlay hook is wired too: `render_console_viewport` calls
+  `developer_overlay`'s draw list where `C4Viewport::Draw` calls
+  `Console.EditCursor.Draw(cgo)` — after the foreground objects, before the
+  per-player HUD, gated on `!Application.isFullScreen`
+  (`C4Viewport.cpp:1102-1108`). Only `SelectMark` is painted; the other
+  commands need the drag gestures, and drawing half a rubber band would be
+  worse than drawing none.
+  Resolving the mark's rectangle needed one addition. `DrawSelectMark` frames
+  the object's **live** `C4Shape` — stretched by `Con`, rotated by `r` — and
+  `ObjectSnapshot::current_shape` carries that only when it is not
+  reconstructible, so it is usually `None`. `EditCursorHitTest::shape_rect`
+  resolves it through the *same* world view the hit test uses, which is what
+  makes the mark and the click agree about what was clicked.
+  Verifying that answered itself and found a bug. The invisible mark was two
+  separate things: the test's ownerless viewport had `ViewX = 864` while the
+  object sat at `x = 240`, so the mark was correctly computed and legitimately
+  off-screen — *and* `object_live_shape_rect` returns the shape in **world**
+  coordinates (`cobj->x + cobj->Shape.x`, the whole left-hand side of C++'s
+  expression), so adding the object's position again double-counted it and put
+  the mark an object-width from where it belonged. Both are fixed and the
+  coordinate convention is now pinned, including that the corner Ls point
+  *outward* — they reach one pixel beyond the shape on each side and no
+  further, which is what catches a displaced mark.
+  **The mark reaches pixels.** `a_selected_object_draws_its_mark_into_the_viewport_frame`
+  renders a console viewport, selects an object inside the view, renders again
+  and asserts the frames differ — then clears the selection and asserts the
+  frame goes back to *exactly* the unmarked bytes, so the difference is the
+  mark and not per-frame drift. The viewport has to be an **owned** one for
+  this: an ownerless viewport is centred on the map, and a mark on an object
+  outside that view is legitimately clipped away, which is what made an earlier
+  attempt at this test pass for the wrong reason.
+  **The rubber band is complete.** `console_viewport_motion` and
+  `console_viewport_release` carry `C4EditCursor::Move`'s Edit arm
+  (`C4EditCursor.cpp:129-152`) and `LeftButtonUp`'s (`:287-341`): a press on
+  empty space arms the band with **both** corners at the press (`X2 = X;
+  Y2 = Y`), motion drags the live corner while the anchor stays put, and the
+  release runs `FrameSelection` over `Game.Objects` master order — the reverse
+  of the snapshot's draw order — then clears `Hold` and `DragFrame`
+  *regardless*, as C++ does. Covered by
+  `console_viewport_pointer_gestures_select_move_and_frame`, which now walks
+  the whole gesture.
+  **Dragging moves the selection, as a control.** A held non-frame drag routes
+  `edit_move`'s `MoveSelection(xoff, yoff)` into `EMMO_Move` through the same
+  `submit_or_execute_editor_selection_script` path `EMMO_Script` already used
+  — editing is a *control*, not a direct mutation, so a network game stays in
+  lockstep. The offset is the delta from the previous pointer message, and a
+  motion that moved nothing emits nothing: the zero-offset re-issue is
+  `Execute`'s per-tick path (`edit_tick_move`), not this one.
+  **The edit cursor's input side is complete.** `UpdateDropTarget` recomputes
+  on every motion, before the drag arms decide anything
+  (`C4EditCursor.cpp:653-670`), and the release emits `PutContents`'
+  `EMMO_Enter` after `FrameSelection`, both optional and in that order
+  (`:674-677`). `edit_tick_move`'s zero-offset re-issue is wired too, with one
+  port-specific guard: `C4Console::Execute` runs `EditCursor.Execute()` once
+  per application tick, while the port's event loop wakes far more often, so
+  the emit is keyed to the engine frame. Without that it would flood the
+  control queue — the kind of divergence that looks like a performance bug
+  rather than a parity one.
+  So every `developer_cursor` entry point now has a production caller:
+  `edit_press`, `edit_target`, `edit_move`, `edit_tick_move`, `edit_release`,
+  `drop_target` and `frame_selection`, plus `developer_selection`'s mutators
+  and `developer_overlay`'s mark. `EMMO_Move` and `EMMO_Enter` both reach the
+  control queue through the path `EMMO_Script` already used.
+
+- **The edit-cursor interaction layer is wired (this entry is kept for the
+  history of how it read before).** Worth
+  stating on its own, because every card above reads as "landed" and the
+  editor still cannot edit. `grep` for the modules outside their own files
+  returned one hit before the click path above landed. `edit_target`,
+  `edit_press`, `DeveloperSelection::replace`/`toggle`/`clear` now have a real
+  caller; `edit_move`, `edit_tick_move`, `edit_release`, `drop_target`,
+  `frame_selection`, `select_frame` and all of `developer_overlay` still do
+  not. `developer_tools` is reached only by
+  `clonk-app::developer_tools_page`, which is itself a specification of the
+  page rather than a rendered one. On the control side only `EMMO_Script` is
+  wired (`clonk-app::main.rs`, the console's script input); `EMMO_Move`,
+  `EMMO_Enter` and `EMMO_Remove` have no emitter.
+  This is not a gap in any one card — each ported the behaviour its card
+  named, and each is pinned by tests. The missing piece is the *caller*, and
+  there is exactly one reason there is no caller: a console viewport window is
+  where all of it would be driven from, and no such window is ever created
+  (M10-P4-L047's criteria 1-3). Closing that card is what turns this group
+  from a tested library into a working editor; nothing else in the group is
+  blocked on anything but it.
+  The window half is now done, so what remains is the bridge. Two concrete
+  pieces, both scouted:
+  - **`C4EditCursor::LeftButtonDown`'s Edit arm is ported** as
+    `developer_cursor::edit_press` (`C4EditCursor.cpp:201-229`), pinned by
+    `edit_press_selects_toggles_and_arms_the_rubber_band_like_cpp`. Two details
+    it keeps: a plain click on an *already selected* object changes nothing
+    (C++ guards the replace on `!Selection.GetLink(Target)`), which is what lets
+    a multi-object selection be dragged as a unit; and the whole Ctrl branch is
+    inside `if (Target)`, so Ctrl-clicking empty space neither clears nor starts
+    a rubber band where a plain click there does both.
+  - **The hit test now reaches outside the script host.**
+    `EditCursorHitTest::new(&snapshot).object_at(x, y, after)` supplies
+    `edit_target`'s `find_next`, which C++ writes as
+    `Game.FindObject(0, X, Y, 0, 0, OCF_NotContained, …, ANY_OWNER, Target)`
+    (`C4EditCursor.cpp:150`). It runs the **same** query script content calls
+    — `compat::objects::find_object_linear` with `FindObjectParams` — rather
+    than a second hit test that could disagree with it. The blocker was that
+    `find_object_linear` needs a `WorldAccessor` and only `with_host_context`
+    supplied one; `HostWorldContext` is itself a `WorldAccessor`, and
+    `host_world_context_from_snapshot` builds one without entering the script
+    host, which is correct because the console hit-tests *between* ticks, not
+    during a script call. It is a struct rather than a bare function on
+    purpose: `edit_target` calls `find_next` repeatedly to walk a shift-click
+    stack, so the world view is built once per gesture. Pinned against a live
+    fixture world by
+    `edit_target_walks_the_live_object_stack_through_the_hit_test`, which also
+    covers the no-wrap-around rule — a fully selected stack ends at `None`.
+    **Still open:** the app-side glue — a viewport window's pointer events
+    projected through `pointer_projection`, fed to `edit_press`/`edit_target`,
+    applied to `DeveloperSelection`, and emitted as `EMMO_Move`/`EMMO_Enter`.
+    Every piece it needs now exists and is tested; none of them are called yet.
+
+- **Frame-selection membership landed; three editor gaps remain untracked.**
+  `DeveloperSelection::select_frame` took the framed objects *from its caller*
+  and nothing computed them, so a rubber-band drag drew a band and selected
+  nothing even once wired. `developer_cursor::frame_selection` ports
+  `C4EditCursor::FrameSelection` (`C4EditCursor.cpp:460-471`). Three details a
+  from-scratch version gets wrong: the test is on the object's **own `x`/`y`**,
+  not its shape rectangle — a wide object centred outside the band is not
+  framed even though its graphic covers it, which is why the candidate type
+  carries no shape at all; `Inside` is `>= lbound && <= rbound`
+  (`C4Math.h:22`), so an object exactly on an edge is admitted and a zero-area
+  band still frames what sits under the cursor; and the band is normalised per
+  axis inside the `Inside` call, so every drag direction frames the same set.
+  `cobj->OCF & OCF_NotContained` is just `!Contained` — that bit is set from
+  nothing else (`C4Object.cpp:636-637,735-736`). Objects are appended with
+  `C4ObjectList::stNone`, which does not sort, so master order is preserved.
+  Pinned by
+  `frame_selection_admits_master_order_positions_inside_the_normalised_band`.
+  **Still open, and owned by no queue card:**
+  (a) **closed** — `MessageManager::update_def` ports
+  `C4GameMessageList::UpdateDef` (`C4GameMessage.cpp:233-244,340-345`), which
+  `C4Game::ReloadDef` runs as its **last** act after *either* arm
+  (`C4Game.cpp:2364`). A decoration the definition still supplies is
+  re-resolved and kept; one it no longer supplies is **deleted** rather than
+  left drawing from a definition that is gone, and decorations sourced from
+  other definitions are untouched. Pinned by
+  `a_removed_definition_drops_the_frame_decorations_it_supplied`;
+  (b) **closed** — the console frame-tick order is ported as
+  `developer_cursor::console_tick_steps` (`C4Console.cpp:1630-1639`). The order
+  is not the obvious one: in console mode the **graphics pass is driven by the
+  console tick and runs last**, after the edit cursor, which is why a selection
+  resolved this tick shows in the same frame's overlay rather than the next. In
+  fullscreen the driver is `C4FullScreen::Execute` and this sequence does not
+  run at all. `PropertyDlg.Execute()` sits inside `#ifdef _WIN32`, so the
+  reference build runs four steps, not five. Pinned by
+  `console_tick_runs_the_edit_cursor_before_the_graphics_pass`;
+  (c) `C4ViewportWindow::GetPositionData` is `#ifdef _WIN32` (`C4Viewport.h:39-49`;
+  `StorePosition`/`RestorePosition` exist only in the HWND `StdWindow.cpp`), so
+  the arm64 macOS reference build never remembers viewport geometry. The landed
+  `developer_viewport::viewport_window_spec` fields `position_id`,
+  `position_subkey` and `store_size` therefore describe **Windows-only**
+  behaviour — wiring them to config on macOS would be a divergence, not parity.
+
+- **`ReloadParticle`'s engine half landed (M10-P4-L048's particle steps).**
+  `Engine::reload_particle` ports `C4Game::ReloadParticle`
+  (`C4Game.cpp:2369-2394`), and the ticket's claim that it depends on
+  M10-P4-L086 is false — `C4ParticleDef::Reload` needs only `Filename` plus
+  `C4Group::Open` and `Load` (`C4Particles.cpp:194-205`), all of which existed.
+  What was missing was the filename: `ParticleDef` now carries a `source_path`,
+  set by `register_resource_from`.
+  Four behaviours a plausible port softens, all pinned by
+  `reload_particle_refuses_network_and_clears_everything_on_failure`:
+  the **network refusal is the first line**, before the name check and any
+  lookup; an **unknown name is a plain `false`** that reloads nothing and
+  clears nothing; a **failed reload clears every particle in the system**, not
+  just this definition's, and then removes the definition; and
+  `C4ParticleDef::Reload` **refusing for want of a filename is itself a failed
+  reload**, so it takes that same destructive arm rather than returning early.
+  One ordering trap: `Reload` mutates the definition **in place**, so its
+  position in `pDef0..pDefL` is unchanged. The port's registration pushes to
+  the tail, so `restore_def_order` puts it back — otherwise every later
+  definition shifts and `GetDef` finds a different one for a duplicate name.
+  **Landed.** `FnReloadParticle` (`C4Script.cpp:5161-5165`, not the
+  `:4992-4996` the port's comment claimed) returns `Game.ReloadParticle`'s
+  result **synchronously**, which the staged-command channel cannot do — it
+  applies after the call has returned. The answer therefore comes from state
+  seeded *before* the call, the same shape the port already uses to let
+  `CreateObject` return a reference to an object the engine has not made yet
+  (`next_object_id`). `HostWorldContext` now carries the definitions that could
+  reload — those holding a `Filename`, since `C4ParticleDef::Reload` refuses
+  without one (`C4Particles.cpp:197`) — alongside the network flag it already
+  had. The builtin answers from those, stages the accepted name on the existing
+  `host_requests` channel (the one `PauseGame` uses), and
+  `Engine::apply_particle_reload_requests` does the work afterwards, drained
+  once per pass beside `apply_engine_pause_game_requests`.
+  No `EffectContextOutcome` plumbing was needed. An earlier note here proposed
+  it and was **wrong**: `host_requests` is purpose-built for exactly this and
+  cost one field, one builder and one drain.
+  Every `false` C++ produces is reproduced exactly — network game, nil name,
+  unknown name, and a definition with no `Filename`. **The residual divergence
+  is one case:** a reload that passes all four checks and then fails on I/O
+  reports `true` to the script where C++ reports `false`. The engine still runs
+  the full failure arm (every particle cleared, the definition removed); only
+  the value the script already received is optimistic.
+  Pinned by `reload_particle_answers_synchronously_and_the_engine_applies_it`
+  (a live script call through a real host context) on top of the frozen
+  `reload_particle_reports_false_for_every_name_cpp_cannot_reload`, which still
+  passes — so the change could only ever turn a successful reload from `false`
+  into `true`, which is what it did.
+  `FnReloadDef` (`C4Script.cpp:5143-5159`) landed with it, on the same channel
+  and with two details of its own: with **no id** the caller reloads its *own*
+  definition (`ctx->Obj->Def`, `:5146-5151`), and a missing definition is a
+  plain `false` rather than an error. Pinned by
+  `reload_def_answers_synchronously_and_defaults_to_the_callers_definition`.
+  One divergence applies to both and is worth stating plainly: C++ reloads
+  *inside* the call, while the port does the work on the next pass, drained
+  beside `apply_engine_pause_game_requests`. The script's answer is unaffected —
+  only the moment the definition changes moves, by at most one pass, and a
+  console reload is not a synchronised operation.
 
 - **Live-reload path matching landed; the reload itself is open.**
   `clonk-engine::developer_reload` ports `C4DefList::GetByPath`
@@ -877,10 +1221,103 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   backup's destructor resets every graphic to default, and `Clear` deliberately
   keeps the filename, which is what lets the reload re-open the group it came
   from. Pinned by `definition_reload_relinks_before_restoring_graphics`.
-  **Still open:** the reload's body — retaining source provenance through
-  production loading and rebuilding DefCore, ActMap, scripts, graphics,
-  portraits, ranks and localised components in place — and the file watcher that
-  feeds it.
+  **Source provenance is retained now (M10-P4-L086's step 1).** `Definition`
+  carries a `source_path`, set at the install site from the
+  `ScenarioDefinition::resource_group` the loader already held — the group's
+  own root, which is what `C4Def::Load` stores as `Filename` (`C4Def.cpp:550`).
+  That one field is what `C4DefList::Reload` re-opens, what `C4Def::Clear`
+  deliberately preserves ("Assume filename is being kept"), and what
+  `AddDirectoryForMonitoring` watches — so it unblocks the watcher's
+  registration as well as the reload. A definition built from script alone
+  carries none, which is the case a reload must refuse rather than attempt.
+  Pinned by `definitions_carry_the_group_they_were_loaded_from` for the
+  accessor contract and, against real content, by
+  `reloading_a_shipped_definition_group_rebuilds_it_from_disk`: it points a
+  definition at the shipped `Wipf.c4d`, registers it under a placeholder name,
+  reloads, and asserts the name came back from `DefCore.txt` — so the rebuild
+  demonstrably re-read the group rather than keeping what was registered. That
+  closes the coverage this note previously recorded as owed.
+  **The reload body landed.** `Engine::reload_definition` re-opens the group
+  from the definition's own stored path, rebuilds it through the same
+  `ResourceDefinition::load` + `Definition::from_resource` pair production
+  loading uses — so DefCore, ActMap, scripts, graphics, portraits and ranks all
+  come back by construction rather than through a second, drifting code path —
+  and relinks. Three orderings are load-bearing: the re-open uses the stored
+  `Filename`, which is exactly why `C4Def::Clear` preserves it; the relink runs
+  with the definition back at its final position (C++ calls `SortByID()` before
+  `ReLink` for the same reason); and **a failed load removes the definition
+  entirely** rather than leaving the old one, because `Clear()` has already
+  emptied it and there is nothing intact to keep. A definition with no stored
+  group is refused without disturbing anything. Pinned by
+  `reloading_a_definition_reopens_its_group_and_removes_it_on_failure`, which
+  drives a real on-disk group and then deletes it.
+  **The failure sweep is applied.** A failed reload now assigns every object of
+  that id for removal before dropping the definition, through
+  `definition_reload_outcome`'s plan. It is blunt on purpose: C++ filters on the
+  id **alone**, not on `Status` (`C4Game.cpp:2352-2360`), unlike
+  `C4ObjectList::UpdateFaces` which does check it — so `object_ids_of_definition`
+  deliberately does not.
+  **The success sweep landed, additively.** `refresh_object_face_from_definition`
+  ports `C4Object::UpdateFace(true)` (`C4Object.cpp:363-386`) as its own engine
+  operation, and `reload_definition` runs it over *every* object of that id —
+  not a computed subset, because C++'s own comment says why: an object can use
+  another definition's graphics, so "better update everything"
+  (`C4Game.cpp:2340-2345`).
+  It writes only definition projections — shape template, solid-mask override,
+  compiled mass — and deliberately leaves `Con`, rotation, position, colour, the
+  action index, energy, contents, effects and commands alone: a reload
+  *refreshes* an object, it does not reinitialise one. The last argument to
+  `refresh_shape_after_state_change` is `false`, which is `UpdateSolidMask`'s
+  `fRestoreAttachedObjects` (`:371`) — a reload must not re-attach riders the
+  C++ path leaves alone. Pinned by
+  `a_successful_reload_refreshes_live_objects_without_reinitialising_them`,
+  against the real shipped `Wipf.c4d`.
+  This was written **additively** rather than by extracting the ChangeDef
+  block it resembles. Extraction would have changed a path
+  (`refresh_shape_after_state_change`) that feeds movement and contact for
+  every existing caller; building the reload's own operation from the same
+  primitives leaves those callers untouched, and the two can be unified later
+  under a differential test rather than under time pressure.
+  `C4DefGraphicsPtrBackup::AssignUpdate` landed with it
+  (`reassign_graphics_after_reload`). Re-resolution is **by name**, not pointer
+  patching (`C4DefGraphics.cpp:355-400`): a named graphic that survives the
+  reload keeps the object on it; one that is gone falls back to the object's own
+  definition; and an object that can do neither is removed rather than left
+  holding a name nothing supplies — leaving a dangling name is the divergence.
+  It runs *before* the face refresh so the refresh sees settled graphics.
+  With that, **M10-P4-L086 is complete**: provenance, the rebuild through the
+  production loader, removal, the failure sweep, the success sweep and the
+  graphics re-resolution. Historical notes on where the work started:
+  `UpdateFace(true)` has no callable primitive — but its pieces are not
+  scattered: they sit inside the **ChangeDef** path in
+  `engine/economy.rs` (around the `object.shape_template = template` assignment),
+  which already does the definition-derived refresh for a *different* reason —
+  new `shape_template`, `solid_mask_override` reset, the non-rotateable
+  rotation reset, and `refresh_shape_after_state_change(..., false)` whose
+  `false` is `UpdateFace`'s own `fRestoreAttachedObjects`. Extracting that
+  block as one operation both call sites share is the piece of work, and it is
+  a **refactor of a determinism-adjacent path** — `refresh_shape_after_state_change`
+  feeds movement and contact — so it wants a session with room to run the full
+  gates, not a tail-end increment. Left undone deliberately rather than
+  attempted badly.
+  What must come with it: `C4DefGraphicsPtrBackup::AssignUpdate`'s graphics
+  re-resolution is **name-based**, not pointer patching
+  (`C4DefGraphics.cpp:355-400`) — a live object whose `graphics_name` is gone
+  from the reloaded sprite variants falls back to its own definition, and is
+  removed if that also fails. Silently leaving a dangling name is the
+  divergence. Until then a successful
+  reload replaces the definition and leaves live objects on their old graphics
+  and shape. Also still open: the watcher's registration, now a short step
+  rather than a blocked one.
+  `Engine::remove_definition` landed with it — the exact inverse of
+  `register_definition`, unwinding the map, the load order, the id-sorted
+  runtime order and the script link source, and invalidating the same caches.
+  `C4Game::ReloadDef`'s failure arm removes the definition outright after
+  assigning every object of that type for removal (`C4Game.cpp:2352-2360`), so
+  a failed reload must not leave the old definition in place. Missing any one
+  structure leaves `relink_scripts` walking a host with no definition behind
+  it, which is why the test also re-registers the removed id. Pinned by
+  `removing_a_definition_unwinds_everything_registration_added`.
 
 - **Deferred runtime config save: mechanism landed, most callers still write
   through.** C++ mutates its process-wide `Config` for ordinary runtime toggles

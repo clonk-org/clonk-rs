@@ -4,6 +4,7 @@ mod console;
 pub mod crash;
 pub mod crash_win32;
 pub mod file_classes;
+pub mod file_monitor;
 mod paths;
 pub mod privileges;
 pub mod startup_dialog;

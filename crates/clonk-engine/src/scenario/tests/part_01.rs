@@ -1,6 +1,317 @@
 // Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
 // by `include!` from the parent module so every test id is unchanged.
 
+    // C4GameMessage.cpp:233-244,340-345 — ReloadDef's last act, after either
+    // arm: a frame decoration the definition no longer supplies is deleted
+    // rather than left drawing from a definition that is gone.
+    #[test]
+    fn a_removed_definition_drops_the_frame_decorations_it_supplied() {
+        let mut engine = crate::Engine::new();
+        let decorated = |source: &str| crate::message::MessageSpec {
+            kind: crate::message::MessageKind::Global,
+            text: format!("from {source}"),
+            target: None,
+            player: None,
+            offset: crate::Vector2::ZERO,
+            color: 0xffffff,
+            flags: crate::message::FLAG_MULTIPLE,
+            width: None,
+            decoration: None,
+            frame_decoration: Some(crate::ObjectMenuFrameDecoration {
+                source_definition: source.to_string(),
+                ..Default::default()
+            }),
+            portrait: None,
+        };
+        engine.messages.add_message(decorated("ROCK"));
+        engine.messages.add_message(decorated("WIPF"));
+
+        // A definition that still supplies its decoration keeps it: C++
+        // re-resolves the graphics and deletes only when that fails.
+        assert_eq!(engine.messages.update_def("ROCK", true), 0);
+
+        // Gone: its decoration goes with it, and only its own.
+        assert_eq!(engine.messages.update_def("ROCK", false), 1);
+        assert_eq!(
+            engine.messages.update_def("ROCK", false),
+            0,
+            "the decoration is dropped once, not on every later reload"
+        );
+        assert_eq!(
+            engine.messages.update_def("WIPF", false),
+            1,
+            "another definition's decoration was untouched"
+        );
+    }
+
+    // C4Game.cpp:2340-2345 + C4Object.cpp:363-386 — a successful reload
+    // refreshes every object of that id against the rebuilt definition, and
+    // touches nothing else about them.
+    #[test]
+    fn a_successful_reload_refreshes_live_objects_without_reinitialising_them() {
+        let group = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../content/Objects.c4d/Animals.c4d/Wipf.c4d");
+        if !group.is_dir() {
+            return;
+        }
+
+        let mut engine = crate::Engine::new();
+        let mut definition =
+            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "")
+                .expect("script definition compiles");
+        definition.set_source_path(Some(group.clone()));
+        engine
+            .register_definition(definition)
+            .expect("register definition");
+        let object = engine
+            .spawn_object(crate::SpawnConfig::new("WIPF"))
+            .expect("spawn a live object");
+        let before = engine
+            .snapshot()
+            .object(object)
+            .expect("the object is live")
+            .clone();
+
+        // A named graphic that the reloaded definition no longer supplies must
+        // fall back to the object's own definition rather than being left
+        // pointing at a name nothing provides
+        // (`C4DefGraphicsPtrBackup::AssignUpdate`, C4DefGraphics.cpp:355-400).
+        if let Some(index) = engine.find_object_index(object) {
+            engine.objects[index].state.base_graphics = Some(crate::ObjectBaseGraphics {
+                definition: crate::DefinitionId::from("WIPF"),
+                graphics_name: Some("NoSuchVariant".to_string()),
+                blit_mode: 0,
+            });
+        }
+
+        assert!(engine.reload_definition("WIPF", false));
+
+        let index = engine
+            .find_object_index(object)
+            .expect("the object is not removed: its own definition can serve it");
+        assert_eq!(
+            engine.objects[index]
+                .state
+                .base_graphics
+                .as_ref()
+                .and_then(|graphics| graphics.graphics_name.clone()),
+            None,
+            "a vanished named graphic falls back to the definition's own"
+        );
+
+        // The object survives with its own state intact: `UpdateFace` writes
+        // only definition projections, so position, Con, rotation and colour
+        // are untouched — a reload refreshes an object, it does not
+        // reinitialise one.
+        let snapshot = engine.snapshot();
+        let live = snapshot
+            .object(object)
+            .expect("the object survives a successful reload");
+        assert_eq!(live.position, before.position);
+        assert_eq!(live.rotation, before.rotation);
+        assert_eq!(live.energy, before.energy);
+    }
+
+    // The reload against a *real shipped group*, not a synthetic DefCore:
+    // C4DefList::Reload re-opens the definition's own path and rebuilds it
+    // through the same loader production uses (C4Def.cpp:1191-1213).
+    #[test]
+    fn reloading_a_shipped_definition_group_rebuilds_it_from_disk() {
+        let group = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../content/Objects.c4d/Animals.c4d/Wipf.c4d");
+        if !group.is_dir() {
+            // The content submodule is not materialised in this checkout.
+            return;
+        }
+
+        let mut engine = crate::Engine::new();
+        let mut definition =
+            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "")
+                .expect("script definition compiles");
+        definition.set_source_path(Some(group.clone()));
+        engine
+            .register_definition(definition)
+            .expect("register definition");
+        assert_eq!(engine.definition("WIPF").map(crate::Definition::name), Some("placeholder"));
+
+        assert!(
+            engine.reload_definition("WIPF", false),
+            "a real shipped group reloads"
+        );
+        let reloaded = engine.definition("WIPF").expect("the definition survives");
+        assert_eq!(reloaded.source_path(), Some(group.as_path()));
+        // The name came from DefCore.txt on disk, replacing the placeholder —
+        // so the rebuild really re-read the group rather than keeping what was
+        // registered.
+        assert_ne!(reloaded.name(), "placeholder");
+        // And the group is offered to the file monitor, since it is unpacked.
+        assert_eq!(engine.monitored_definition_directories(), vec![group]);
+    }
+
+    // C4Def.cpp:547-560 — only unpacked definition groups are watched, and
+    // each group is registered once.
+    #[test]
+    fn only_unpacked_definition_groups_are_offered_to_the_file_monitor() {
+        let dir = tempfile::tempdir().expect("temp root");
+        let unpacked = dir.path().join("Rock.c4d");
+        std::fs::create_dir_all(&unpacked).expect("create unpacked group");
+        let packed = dir.path().join("Packed.c4d");
+        std::fs::write(&packed, b"packed group bytes").expect("write packed group");
+
+        let mut engine = crate::Engine::new();
+        for (id, path) in [
+            ("ROCK", Some(unpacked.clone())),
+            ("PACK", Some(packed.clone())),
+            ("SCRP", None),
+        ] {
+            let mut definition =
+                crate::Definition::from_script(id.to_string(), id.to_string(), "")
+                    .expect("script definition compiles");
+            definition.set_source_path(path);
+            engine
+                .register_definition(definition)
+                .expect("register definition");
+        }
+
+        // A packed group has no directory to observe, and a script-only
+        // definition has no group at all.
+        assert_eq!(
+            engine.monitored_definition_directories(),
+            vec![unpacked.clone()]
+        );
+
+        // Two definitions sharing one group register it once — C++ skips a
+        // location it already has.
+        let mut sibling =
+            crate::Definition::from_script("ROK2".to_string(), "Rock 2".to_string(), "")
+                .expect("script definition compiles");
+        sibling.set_source_path(Some(unpacked.clone()));
+        engine
+            .register_definition(sibling)
+            .expect("register sibling definition");
+        assert_eq!(engine.monitored_definition_directories(), vec![unpacked]);
+    }
+
+    // C4Def.cpp:1191-1213 + C4Game.cpp:2322-2367 — the reload re-opens the
+    // definition's own stored group, and a failed load removes it outright.
+    #[test]
+    fn reloading_a_definition_reopens_its_group_and_removes_it_on_failure() {
+        let dir = tempfile::tempdir().expect("temp group root");
+        let group_path = dir.path().join("Rock.c4d");
+        std::fs::create_dir_all(&group_path).expect("create definition group");
+        std::fs::write(
+            group_path.join("DefCore.txt"),
+            "[DefCore]\nid=ROCK\nVersion=4,9,8\nName=Rock\n",
+        )
+        .expect("write DefCore");
+
+        let mut engine = crate::Engine::new();
+        let mut definition =
+            crate::Definition::from_script("ROCK".to_string(), "Rock".to_string(), "")
+                .expect("script definition compiles");
+        definition.set_source_path(Some(group_path.clone()));
+        engine
+            .register_definition(definition)
+            .expect("register definition");
+
+        // The network refusal is the first line: nothing is re-opened and the
+        // definition is untouched.
+        assert!(!engine.reload_definition("ROCK", true));
+        assert!(engine.definition("ROCK").is_some());
+
+        // A definition with no stored group cannot reload, and nothing is
+        // disturbed by the attempt.
+        let mut pathless =
+            crate::Definition::from_script("STON".to_string(), "Stone".to_string(), "")
+                .expect("script definition compiles");
+        pathless.set_source_path(None);
+        engine
+            .register_definition(pathless)
+            .expect("register pathless definition");
+        assert!(!engine.reload_definition("STON", false));
+        assert!(
+            engine.definition("STON").is_some(),
+            "a definition with no group to re-open is refused, not removed"
+        );
+
+        // The group is real, so the reload succeeds and the definition keeps
+        // its path for the next one.
+        assert!(engine.reload_definition("ROCK", false));
+        let reloaded = engine.definition("ROCK").expect("the definition survives");
+        assert_eq!(reloaded.source_path(), Some(group_path.as_path()));
+
+        // Now break the group. `C4Def::Clear` has already emptied the
+        // definition by the time `Load` fails, so the failure arm removes it
+        // rather than restoring anything.
+        std::fs::remove_dir_all(&group_path).expect("remove the group");
+        assert!(!engine.reload_definition("ROCK", false));
+        assert!(
+            engine.definition("ROCK").is_none(),
+            "a failed reload removes the definition"
+        );
+    }
+
+    // C4Game.cpp:2352-2360 — a failed reload removes the definition outright,
+    // so removal must unwind every structure registration pushed into.
+    #[test]
+    fn removing_a_definition_unwinds_everything_registration_added() {
+        let mut engine = crate::Engine::new();
+        for id in ["AAAA", "BBBB"] {
+            let definition =
+                crate::Definition::from_script(id.to_string(), id.to_string(), "")
+                    .expect("script definition compiles");
+            engine
+                .register_definition(definition)
+                .expect("register definition");
+        }
+        assert!(engine.definition("AAAA").is_some());
+
+        assert!(engine.remove_definition("AAAA"));
+        assert!(engine.definition("AAAA").is_none());
+        assert!(
+            engine.definition("BBBB").is_some(),
+            "removing one definition leaves its siblings alone"
+        );
+        // Removing the same id twice reports the miss rather than unwinding
+        // anything a second time.
+        assert!(!engine.remove_definition("AAAA"));
+
+        // The id is free again, which it would not be if the map entry were
+        // the only thing dropped.
+        let definition = crate::Definition::from_script("AAAA".to_string(), "A".to_string(), "")
+            .expect("script definition compiles");
+        engine
+            .register_definition(definition)
+            .expect("the removed id can be registered again");
+    }
+
+    // C4Def.cpp:547-560 — `C4Def::Load` stores the group's own full name as
+    // `Filename`. `C4DefList::Reload` re-opens exactly that, `C4Def::Clear`
+    // deliberately preserves it ("Assume filename is being kept"), and
+    // `AddDirectoryForMonitoring` watches it. A definition with no group
+    // behind it carries none, which is the case a reload must refuse rather
+    // than attempt.
+    #[test]
+    fn definitions_carry_the_group_they_were_loaded_from() {
+        let mut definition =
+            crate::Definition::from_script("TEST".to_string(), "Test".to_string(), "")
+                .expect("script-only definition compiles");
+        assert!(
+            definition.source_path().is_none(),
+            "a definition built from script alone has no group to reload from"
+        );
+
+        let group = std::path::PathBuf::from("/content/Objects.c4d/Rock.c4d");
+        definition.set_source_path(Some(group.clone()));
+        assert_eq!(definition.source_path(), Some(group.as_path()));
+
+        // Clearing it is not the same as never having had one, but both refuse
+        // a reload — C++ tests `if (!Filename[0])` (C4Particles.cpp:197 for the
+        // particle sibling; the def path re-opens Filename directly).
+        definition.set_source_path(None);
+        assert!(definition.source_path().is_none());
+    }
+
     #[test]
     fn legacy_string_table_reuses_identity_and_overwrites_repeated_line_id() {
         let directory = tempdir().expect("string-table directory");

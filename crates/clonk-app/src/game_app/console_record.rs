@@ -362,9 +362,15 @@ impl GameApp {
                 }
                 DeveloperConsoleAction::NewViewport(player) => {
                     let owner = player.unwrap_or(OWNER_NONE);
+                    // `C4Console::ViewportNew` is `Game.CreateViewport(NO_OWNER)`
+                    // (C4Console.cpp:1205) and the per-player rows are
+                    // `Game.CreateViewport(<player>)` (:223, :1828) — all three
+                    // take `fSilent`'s `false` default (C4Game.h:222). Only
+                    // `C4FullScreen::ViewportCheck` silences an ownerless
+                    // creation (C4FullScreen.cpp:517), and this is not it.
                     let _ = self.create_physical_viewport(
                         owner,
-                        owner == OWNER_NONE,
+                        false,
                         self.mode == AppMode::Running,
                         true,
                     );

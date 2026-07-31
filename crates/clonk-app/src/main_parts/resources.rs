@@ -3495,6 +3495,13 @@ pub(crate) fn configured_allow_scripting_in_replays(config: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// `C4ConfigDeveloper::CompileFunc` defaults `AutoFileReload` to **true**
+/// (`C4Config.cpp:434`), so a developer build watches unless told not to.
+pub(crate) fn configured_auto_file_reload(config: &[u8]) -> bool {
+    clonk_app_netplay::configured_native_boolean(config, "Developer", "AutoFileReload")
+        .unwrap_or(true)
+}
+
 pub(crate) fn configured_auto_frame_skip(config: &[u8]) -> bool {
     clonk_app_netplay::configured_native_boolean(config, "Graphics", "AutoFrameSkip")
         .unwrap_or(true)

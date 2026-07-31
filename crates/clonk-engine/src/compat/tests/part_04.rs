@@ -27,7 +27,7 @@
     }
 
     #[test]
-    fn reload_particle_is_registered_and_returns_false_while_unsupported() {
+    fn reload_particle_returns_false_without_a_reloadable_definition() {
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
         script
@@ -47,6 +47,156 @@
                 .call("Unnamed", &[])
                 .expect("unnamed reload executes"),
             Value::Int(0)
+        );
+    }
+
+    // C4Script.cpp:5161-5165 -> C4Game::ReloadParticle (C4Game.cpp:2369-2394).
+    //
+    // The builtin returns its answer *synchronously*, which the staged-command
+    // channel cannot do — so it answers from state seeded before the call (the
+    // definitions carrying a Filename, and whether this is a network game),
+    // the same shape `CreateObject` uses to return a reference to an object the
+    // engine has not created yet. The engine then does the work.
+    #[test]
+    fn reload_particle_answers_synchronously_and_the_engine_applies_it() {
+        let dir = tempfile::tempdir().expect("temp particle root");
+        let group = dir.path().join("Smoke.c4d");
+        std::fs::create_dir_all(&group).expect("create particle group");
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Known() { return ReloadParticle(\"Smoke\"); }\n\
+                 func Unknown() { return ReloadParticle(\"NoSuchParticle\"); }\n\
+                 func Pathless() { return ReloadParticle(\"Sparks\"); }",
+            )
+            .expect("ReloadParticle probes compile");
+
+        let mut engine = crate::Engine::new();
+        // One definition backed by a real group, one with no Filename at all —
+        // `C4ParticleDef::Reload` refuses the latter (C4Particles.cpp:197).
+        let core = |name: &str| crate::particles::ParticleDefCore {
+            name: name.to_string(),
+            init_fn: "StdInit".to_string(),
+            exec_fn: "StdExec".to_string(),
+            draw_fn: "Std".to_string(),
+            ..Default::default()
+        };
+        engine
+            .particle_system
+            .register_def(core("Smoke"), 4, 1.0)
+            .expect("register a particle def");
+        assert!(engine
+            .particle_system
+            .set_def_source_path("Smoke", Some(group.clone())));
+        engine
+            .particle_system
+            .register_def(core("Sparks"), 4, 1.0)
+            .expect("register a simulation-only particle def");
+
+        let world = engine.host_world_context();
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            // A definition with a group answers true before the work happens.
+            assert_eq!(
+                script.call("Known", &[]).expect("known probe executes"),
+                Value::Int(1)
+            );
+            // Every C++ false case still answers false.
+            assert_eq!(
+                script.call("Unknown", &[]).expect("unknown probe executes"),
+                Value::Int(0)
+            );
+            assert_eq!(
+                script.call("Pathless", &[]).expect("pathless probe executes"),
+                Value::Int(0),
+                "a def with no Filename can never reload"
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("live ReloadParticle probes execute");
+
+        // Only the accepted name is staged, and the engine does the work once.
+        assert_eq!(engine.apply_particle_reload_requests(), 0);
+        assert!(
+            engine.particle_system.get_def("Smoke").is_none(),
+            "the group has no Particle.txt, so the reload failed and removed it"
+        );
+        assert_eq!(
+            engine.apply_particle_reload_requests(),
+            0,
+            "the request is drained once, not replayed"
+        );
+    }
+
+    // C4Script.cpp:5143-5159 -> C4Game::ReloadDef (C4Game.cpp:2322-2367).
+    #[test]
+    fn reload_def_answers_synchronously_and_defaults_to_the_callers_definition() {
+        let dir = tempfile::tempdir().expect("temp group root");
+        let group = dir.path().join("Rock.c4d");
+        std::fs::create_dir_all(&group).expect("create definition group");
+        std::fs::write(
+            group.join("DefCore.txt"),
+            "[DefCore]\nid=ROCK\nVersion=4,9,8\nName=Rock\n",
+        )
+        .expect("write DefCore");
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Known() { return ReloadDef(ROCK); }\n\
+                 func Pathless() { return ReloadDef(STON); }\n\
+                 func Own() { return ReloadDef(); }",
+            )
+            .expect("ReloadDef probes compile");
+
+        let mut engine = crate::Engine::new();
+        for (id, path) in [("ROCK", Some(group.clone())), ("STON", None)] {
+            let mut definition =
+                crate::Definition::from_script(id.to_string(), id.to_string(), "")
+                    .expect("script definition compiles");
+            definition.set_source_path(path);
+            engine
+                .register_definition(definition)
+                .expect("register definition");
+        }
+
+        let world = engine.host_world_context();
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            // A definition with a group answers true before the work happens.
+            assert_eq!(
+                script.call("Known", &[]).expect("known probe executes"),
+                Value::Int(1)
+            );
+            // One with no Filename can never reload.
+            assert_eq!(
+                script.call("Pathless", &[]).expect("pathless probe executes"),
+                Value::Int(0)
+            );
+            // `ReloadDef()` with no id and no calling object is a plain false,
+            // not an error (`C4Script.cpp:5146-5151`).
+            assert_eq!(
+                script.call("Own", &[]).expect("own probe executes"),
+                Value::Int(0)
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("live ReloadDef probes execute");
+
+        // Only the accepted id was staged, and the engine does the work once.
+        assert_eq!(engine.apply_definition_reload_requests(), 1);
+        assert_eq!(
+            engine.definition("ROCK").map(crate::Definition::name),
+            Some("Rock"),
+            "the reload rebuilt the definition from DefCore.txt on disk"
+        );
+        assert_eq!(
+            engine.apply_definition_reload_requests(),
+            0,
+            "the request is drained once, not replayed"
         );
     }
 

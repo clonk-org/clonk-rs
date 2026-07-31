@@ -328,6 +328,39 @@ pub(crate) struct GameApp {
     pub(crate) console_mode: bool,
     pub(crate) developer_console: DeveloperConsole,
     pub(crate) developer_console_edit_mode: ConsoleEditMode,
+    /// `C4EditCursor::Selection`. Shared by the viewport edit cursor, the
+    /// property panel and the object tree, so a write from one is visible
+    /// to the others (`C4EditCursor.h:39`).
+    pub(crate) developer_selection: clonk_engine::developer_selection::DeveloperSelection,
+    /// The projection each console viewport window was last drawn with,
+    /// keyed by physical identity. `GraphicsSystem::active_viewports` holds
+    /// the *fullscreen* layout, which console mode never renders, so a
+    /// detached window's pointer routing has no other source of its own
+    /// `ViewX`/`ViewY` (`C4Viewport.cpp:1146`).
+    pub(crate) console_viewport_projections:
+        std::collections::HashMap<u64, clonk_frontend::ActiveViewportProjection>,
+    /// The last pointer position in world coordinates, so a held drag can
+    /// send `MoveSelection` the *delta* C++ computes from the previous
+    /// message's coordinates (`C4EditCursor.cpp:131-137`).
+    pub(crate) edit_cursor_last_world: Option<(i32, i32)>,
+    /// `C4EditCursor::DropTarget` — the container a Ctrl-drag would put the
+    /// selection into, recomputed on every motion (`UpdateDropTarget`).
+    pub(crate) edit_cursor_drop_target: Option<clonk_engine::ObjectId>,
+    /// The engine frame the held-move control was last issued for.
+    /// `C4Console::Execute` runs `EditCursor.Execute()` once per
+    /// application tick; the port's event loop wakes far more often than
+    /// that, and emitting per wake would flood the control queue.
+    pub(crate) edit_cursor_tick_frame: Option<u64>,
+    /// `C4Game::FileMonitor`. Armed once per game when
+    /// `Developer.AutoFileReload` is set and the app is windowed
+    /// (`C4Game.cpp:2413-2424`), started after definitions have loaded.
+    pub(crate) file_monitor: Option<clonk_platform::file_monitor::DirectoryMonitor>,
+    /// `C4EditCursor::Hold` — set by a press, cleared by the release.
+    pub(crate) edit_cursor_hold: bool,
+    /// `C4EditCursor::DragFrame` with its `(X, Y)` press anchor and live
+    /// `(X2, Y2)` corner, both in world coordinates. `Some` exactly while a
+    /// rubber band is armed.
+    pub(crate) edit_cursor_drag_frame: Option<((i32, i32), (i32, i32))>,
     /// Native `C4Console::Editing` starts true and is irreversibly cleared
     /// when `EnableControls` observes a no-input playback. Opening another
     /// game defaults the edit cursor mode, but does not restore this latch.

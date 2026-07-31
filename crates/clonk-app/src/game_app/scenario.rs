@@ -2051,6 +2051,10 @@ impl GameApp {
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
         self.initialize_physical_viewports(false);
+        // `C4Game::InitGameFinal` starts the monitor as its last act, after
+        // viewports exist and definitions have loaded (`C4Game.cpp:2738`).
+        // Registration closes at the start, so this must not run earlier.
+        self.arm_developer_file_monitor(self.configured_auto_file_reload());
         self.arm_initial_scoreboard_reconcile();
         self.refresh_object_menu();
         self.refresh_focus();

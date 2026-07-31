@@ -4010,7 +4010,7 @@ impl PartialEq for ObjectMenuState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMenuFrameDecoration {
     pub source_definition: String,
     pub background_color: u32,
@@ -7423,6 +7423,11 @@ struct HostRequestQueues {
     pending_remove_player_controls: Vec<RemovePlayerControlData>,
     pending_game_goal_menu_requests: Vec<GameGoalMenuRequest>,
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
+    /// Particle names `FnReloadParticle` accepted during a script call,
+    /// applied by the engine once the call has returned.
+    particle_reload_requests: Rc<RefCell<Vec<String>>>,
+    /// Definition ids `FnReloadDef` accepted during a script call.
+    definition_reload_requests: Rc<RefCell<Vec<String>>>,
     network_target_fps_requests: Rc<RefCell<Vec<NetworkTargetFpsRequest>>>,
     viewport_presentation_requests: Rc<RefCell<Vec<ViewportPresentationRequest>>>,
 }
@@ -9975,6 +9980,8 @@ impl Engine {
                 pending_remove_player_controls: Vec::new(),
                 pending_game_goal_menu_requests: Vec::new(),
                 pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+                particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
+                definition_reload_requests: Rc::new(RefCell::new(Vec::new())),
                 network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
                 viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             },
@@ -10396,6 +10403,348 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         color_modulation: snapshot.color_modulation,
         shape_override: snapshot.current_shape,
         ocf: OCF_NORMAL,
+    }
+}
+
+impl Engine {
+    /// `C4DefList::Reload` plus the `C4Game::ReloadDef` policy around it
+    /// (`C4Def.cpp:1191-1213`, `C4Game.cpp:2322-2367`).
+    ///
+    /// The ordering here is load-bearing in three places, all of them easy to
+    /// shuffle:
+    ///
+    /// - the reload **re-opens the group from the definition's own stored
+    ///   path**. `C4Def::Clear` deliberately preserves `Filename` ("Assume
+    ///   filename is being kept") precisely so this can work;
+    /// - the **relink runs after the definition is back in place**, so it sees
+    ///   it at its final position — C++ calls `SortByID()` before `ReLink` for
+    ///   the same reason; and
+    /// - **a failed load removes the definition entirely** rather than leaving
+    ///   the old one behind. `C4Def::Clear` has already run by then, so there
+    ///   is no intact definition to keep.
+    ///
+    /// The object sweeps this outcome implies — `UpdateFace(true)` on success,
+    /// `AssignRemoval` on failure, both over *every* object of that id — are
+    /// described by [`developer_reload::definition_reload_outcome`] and applied
+    /// by the caller, exactly as `C4Game::ReloadDef` applies them around
+    /// `Defs.Reload`.
+    pub fn reload_definition(&mut self, id: &str, network_enabled: bool) -> bool {
+        // The network refusal is `C4Game::ReloadDef`'s first line.
+        if network_enabled {
+            return false;
+        }
+        let Some(source) = self
+            .definition(id)
+            .and_then(|definition| definition.source_path().map(std::path::Path::to_path_buf))
+        else {
+            // No stored group: nothing to re-open, and nothing is disturbed.
+            return false;
+        };
+        let reloaded = clonk_resources::Group::open(&source)
+            .ok()
+            .and_then(|group| ResourceDefinitionData::load(&group).ok())
+            .and_then(|resource| Definition::from_resource(&resource).ok());
+        let Some(mut definition) = reloaded else {
+            // `C4Game::ReloadDef`'s failure arm is destructive and blunt: it
+            // filters on the id alone — not on `Status` — and assigns *every*
+            // matching object for removal before dropping the definition
+            // (`C4Game.cpp:2352-2360`). `Clear()` has already emptied the
+            // definition by then, so there is nothing intact to restore.
+            let outcome = developer_reload::definition_reload_outcome(
+                false,
+                &self.object_ids_of_definition(id),
+            );
+            if let developer_reload::DefinitionReloadOutcome::Failed { remove_objects, .. } =
+                outcome
+            {
+                for object in remove_objects {
+                    if let Err(error) = self.assign_object_removal(object) {
+                        tracing::warn!(definition = %id, %error, "failed reload could not remove an object");
+                    }
+                }
+            }
+            self.remove_definition(id);
+            // The definition is gone, so every frame decoration drawing from
+            // it goes with it.
+            self.messages.update_def(id, false);
+            return false;
+        };
+        definition.set_source_path(Some(source));
+        self.remove_definition(id);
+        if self.register_definition(definition).is_err() {
+            return false;
+        }
+        // `C4DefGraphicsPtrBackup::AssignUpdate` re-resolves live graphics
+        // **by name**, not by patching pointers (`C4DefGraphics.cpp:355-400`),
+        // and runs before the faces are refreshed so the refresh sees the
+        // settled graphics.
+        self.reassign_graphics_after_reload(id);
+        // `C4Game::ReloadDef`'s success sweep: `UpdateFace(true)` on *every*
+        // object of that id (`C4Game.cpp:2340-2345`). C++'s own comment says
+        // why it is not a computed subset — an object can use another
+        // definition's graphics, so "better update everything".
+        for object in self.object_ids_of_definition(id) {
+            self.refresh_object_face_from_definition(object);
+        }
+        // `ReLink` runs with the definition at its final position. C++ links
+        // and logs whatever diagnostics arise without failing the reload, so a
+        // link error here does not undo it either.
+        if let Err(error) = self.relink_scripts() {
+            tracing::warn!(definition = %id, %error, "definition reload relink diagnostic");
+        }
+        // `Messages.UpdateDef(id)` is `ReloadDef`'s last act, after *either*
+        // arm (`C4Game.cpp:2364`).
+        self.messages.update_def(id, true);
+        true
+    }
+
+    /// The definition directories a file monitor should watch.
+    ///
+    /// `C4Def::Load` registers a definition's group with
+    /// `Game.AddDirectoryForMonitoring` only when the group is **unpacked**
+    /// (`C4Def.cpp:547-560`) — a packed `.c4d` has no directory to observe, so
+    /// a packed installation watches nothing however `Developer.AutoFileReload`
+    /// is set. `definition_registers_for_monitoring` carries that rule; here
+    /// "unpacked" is simply the stored path being a directory.
+    /// The definitions a reload could re-open — those holding a `Filename`.
+    pub fn reloadable_definition_ids(&self) -> std::collections::HashSet<String> {
+        self.definitions
+            .iter()
+            .filter(|(_, definition)| definition.source_path().is_some())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    pub fn monitored_definition_directories(&self) -> Vec<std::path::PathBuf> {
+        let mut directories = Vec::new();
+        for id in self.definition_load_order.iter() {
+            let Some(path) = self
+                .definitions
+                .get(id.as_str())
+                .and_then(|definition| definition.source_path())
+            else {
+                continue;
+            };
+            if !path.is_dir() {
+                continue;
+            }
+            // C++ registers each group once; a definition reloaded from the
+            // path it already has re-registers nothing.
+            if !directories.iter().any(|entry| entry == path) {
+                directories.push(path.to_path_buf());
+            }
+        }
+        directories
+    }
+
+    /// The definition whose stored group is exactly this path.
+    ///
+    /// `C4DefList::GetByPath` matches the definition **root** or one immediate
+    /// child (`C4Def.cpp:1137-1152`), but on the reference build only the root
+    /// can ever match: the immediate-child arm tests a literal `\\`, and macOS
+    /// paths use `/`. The watcher reports directories, so a root match is the
+    /// only case that arises.
+    pub fn definition_id_for_source_path(&self, path: &str) -> Option<String> {
+        let candidate = std::path::Path::new(path);
+        self.definition_load_order.iter().find_map(|id| {
+            let definition = self.definitions.get(id.as_str())?;
+            (definition.source_path()? == candidate).then(|| id.as_str().to_string())
+        })
+    }
+
+    /// `C4DefGraphicsPtrBackup::AssignUpdate` (`C4DefGraphics.cpp:355-400`).
+    ///
+    /// Re-resolution is **by name**, not pointer patching: for each live object
+    /// still pointing at the reloaded definition's graphics, C++ tries
+    /// `SetGraphics(Name, pDef)`, then `SetGraphics(Name, pObj->Def)`, and
+    /// `AssignRemoval`s the object when both fail. So a named graphic that
+    /// survives the reload keeps the object on it; one that is gone falls back
+    /// to the object's own definition; and an object that can do neither is
+    /// removed rather than left holding a name nothing supplies — leaving a
+    /// dangling name is the divergence.
+    fn reassign_graphics_after_reload(&mut self, id: &str) {
+        let Some(definition) = self.definitions.get(id) else {
+            return;
+        };
+        let surviving = definition.sprite_variant_keys();
+        let mut orphaned = Vec::new();
+        for object in self.objects.iter_mut() {
+            let Some(graphics) = object.state.base_graphics.as_mut() else {
+                continue;
+            };
+            if graphics.definition.as_str() != id {
+                continue;
+            }
+            let Some(name) = graphics.graphics_name.clone() else {
+                // The definition's default graphic, which the rebuild replaced
+                // in place: nothing to re-resolve.
+                continue;
+            };
+            if surviving.iter().any(|key| key == &name) {
+                continue;
+            }
+            // `SetGraphics(Name, pObj->Def)` — fall back to the object's own
+            // definition, which is the reloaded one here.
+            if object.definition_id.as_str() == id {
+                graphics.graphics_name = None;
+                continue;
+            }
+            orphaned.push(object.id);
+        }
+        for object in orphaned {
+            if let Err(error) = self.assign_object_removal(object) {
+                tracing::warn!(definition = %id, %error, "reload could not remove an orphaned object");
+            }
+        }
+    }
+
+    /// `C4Object::UpdateFace(true)` for one object (`C4Object.cpp:363-386`).
+    ///
+    /// Everything it writes is a projection of the definition: the shape (via
+    /// `UpdateShape`), the solid mask, and the action facet. It deliberately
+    /// does **not** touch `Con`, rotation, position, colour, the action index,
+    /// energy, contents, effects or commands — a reload refreshes an object,
+    /// it does not reinitialise one.
+    ///
+    /// `UpdateSolidMask(false)` is called with `fRestoreAttachedObjects`
+    /// **false** (`:371`), which is what `refresh_shape_after_state_change`'s
+    /// last argument carries: a reload must not re-attach riders that the C++
+    /// path leaves alone.
+    pub(crate) fn refresh_object_face_from_definition(&mut self, object: ObjectId) {
+        let Some(index) = self.find_object_index(object) else {
+            return;
+        };
+        let definition_id = self.objects[index].definition_id.clone();
+        let Some(definition) = self.definitions.get(definition_id.as_str()) else {
+            return;
+        };
+        let template = crate::object::ObjectShapeTemplate::new(
+            definition.shape_vertices().to_vec(),
+            definition.shape_rect(),
+            definition.fire_top(),
+            definition.stretch_growth(),
+            definition.rotateable(),
+        )
+        .with_line(definition.line());
+        let object = &mut self.objects[index];
+        let previous_rect = object.current_shape_rect();
+        let previous_construction = object.state.construction;
+        object.shape_template = template;
+        // The mask falls back to the reloaded definition's default, the way
+        // ChangeDef drops the override (`C4Object.cpp:1213`).
+        object.state.solid_mask_override = None;
+        object.compiled_mass = None;
+        object.refresh_shape_after_state_change(previous_construction, previous_rect, false);
+    }
+
+    /// Every live object of one definition, in master order — the set both
+    /// `C4Game::ReloadDef` sweeps operate on. It filters on the id **alone**:
+    /// C++ does not check `Status` here, unlike `C4ObjectList::UpdateFaces`.
+    pub(crate) fn object_ids_of_definition(&self, id: &str) -> Vec<ObjectId> {
+        self.objects
+            .iter()
+            .filter(|object| object.definition_id.as_str() == id)
+            .map(|object| object.id)
+            .collect()
+    }
+
+    /// `C4Game::ReloadParticle` (`C4Game.cpp:2369-2394`).
+    ///
+    /// Four behaviours a plausible port softens:
+    ///
+    /// - the **network refusal is the first line**, before the name check and
+    ///   before any lookup, so a network game reloads nothing;
+    /// - an **unknown name reloads nothing and clears nothing** — it is a
+    ///   plain `false`, not a failure;
+    /// - a **failed reload clears every particle in the system**, not just
+    ///   this definition's, then removes the definition; and
+    /// - `C4ParticleDef::Reload` refuses outright when the definition has no
+    ///   filename (`C4Particles.cpp:197`), which is every manually registered
+    ///   simulation-only def.
+    pub fn reload_particle(&mut self, name: &str, network_enabled: bool) -> bool {
+        if network_enabled {
+            return false;
+        }
+        // An unknown name is a plain `false`: nothing is reloaded and nothing
+        // is cleared. Only a def that exists and then fails to reload is
+        // destructive.
+        let Some(index) = self
+            .particle_system
+            .defs()
+            .iter()
+            .position(|def| def.core.name == name)
+        else {
+            return false;
+        };
+        let source = self.particle_system.defs()[index].source_path.clone();
+        // `C4ParticleDef::Reload` refuses when there is no filename
+        // (`C4Particles.cpp:197`) — and that refusal is a *failed* reload, so
+        // it takes the destructive arm like any other.
+        let reloaded = source.as_ref().and_then(|path| {
+            clonk_resources::Group::open(path)
+                .ok()
+                .and_then(|group| clonk_resources::ParticleDefinition::load(&group).ok())
+        });
+        let Some(resource) = reloaded else {
+            // "safer: remove all particles" — the whole system, not just this
+            // definition's, then the definition itself.
+            self.particle_system.clear_particles();
+            self.particle_system.remove_def(name);
+            return false;
+        };
+        // `Reload` mutates the definition in place, so its position in
+        // `pDef0..pDefL` must not change: a remove-then-register would move it
+        // to the tail and reorder every later definition.
+        self.particle_system.remove_def(name);
+        if self
+            .particle_system
+            .register_resource_from(&resource, source)
+            .is_err()
+        {
+            self.particle_system.clear_particles();
+            return false;
+        }
+        self.particle_system.restore_def_order(index);
+        true
+    }
+}
+
+/// The edit cursor's world hit test, bound to one snapshot.
+///
+/// This is the bridge `developer_cursor::edit_target` needs: it supplies that
+/// function's `find_next(after)` closure, which C++ writes as
+/// `Game.FindObject(0, X, Y, 0, 0, OCF_NotContained, …, ANY_OWNER, Target)`
+/// (`C4EditCursor.cpp:150`). Building it once per gesture and reusing it across
+/// the shift-click walk is deliberate — `edit_target` calls `find_next`
+/// repeatedly, and rebuilding the world view per call would rescan the snapshot
+/// for every step of the stack.
+pub struct EditCursorHitTest {
+    world: HostWorldContext,
+}
+
+impl EditCursorHitTest {
+    pub fn new(snapshot: &SimulationSnapshot) -> Self {
+        Self {
+            world: host_world_context_from_snapshot(snapshot),
+        }
+    }
+
+    /// The first object at `(x, y)` strictly after `after` in master-list
+    /// order, skipping contained ones, or `None` at the end of the stack.
+    pub fn object_at(&self, x: i32, y: i32, after: Option<ObjectId>) -> Option<ObjectId> {
+        crate::compat::objects::edit_cursor_object_at(&self.world, x, y, after)
+    }
+
+    /// One object's live `C4Shape` rectangle, relative to its position.
+    ///
+    /// `DrawSelectMark` frames `cobj->x + cobj->Shape.x` by `Shape.Wdt`
+    /// (`C4EditCursor.cpp`), which is the *live* shape — stretched by `Con`,
+    /// rotated by `r` — not the definition's. `ObjectSnapshot::current_shape`
+    /// carries it only when it is not reconstructible, so resolving it through
+    /// the same world view the hit test uses is what makes the two agree.
+    pub fn shape_rect(&self, object: ObjectId) -> Option<DefinitionRect> {
+        let live = self.world.get(object)?;
+        Some(self.world.object_live_shape_rect(&live))
     }
 }
 

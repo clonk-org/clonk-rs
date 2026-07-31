@@ -135,6 +135,13 @@ pub struct Definition {
     pub(crate) def_core_reflected_ints: HashMap<String, i32>,
     /// Trimmed localized C4Def description (`C4Def::GetDesc`).
     description: Option<String>,
+    /// `C4Def::Filename` — the group this definition was loaded from
+    /// (`C4Def.cpp:550`). `C4DefList::Reload` re-opens exactly this path, and
+    /// `C4Def::Clear` deliberately preserves it ("Assume filename is being
+    /// kept") so the reload has somewhere to read from. It is also what
+    /// `C4Def::Load` hands `Game.AddDirectoryForMonitoring` (`:558-560`).
+    /// `None` for definitions built from script rather than a group.
+    pub(crate) source_path: Option<std::path::PathBuf>,
     /// Shared compiled script: `host_world_context()` hands clones of this
     /// `Arc` to host functions so nested script calls (Find_Func, GameCall)
     /// can execute another definition's functions mid-VM-call.
@@ -485,6 +492,7 @@ impl Definition {
         // Rc-based GlobalNamed table).
         #[allow(clippy::arc_with_non_send_sync)]
         Ok(Self {
+            source_path: None,
             id,
             name,
             version: DEFAULT_DEFINITION_VERSION,
@@ -863,6 +871,17 @@ impl Definition {
     /// [`Self::function_count`], this detects duplicate link copies.
     pub fn linked_function_count(&self) -> usize {
         self.script.linked_function_count()
+    }
+
+    /// `C4Def::Filename`. `None` for a definition built from script alone.
+    pub fn source_path(&self) -> Option<&std::path::Path> {
+        self.source_path.as_deref()
+    }
+
+    /// Retain the group this definition was loaded from, so a console reload
+    /// can re-open it (`C4Def.cpp:550`).
+    pub fn set_source_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.source_path = path;
     }
 
     pub fn from_resource(resource: &ResourceDefinitionData) -> Result<Self, EngineError> {

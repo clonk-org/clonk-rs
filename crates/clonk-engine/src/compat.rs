@@ -63,12 +63,12 @@ mod effects;
 mod landscape;
 mod menus_messages;
 mod object_state;
-mod objects;
+pub(crate) mod objects;
 mod players;
 mod registration;
 mod sounds;
 mod values;
-mod world;
+pub(crate) mod world;
 
 pub(crate) use commands::*;
 pub use contexts::*;

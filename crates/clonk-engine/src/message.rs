@@ -155,6 +155,35 @@ pub struct MessageManager {
 }
 
 impl MessageManager {
+    /// `C4GameMessageList::UpdateDef` (`C4GameMessage.cpp:340-345`), which
+    /// `C4Game::ReloadDef` runs as its **last** act after either arm
+    /// (`C4Game.cpp:2364`) — success or failure alike.
+    ///
+    /// Each live message's frame decoration re-resolves against the reloaded
+    /// definition (`C4GameMessage::UpdateDef` -> `pFrameDeco->UpdateGfx()`,
+    /// `:233-244`), and a decoration the definition no longer supplies is
+    /// **deleted** rather than left drawing from a definition that is gone.
+    /// Decorations sourced from other definitions are untouched.
+    ///
+    /// Returns how many decorations were dropped.
+    pub fn update_def(&mut self, definition: &str, still_supplied: bool) -> usize {
+        if still_supplied {
+            return 0;
+        }
+        let mut dropped = 0;
+        for message in &mut self.messages {
+            let sourced_here = message
+                .frame_decoration
+                .as_ref()
+                .is_some_and(|decoration| decoration.source_definition == definition);
+            if sourced_here {
+                message.frame_decoration = None;
+                dropped += 1;
+            }
+        }
+        dropped
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
