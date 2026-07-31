@@ -1137,42 +1137,37 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   position in `pDef0..pDefL` is unchanged. The port's registration pushes to
   the tail, so `restore_def_order` puts it back — otherwise every later
   definition shifts and `GetDef` finds a different one for a duplicate name.
-  **Still open, and not for the reason first recorded here.** The script-facing
-  `ReloadParticle` (`C4Script.cpp:5161-5165`, not the `:4992-4996` the port's
-  comment claimed) returns `Game.ReloadParticle`'s result **synchronously**. The
-  staged-command channel — the port's route from a host function to
-  `&mut Engine` — applies its commands *after* the script call has returned, so
-  it cannot produce that value: the port would have to answer the script before
-  doing the work. This is a design question about synchronous engine access
-  from host functions, not a wiring gap, and `FnReloadDef` will ask the same
-  one. Until it is decided the builtin returns `false`, which is what C++
-  returns for every name it *cannot* reload — so the divergence is confined to
-  a script-driven reload that would have succeeded.
-  A concrete proposal, modelled on how the port already solves the identical
-  problem for `CreateObject`: that builtin must return a *reference* to an
-  object the engine has not created yet, and it can because the host context is
-  seeded with `next_object_id` before the call — it answers from pre-computed
-  state and stages the real work. The same shape fits here. Seed the context
-  with the particle names that *could* reload (those carrying a `source_path`,
-  and only when the game is not networked), answer synchronously from that, and
-  stage the reload in `EffectContextOutcome` for the engine to apply. Every
-  `false` C++ produces — network game, null name, unknown def, no filename — is
-  then answered exactly, and the only divergence left is an I/O failure between
-  the check and the staged reload: a far narrower window than today's
-  unconditional `false`.
-  `EffectContextOutcome` sits in the script execution path, which is
-  determinism-critical, so this repo's rule applies: freeze current behaviour
-  with a test *before* changing the subsystem. **That freeze is now in place** —
-  `reload_particle_reports_false_for_every_name_cpp_cannot_reload` pins the
-  script-visible contract for every case where C++ returns false (nil name,
-  unknown name) and that the return is `C4ValueInt`, not a bool. Any
-  implementation of the proposal above can therefore only ever turn a
-  *successful* reload from `false` into `true`; if it changes one of the frozen
-  answers, that test fails.
-  The remaining work is the plumbing itself: seed the context at its single
-  `EffectHostContext::new` call site, carry the staged requests through
-  `EffectContextOutcome`, and apply them where the engine destructures that
-  batch (`engine/game_over.rs`, alongside `trigger_game_over`).
+  **Landed.** `FnReloadParticle` (`C4Script.cpp:5161-5165`, not the
+  `:4992-4996` the port's comment claimed) returns `Game.ReloadParticle`'s
+  result **synchronously**, which the staged-command channel cannot do — it
+  applies after the call has returned. The answer therefore comes from state
+  seeded *before* the call, the same shape the port already uses to let
+  `CreateObject` return a reference to an object the engine has not made yet
+  (`next_object_id`). `HostWorldContext` now carries the definitions that could
+  reload — those holding a `Filename`, since `C4ParticleDef::Reload` refuses
+  without one (`C4Particles.cpp:197`) — alongside the network flag it already
+  had. The builtin answers from those, stages the accepted name on the existing
+  `host_requests` channel (the one `PauseGame` uses), and
+  `Engine::apply_particle_reload_requests` does the work afterwards, drained
+  once per pass beside `apply_engine_pause_game_requests`.
+  No `EffectContextOutcome` plumbing was needed. An earlier note here proposed
+  it and was **wrong**: `host_requests` is purpose-built for exactly this and
+  cost one field, one builder and one drain.
+  Every `false` C++ produces is reproduced exactly — network game, nil name,
+  unknown name, and a definition with no `Filename`. **The residual divergence
+  is one case:** a reload that passes all four checks and then fails on I/O
+  reports `true` to the script where C++ reports `false`. The engine still runs
+  the full failure arm (every particle cleared, the definition removed); only
+  the value the script already received is optimistic.
+  Pinned by `reload_particle_answers_synchronously_and_the_engine_applies_it`
+  (a live script call through a real host context) on top of the frozen
+  `reload_particle_reports_false_for_every_name_cpp_cannot_reload`, which still
+  passes — so the change could only ever turn a successful reload from `false`
+  into `true`, which is what it did.
+  **Still open:** `FnReloadDef` (`C4Script.cpp:5143-5159`,
+  `compat/world.rs:4669`) is registered and still returns false. It asks the
+  identical question and `Engine::reload_definition` already exists, so it is
+  now the same shape as this one: seed the reloadable ids, answer, stage, apply.
 
 - **Live-reload path matching landed; the reload itself is open.**
   `clonk-engine::developer_reload` ports `C4DefList::GetByPath`
