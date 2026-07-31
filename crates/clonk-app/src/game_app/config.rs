@@ -1367,6 +1367,7 @@ impl GameApp {
                 }
             })
             .unwrap_or_default();
+        self.persisted_mission_access = self.mission_access.snapshot();
         self.engine
             .set_mission_access_store(self.mission_access.clone());
         self.bindings = KeyboardBindings::load(paths);
@@ -1867,26 +1868,35 @@ impl GameApp {
         self.close_options_menu_with_persist_result(save_result)
     }
 
-    /// `Config.Save()` writes the whole live config, so a `GainMissionAccess`
-    /// password the engine added straight to the shared list
-    /// (C4Script.cpp:2466-2471) has to join the pending writes at every save
-    /// surface (C4Application.cpp:367; C4StartupOptionsDlg.cpp:1189).
+    /// Writes `Config.General.MissionAccess` as soon as the shared list the
+    /// engine mutates differs from the file.
     ///
-    /// An empty live list is skipped: C++ suppresses `Save()` entirely when the
-    /// config never loaded (C4Application.cpp:367), which is the same state a
-    /// failed read leaves here, and an explicit Alt+M removal has already queued
-    /// its own value.
-    pub(crate) fn queue_live_mission_access(&mut self) {
+    /// `FnGainMissionAccess` only grows that in-memory list
+    /// (C4Script.cpp:2466-2471), and C++ leaves the write to `Config.Save()` on
+    /// a clean quit (C4Application.cpp:367). A mission the player has already
+    /// unlocked is earned progress rather than a runtime toggle, though, so a
+    /// round that ends any other way must not relock it — the deliberate
+    /// divergence behind issue #50. Runtime toggles keep C++'s timing in
+    /// `DeferredConfig`.
+    pub(crate) fn persist_mission_access_if_changed(&mut self) {
+        if self.mission_access.matches(&self.persisted_mission_access) {
+            return;
+        }
         let access = self.mission_access.snapshot();
-        if !access.is_empty() {
-            self.deferred_config.set("General", "MissionAccess", access);
+        // Retrying a failed write every frame would only repeat the warning,
+        // so the list counts as persisted either way.
+        self.persisted_mission_access = access.clone();
+        let Some(paths) = self.app_paths.clone() else {
+            return;
+        };
+        if let Err(error) = persist_mission_access(&paths, &access) {
+            tracing::warn!(%error, "could not save General.MissionAccess");
         }
     }
 
     /// Writes every pending runtime config change now. Used by the explicit
     /// save surfaces; the clean-shutdown path flushes the same store.
     pub(crate) fn flush_deferred_config(&mut self) {
-        self.queue_live_mission_access();
         let Some(paths) = self.app_paths.clone() else {
             return;
         };

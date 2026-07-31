@@ -175,12 +175,13 @@ impl GameApp {
             .menu_state
             .selected_scenario()
             .map(|entry| entry.identifier.clone());
-        let value = self.mission_access.update_modules(modules, remove);
+        self.mission_access.update_modules(modules, remove);
         // Both native mutation sites change `Config.General.MissionAccess` in
-        // memory alone — `FnGainMissionAccess` (C4Script.cpp:2466-2471) and the
-        // cheat-code removal (C4StartupScenSelDlg.cpp:1838-1846) — so the file
-        // is written once at shutdown.
-        self.deferred_config.set("General", "MissionAccess", value);
+        // memory alone — `FnGainMissionAccess` (C4Script.cpp:2466-2471) and this
+        // cheat-code entry (C4StartupScenSelDlg.cpp:1838-1846). The port writes
+        // the list out as soon as it changes instead; see
+        // `persist_mission_access_if_changed`.
+        self.persist_mission_access_if_changed();
         // C4StartupScenSelDlg::UpdateList begins with AbortRenaming. Empty or
         // cancelled input never reaches this accepted/rebuild path.
         self.abort_scenario_rename();

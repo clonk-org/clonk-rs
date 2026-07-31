@@ -4701,6 +4701,26 @@ pub(crate) fn persist_native_config_values(
     fs::write(path, updated)
 }
 
+/// `Config.General.MissionAccess` is a `CFG_MaxString` escaped-string field
+/// (`C4Config.cpp:379`), so only the quoted C++ form is readable by a
+/// LegacyClonk install sharing this configuration file.
+pub(crate) fn persist_mission_access(paths: &AppPaths, access: &str) -> io::Result<()> {
+    let native = clonk_resources::encode_legacy_script_text(access).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mission access is not representable in the classic Windows-1252 config",
+        )
+    })?;
+    persist_native_config_values(
+        paths,
+        "General",
+        &[(
+            "MissionAccess",
+            clonk_app_netplay::NativeConfigValue::CppEscapedString(&native),
+        )],
+    )
+}
+
 pub(crate) fn persist_league_account_preference(
     paths: &AppPaths,
     account: &LegacyCString,

@@ -49,6 +49,9 @@ pub(crate) struct GameApp {
     pub(crate) runtime_language_charset: RuntimeHelpCharset,
     /// Process-local Config.General.MissionAccess shared across fresh games.
     pub(crate) mission_access: MissionAccessStore,
+    /// The mission-access list already on disk, so a round that earns one
+    /// writes once rather than on every frame that follows.
+    pub(crate) persisted_mission_access: String,
     /// Process-global C4Group maker captured from `Config.General.Name` once
     /// during application initialization, like `C4Group_SetMaker`.
     pub(crate) process_group_maker: LegacyCString,
