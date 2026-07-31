@@ -4,6 +4,43 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-31
+
+### Bug fixes
+
+- Draw the first frame whatever RenderInactive says (#39)
+- Let UpdateFlipDir own the FlipDir mirror instead of the renderer (#38)
+- Discover SoundFonts in platform bank directories
+- Attach the macOS Dock tile once the application has launched
+
+### Continuous integration
+
+- Reset an existing release branch instead of failing to recreate it (#42)
+- Check pull request titles now that the merge queue squashes (#36)
+
+### Documentation
+
+- Document the MIDI SoundFont requirement
+- Correct why joined option selections cannot arrive
+- Fix stale steering-file claims and trim the parity section
+
+### Features
+
+- Make the scenario editor usable with viewport windows, editing and live reload (#35)
+- Super-resolve the scenario icon strip (#37)
+- Fly birds on a steered heading instead of per-second axis snaps (#34)
+- Super-resolve the stretched startup menu art
+- Group the update component archives under an update- name prefix
+- Rotate through ten HarpoonRace relaunch messages
+
+### Refactoring
+
+- Share the component archive name prefixes between construction and parsing
+
+### Testing
+
+- Pin the joined lobby Options tab click
+
 ## [0.5.0] - 2026-07-30
 
 ### Bug fixes
