@@ -553,6 +553,33 @@ impl ParticleSystem {
         self.defs.iter().map(|def| def.core.name.clone()).collect()
     }
 
+    /// Attach the group a definition was loaded from after the fact.
+    ///
+    /// Production registers the path with the definition
+    /// (`register_resource_from`); this exists for callers that build a
+    /// definition first and learn its group second.
+    pub fn set_def_source_path(&mut self, name: &str, path: Option<std::path::PathBuf>) -> bool {
+        match self.defs.iter_mut().find(|def| def.core.name == name) {
+            Some(def) => {
+                def.source_path = path;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The definitions a reload could actually re-open — those carrying a
+    /// `Filename`. `C4ParticleDef::Reload` refuses without one
+    /// (`C4Particles.cpp:197`), so a manually registered simulation-only def
+    /// can never reload however it is named.
+    pub fn reloadable_def_names(&self) -> std::collections::HashSet<String> {
+        self.defs
+            .iter()
+            .filter(|def| def.source_path.is_some())
+            .map(|def| def.core.name.clone())
+            .collect()
+    }
+
     /// `C4ParticleList::Remove` via FnClearParticles (C4Script.cpp:4925-4944):
     /// the global scope clears the global list; an object scope clears that
     /// object's front and back lists. Def counts are released

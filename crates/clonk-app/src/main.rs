@@ -6424,6 +6424,12 @@ impl GameApp {
         // game frame still runs to completion. Apply those app-owned requests
         // now; the caller advances its cadence clock after this method.
         self.apply_engine_pause_game_requests();
+        // `FnReloadParticle` answered the script synchronously from pre-seeded
+        // state; the reload itself happens here, once the call has returned.
+        let reloaded = self.engine.apply_particle_reload_requests();
+        if reloaded > 0 {
+            tracing::debug!(reloaded, "applied script-driven particle reloads");
+        }
         let goal_menu_result = self.apply_game_goal_menu_requests();
         if result.is_ok() {
             result = goal_menu_result;

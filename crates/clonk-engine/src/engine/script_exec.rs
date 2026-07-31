@@ -1130,6 +1130,24 @@ impl Engine {
         std::mem::take(&mut *self.host_requests.pause_game_requests.borrow_mut())
     }
 
+    /// Apply the reloads `FnReloadParticle` accepted during the last script
+    /// call (`C4Game::ReloadParticle`, `C4Game.cpp:2369-2394`).
+    ///
+    /// The builtin answered synchronously from pre-seeded state, so this is
+    /// only the work; the script already has its result. A reload that fails
+    /// here still clears every particle and drops the definition, exactly as
+    /// the direct call does — the script simply saw the optimistic answer,
+    /// which is the one narrow divergence this design accepts.
+    pub fn apply_particle_reload_requests(&mut self) -> usize {
+        let requests =
+            std::mem::take(&mut *self.host_requests.particle_reload_requests.borrow_mut());
+        let network_game = self.network_game;
+        requests
+            .into_iter()
+            .filter(|name| self.reload_particle(name, network_game))
+            .count()
+    }
+
     /// Drain local `SetPreSend` requests in exact script-call order. This is
     /// runtime-only state and never enters synchronized snapshots or saves.
     pub fn take_network_target_fps_requests(&mut self) -> Vec<NetworkTargetFpsRequest> {

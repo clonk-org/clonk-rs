@@ -7423,6 +7423,9 @@ struct HostRequestQueues {
     pending_remove_player_controls: Vec<RemovePlayerControlData>,
     pending_game_goal_menu_requests: Vec<GameGoalMenuRequest>,
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
+    /// Particle names `FnReloadParticle` accepted during a script call,
+    /// applied by the engine once the call has returned.
+    particle_reload_requests: Rc<RefCell<Vec<String>>>,
     network_target_fps_requests: Rc<RefCell<Vec<NetworkTargetFpsRequest>>>,
     viewport_presentation_requests: Rc<RefCell<Vec<ViewportPresentationRequest>>>,
 }
@@ -9975,6 +9978,7 @@ impl Engine {
                 pending_remove_player_controls: Vec::new(),
                 pending_game_goal_menu_requests: Vec::new(),
                 pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+                particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
                 network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
                 viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             },

@@ -16,8 +16,24 @@ use super::*;
 /// reload — so the divergence is confined to a script-driven reload that would
 /// have succeeded.
 pub(crate) fn reload_particle(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _name = parse_native_c4_string_argument(args.first(), "ReloadParticle", "name")?;
-    Ok(Value::Int(0))
+    let name = parse_native_c4_string_argument(args.first(), "ReloadParticle", "name")?;
+    // `if (!szName) return false;` — the nil safety check comes before the
+    // definition lookup (`C4Game.cpp:2375`).
+    let Some(name) = name else {
+        return Ok(Value::Int(0));
+    };
+    let accepted = with_host_context(false, |context| {
+        if !context.world.particle_reload_accepted(&name) {
+            return false;
+        }
+        context
+            .world
+            .particle_reload_requests
+            .borrow_mut()
+            .push(name.clone());
+        true
+    });
+    Ok(Value::Int(i32::from(accepted)))
 }
 
 /// `C4Effect::ClearAll(..., C4FxCall_RemoveClear)` for AssignRemoval.

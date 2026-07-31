@@ -2057,6 +2057,15 @@ pub struct HostWorldContext {
     /// return false exactly like the C++ GetDef-failure paths
     /// (C4Script.cpp:4874,4893,4917,4932).
     particle_defs: Option<Rc<std::collections::HashSet<String>>>,
+    /// The particle definitions a reload could actually re-open — those
+    /// carrying a `Filename` (`C4Particles.cpp:197`). Seeded before the
+    /// call so `FnReloadParticle` can answer *synchronously*, the way the
+    /// port pre-allocates `next_object_id` so `CreateObject` can return a
+    /// reference to an object the engine has not made yet.
+    reloadable_particle_defs: Option<Rc<std::collections::HashSet<String>>>,
+    /// Names `FnReloadParticle` accepted, drained by the engine after the
+    /// call (`Engine::take_particle_reload_requests`).
+    pub(crate) particle_reload_requests: Rc<RefCell<Vec<String>>>,
     /// Compiled definition scripts, shared from `Engine.definitions`, so host
     /// functions can run script functions on other objects mid-VM-call
     /// (Find_Func/Sort_Func, GameCall). Empty in legacy fixture contexts.
@@ -2194,6 +2203,8 @@ impl Default for HostWorldContext {
             construction_check_strings: Rc::new(crate::ConstructionCheckStrings::default()),
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             particle_defs: None,
+            reloadable_particle_defs: None,
+            particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
             definition_scripts: Rc::new(HashMap::new()),
             reference_parameter_slots: Rc::new(HashMap::new()),
             direct_call_function_names: Rc::new(HashSet::new()),
@@ -2566,6 +2577,8 @@ impl HostWorldContext {
             definition_crew_names: Rc::new(HashMap::new()),
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             particle_defs: None,
+            reloadable_particle_defs: None,
+            particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
             definition_scripts: Rc::new(HashMap::new()),
             reference_parameter_slots: Rc::new(HashMap::new()),
             direct_call_function_names: Rc::new(HashSet::new()),
@@ -3198,6 +3211,32 @@ impl HostWorldContext {
     pub(crate) fn with_particle_defs(mut self, defs: std::collections::HashSet<String>) -> Self {
         self.particle_defs = Some(Rc::new(defs));
         self
+    }
+
+    /// Seed the synchronous answer for `FnReloadParticle` and the channel its
+    /// accepted names travel back on.
+    pub(crate) fn with_particle_reloads(
+        mut self,
+        reloadable: std::collections::HashSet<String>,
+        requests: Rc<RefCell<Vec<String>>>,
+    ) -> Self {
+        self.reloadable_particle_defs = Some(Rc::new(reloadable));
+        self.particle_reload_requests = requests;
+        self
+    }
+
+    /// Whether `Game.ReloadParticle(name)` would reload this definition.
+    ///
+    /// `C4Game::ReloadParticle` returns false for a network game, a null name,
+    /// a name no definition answers to, and a definition with no `Filename`
+    /// (`C4Game.cpp:2371-2380`, `C4Particles.cpp:197`). All four are decidable
+    /// before the call; only an I/O failure at reload time is not.
+    pub(crate) fn particle_reload_accepted(&self, name: &str) -> bool {
+        !self.network_game
+            && self
+                .reloadable_particle_defs
+                .as_ref()
+                .is_some_and(|defs| defs.contains(name))
     }
 
     /// Attach the material table (FnMaterial name lookups).
