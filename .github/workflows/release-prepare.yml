@@ -157,9 +157,24 @@ jobs:
           # Seed the protected branch at an existing main commit, then push
           # only the three generated release files. This keeps the App's
           # permissions limited to Contents and Pull requests.
-          gh api --method POST "repos/${REPOSITORY}/git/refs" \
-            -f ref="refs/heads/${branch}" \
-            -f sha="${BASE_SHA}" >/dev/null
+          #
+          # Seeding has to tolerate a branch an earlier run left behind: if
+          # anything fails between this step and `gh pr create` the ref
+          # survives with no pull request to consume it, and a ruleset forbids
+          # deleting it. A create-only seed then wedges every later run --
+          # including the daily schedule -- on "Reference already exists".
+          # Resetting to the base commit is safe because the branch carries no
+          # unique work: only the push below adds the release commit, and it
+          # keeps the lease that push expects.
+          if gh api "repos/${REPOSITORY}/git/ref/heads/${branch}" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${REPOSITORY}/git/refs/heads/${branch}" \
+              -f sha="${BASE_SHA}" \
+              -F force=true >/dev/null
+          else
+            gh api --method POST "repos/${REPOSITORY}/git/refs" \
+              -f ref="refs/heads/${branch}" \
+              -f sha="${BASE_SHA}" >/dev/null
+          fi
           git push \
             --force-with-lease="refs/heads/${branch}:${BASE_SHA}" \
             origin "HEAD:refs/heads/${branch}"
