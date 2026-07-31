@@ -304,11 +304,12 @@
         .expect("grant and reload Mission Access");
         wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "secret");
-        // Memory-only until shutdown, as both native sites are
-        // (C4Script.cpp:2466-2471; C4StartupScenSelDlg.cpp:1838-1856).
+        // C++ keeps this in memory until a save (C4Script.cpp:2466-2471;
+        // C4StartupScenSelDlg.cpp:1838-1856); the port writes earned access
+        // straight out instead (`persist_mission_access_if_changed`).
         assert_eq!(
-            app.deferred_config.get("General", "MissionAccess"),
-            Some("secret")
+            load_configured_mission_access(&paths).expect("read saved mission access"),
+            "secret"
         );
         assert_eq!(app.scenario_entry_enabled.get("Locked.c4s"), Some(&true));
         assert_eq!(app.scenario_entry_enabled.get("Native.c4s"), Some(&false));
@@ -3136,11 +3137,11 @@
         assert_eq!(app.mission_access.snapshot(), "Secret;Second");
         // Both native mutation sites change `Config.General.MissionAccess` in
         // memory alone and neither calls `Config.Save()`
-        // (C4Script.cpp:2466-2471; C4StartupScenSelDlg.cpp:1838-1856), so the
-        // grant is pending until a clean shutdown rather than on disk now.
+        // (C4Script.cpp:2466-2471; C4StartupScenSelDlg.cpp:1838-1856). The port
+        // writes the changed list out at once so no aborted run can lose it.
         assert_eq!(
-            app.deferred_config.get("General", "MissionAccess"),
-            Some("Secret;Second")
+            load_configured_mission_access(&paths).expect("read granted mission access"),
+            "Secret;Second"
         );
 
         app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
@@ -3152,9 +3153,9 @@
         wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "Second");
         assert_eq!(
-            app.deferred_config.get("General", "MissionAccess"),
-            Some("Second"),
-            "a removal replaces the pending value rather than queueing a second write"
+            load_configured_mission_access(&paths).expect("read reduced mission access"),
+            "Second",
+            "a removal replaces the saved value rather than appending a second one"
         );
         reset_cached_app_paths();
     }
@@ -3162,25 +3163,53 @@
     #[test]
     fn script_earned_mission_access_reaches_the_saved_config() {
         // `FnGainMissionAccess` grows the live `Config.General.MissionAccess`
-        // and queues nothing (C4Script.cpp:2466-2471) — it is `Config.Save()`
-        // on a clean quit that writes the whole config back
-        // (C4Application.cpp:367). A save surface must therefore persist the
-        // live list even though only the engine touched it; the host function
+        // and queues nothing (C4Script.cpp:2466-2471); the host function
         // mutates the very string this store shares with every engine
         // (`configured_mission_access_reaches_fresh_engines_and_survives_replacement`).
+        // C++ leaves the write to `Config.Save()` on a clean quit
+        // (C4Application.cpp:367), but a mission the player already unlocked is
+        // earned progress rather than a runtime toggle, so this port writes it
+        // as soon as the list changes: an aborted round must not relock it.
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated mission access user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
         let mut app = new_menu_app_with_paths(800, 600, &paths);
         app.mission_access.update_modules("Earned", false);
-        assert_eq!(app.deferred_config.get("General", "MissionAccess"), None);
 
-        app.flush_deferred_config();
+        app.persist_mission_access_if_changed();
 
         assert_eq!(
             load_configured_mission_access(&paths).expect("read saved mission access"),
             "Earned"
         );
+        // `C4Config` registers MissionAccess as a `CFG_MaxString` escaped
+        // string (C4Config.cpp:379), so the quoted C++ form is the only one a
+        // shared LegacyClonk install reads back.
+        let saved = fs::read_to_string(paths.config_file()).expect("saved config text");
+        assert!(
+            saved.contains("MissionAccess=\"Earned\""),
+            "escaped C4Config string expected, got: {saved}"
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn earned_mission_access_survives_an_aborted_session() {
+        // The reported failure (#50): a mission unlocked during a round was
+        // locked again on the next start, because nothing had written
+        // `Config.General.MissionAccess` before the process ended.
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated mission access user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.mission_access.update_modules("WestGR", false);
+        app.persist_mission_access_if_changed();
+        // No shutdown flush: this session never reaches one.
+        drop(app);
+
+        let restarted = new_menu_app_with_paths(800, 600, &paths);
+
+        assert!(restarted.mission_access.contains("westgr"));
         reset_cached_app_paths();
     }
 

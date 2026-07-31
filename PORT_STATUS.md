@@ -1353,21 +1353,14 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `runtime_config_mutations_remain_process_local_until_shutdown_save`.
   **Migrated so far, each with an oracle citation:**
   `Network.MasterServerSignUp` and `General.Record`
-  (`C4StartupNetDlg::OnBtnInternet`/`OnBtnRecord`, `C4StartupNetDlg.cpp:840-850`),
-  and `General.MissionAccess` — both of *its* native mutation sites,
-  `FnGainMissionAccess` (`C4Script.cpp:2466-2471`) and the cheat-code
-  add/remove (`C4StartupScenSelDlg.cpp:1838-1856`), change the string in memory
-  and return; `C4StartupScenSelDlg.cpp` contains no `Config.Save()` at all.
-  Only the cheat-code site could *queue* that write, though — `GainMissionAccess`
-  grows the list inside the engine, through the store both share — so both flush
-  points now snapshot the live `General.MissionAccess`, exactly as `Config.Save()`
-  writes the whole in-memory config. An empty list is skipped: C++ suppresses
-  `Save()` when the config never loaded (`C4Application.cpp:367`), which is the
-  state a failed read leaves here. The same list is what `CanOpen` tests
-  (`C4StartupScenSelDlg.cpp:743`); the network branch used to re-read the config
-  *file* instead, so every password earned this session stayed locked in the
+  (`C4StartupNetDlg::OnBtnInternet`/`OnBtnRecord`, `C4StartupNetDlg.cpp:840-850`).
+  `General.MissionAccess` was migrated here too and has since been pulled back
+  out — see *Earned mission access is written when it is earned* under
+  [Deliberate divergences](#deliberate-divergences-from-the-oracle). What it
+  contributed and keeps: the live list, not the config *file*, is what the gate
+  tests (`C4StartupScenSelDlg.cpp:743`); the network branch used to re-read the
+  file instead, so every password earned this session stayed locked in the
   network selector while the local selector already honoured it. Pinned by
-  `script_earned_mission_access_reaches_the_saved_config` and
   `network_mission_access_gate_honours_memory_only_grant`.
   The four `[Sound]` toggles defer too: `C4SoundSystem::ToggleOnOff` is
   `enabled = !enabled` with no save (`C4SoundSystem.cpp:138-142`), and neither
@@ -1390,7 +1383,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   the Options save to shutdown would have lost exactly the crash protection that
   comment describes. **Still open:** every other
   `persist_config_value` caller needs its own C++ site read before being moved —
-  MissionAccess, Participants, sound toggles, ServerAddress and the Startup
+  Participants, sound toggles, ServerAddress and the Startup
   checkboxes are *not* settled by the oracle lines this ticket cites, and the
   many `main_tests` callers are fixture set-up that must keep writing
   immediately.
@@ -2423,6 +2416,26 @@ hashed but not exported by the C++ bridge; unequal-count duplicate IDs remain
 an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
+
+- **Earned mission access is written when it is earned**
+  (`GameApp::persist_mission_access_if_changed`,
+  `crates/clonk-app/src/game_app/config.rs`; no key). Approved 2026-07-31,
+  issue #50. C++ mutates `Config.General.MissionAccess` in memory at both of its
+  sites — `FnGainMissionAccess` (`C4Script.cpp:2368-2373`) and the cheat-code
+  add/remove (`C4StartupScenSelDlg.cpp:1828-1839`) — and writes it only when the
+  whole config is saved, on a clean quit (`C4Application.cpp:367`); a round that
+  ends any other way silently relocks the mission the player just finished. The
+  reporter hit exactly that. Unlike the runtime toggles that share the deferral,
+  a password is earned progress, not a preference, so the port writes it as soon
+  as the shared list changes: the event loop compares the store against the
+  value on disk once per iteration, ahead of every early exit. Nothing
+  simulation-facing reads the timing — script sees the same in-memory list
+  either way — so this cannot desync. The value is written in C++'s escaped
+  form (`MissionAccess="…"`, `C4Config.cpp:379`); the previous unquoted
+  `RawAscii` write was unreadable to a LegacyClonk install sharing the file,
+  since `StdCompilerINIRead` requires the quotes for an `RCT_Escaped` field.
+  Pinned by `script_earned_mission_access_reaches_the_saved_config` and
+  `earned_mission_access_survives_an_aborted_session`.
 
 - **The fullscreen loader background may be aspect-filled**
   (`LoaderRenderConfig::with_aspect_fill`, `crates/clonk-frontend/src/loader_screen.rs`;

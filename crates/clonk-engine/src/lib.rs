@@ -7302,6 +7302,13 @@ impl MissionAccessStore {
         self.inner.borrow().clone()
     }
 
+    /// Whether the live list still reads exactly `value`. `GainMissionAccess`
+    /// writes through the shared string rather than this type, so a host that
+    /// persists the list watches it with this instead of cloning per frame.
+    pub fn matches(&self, value: &str) -> bool {
+        *self.inner.borrow() == value
+    }
+
     /// Applies `SAddModules`/`SRemoveModules`-style semicolon modules and
     /// returns the value that should be persisted to configuration.
     ///

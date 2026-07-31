@@ -919,6 +919,10 @@ fn run() -> Result<()> {
                 app.poll_developer_file_monitor();
                 app.drain_console_log_capture();
                 app.drain_game_log_capture();
+                // Ahead of every path that can leave this arm early, so a
+                // password the last frame's script earned is already on disk
+                // whichever way the process ends.
+                app.persist_mission_access_if_changed();
                 if app.sync_developer_console_view() {
                     window.set_title(&app.developer_console.view_model().caption);
                     window.request_redraw();
@@ -1449,13 +1453,14 @@ fn run() -> Result<()> {
         // separate from the game window's `persist_if_dirty` above.
         // `C4Application::Clear` writes the accumulated config once on a clean
         // quit; an aborted run discards it (C4Application.cpp:351-367).
+        // Mission access deliberately does not wait for this — see
+        // `persist_mission_access_if_changed`.
         if matches!(
             *control_flow,
             ControlFlow::Exit | ControlFlow::ExitWithCode(_)
         ) && !app.configuration_reset_requested
         {
             if let Some(paths) = app_paths.as_ref() {
-                app.queue_live_mission_access();
                 for (section, entries) in app.deferred_config.take_by_section() {
                     let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
                         .iter()
@@ -1873,6 +1878,7 @@ impl GameApp {
             loaded_default_rank_names,
             startup_tooltip_resources,
             runtime_language_charset,
+            persisted_mission_access: mission_access.snapshot(),
             mission_access,
             process_group_maker,
             save_description_language_table,
