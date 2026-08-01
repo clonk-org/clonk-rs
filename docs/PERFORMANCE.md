@@ -168,14 +168,14 @@ inheriting eight.
 
 On MSVC, rustc 1.97.1 requests a PDB even though the release profile has no
 debug information, while the published archives do not contain that PDB. The
-landing, post-merge, and release builds therefore share one configuration
+post-merge and release builds therefore share one configuration
 script that selects rustc's bundled LLD and passes `/DEBUG:NONE`,
 `/OPT:REF,ICF`, `/TIME`, and `/Brepro` explicitly. The same script enables
 linker-plugin LTO and a bounded 512 MiB ThinLTO cache while retaining the static
 CRT. It clears inherited `LINK` and `_LINK_` values before exporting the
 fingerprinted Rust flags, so runner-image defaults cannot silently override the
 contract. If release symbols are published in the future, remove
-`/DEBUG:NONE` from all three paths and ship the matching PDB rather than
+`/DEBUG:NONE` from both paths and ship the matching PDB rather than
 silently producing an unused one.
 
 Hosted run `30691633087` restored an 855 MiB Windows dependency cache and took
@@ -186,8 +186,8 @@ native link in the build; the roughly 8m40s final application tail is rustc
 frontend, codegen, and ThinLTO work rather than MSVC linking. A later hosted
 toolchain probe accidentally changed `CARGO_HOME` from the producer's native
 Windows path to an MSYS path, producing a cache identity that the restore-only
-landing job could never seed. Windows landing jobs therefore use the same
-pinned toolchain action as the trusted post-merge cache producer.
+landing job could never seed. Windows smoke therefore uses the same pinned
+toolchain action as the trusted post-merge cache producer.
 
 Later native-MSVC measurements isolated the remaining warm path. Cold hosted
 run `30698792424` used linker-plugin ThinLTO and finished in 16m48s;
@@ -208,8 +208,8 @@ compiling after 10m11s and was stopped before the final application link. This
 arm is rejected: disabling LTO made the relevant warm path slower while also
 changing the shipped optimization contract. Normalizing the runner to the one
 pinned Rust toolchain keeps future dependency-cache identities stable, and
-trusted `main` alone publishes both dependency and ThinLTO caches. Queue and
-release jobs restore them without writing short-lived copies.
+trusted `main` alone publishes both dependency and ThinLTO caches. Release jobs
+restore them without writing short-lived copies.
 
 Production-plumbing run `30701547831` deliberately began with neither exact
 cache and finished green in 12m55s. Cargo reported 11m32s; the application
@@ -221,10 +221,11 @@ and finished in 3m56s.
 
 These samples put the standard four-vCPU Windows runner above the five-minute
 landing target even with both caches exact. The remaining cost is application
-frontend and code generation, not linking. Meeting five minutes without
-weakening the shipped profile therefore requires either a faster trusted
-runner or a substantial application-crate decomposition, each with a new
-hosted measurement.
+frontend and code generation, not linking. The bounded queue therefore retains
+Windows tests, path linting, and an NSIS installer smoke compile, while trusted
+post-merge validation performs the exact static-CRT release build and runtime
+inspection. Release remains fail-closed on both the merge-group Landing run and
+the exact-SHA post-merge validation run.
 
 Two exhaustive standard-runner Linux samples of the predecessor graph, runs
 `30693625838` and `30693995330`, passed every row, but shared-runner execution
@@ -236,7 +237,7 @@ shard-6 probe kept the current app test profile: opt-level 1, opt-level 0, and
 256 units. These samples prove the predecessor partitions exhaustive and green,
 not a robust five-minute latency bound on four-vCPU hosted runners.
 
-The replacement queue graph uses 18 Linux rows and two Windows rows. It turns
+The replacement queue graph uses 18 Linux rows and one Windows smoke row. It turns
 the two netplay runtime hash partitions into independent compile-time modules,
 splits and rebalances the other application tests across ten selectors, splits
 engine integration across its two feature selectors, and partitions all 26
@@ -254,9 +255,9 @@ file-hash key. This is a shared-runner sample with five seconds of end-to-end
 margin, not a portable timing guarantee.
 
 Because the merge queue admits one candidate at a time, three Linux
-merge-group rows and the shipped-MSVC row claim the rolling Linux-cache,
-coverage, recording-host, and Windows-cache concurrency groups. Required queue
-work therefore preempts stale ordinary post-merge owners; release pushes use
+merge-group rows and Windows smoke claim the rolling Linux-cache, coverage,
+recording-host, and Windows-cache concurrency groups. Required queue work
+therefore preempts stale ordinary post-merge owners; release pushes use
 SHA-specific groups and are unaffected.
 
 The build values are single sequential directional samples from fresh Cargo
@@ -949,19 +950,18 @@ sample.
 
 ## CI cache interpretation
 
-Landing jobs restore the existing trusted-main `full-parity`,
-`windows-runtime-msvc`, shipped-runtime dependency, and ThinLTO caches without
-saving short-lived merge-queue copies.
+Landing jobs restore the existing trusted-main `full-parity` and
+`windows-runtime-msvc` caches without saving short-lived merge-queue copies.
 A post-merge Linux producer compiles the complete locked workspace graph before
 it may publish; canceled runs cannot leave an incomplete immutable cache.
 Replay/render work restores that ordinary target read-only while instrumented
 coverage stays in a different target. Post-merge Windows validation refreshes
 smoke, packaging-tool, and exact static-CRT runtime artifacts only after all
-three succeed, then publishes the bounded linker cache if its exact key was
-absent. Recording-host oracles retain their own cache. The keys include the
-Rust dependency/build inputs maintained by the Rust cache action; the ThinLTO
-key additionally pins the Rust and LLVM versions plus manifests and the shared
-configuration script.
+three succeed, then publishes the shipped-runtime dependency cache and bounded
+linker cache. Release restores those trusted caches. Recording-host oracles
+retain their own cache. The keys include the Rust dependency/build inputs
+maintained by the Rust cache action; the ThinLTO key additionally pins the Rust
+and LLVM versions plus manifests and the shared configuration script.
 `CARGO_INCREMENTAL=0` keeps CI artifacts reproducible and smaller; the local
 development, play, and test profiles retain incremental behavior.
 
