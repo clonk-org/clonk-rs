@@ -4236,7 +4236,7 @@ impl Definition {
         let mut extras = vec![Value::String(pending.name.clone().into())];
         // rVal1-4 (C4Effect.cpp:282): always four slots, missing = nil.
         extras.extend(constructor_values.iter().cloned());
-        self.dispatch_effect_callback(
+        self.dispatch_effect_callback_with_parameter_conversion_policy(
             carrier,
             checker,
             "Effect",
@@ -4250,6 +4250,7 @@ impl Definition {
             world,
             game_over_triggered,
             audio,
+            compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3,
         )
     }
 
@@ -4371,6 +4372,41 @@ impl Definition {
         effect: &EffectState,
         event: &'static str,
         function_label: &'static str,
+        extras: Vec<Value>,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        self.dispatch_effect_callback_with_parameter_conversion_policy(
+            carrier,
+            effect,
+            event,
+            function_label,
+            extras,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            compat::EffectCallbackParameterConversionPolicy::Standard,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_effect_callback_with_parameter_conversion_policy(
+        &self,
+        carrier: Option<(&ObjectState, ObjectId)>,
+        effect: &EffectState,
+        event: &'static str,
+        function_label: &'static str,
         mut extras: Vec<Value>,
         rng: LcgRng,
         global_effects: &[EffectState],
@@ -4380,6 +4416,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
+        parameter_conversion: compat::EffectCallbackParameterConversionPolicy,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         let next_object_id = world.next_object_id();
         let callback_name = format!("Fx{}{}", effect.name, event);
@@ -4601,16 +4638,43 @@ impl Definition {
                     .expect("script callback exists when native fallback is inactive");
                 if callback.engine_global_entry {
                     if context_object.is_some() {
-                        return callback
-                            .script
-                            .call_pinned_with_cells_and_this(
+                        let call = if parameter_conversion
+                            == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
+                        {
+                            callback
+                                .script
+                                .call_pinned_with_cells_and_this_for_effect_callback(
+                                    &callback.resolution.function,
+                                    true,
+                                    &args,
+                                    &context_cells,
+                                    context_this,
+                                )
+                        } else {
+                            callback.script.call_pinned_with_cells_and_this(
                                 &callback.resolution.function,
                                 true,
                                 &args,
                                 &context_cells,
                                 context_this,
                             )
-                            .map(|value| Some((value, context_cells.snapshot())));
+                        };
+                        return call.map(|value| Some((value, context_cells.snapshot())));
+                    }
+                    if parameter_conversion
+                        == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
+                    {
+                        let cells = clonk_script::LocalCells::from_local_vars(&HashMap::new());
+                        return callback
+                            .script
+                            .call_pinned_with_cells_and_this_for_effect_callback(
+                                &callback.resolution.function,
+                                true,
+                                &args,
+                                &cells,
+                                Value::Nil,
+                            )
+                            .map(|value| Some((value, HashMap::new())));
                     }
                     return callback
                         .script
@@ -4618,6 +4682,19 @@ impl Definition {
                         .map(|(value, _)| Some((value, HashMap::new())));
                 }
                 if context_object.is_some() {
+                    if parameter_conversion
+                        == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
+                    {
+                        return callback
+                            .script
+                            .call_effect_callback_with_cells_and_this(
+                                &callback_name,
+                                &args,
+                                &context_cells,
+                                context_this,
+                            )
+                            .map(|value| Some((value, context_cells.snapshot())));
+                    }
                     return callback.script.call_effect_callback_in_context_with_cells(
                         &effect.name,
                         event,
@@ -4625,6 +4702,19 @@ impl Definition {
                         &context_cells,
                         context_this,
                     );
+                }
+                if parameter_conversion
+                    == compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3
+                {
+                    return callback
+                        .script
+                        .call_effect_callback_with_locals_and_this(
+                            &callback_name,
+                            &args,
+                            &context_locals,
+                            context_this,
+                        )
+                        .map(Some);
                 }
                 callback.script.call_effect_callback_in_context(
                     &effect.name,

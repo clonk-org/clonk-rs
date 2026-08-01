@@ -5,6 +5,15 @@ use clonk_core::log_target::SCRIPT_LOG_TARGET;
 #[cfg(test)]
 use crate::ActionLibrary;
 
+/// Parameter-conversion policy for the immediate scripted C4Effect callback.
+/// C++ passes `nonStrict3WarnConversionOnly` to Fx callbacks; the marker must
+/// never leak into nested or ordinary script invocations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EffectCallbackParameterConversionPolicy {
+    Standard,
+    WarnForNonStrict3,
+}
+
 struct FairCrewHostContextState {
     script_object: Option<ObjectId>,
     script_definition: Option<Option<DefinitionId>>,
@@ -785,7 +794,16 @@ pub(crate) fn call_scoped_script_function(
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
     call_scoped_script_function_impl(
-        script, function, args, false, false, false, None, None, false,
+        script,
+        function,
+        args,
+        false,
+        false,
+        false,
+        None,
+        None,
+        false,
+        EffectCallbackParameterConversionPolicy::Standard,
     )
     .map(|outcome| outcome.map(|(value, _)| value))
 }
@@ -809,6 +827,7 @@ pub(crate) fn call_scoped_scenario_function(
         None,
         Some(resolution),
         false,
+        EffectCallbackParameterConversionPolicy::Standard,
     )
     .map(|outcome| outcome.map(|(value, _)| value))
 }
@@ -853,6 +872,7 @@ fn call_scoped_script_function_or_global(
         Some(Some(definition)),
         None,
         false,
+        EffectCallbackParameterConversionPolicy::Standard,
     )
     .map(|outcome| outcome.map(|(value, _)| value))
 }
@@ -875,6 +895,7 @@ fn call_scoped_script_ref_args_or_global(
         Some(Some(definition)),
         None,
         true,
+        EffectCallbackParameterConversionPolicy::Standard,
     )
 }
 
@@ -885,6 +906,7 @@ pub(crate) fn call_scoped_effect_function_or_global(
     definition: Option<DefinitionId>,
     function: &str,
     args: &[Value],
+    parameter_conversion: EffectCallbackParameterConversionPolicy,
 ) -> Option<Result<Value, RuntimeError>> {
     call_scoped_script_function_impl(
         script,
@@ -896,6 +918,7 @@ pub(crate) fn call_scoped_effect_function_or_global(
         Some(definition),
         None,
         false,
+        parameter_conversion,
     )
     .map(|outcome| outcome.map(|(value, _)| value))
 }
@@ -908,6 +931,7 @@ pub(crate) fn call_scoped_global_effect_function(
     script: Arc<ScriptEngine>,
     function: &str,
     args: &[Value],
+    parameter_conversion: EffectCallbackParameterConversionPolicy,
 ) -> Option<Result<Value, RuntimeError>> {
     if !script.has_global_function(function) && !script.has_host_function(function) {
         return None;
@@ -926,8 +950,14 @@ pub(crate) fn call_scoped_global_effect_function(
                 (None, None, None)
             }
         });
-    let call = script
-        .call_global_with_ref_args(function, args)
+    let call =
+        if parameter_conversion == EffectCallbackParameterConversionPolicy::WarnForNonStrict3 {
+            script
+                .call_global_for_effect_callback(function, args)
+                .map(|value| (value, args.to_vec()))
+        } else {
+            script.call_global_with_ref_args(function, args)
+        }
         .map(|(value, _)| value);
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
@@ -1010,6 +1040,7 @@ fn call_scoped_script_function_impl(
     definition_override: Option<Option<DefinitionId>>,
     resolution_override: Option<clonk_script::ScriptFunctionResolution>,
     ref_args: bool,
+    parameter_conversion: EffectCallbackParameterConversionPolicy,
 ) -> Option<Result<(Value, Vec<Value>), RuntimeError>> {
     let pinned_resolution = resolution_override;
     let resolution = pinned_resolution.clone().or_else(|| {
@@ -1058,6 +1089,10 @@ fn call_scoped_script_function_impl(
     let locals = HashMap::new();
     let call = if ref_args {
         debug_assert!(preserve_caller && pinned_resolution.is_none());
+        debug_assert_eq!(
+            parameter_conversion,
+            EffectCallbackParameterConversionPolicy::Standard
+        );
         let cells = clonk_script::LocalCells::from_local_vars(&locals);
         script.call_ref_args_with_cells_and_this_preserving_caller(
             function,
@@ -1067,24 +1102,39 @@ fn call_scoped_script_function_impl(
         )
     } else if let Some(resolution) = pinned_resolution {
         let cells = clonk_script::LocalCells::from_local_vars(&locals);
-        script
-            .call_pinned_with_cells_and_this(
-                resolution.function.as_ref(),
-                false,
-                args,
-                &cells,
-                Value::Nil,
-            )
-            .map(|value| (value, args.to_vec()))
+        let call =
+            if parameter_conversion == EffectCallbackParameterConversionPolicy::WarnForNonStrict3 {
+                script.call_pinned_with_cells_and_this_for_effect_callback(
+                    resolution.function.as_ref(),
+                    false,
+                    args,
+                    &cells,
+                    Value::Nil,
+                )
+            } else {
+                script.call_pinned_with_cells_and_this(
+                    resolution.function.as_ref(),
+                    false,
+                    args,
+                    &cells,
+                    Value::Nil,
+                )
+            };
+        call.map(|value| (value, args.to_vec()))
     } else if preserve_caller {
         let cells = clonk_script::LocalCells::from_local_vars(&locals);
         script
             .call_with_cells_and_this_preserving_caller(function, args, &cells, Value::Nil)
             .map(|value| (value, args.to_vec()))
     } else {
-        script
-            .call_with_locals_and_this(function, args, &locals, Value::Nil)
-            .map(|(value, _locals)| (value, args.to_vec()))
+        let call = if parameter_conversion
+            == EffectCallbackParameterConversionPolicy::WarnForNonStrict3
+        {
+            script.call_effect_callback_with_locals_and_this(function, args, &locals, Value::Nil)
+        } else {
+            script.call_with_locals_and_this(function, args, &locals, Value::Nil)
+        };
+        call.map(|(value, _locals)| (value, args.to_vec()))
     };
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
@@ -2873,6 +2923,7 @@ pub(crate) fn call_world_object_script_callback(
             false,
             Some(resolution.clone()),
             false,
+            EffectCallbackParameterConversionPolicy::Standard,
         )
         .map(|outcome| outcome.map(|(value, _)| value)),
         None => call_world_object_own_function(target, callback.function_name(), args),
@@ -2889,7 +2940,17 @@ fn call_world_object_own_function_inflight(
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
     call_world_object_function_with_options(
-        target, function, args, false, false, None, false, true, None, false,
+        target,
+        function,
+        args,
+        false,
+        false,
+        None,
+        false,
+        true,
+        None,
+        false,
+        EffectCallbackParameterConversionPolicy::Standard,
     )
     .map(|outcome| outcome.map(|(value, _)| value))
 }
@@ -2902,9 +2963,20 @@ pub(crate) fn call_world_object_function_inflight(
     target: ObjectId,
     function: &str,
     args: &[Value],
+    parameter_conversion: EffectCallbackParameterConversionPolicy,
 ) -> Option<Result<Value, RuntimeError>> {
     call_world_object_function_with_options(
-        target, function, args, true, true, None, false, true, None, false,
+        target,
+        function,
+        args,
+        true,
+        true,
+        None,
+        false,
+        true,
+        None,
+        false,
+        parameter_conversion,
     )
     .map(|outcome| outcome.map(|(value, _)| value))
 }
@@ -2919,6 +2991,7 @@ pub(crate) fn call_world_object_resolved_global_function(
     resolution: clonk_script::ScriptFunctionResolution,
     function: &str,
     args: &[Value],
+    parameter_conversion: EffectCallbackParameterConversionPolicy,
 ) -> Option<Result<Value, RuntimeError>> {
     call_world_object_function_with_options(
         target,
@@ -2931,6 +3004,7 @@ pub(crate) fn call_world_object_resolved_global_function(
         true,
         Some(resolution),
         false,
+        parameter_conversion,
     )
     .map(|outcome| outcome.map(|(value, _)| value))
 }
@@ -2955,6 +3029,7 @@ fn call_world_object_function_with(
         false,
         None,
         false,
+        EffectCallbackParameterConversionPolicy::Standard,
     )
     .map(|outcome| outcome.map(|(value, _)| value))
 }
@@ -2968,7 +3043,17 @@ fn call_world_object_ref_args_from_arrow(
     args: &[Value],
 ) -> Option<Result<(Value, Vec<Value>), RuntimeError>> {
     call_world_object_function_with_options(
-        target, function, args, true, true, None, true, false, None, true,
+        target,
+        function,
+        args,
+        true,
+        true,
+        None,
+        true,
+        false,
+        None,
+        true,
+        EffectCallbackParameterConversionPolicy::Standard,
     )
 }
 
@@ -2983,6 +3068,7 @@ fn call_world_object_function_with_options(
     allow_scope_without_world_object: bool,
     pinned_resolution: Option<clonk_script::ScriptFunctionResolution>,
     ref_args: bool,
+    parameter_conversion: EffectCallbackParameterConversionPolicy,
 ) -> Option<Result<(Value, Vec<Value>), RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
@@ -3039,26 +3125,48 @@ fn call_world_object_function_with_options(
     let unchanged_finals = || args.to_vec();
     let call = if ref_args {
         debug_assert!(preserve_caller && pinned_resolution.is_none());
+        debug_assert_eq!(
+            parameter_conversion,
+            EffectCallbackParameterConversionPolicy::Standard
+        );
         script.call_ref_args_with_cells_and_this_preserving_caller(function, args, &cells, this)
     } else if let Some(resolution) = pinned_resolution {
         debug_assert!(!preserve_caller);
-        script
-            .call_pinned_with_cells_and_this(
-                resolution.function.as_ref(),
-                resolution.scope == clonk_script::ScriptFunctionScope::Global,
-                args,
-                &cells,
-                this,
-            )
-            .map(|value| (value, unchanged_finals()))
+        let call =
+            if parameter_conversion == EffectCallbackParameterConversionPolicy::WarnForNonStrict3 {
+                script.call_pinned_with_cells_and_this_for_effect_callback(
+                    resolution.function.as_ref(),
+                    resolution.scope == clonk_script::ScriptFunctionScope::Global,
+                    args,
+                    &cells,
+                    this,
+                )
+            } else {
+                script.call_pinned_with_cells_and_this(
+                    resolution.function.as_ref(),
+                    resolution.scope == clonk_script::ScriptFunctionScope::Global,
+                    args,
+                    &cells,
+                    this,
+                )
+            };
+        call.map(|value| (value, unchanged_finals()))
     } else if preserve_caller {
+        debug_assert_eq!(
+            parameter_conversion,
+            EffectCallbackParameterConversionPolicy::Standard
+        );
         script
             .call_with_cells_and_this_preserving_caller(function, args, &cells, this)
             .map(|value| (value, unchanged_finals()))
     } else {
-        script
-            .call_with_cells_and_this(function, args, &cells, this)
-            .map(|value| (value, unchanged_finals()))
+        let call =
+            if parameter_conversion == EffectCallbackParameterConversionPolicy::WarnForNonStrict3 {
+                script.call_effect_callback_with_cells_and_this(function, args, &cells, this)
+            } else {
+                script.call_with_cells_and_this(function, args, &cells, this)
+            };
+        call.map(|value| (value, unchanged_finals()))
     };
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {

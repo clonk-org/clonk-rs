@@ -49,6 +49,15 @@ type HostCallArgs = SmallVec<[HostCallArg; MAX_CALL_PARAMETERS]>;
 type CallBindings = SmallVec<[Binding; MAX_CALL_PARAMETERS]>;
 type DiagnosticObjectFormatter = fn(u64) -> Option<(String, Option<String>)>;
 
+/// Whether a C4Aul entry point treats a failed script-parameter conversion as
+/// an error. Scripted C4Effect callbacks request C++'s
+/// `nonStrict3WarnConversionOnly` behavior for pre-`#strict 3` functions.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ParameterConversionFailurePolicy {
+    Error,
+    WarnForNonStrict3EffectCallback,
+}
+
 struct AssignmentOperator<'a> {
     operation: Option<&'a BinaryOp>,
     spelling: &'a str,
@@ -2986,6 +2995,11 @@ pub struct Vm<'a> {
     /// keeps the historical own-root dispatch used by synthetic callbacks;
     /// a captured C4AulFunc pointer skips unnamed own global links.
     exact_global_link_lookup: bool,
+    /// One-shot parameter conversion policy for a host-selected script entry.
+    /// A scripted C4Effect callback consumes the warning-only exception at
+    /// its immediate function; all nested calls return to ordinary strict
+    /// conversion.
+    entry_parameter_conversion: Cell<ParameterConversionFailurePolicy>,
     /// The object context the call runs on, returned by an unbound script
     /// `this` (`Value::Object` in clonk-engine). Nil when the call has no object
     /// context (e.g. global functions).
@@ -3058,6 +3072,7 @@ impl<'a> Vm<'a> {
             constants: None,
             global_functions: None,
             exact_global_link_lookup: false,
+            entry_parameter_conversion: Cell::new(ParameterConversionFailurePolicy::Error),
             this_value: Value::Nil,
             method_dispatch: None,
             method_reference_dispatch: None,
@@ -3149,6 +3164,15 @@ impl<'a> Vm<'a> {
 
     pub(crate) fn with_exact_global_link_lookup(mut self) -> Self {
         self.exact_global_link_lookup = true;
+        self
+    }
+
+    /// Marks the next selected script function as a C4Effect callback. The
+    /// marker is consumed before its parameter frame is built, so calls
+    /// originating inside that callback retain ordinary conversion behavior.
+    pub(crate) fn with_effect_callback_parameter_conversion(self) -> Self {
+        self.entry_parameter_conversion
+            .set(ParameterConversionFailurePolicy::WarnForNonStrict3EffectCallback);
         self
     }
 
@@ -3500,6 +3524,17 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         self.invoke_engine_global_raw(name, args.into_iter().collect(), 0, None)?
             .into_value_on_stack()
+    }
+
+    /// Exact engine-global entry whose native caller supplied ordinary
+    /// C4Values rather than explicit `GetRef()` cells.
+    pub(crate) fn call_engine_global(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Value, RuntimeError> {
+        let args = args.iter().cloned().map(CallArg::external).collect();
+        self.call_engine_global_args(name, args)
     }
 
     /// Invoke an already-resolved immutable script function without another
@@ -4016,6 +4051,7 @@ impl<'a> Vm<'a> {
             constants: self.constants,
             global_functions: self.global_functions,
             exact_global_link_lookup: true,
+            entry_parameter_conversion: Cell::new(ParameterConversionFailurePolicy::Error),
             this_value: Value::Nil,
             method_dispatch: self.method_dispatch,
             method_reference_dispatch: self.method_reference_dispatch,
@@ -4162,6 +4198,9 @@ impl<'a> Vm<'a> {
         // balanced argument slots and become the callee's parameter frame;
         // cross-host AB_CALL may provide the same count through the one-shot
         // override, so consume it exactly once at the true call boundary.
+        let policy = self
+            .entry_parameter_conversion
+            .replace(ParameterConversionFailurePolicy::Error);
         let parameter_slots = take_call_parameter_slots(MAX_CALL_PARAMETERS);
         let mut value_stack = ValueStackReservation::reserve(parameter_slots)?;
         // Every script call carries the full ten-slot C4AulParSet. Parameter
@@ -4178,7 +4217,17 @@ impl<'a> Vm<'a> {
         args.resize_with(MAX_CALL_PARAMETERS, || CallArg::runtime(Value::Nil));
         #[cfg(test)]
         record_call_arg_heap_spill(args.spilled());
-        Self::check_convert_function_parameters(name, function, &mut args, caller.as_ref())?;
+        Self::check_convert_function_parameters(
+            name,
+            function,
+            &mut args,
+            caller.as_ref(),
+            policy,
+            match &self.this_value {
+                Value::Object(object) => Some(*object),
+                _ => None,
+            },
+        )?;
 
         // The external C4AulScriptFunc::Exec overload converts its temporary
         // C4AulParSet first, then C4AulExec::Exec pushes every slot with
@@ -4329,6 +4378,8 @@ impl<'a> Vm<'a> {
         function: &Function,
         args: &mut [CallArg],
         caller: Option<&ScriptCallerContext>,
+        policy: ParameterConversionFailurePolicy,
+        context_object: Option<u64>,
     ) -> Result<(), RuntimeError> {
         let callee_has_strict_nil = function.strict_level.unwrap_or(0) >= 3;
         let (convert_to_any_eagerly, convert_nil_to_int_bool) = match caller {
@@ -4352,10 +4403,23 @@ impl<'a> Vm<'a> {
                     continue;
                 }
                 let got = Self::c4v_type_name(arg.read()?.c4v_type());
-                return Err(RuntimeError::new(format!(
+                let message = format!(
                     "call to \"{name}\" parameter {}: got \"{got}\", but expected \"&\"!",
                     index + 1
-                )));
+                );
+                if policy == ParameterConversionFailurePolicy::WarnForNonStrict3EffectCallback
+                    && function.strict_level.unwrap_or(0) < 3
+                {
+                    // C4Value::ConvertTo(C4V_pC4Value) fails for a value
+                    // slot, but a C4Effect callback still executes a
+                    // pre-STRICT3 function after its warning. Leave the value
+                    // slot in place: its parameter is readable but not an
+                    // alias of the caller (C4AulExec.cpp:1364-1397;
+                    // C4Value.cpp:488-620).
+                    Self::warn_parameter_conversion_failure(&message, context_object);
+                    continue;
+                }
+                return Err(RuntimeError::new(message));
             }
 
             // Non-reference parameters receive a dereferenced copy even when
@@ -4371,12 +4435,23 @@ impl<'a> Vm<'a> {
             }
 
             if !tracked.value.convert_to_in_place(expected, true) {
-                return Err(RuntimeError::new(format!(
+                let message = format!(
                     "call to \"{name}\" parameter {}: got \"{}\", but expected \"{}\"!",
                     index + 1,
                     Self::c4v_type_name(tracked.value.c4v_type()),
                     Self::c4v_type_name(expected)
-                )));
+                );
+                if policy == ParameterConversionFailurePolicy::WarnForNonStrict3EffectCallback
+                    && function.strict_level.unwrap_or(0) < 3
+                {
+                    // C4AulScriptFunc::Exec keeps the original C4Value in
+                    // this one mode: it emits a warning, then executes the
+                    // pre-STRICT3 function (C4AulExec.cpp:1621-1648).
+                    Self::warn_parameter_conversion_failure(&message, context_object);
+                    *arg = CallArg::Value(tracked);
+                    continue;
+                }
+                return Err(RuntimeError::new(message));
             }
 
             if convert_nil_to_int_bool && matches!(tracked.value, Value::Nil) {
@@ -4389,6 +4464,18 @@ impl<'a> Vm<'a> {
             *arg = CallArg::Value(tracked);
         }
         Ok(())
+    }
+
+    fn warn_parameter_conversion_failure(message: &str, context_object: Option<u64>) {
+        // C++'s ErrorOrWarning sends this same message to DebugLog and adds
+        // the command-target object when one exists (C4AulExec.cpp:1345-1362).
+        // Keep the object structured so presentation can choose its label;
+        // tracing never enters simulation state or the lockstep hash.
+        if let Some(object) = context_object {
+            tracing::warn!(target: "clonk-script", object, "{message}");
+        } else {
+            tracing::warn!(target: "clonk-script", "{message}");
+        }
     }
 
     fn function_parameter_type(parameter: Option<&Parameter>) -> C4VType {
