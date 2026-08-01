@@ -113,6 +113,35 @@ class ClonkAppTestShardTests(unittest.TestCase):
             "the internal sentinel alone must not silently produce an empty shard",
         )
 
+    def test_inline_test_modules_run_once_in_shard_five(self):
+        expected_cfg = normalized_rust(
+            """#[cfg(all(
+                test,
+                any(
+                    not(feature = "app-test-shard-mode"),
+                    feature = "app-test-shard-5",
+                ),
+            ))]"""
+        )
+        discovered = []
+        module_pattern = re.compile(r"(?m)^\s*mod [A-Za-z0-9_]*tests\s*\{")
+
+        for path in (APP / "src").rglob("*.rs"):
+            if path == HARNESS or FRAGMENTS in path.parents:
+                continue
+            source = path.read_text(encoding="utf-8")
+            for module in module_pattern.finditer(source):
+                cfg_start = source.rfind("#[cfg(", 0, module.start())
+                self.assertGreaterEqual(cfg_start, 0, path)
+                self.assertEqual(
+                    normalized_rust(source[cfg_start : module.start()]),
+                    expected_cfg,
+                    f"{path.relative_to(REPOSITORY)} must assign inline tests to shard 5",
+                )
+                discovered.append((path, module.group()))
+
+        self.assertGreaterEqual(len(discovered), 30)
+
 
 if __name__ == "__main__":
     unittest.main()

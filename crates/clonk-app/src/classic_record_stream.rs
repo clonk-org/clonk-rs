@@ -216,7 +216,10 @@ fn classic_record_output_path(stream_path: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};

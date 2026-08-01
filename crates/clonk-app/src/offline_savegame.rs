@@ -311,7 +311,10 @@ fn legacy_basename(path: &[u8]) -> &[u8] {
         .map_or(path, |separator| &path[separator + 1..])
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use super::*;
     use clonk_engine::{

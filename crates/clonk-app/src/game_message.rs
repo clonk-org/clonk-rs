@@ -731,7 +731,10 @@ fn bound_by(value: i32, left: i32, right: i32) -> i32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use super::*;
     use clonk_engine::{ObjectId, Vector2, FLAG_LEFT, FLAG_TOP};

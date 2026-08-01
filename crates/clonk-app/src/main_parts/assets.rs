@@ -2372,7 +2372,10 @@ fn matching_native_font_source(
         })
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod native_font_recipe_tests {
     use super::*;
 
@@ -9025,7 +9028,10 @@ pub(crate) fn reconcile_deferred_fullscreen(window: &Window, mode: DisplayMode) 
     false
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod remastered_graphics_stem_tests {
     use super::*;
     use tempfile::tempdir;
@@ -9074,7 +9080,10 @@ mod remastered_graphics_stem_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod startup_monitor_tests {
     use super::*;
 

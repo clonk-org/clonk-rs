@@ -686,7 +686,10 @@ pub fn apply_changes(config: &mut Config, changes: &[AdvancedConfigChange]) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use super::*;
     use clonk_frontend::startup_options_advanced::AdvancedConfigController;

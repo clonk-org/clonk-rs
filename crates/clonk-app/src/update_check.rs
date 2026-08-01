@@ -241,7 +241,10 @@ pub(crate) mod test_support {
     pub(crate) const OFFERED_VERSION: &str = "99.0.0";
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use super::test_support::{manifest_for, FakeTransport, OFFERED_VERSION};
     use super::*;

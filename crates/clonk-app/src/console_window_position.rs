@@ -81,7 +81,10 @@ pub(crate) fn format_console_position(x: i32, y: i32) -> String {
     format!("{x},{y}")
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use super::*;
 

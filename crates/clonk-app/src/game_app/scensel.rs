@@ -1800,7 +1800,10 @@ impl GameApp {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod portrait_location_tests {
     use super::*;
 

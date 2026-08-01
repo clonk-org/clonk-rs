@@ -1601,7 +1601,10 @@ fn decode_png(bytes: Vec<u8>) -> Option<ImageData> {
     Some(ImageData::new(info.width, info.height, pixels))
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use std::fs;
 

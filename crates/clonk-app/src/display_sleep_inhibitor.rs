@@ -55,7 +55,10 @@ mod platform {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
