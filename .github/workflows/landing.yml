@@ -287,12 +287,16 @@ jobs:
       - name: Configure the shipped MSVC runtime
         run: scripts/configure-msvc-runtime.sh
 
+      - name: Restore trusted-main ThinLTO cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clonk-msvc-thinlto
+          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: shipped-msvc-runtime-v1
-          # Temporary manual runs seed the matching dependency graph so the
-          # second identical SHA measures the production warm path.
-          save-if: ${{ github.event_name == 'workflow_dispatch' }}
+          save-if: false
 
       - name: Build the runtime exactly as a release ships it
         run: |

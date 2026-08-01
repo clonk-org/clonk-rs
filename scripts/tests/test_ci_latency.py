@@ -31,8 +31,8 @@ class CiLatencyTests(unittest.TestCase):
             scopes,
             {"full-parity", "windows-runtime-msvc", "shipped-msvc-runtime-v1"},
         )
-        self.assertEqual(landing.count("save-if: false"), 2)
-        self.assertIn(
+        self.assertEqual(landing.count("save-if: false"), 3)
+        self.assertNotIn(
             "save-if: ${{ github.event_name == 'workflow_dispatch' }}",
             landing,
         )
