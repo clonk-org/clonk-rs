@@ -52,6 +52,7 @@ jobs:
           # is running.
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Decide whether this commit releases
         id: resolve
@@ -301,6 +302,7 @@ jobs:
           # configuration for every queued tree, which proves the /MT-vs-/MD
           # link before this release is allowed to run.
           RUSTFLAGS: -C target-feature=+crt-static
+          _LINK_: /DEBUG:NONE /OPT:REF,ICF /TIME
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that

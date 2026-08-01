@@ -13,6 +13,14 @@ MAIN = REPOSITORY / ".github" / "workflows" / "rust.yml"
 DEPENDENCY_GUARD = REPOSITORY / ".github" / "workflows" / "dependency-guard.yml"
 
 
+def matrix_entry(workflow, name):
+    """Return one literal Linux matrix entry."""
+    marker = f"          - name: {name}\n"
+    start = workflow.index(marker)
+    end = workflow.find("\n          - name: ", start + len(marker))
+    return workflow[start : end if end >= 0 else len(workflow)]
+
+
 class CiLatencyTests(unittest.TestCase):
     def test_restore_only_landing_caches_have_trusted_main_producers(self):
         landing = LANDING.read_text(encoding="utf-8")
@@ -74,16 +82,15 @@ class CiLatencyTests(unittest.TestCase):
             r"--features (engine-it-shard-[1-9][0-9]*)",
             workflow,
         )
-        self.assertEqual(app_selectors, [f"app-test-shard-{index}" for index in range(1, 6)])
+        self.assertEqual(app_selectors, [f"app-test-shard-{index}" for index in range(1, 10)])
         self.assertEqual(engine_selectors, ["engine-it-shard-1", "engine-it-shard-2"])
+        unit_and_parity = matrix_entry(workflow, "workspace unit and parity")
         self.assertIn(
-            "cargo nextest run -p clonk-engine-unit-tests --no-fail-fast --locked",
-            workflow,
+            "cargo nextest run -p clonk-engine-unit-tests "
+            "-p clonk-frontend-unit-tests --no-fail-fast --locked",
+            unit_and_parity,
         )
-        self.assertIn(
-            "cargo nextest run -p clonk-frontend-unit-tests --no-fail-fast --locked",
-            workflow,
-        )
+        self.assertIn("cargo xtask parity verify", unit_and_parity)
         dedicated_packages = {
             "clonk-app",
             "clonk-engine-integration-tests",
@@ -106,7 +113,7 @@ class CiLatencyTests(unittest.TestCase):
         )
         self.assertEqual(
             [(index, total) for index, total, _ in remaining_shards],
-            [("1", "3"), ("2", "3"), ("3", "3")],
+            [("1", "2"), ("2", "2")],
         )
         remaining_packages = Counter()
         for _, _, arguments in remaining_shards:
@@ -122,6 +129,35 @@ class CiLatencyTests(unittest.TestCase):
             workflow,
         )
 
+    def test_overlapping_linux_checks_share_setup_without_failing_open(self):
+        workflow = LANDING.read_text(encoding="utf-8")
+        unit_and_parity = matrix_entry(workflow, "workspace unit and parity")
+        quality = matrix_entry(workflow, "workspace quality")
+
+        for entry in (unit_and_parity, quality):
+            self.assertIn("failed=0", entry)
+            self.assertIn('exit "$failed"', entry)
+        self.assertIn("cargo xtask parity verify || failed=1", unit_and_parity)
+        self.assertIn(
+            "rustup component add clippy rustfmt || failed=1",
+            quality,
+        )
+        for command in (
+            "cargo fmt --all -- --check || failed=1",
+            "python3 -m unittest discover -s scripts/tests -p 'test_*.py' || failed=1",
+            "cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings || failed=1",
+        ):
+            self.assertIn(command, quality)
+        for old_name in (
+            "engine unit",
+            "frontend unit",
+            "workspace lints",
+            "C++ parity",
+            "repository hygiene",
+        ):
+            self.assertNotIn(f"          - name: {old_name}\n", workflow)
+        self.assertNotIn("components: clippy, rustfmt", workflow)
+
     def test_literal_required_commands_remain_on_the_landing_tree(self):
         workflow = LANDING.read_text(encoding="utf-8")
         required = (
@@ -136,7 +172,8 @@ class CiLatencyTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIn(command, workflow)
 
-        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn("fetch-depth: 1", workflow)
+        self.assertNotIn("fetch-depth: 0", workflow)
         self.assertIn("python3-pil", workflow)
 
     def test_slow_diagnostics_are_post_merge_and_release_sha_is_not_cancelled(self):

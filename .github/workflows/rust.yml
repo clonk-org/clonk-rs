@@ -295,6 +295,7 @@ jobs:
         env:
           CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
           RUSTFLAGS: -C target-feature=+crt-static
+          _LINK_: /DEBUG:NONE /OPT:REF,ICF /TIME
         run: |
           cargo fetch --locked
           zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib

@@ -7,6 +7,7 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, edited]
   merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions:
@@ -23,6 +24,7 @@ env:
 jobs:
   pull-request-title:
     name: Pull request title
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     defaults:
@@ -30,7 +32,6 @@ jobs:
         shell: bash
     steps:
       - name: Check the title is a Conventional Commit subject
-        if: github.event_name == 'pull_request'
         env:
           # Untrusted text belongs in the environment, never interpolated into
           # the shell program by the Actions expression evaluator.
@@ -55,46 +56,54 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: app 1/5
+          - name: app 1/9
             command: cargo nextest run -p clonk-app --features app-test-shard-1 --no-fail-fast --locked
-          - name: app 2/5
+          - name: app 2/9
             command: cargo nextest run -p clonk-app --features app-test-shard-2 --no-fail-fast --locked
-          - name: app 3/5
+          - name: app 3/9
             command: cargo nextest run -p clonk-app --features app-test-shard-3 --no-fail-fast --locked
-          - name: app 4/5
+          - name: app 4/9
             command: cargo nextest run -p clonk-app --features app-test-shard-4 --no-fail-fast --locked
-          - name: app 5/5
+          - name: app 5/9
             command: cargo nextest run -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
+          - name: app 6/9
+            command: cargo nextest run -p clonk-app --features app-test-shard-6 --no-fail-fast --locked
+          - name: app 7/9
+            command: cargo nextest run -p clonk-app --features app-test-shard-7 --no-fail-fast --locked
+          - name: app 8/9
+            command: cargo nextest run -p clonk-app --features app-test-shard-8 --no-fail-fast --locked
+          - name: app 9/9
+            command: cargo nextest run -p clonk-app --features app-test-shard-9 --no-fail-fast --locked
           - name: engine integration 1/2
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
           - name: engine integration 2/2
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
-          - name: engine unit
-            command: cargo nextest run -p clonk-engine-unit-tests --no-fail-fast --locked
-          - name: frontend unit
-            command: cargo nextest run -p clonk-frontend-unit-tests --no-fail-fast --locked
-          - name: remaining workspace 1/3
-            command: cargo nextest run -p clonk-app-netplay -p clonk-app-menus -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-platform -p clonk-audio -p clonk-game -p clonk-update -p clonk-update-net --no-fail-fast --locked
-          - name: remaining workspace 2/3
-            command: cargo nextest run -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-launcher -p clonk-logging -p clonk-icon -p clonk-c4group -p clonk-resources -p clonk-script --no-fail-fast --locked
-          - name: remaining workspace 3/3
-            command: cargo nextest run -p clonk-network -p clonk-app-core -p clonk-app-render -p clonk-frontend -p clonk-graphics -p clonk-gui -p clonk-scaling -p xtask --no-fail-fast --locked
-          - name: workspace lints
-            command: cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
-          - name: C++ parity
-            command: cargo xtask parity verify
+          - name: workspace unit and parity
+            command: |
+              failed=0
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked || failed=1
+              cargo xtask parity verify || failed=1
+              exit "$failed"
+          - name: remaining workspace 1/2
+            command: cargo nextest run -p clonk-app-core -p clonk-app-menus -p clonk-app-render -p clonk-frontend -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-logging -p clonk-scaling --no-fail-fast --locked
+          - name: remaining workspace 2/2
+            command: cargo nextest run -p clonk-app-netplay -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-network -p clonk-platform -p clonk-resources -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
+          - name: workspace quality
+            command: |
+              failed=0
+              rustup component add clippy rustfmt || failed=1
+              cargo fmt --all -- --check || failed=1
+              python3 -m unittest discover -s scripts/tests -p 'test_*.py' || failed=1
+              cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings || failed=1
+              exit "$failed"
           - name: engine contracts
             command: |
               cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
               cargo xtask engine-snapshots verify
-          - name: repository hygiene
-            command: |
-              cargo fmt --all -- --check
-              python3 -m unittest discover -s scripts/tests -p 'test_*.py'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           filter: blob:none
           persist-credentials: false
           submodules: recursive
@@ -114,8 +123,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-        with:
-          components: clippy, rustfmt
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
@@ -228,6 +235,7 @@ jobs:
         env:
           CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
           RUSTFLAGS: -C target-feature=+crt-static
+          _LINK_: /DEBUG:NONE /OPT:REF,ICF /TIME
         run: |
           cargo fetch --locked
           zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
@@ -282,12 +290,13 @@ jobs:
             fi
           }
 
-          require_result title "$TITLE_RESULT" success
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            require_result title "$TITLE_RESULT" success
             require_result linux "$LINUX_RESULT" skipped
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" skipped
             require_result runtime-msvc "$RUNTIME_MSVC_RESULT" skipped
           else
+            require_result title "$TITLE_RESULT" skipped
             require_result linux "$LINUX_RESULT" success
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" success
             require_result runtime-msvc "$RUNTIME_MSVC_RESULT" success

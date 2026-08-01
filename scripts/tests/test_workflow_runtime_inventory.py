@@ -34,6 +34,20 @@ def step_script(workflow, name):
 
 
 class WorkflowRuntimeInventoryTests(unittest.TestCase):
+    def test_checkouts_do_not_persist_credentials(self):
+        marker = "uses: actions/checkout@"
+
+        for workflow in (LANDING_WORKFLOW, MAIN_WORKFLOW, RELEASE_WORKFLOW):
+            source = workflow.read_text(encoding="utf-8")
+            blocks = [
+                block.split("\n      - ", 1)[0]
+                for block in source.split(marker)[1:]
+            ]
+            self.assertTrue(blocks, workflow.name)
+            for index, block in enumerate(blocks, start=1):
+                with self.subTest(workflow=workflow.name, checkout=index):
+                    self.assertIn("persist-credentials: false", block)
+
     def test_landing_workflow_uses_current_pinned_actions_and_nextest(self):
         workflow = LANDING_WORKFLOW.read_text(encoding="utf-8")
         checkout = (
@@ -69,6 +83,21 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         for step, fragment in expected.items():
             with self.subTest(step=step):
                 self.assertIn(fragment, step_script(LANDING_WORKFLOW, step))
+
+    def test_msvc_builds_share_static_crt_and_link_timing_flags(self):
+        rustflags = "RUSTFLAGS: -C target-feature=+crt-static"
+        link_flags = "_LINK_: /DEBUG:NONE /OPT:REF,ICF /TIME"
+
+        for workflow in (LANDING_WORKFLOW, MAIN_WORKFLOW, RELEASE_WORKFLOW):
+            with self.subTest(workflow=workflow.name):
+                self.assertEqual(
+                    workflow.read_text(encoding="utf-8").count(rustflags),
+                    1,
+                )
+                self.assertEqual(
+                    workflow.read_text(encoding="utf-8").count(link_flags),
+                    1,
+                )
 
     def test_windows_release_tool_build_is_post_merge_and_not_runtime_serial(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")

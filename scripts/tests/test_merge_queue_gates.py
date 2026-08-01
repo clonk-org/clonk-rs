@@ -88,20 +88,24 @@ class MergeQueueGateTests(unittest.TestCase):
                     "if: github.event_name != 'pull_request'",
                     job_block(LANDING, job),
                 )
+        self.assertRegex(
+            job_block(LANDING, "pull-request-title"),
+            r"(?m)^    if: github\.event_name == 'pull_request'$",
+        )
 
     def test_landing_result_script_accepts_only_the_intended_phase_results(self):
         script = step_script(LANDING, "Enforce landing results")
         base = {
             **os.environ,
             "EVENT_NAME": "merge_group",
-            "TITLE_RESULT": "success",
+            "TITLE_RESULT": "skipped",
             "LINUX_RESULT": "success",
             "WINDOWS_SMOKE_RESULT": "success",
             "RUNTIME_MSVC_RESULT": "success",
         }
 
         cases = (
-            ("pull request", {"EVENT_NAME": "pull_request", "LINUX_RESULT": "skipped", "WINDOWS_SMOKE_RESULT": "skipped", "RUNTIME_MSVC_RESULT": "skipped"}, 0),
+            ("pull request", {"EVENT_NAME": "pull_request", "TITLE_RESULT": "success", "LINUX_RESULT": "skipped", "WINDOWS_SMOKE_RESULT": "skipped", "RUNTIME_MSVC_RESULT": "skipped"}, 0),
             ("merge group", {}, 0),
             ("failed child", {"LINUX_RESULT": "failure"}, 1),
             ("cancelled child", {"WINDOWS_SMOKE_RESULT": "cancelled"}, 1),
