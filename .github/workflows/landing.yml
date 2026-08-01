@@ -47,7 +47,7 @@ jobs:
   linux:
     name: Linux / ${{ matrix.name }}
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -57,22 +57,31 @@ jobs:
       matrix:
         include:
           - name: app 1/9
+            apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-1 --no-fail-fast --locked
           - name: app 2/9
+            apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-2 --no-fail-fast --locked
           - name: app 3/9
+            apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-3 --no-fail-fast --locked
           - name: app 4/9
+            apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-4 --no-fail-fast --locked
           - name: app 5/9
+            apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
           - name: app 6/9
+            apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-6 --no-fail-fast --locked
           - name: app 7/9
+            apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-7 --no-fail-fast --locked
           - name: app 8/9
+            apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-8 --no-fail-fast --locked
           - name: app 9/9
+            apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-9 --no-fail-fast --locked
           - name: engine integration 1/2
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
@@ -85,10 +94,13 @@ jobs:
               cargo xtask parity verify || failed=1
               exit "$failed"
           - name: remaining workspace 1/2
+            apt: libvulkan1 mesa-vulkan-drivers
             command: cargo nextest run -p clonk-app-core -p clonk-app-menus -p clonk-app-render -p clonk-frontend -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-logging -p clonk-scaling --no-fail-fast --locked
           - name: remaining workspace 2/2
+            apt: libasound2-dev libxmp4
             command: cargo nextest run -p clonk-app-netplay -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-network -p clonk-platform -p clonk-resources -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
           - name: workspace quality
+            apt: libasound2-dev libudev-dev python3-pil
             command: |
               failed=0
               rustup component add clippy rustfmt || failed=1
@@ -104,24 +116,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-          filter: blob:none
           persist-credentials: false
           submodules: recursive
 
       - name: Install native dependencies
+        if: matrix.apt != ''
+        env:
+          APT_PACKAGES: ${{ matrix.apt }}
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libasound2-dev \
-            libfreetype6-dev \
-            libvulkan1 \
-            libxmp4 \
-            libudev-dev \
-            mesa-vulkan-drivers \
-            pkg-config \
-            python3-pil
+          read -r -a packages <<< "$APT_PACKAGES"
+          if ! sudo apt-get install --yes --no-install-recommends "${packages[@]}"; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends "${packages[@]}"
+          fi
 
-      - name: Install Rust toolchain
+      - name: Reuse exact preinstalled Rust
+        id: preinstalled-rust
+        run: |
+          required='rustc 1.97.1 '
+          if command -v rustc >/dev/null && [[ "$(rustc --version)" == "$required"* ]]; then
+            echo 'exact=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exact=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install exact Rust toolchain
+        if: steps.preinstalled-rust.outputs.exact != 'true'
         uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
       - name: Install cargo-nextest

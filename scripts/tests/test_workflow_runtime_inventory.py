@@ -98,6 +98,10 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                     workflow.read_text(encoding="utf-8").count(link_flags),
                     1,
                 )
+                self.assertNotIn(
+                    "-C link-arg=",
+                    workflow.read_text(encoding="utf-8"),
+                )
 
     def test_windows_release_tool_build_is_post_merge_and_not_runtime_serial(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")

@@ -108,6 +108,7 @@ class CiLatencyTests(unittest.TestCase):
         }
         remaining_shards = re.findall(
             r"          - name: remaining workspace ([1-9][0-9]*)/([1-9][0-9]*)\n"
+            r"(?:            apt: [^\n]+\n)?"
             r"            command: cargo nextest run (.*?) --no-fail-fast --locked",
             workflow,
         )
@@ -157,6 +158,39 @@ class CiLatencyTests(unittest.TestCase):
         ):
             self.assertNotIn(f"          - name: {old_name}\n", workflow)
         self.assertNotIn("components: clippy, rustfmt", workflow)
+
+    def test_linux_setup_is_pinned_fast_and_matrix_scoped(self):
+        workflow = LANDING.read_text(encoding="utf-8")
+        linux = workflow[workflow.index("  linux:") : workflow.index("  windows-smoke:")]
+
+        self.assertIn("runs-on: ubuntu-24.04", linux)
+        self.assertNotIn("filter: blob:none", linux)
+        for index in range(1, 10):
+            self.assertIn(
+                "apt: libasound2-dev libudev-dev",
+                matrix_entry(workflow, f"app {index}/9"),
+            )
+        expected_apt = {
+            "remaining workspace 1/2": "libvulkan1 mesa-vulkan-drivers",
+            "remaining workspace 2/2": "libasound2-dev libxmp4",
+            "workspace quality": "libasound2-dev libudev-dev python3-pil",
+        }
+        for name, packages in expected_apt.items():
+            self.assertIn(f"apt: {packages}", matrix_entry(workflow, name))
+        for name in (
+            "engine integration 1/2",
+            "engine integration 2/2",
+            "workspace unit and parity",
+            "engine contracts",
+        ):
+            self.assertNotIn("\n            apt:", matrix_entry(workflow, name))
+
+        self.assertIn("if: matrix.apt != ''", linux)
+        self.assertIn("if ! sudo apt-get install", linux)
+        self.assertEqual(linux.count("sudo apt-get update"), 1)
+        self.assertIn("rustc 1.97.1", linux)
+        self.assertIn("id: preinstalled-rust", linux)
+        self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", linux)
 
     def test_literal_required_commands_remain_on_the_landing_tree(self):
         workflow = LANDING.read_text(encoding="utf-8")
