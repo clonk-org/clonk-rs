@@ -70,6 +70,22 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("needs: linux-landing-cache", coverage)
         self.assertIn("save-if: false", coverage)
 
+    def test_post_merge_work_leaves_the_next_landing_runner_budget(self):
+        main = MAIN.read_text(encoding="utf-8")
+        dependency_guard = DEPENDENCY_GUARD.read_text(encoding="utf-8")
+
+        recording_host = main[
+            main.index("  recording-host-oracles:") : main.index(
+                "  windows-release-tools:"
+            )
+        ]
+        self.assertIn("needs: linux-landing-cache", recording_host)
+
+        triggers = dependency_guard[
+            dependency_guard.index("on:\n") : dependency_guard.index("permissions:\n")
+        ]
+        self.assertNotIn("\n  push:\n", triggers)
+
     def test_normal_workspace_is_an_exhaustive_compile_time_partition(self):
         workflow = LANDING.read_text(encoding="utf-8")
 

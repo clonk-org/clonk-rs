@@ -209,6 +209,7 @@ jobs:
 
   recording-host-oracles:
     name: Recording-host material-order oracles (macOS)
+    needs: linux-landing-cache
     runs-on: macos-latest
     timeout-minutes: 45
     concurrency:

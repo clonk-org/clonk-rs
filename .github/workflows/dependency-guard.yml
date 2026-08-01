@@ -15,14 +15,6 @@ on:
       - '.cargo/**'
       - 'rust-toolchain.toml'
       - '.github/workflows/dependency-guard.yml'
-  push:
-    branches: [main]
-    paths:
-      - '**/Cargo.toml'
-      - 'Cargo.lock'
-      - '.cargo/**'
-      - 'rust-toolchain.toml'
-      - '.github/workflows/dependency-guard.yml'
   workflow_dispatch:
 
 # Least privilege: this workflow only reads the repository. No job raises it.
