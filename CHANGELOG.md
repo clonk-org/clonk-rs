@@ -4,6 +4,26 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-08-01
+
+### Bug fixes
+
+- Preserve pre-strict3 effect callback values (#70)
+- Preserve pre-strict3 effect check parameter values (#69)
+- Reanchor frame timer after long stalls (#67)
+- Keep player menu available after elimination (#68)
+- Retain runtime join data until host timer (#66)
+- Fall back to CPU for oversized GPU textures (#65)
+- Persist earned mission access as soon as a round grants it (#52)
+
+### Continuous integration
+
+- Add a five-minute landing pipeline (#64)
+
+### Testing
+
+- Stabilize runtime dynamic timer assertion (#72)
+
 ## [0.6.1] - 2026-07-31
 
 ### Bug fixes
