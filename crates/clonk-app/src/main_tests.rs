@@ -2861,6 +2861,7 @@ fn test_game_app(
     GameApp::new(width, height, audio_options, paths, test_runtime_config())
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     let directory = tempdir().expect("client preload resource directory");
@@ -3160,6 +3161,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     assert!(!combined_path.exists());
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn l021_client_go_combines_scenario_once_and_defers_100_until_final_init() {
     // RetrieveScenario waits for Parameters.Scenario and ResDynamic, merges
@@ -3684,6 +3686,7 @@ fn set_control_test_player(id: i32, team: i32, flags: u16) -> clonk_engine::Cont
     }
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn l052_ready_tick_local_join_opens_one_viewport_with_feedback() {
     // C4Control executes the complete list in packet order, so PlrInfo is
@@ -3764,6 +3767,7 @@ fn l052_ready_tick_local_join_opens_one_viewport_with_feedback() {
     );
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn l052_synchronized_remote_join_has_no_local_viewport_feedback() {
     // C4ControlJoinPlayer passes iAtClient through C4Game::JoinPlayer and
@@ -3855,6 +3859,7 @@ fn l052_synchronized_remote_join_has_no_local_viewport_feedback() {
     );
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn synchronized_join_for_a_missing_client_is_ignored() {
     // C4ControlJoinPlayer resolves AtClient before joining and returns
@@ -4319,6 +4324,7 @@ fn runtime_flash_text(app: &GameApp) -> Option<&str> {
         .map(|message| message.text.as_str())
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn runtime_f1_help_columns_match_cpp_rows_keys_and_us_labels() {
     let table = parse_runtime_help_language_table(
@@ -4364,6 +4370,7 @@ fn runtime_f1_help_columns_match_cpp_rows_keys_and_us_labels() {
     );
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn default_rank_resource_names_decode_shipped_tables_and_preserve_segments() {
     let us = parse_runtime_language_table(
@@ -4398,6 +4405,7 @@ fn default_rank_resource_names_decode_shipped_tables_and_preserve_segments() {
     );
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn presentation_material_and_texture_overload_chains_stop_independently() {
     // InitMaterialTexture carries separate OverloadMaterials and
@@ -4521,7 +4529,11 @@ include_split_main_test_fragment!(
 );
 include_main_test_fragment!("app-test-shard-7", "main_tests/scensel.rs");
 include_main_test_fragment!("app-test-shard-7", "main_tests/startup.rs");
-include_main_test_fragment!("app-test-shard-2", "main_tests/menus.rs");
+include_split_main_test_fragment!(
+    "app-test-shard-2",
+    "app-test-shard-11",
+    "main_tests/menus.rs",
+);
 include_main_test_fragment!("app-test-shard-5", "main_tests/chat_messages.rs");
 include_main_test_fragment!("app-test-shard-8", "main_tests/net_resources.rs");
 include_main_test_fragment!("app-test-shard-8", "main_tests/saves.rs");

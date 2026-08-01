@@ -1,5 +1,15 @@
-// Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
-// sequence, not a child module, so test ids stay `tests::<fn>`.
+// Spliced into `mod tests` (src/main_tests.rs) via include!. The two child
+// modules are independent compile-time shards; ordinary tests include both.
+// Keep their existing bodies unindented so this structural split stays
+// reviewable; format new code before placing it inside either skipped wrapper.
+
+#[rustfmt::skip]
+#[cfg(any(
+    not(feature = "app-test-shard-mode"),
+    feature = "app-test-shard-2"
+))]
+mod menus_shard_1 {
+    use super::*;
 
 #[test]
 fn eliminated_player_mouse_menu_keeps_new_player_reentry_surface() {
@@ -5692,6 +5702,16 @@ fn menu_resize_renders_at_new_dimensions() {
     );
 }
 
+}
+
+#[rustfmt::skip]
+#[cfg(any(
+    not(feature = "app-test-shard-mode"),
+    feature = "app-test-shard-11"
+))]
+mod menus_shard_2 {
+    use super::*;
+
 #[inline(never)]
 fn boxed_running_sandbox_app() -> Box<GameApp> {
     Box::new(new_running_sandbox_app())
@@ -9766,4 +9786,6 @@ fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
         clonk_frontend::message_dialog::MessageDialogResult::No,
     );
     assert_eq!(network.offline_halt_count, 0);
+}
+
 }

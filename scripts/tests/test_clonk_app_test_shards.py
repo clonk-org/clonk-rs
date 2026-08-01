@@ -25,7 +25,7 @@ SPLIT_CALL_PATTERN = re.compile(
 )
 EXPECTED_SHARDS = {
     "app-test-shard-1": {"netplay.rs::netplay_shard_1"},
-    "app-test-shard-2": {"menus.rs"},
+    "app-test-shard-2": {"menus.rs::menus_shard_1"},
     "app-test-shard-3": {"scenario_routes.rs::scenario_routes_shard_1"},
     "app-test-shard-4": {"audio.rs", "input.rs"},
     "app-test-shard-5": {"chat_messages.rs", "lobby.rs"},
@@ -35,6 +35,7 @@ EXPECTED_SHARDS = {
     "app-test-shard-9": {"league.rs", "rendering.rs"},
     "app-test-shard-10": {"netplay.rs::netplay_shard_2"},
     "app-test-shard-11": {
+        "menus.rs::menus_shard_2",
         "runtime.rs",
         "scenario_routes.rs::scenario_routes_shard_2",
     },
@@ -108,7 +109,12 @@ class ClonkAppTestShardTests(unittest.TestCase):
                     "app-test-shard-1",
                     "app-test-shard-10",
                     "main_tests/netplay.rs",
-                )
+                ),
+                (
+                    "app-test-shard-2",
+                    "app-test-shard-11",
+                    "main_tests/menus.rs",
+                ),
             ],
         )
         for first, second, relative in split_calls:
@@ -161,6 +167,7 @@ class ClonkAppTestShardTests(unittest.TestCase):
         for fragment, first, second in (
             ("netplay", "app-test-shard-1", "app-test-shard-10"),
             ("scenario_routes", "app-test-shard-3", "app-test-shard-11"),
+            ("menus", "app-test-shard-2", "app-test-shard-11"),
         ):
             source = (FRAGMENTS / f"{fragment}.rs").read_text(encoding="utf-8")
             compact_fragment = normalized_rust(source)
@@ -171,6 +178,18 @@ class ClonkAppTestShardTests(unittest.TestCase):
                     "{usesuper::*;",
                     compact_fragment,
                 )
+
+    def test_shared_harness_tests_run_once_in_shard_five(self):
+        source = HARNESS.read_text(encoding="utf-8")
+        tests = re.findall(r"(?m)^#\[(?:tokio::)?test\]", source)
+        gated_tests = re.findall(
+            r'(?m)^#\[cfg\(any\(not\(feature = "app-test-shard-mode"\), '
+            r'feature = "app-test-shard-5"\)\)\]\n#\[(?:tokio::)?test\]',
+            source,
+        )
+
+        self.assertTrue(tests, "the shared harness test inventory changed")
+        self.assertEqual(len(gated_tests), len(tests))
 
     def test_inline_test_modules_run_once_in_shard_five(self):
         expected_cfg = normalized_rust(
