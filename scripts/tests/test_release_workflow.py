@@ -135,6 +135,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         completed = self.run_gate()
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("in_progress:none", completed.stdout)
+        self.assertEqual((self.root / ".calls").read_text(encoding="utf-8").strip(), "4")
 
     def test_gate_rejects_a_terminal_failure_immediately(self):
         self._stub(
