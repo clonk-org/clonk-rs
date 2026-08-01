@@ -4726,7 +4726,12 @@ impl GraphicsSystem {
             // The fragment-shader composer reads the same resolved slots. Build
             // its inputs here, while they are in scope, rather than resolving
             // the texmap a second time somewhere the two could drift.
-            if self.shader_landscape {
+            if self.shader_landscape
+                && self
+                    .landscape_cache
+                    .as_ref()
+                    .is_some_and(|cache| !cache.has_multiple_gpu_tiles())
+            {
                 let placement_table: [i32; 128] =
                     std::array::from_fn(|index| placements.get(index).copied().unwrap_or(0));
                 let shading_plane = shade_materials.then(|| {
