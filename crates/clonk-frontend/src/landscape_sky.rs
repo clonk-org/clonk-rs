@@ -1,5 +1,166 @@
 use super::*;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_landscape_uses_cpp_square_texture_tiles() {
+        // C4Surface::CreateTextures selects a power-of-two square backing and
+        // creates one texture per tile (src/C4Surface.cpp:166-205).
+        let layout = landscape_tile_layout(33_900, 825);
+
+        assert_eq!(layout.len(), 34);
+        assert!(layout.iter().all(|tile| tile.size == 1024));
+        assert_eq!(layout[33].origin, [33_792, 0]);
+        assert_eq!(layout[33].logical_extent, [108, 825]);
+    }
+
+    #[test]
+    fn landscape_tile_resource_copies_only_its_logical_source() {
+        // C4Surface::CreateTextures pads each square tile while copying only
+        // the logical source region (src/C4Surface.cpp:166-205;
+        // src/C4Surface.cpp:1075-1115).
+        let width = 3_000;
+        let height = 1_000;
+        let grid = PixelGrid::new(
+            width,
+            height,
+            vec![0; (width * height) as usize],
+            vec![0],
+            vec![None],
+            vec![None],
+        );
+        let mut cache =
+            LandscapeRenderCache::new(grid, width, height, false, (0, 0, true, true, None));
+        let mut pixels = vec![0; (width * height * 4) as usize];
+        pixels[..4].copy_from_slice(&[1, 2, 3, 4]);
+        let second_tile_pixel = (2_048 * 4) as usize;
+        pixels[second_tile_pixel..second_tile_pixel + 4].copy_from_slice(&[5, 6, 7, 8]);
+        cache.pixels = Arc::from(pixels.into_boxed_slice());
+        cache.record_gpu_update(&[(0, 0, width, height)]);
+
+        let (base, mask) = cache
+            .take_gpu_tile_resources(&[2])
+            .into_iter()
+            .next()
+            .expect("tile resource");
+
+        assert_eq!(base.extent, [1_024, 1_024]);
+        assert_eq!(&base.pixels[..4], &[5, 6, 7, 8]);
+        assert_eq!(mask.extent, base.extent);
+        assert_eq!(base.base_revision, None);
+        assert!(base.dirty.is_empty());
+    }
+
+    #[test]
+    fn wide_landscape_records_one_gpu_command_per_visible_tile() {
+        // C4Surface::GetTexAt selects the physical tile and BlitLandscape
+        // submits tile-local texture coordinates (src/C4Surface.cpp:593-608;
+        // src/StdGL.cpp:680-767).
+        let width = 3_000;
+        let height = 1_000;
+        let grid = PixelGrid::new(
+            width,
+            height,
+            vec![0; (width * height) as usize],
+            vec![0],
+            vec![None],
+            vec![None],
+        );
+        let mut cache =
+            LandscapeRenderCache::new(grid, width, height, false, (0, 0, true, true, None));
+        cache.pixels = Arc::from(vec![32; (width * height * 4) as usize].into_boxed_slice());
+        cache.record_gpu_update(&[(0, 0, width, height)]);
+        let mut surface = Surface::new(2_048, 512, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(record_gpu_landscape(
+            &mut surface,
+            &mut cache,
+            2_048,
+            512,
+            0.0,
+            0.0,
+            1.0,
+            SpriteBlitState::normal(),
+            None,
+            None,
+            None,
+            false,
+        ));
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("landscape capture remains active")
+            .into_scene(
+                [2_048, 512],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::standard(),
+            );
+
+        assert_eq!(scene.commands.len(), 2);
+        assert_eq!(scene.textures.len(), 2);
+        assert!(scene
+            .textures
+            .iter()
+            .all(|resource| resource.extent == [1_024, 1_024]));
+        for command in &scene.commands {
+            let GpuCommand::Landscape { base, vertices, .. } = command else {
+                panic!("wide landscape must record tiled landscape commands");
+            };
+            let resource = scene
+                .textures
+                .iter()
+                .find(|resource| resource.id == *base)
+                .expect("landscape command resource");
+            let max_u = vertices
+                .iter()
+                .map(|vertex| vertex.uv[0])
+                .fold(0.0, f32::max);
+            assert!(max_u <= 1.0);
+            assert_eq!(resource.extent, [1_024, 1_024]);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LandscapeTileLayout {
+    origin: [u32; 2],
+    size: u32,
+    logical_extent: [u32; 2],
+}
+
+fn landscape_tile_layout(width: u32, height: u32) -> Vec<LandscapeTileLayout> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let base = cpp_tex_size(width, height);
+    let tiles_x = width.div_ceil(base);
+    let tiles_y = height.div_ceil(base);
+    let mut layout = Vec::with_capacity((tiles_x * tiles_y) as usize);
+    for tile_y in 0..tiles_y {
+        for tile_x in 0..tiles_x {
+            let origin = [tile_x * base, tile_y * base];
+            let logical_extent = [
+                width.saturating_sub(origin[0]).min(base),
+                height.saturating_sub(origin[1]).min(base),
+            ];
+            let center = [
+                origin[0] as f32 + (logical_extent[0] as f32 * 0.5),
+                origin[1] as f32 + (logical_extent[1] as f32 * 0.5),
+            ];
+            let size = cpp_texture_tile_for_source(width, height, center[0], center[1], false)
+                .map_or(base, |(_, _, size)| size as u32);
+            layout.push(LandscapeTileLayout {
+                origin,
+                size,
+                logical_extent,
+            });
+        }
+    }
+    layout
+}
+
 pub(crate) struct LandscapeRenderCache {
     pub(crate) grid: PixelGrid,
     pub(crate) width: u32,
@@ -9,16 +170,30 @@ pub(crate) struct LandscapeRenderCache {
     pub(crate) pixels: Arc<[u8]>,
     pub(crate) liquid_mask: Arc<[u8]>,
     gpu_texture_id: GpuTextureId,
-    gpu_liquid_mask_id: GpuTextureId,
+    gpu_tiles: Vec<LandscapeGpuTile>,
     gpu_revision: u64,
-    gpu_published_revision: u64,
     pub(crate) gpu_dirty: Vec<SurfaceRect>,
     pub(crate) composition_scratch: Vec<u8>,
+}
+
+struct LandscapeGpuTile {
+    layout: LandscapeTileLayout,
+    base_id: GpuTextureId,
+    liquid_mask_id: GpuTextureId,
+    pixels: Option<Arc<[u8]>>,
+    liquid_mask: Option<Arc<[u8]>>,
+    revision: u64,
+    published_revision: Option<u64>,
+    dirty: Vec<SurfaceRect>,
 }
 
 impl LandscapeRenderCache {
     pub(crate) fn gpu_texture_id(&self) -> GpuTextureId {
         self.gpu_texture_id
+    }
+
+    pub(crate) fn has_multiple_gpu_tiles(&self) -> bool {
+        self.gpu_tiles.len() > 1
     }
 
     pub(crate) fn new(
@@ -29,6 +204,31 @@ impl LandscapeRenderCache {
         border_state: (i32, i32, bool, bool, Option<u8>),
     ) -> Self {
         let pixel_count = width as usize * height as usize;
+        let legacy_base_id = GpuTextureId::fresh();
+        let legacy_liquid_mask_id = GpuTextureId::fresh();
+        let layout = landscape_tile_layout(width, height);
+        let single_tile = layout.len() == 1;
+        let gpu_tiles = layout
+            .into_iter()
+            .map(|layout| LandscapeGpuTile {
+                layout,
+                base_id: if single_tile {
+                    legacy_base_id
+                } else {
+                    GpuTextureId::fresh()
+                },
+                liquid_mask_id: if single_tile {
+                    legacy_liquid_mask_id
+                } else {
+                    GpuTextureId::fresh()
+                },
+                pixels: None,
+                liquid_mask: None,
+                revision: 0,
+                published_revision: None,
+                dirty: Vec::new(),
+            })
+            .collect();
         Self {
             grid,
             width,
@@ -37,10 +237,9 @@ impl LandscapeRenderCache {
             border_state,
             pixels: Arc::from(vec![0; pixel_count.saturating_mul(4)].into_boxed_slice()),
             liquid_mask: Arc::from(vec![0; pixel_count].into_boxed_slice()),
-            gpu_texture_id: GpuTextureId::fresh(),
-            gpu_liquid_mask_id: GpuTextureId::fresh(),
+            gpu_texture_id: legacy_base_id,
+            gpu_tiles,
             gpu_revision: 0,
-            gpu_published_revision: 0,
             gpu_dirty: Vec::new(),
             composition_scratch: Vec::new(),
         }
@@ -63,30 +262,182 @@ impl LandscapeRenderCache {
         }
     }
 
-    fn take_gpu_resources(&mut self) -> (GpuTextureResource, GpuTextureResource) {
+    fn tile_for_source(
+        &self,
+        source_x: f32,
+        source_y: f32,
+        fog_chunked: bool,
+    ) -> Option<(usize, LandscapeTileLayout)> {
+        let (tile_x, tile_y, tile_size) =
+            cpp_texture_tile_for_source(self.width, self.height, source_x, source_y, fog_chunked)?;
+        let base = cpp_tex_size(self.width, self.height);
+        let tiles_x = self.width.div_ceil(base);
+        let tile_index = (tile_y as u32 / base)
+            .checked_mul(tiles_x)?
+            .checked_add(tile_x as u32 / base)? as usize;
+        let layout = self.gpu_tiles.get(tile_index)?.layout;
+        (layout.origin == [tile_x as u32, tile_y as u32] && layout.size == tile_size as u32)
+            .then_some((tile_index, layout))
+    }
+
+    fn copy_tile_region(
+        tile: &mut LandscapeGpuTile,
+        source_pixels: &[u8],
+        source_mask: &[u8],
+        source_width: u32,
+        region: SurfaceRect,
+    ) {
+        let tile_size = tile.layout.size as usize;
+        let origin_x = tile.layout.origin[0] as usize;
+        let origin_y = tile.layout.origin[1] as usize;
+        let logical_width = tile.layout.logical_extent[0] as usize;
+        let logical_height = tile.layout.logical_extent[1] as usize;
+        let left = region.x.max(tile.layout.origin[0] as i32) as usize;
+        let top = region.y.max(tile.layout.origin[1] as i32) as usize;
+        let right = (region.x + region.width as i32)
+            .min((tile.layout.origin[0] + tile.layout.logical_extent[0]) as i32)
+            as usize;
+        let bottom = (region.y + region.height as i32)
+            .min((tile.layout.origin[1] + tile.layout.logical_extent[1]) as i32)
+            as usize;
+        if left >= right || top >= bottom || logical_width == 0 || logical_height == 0 {
+            return;
+        }
+        let base = Arc::make_mut(tile.pixels.get_or_insert_with(|| {
+            let mut pixels = vec![255; tile_size.saturating_mul(tile_size).saturating_mul(4)];
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel[3] = 0;
+            }
+            Arc::from(pixels.into_boxed_slice())
+        }));
+        let mask = Arc::make_mut(tile.liquid_mask.get_or_insert_with(|| {
+            Arc::from(vec![0; tile_size.saturating_mul(tile_size)].into_boxed_slice())
+        }));
+        for source_y in top..bottom {
+            let local_y = source_y - origin_y;
+            let source_row = source_y * source_width as usize;
+            let destination_row = local_y * tile_size;
+            for source_x in left..right {
+                let local_x = source_x - origin_x;
+                let source_pixel = (source_row + source_x) * 4;
+                let destination_pixel = (destination_row + local_x) * 4;
+                base[destination_pixel..destination_pixel + 4]
+                    .copy_from_slice(&source_pixels[source_pixel..source_pixel + 4]);
+                mask[destination_row + local_x] = source_mask[source_row + source_x];
+            }
+        }
+    }
+
+    fn sync_gpu_tiles(&mut self, tile_indices: &[usize]) {
         let dirty = std::mem::take(&mut self.gpu_dirty);
-        let base_revision = (!dirty.is_empty()).then_some(self.gpu_published_revision);
-        self.gpu_published_revision = self.gpu_revision;
-        (
-            GpuTextureResource {
-                id: self.gpu_texture_id,
-                extent: [self.width, self.height],
-                revision: self.gpu_revision,
-                base_revision,
-                format: clonk_graphics::GpuTextureFormat::Rgba8,
-                pixels: Arc::clone(&self.pixels),
-                dirty: dirty.clone(),
-            },
-            GpuTextureResource {
-                id: self.gpu_liquid_mask_id,
-                extent: [self.width, self.height],
-                revision: self.gpu_revision,
-                base_revision,
-                format: clonk_graphics::GpuTextureFormat::R8,
-                pixels: Arc::clone(&self.liquid_mask),
-                dirty,
-            },
-        )
+        if dirty.is_empty() {
+            return;
+        }
+        let source_pixels = Arc::clone(&self.pixels);
+        let source_mask = Arc::clone(&self.liquid_mask);
+        for &tile_index in tile_indices {
+            let Some(tile) = self.gpu_tiles.get_mut(tile_index) else {
+                continue;
+            };
+            if tile.revision == self.gpu_revision {
+                continue;
+            }
+            let tile_bounds = SurfaceRect::new(
+                tile.layout.origin[0] as i32,
+                tile.layout.origin[1] as i32,
+                tile.layout.logical_extent[0],
+                tile.layout.logical_extent[1],
+            );
+            let intersections = dirty
+                .iter()
+                .filter_map(|region| region.intersection(tile_bounds))
+                .collect::<Vec<_>>();
+            if intersections.is_empty() {
+                continue;
+            }
+            let full_upload = tile.pixels.is_none() || tile.published_revision.is_none();
+            if full_upload {
+                Self::copy_tile_region(tile, &source_pixels, &source_mask, self.width, tile_bounds);
+                tile.dirty.clear();
+            } else {
+                for region in intersections {
+                    Self::copy_tile_region(tile, &source_pixels, &source_mask, self.width, region);
+                    let local = SurfaceRect::new(
+                        region.x - tile.layout.origin[0] as i32,
+                        region.y - tile.layout.origin[1] as i32,
+                        region.width,
+                        region.height,
+                    );
+                    tile.dirty.push(local);
+                }
+                if tile.dirty.len() > 128 {
+                    tile.dirty.clear();
+                }
+            }
+            tile.revision = self.gpu_revision;
+        }
+        if self.gpu_tiles.iter().enumerate().any(|(index, tile)| {
+            tile.published_revision.is_some() && !tile_indices.contains(&index)
+        }) {
+            self.gpu_dirty = dirty;
+        }
+    }
+
+    fn take_gpu_tile_resources(
+        &mut self,
+        tile_indices: &[usize],
+    ) -> Vec<(GpuTextureResource, GpuTextureResource)> {
+        self.sync_gpu_tiles(tile_indices);
+        let source_pixels = Arc::clone(&self.pixels);
+        let source_mask = Arc::clone(&self.liquid_mask);
+        tile_indices
+            .iter()
+            .filter_map(|&tile_index| {
+                let tile = self.gpu_tiles.get_mut(tile_index)?;
+                if tile.pixels.is_none() {
+                    let bounds = SurfaceRect::new(
+                        tile.layout.origin[0] as i32,
+                        tile.layout.origin[1] as i32,
+                        tile.layout.logical_extent[0],
+                        tile.layout.logical_extent[1],
+                    );
+                    Self::copy_tile_region(tile, &source_pixels, &source_mask, self.width, bounds);
+                    tile.dirty.clear();
+                    tile.revision = self.gpu_revision;
+                }
+                let dirty = std::mem::take(&mut tile.dirty);
+                let base_revision = (!dirty.is_empty())
+                    .then_some(tile.published_revision)
+                    .flatten();
+                tile.published_revision = Some(tile.revision);
+                let pixels = Arc::clone(tile.pixels.as_ref().expect("tile pixels initialized"));
+                let liquid_mask = Arc::clone(
+                    tile.liquid_mask
+                        .as_ref()
+                        .expect("tile liquid mask initialized"),
+                );
+                Some((
+                    GpuTextureResource {
+                        id: tile.base_id,
+                        extent: [tile.layout.size, tile.layout.size],
+                        revision: tile.revision,
+                        base_revision,
+                        format: clonk_graphics::GpuTextureFormat::Rgba8,
+                        pixels,
+                        dirty: dirty.clone(),
+                    },
+                    GpuTextureResource {
+                        id: tile.liquid_mask_id,
+                        extent: [tile.layout.size, tile.layout.size],
+                        revision: tile.revision,
+                        base_revision,
+                        format: clonk_graphics::GpuTextureFormat::R8,
+                        pixels: liquid_mask,
+                        dirty,
+                    },
+                ))
+            })
+            .collect()
     }
 }
 
@@ -159,16 +510,11 @@ pub(crate) fn record_gpu_landscape(
         return false;
     }
 
-    let base_id = cache.gpu_texture_id;
-    let liquid_mask_id = cache.gpu_liquid_mask_id;
-    let (base_resource, liquid_mask_resource) = cache.take_gpu_resources();
-    surface.add_gpu_texture(base_resource);
-    let (liquid_mask, liquid, phase) = if let Some((image, phase)) = liquid_animation {
-        surface.add_gpu_texture(liquid_mask_resource);
+    let (liquid, phase) = if let Some((image, phase)) = liquid_animation {
         surface.add_gpu_texture(image.gpu_texture_resource());
-        (Some(liquid_mask_id), Some(image.gpu_texture_id()), phase)
+        (Some(image.gpu_texture_id()), phase)
     } else {
-        (None, None, [0.0; 3])
+        (None, [0.0; 3])
     };
 
     let clip = surface.clip();
@@ -178,6 +524,7 @@ pub(crate) fn record_gpu_landscape(
     let offset = blit.renderer_config.destination_offset();
     let indent = blit.renderer_config.texture_indent();
     let base_texture_size = cpp_tex_size(cache.width, cache.height) as f32;
+    let mut used_tiles = Vec::new();
     let mut emit = |x: (f32, f32), y: (f32, f32), fog_modulation: Option<[u32; 4]>| {
         let outer_modulation = if blit.modulation.is_some() || fog_modulation.is_some() {
             GpuOuterModulation::Combine
@@ -199,42 +546,44 @@ pub(crate) fn record_gpu_landscape(
         let screen_bottom = offset + y.1 / source_height * surface_height as f32;
         let world_center_x = viewport_x + (x.0 + x.1) / 2.0;
         let world_center_y = viewport_y + (y.0 + y.1) / 2.0;
-        let physical_tile = if indent != 0.0 {
-            let Some(tile) = cpp_texture_tile_for_source(
-                cache.width,
-                cache.height,
-                world_center_x,
-                world_center_y,
-                fog_sampler.is_some(),
-            ) else {
-                return;
-            };
-            Some(tile)
-        } else {
-            None
+        let Some((tile_index, tile_layout)) =
+            cache.tile_for_source(world_center_x, world_center_y, fog_sampler.is_some())
+        else {
+            return;
         };
+        if !used_tiles.contains(&tile_index) {
+            used_tiles.push(tile_index);
+        }
+        let tile = &cache.gpu_tiles[tile_index];
         let adjust = |edge: f32, tile_origin: i32, physical_size: i32| {
             (edge + indent).clamp(
                 tile_origin as f32,
                 tile_origin.saturating_add(physical_size) as f32,
             )
         };
-        let (world_left, world_right, world_top, world_bottom) = physical_tile.map_or(
-            (
-                viewport_x + x.0,
-                viewport_x + x.1,
-                viewport_y + y.0,
-                viewport_y + y.1,
-            ),
-            |(tile_x, tile_y, physical_size)| {
-                (
-                    adjust(viewport_x + x.0, tile_x, physical_size),
-                    adjust(viewport_x + x.1, tile_x, physical_size),
-                    adjust(viewport_y + y.0, tile_y, physical_size),
-                    adjust(viewport_y + y.1, tile_y, physical_size),
-                )
-            },
-        );
+        let tile_x = tile_layout.origin[0] as i32;
+        let tile_y = tile_layout.origin[1] as i32;
+        let physical_size = tile_layout.size as i32;
+        let world_left = if indent == 0.0 {
+            viewport_x + x.0
+        } else {
+            adjust(viewport_x + x.0, tile_x, physical_size)
+        };
+        let world_right = if indent == 0.0 {
+            viewport_x + x.1
+        } else {
+            adjust(viewport_x + x.1, tile_x, physical_size)
+        };
+        let world_top = if indent == 0.0 {
+            viewport_y + y.0
+        } else {
+            adjust(viewport_y + y.0, tile_y, physical_size)
+        };
+        let world_bottom = if indent == 0.0 {
+            viewport_y + y.1
+        } else {
+            adjust(viewport_y + y.1, tile_y, physical_size)
+        };
         let positions = [
             [screen_left, screen_top, 1.0],
             [screen_right, screen_top, 1.0],
@@ -243,25 +592,25 @@ pub(crate) fn record_gpu_landscape(
         ];
         let uv = [
             [
-                world_left / cache.width as f32,
-                world_top / cache.height as f32,
+                (world_left - tile_x as f32) / physical_size as f32,
+                (world_top - tile_y as f32) / physical_size as f32,
             ],
             [
-                world_right / cache.width as f32,
-                world_top / cache.height as f32,
+                (world_right - tile_x as f32) / physical_size as f32,
+                (world_top - tile_y as f32) / physical_size as f32,
             ],
             [
-                world_left / cache.width as f32,
-                world_bottom / cache.height as f32,
+                (world_left - tile_x as f32) / physical_size as f32,
+                (world_bottom - tile_y as f32) / physical_size as f32,
             ],
             [
-                world_right / cache.width as f32,
-                world_bottom / cache.height as f32,
+                (world_right - tile_x as f32) / physical_size as f32,
+                (world_bottom - tile_y as f32) / physical_size as f32,
             ],
         ];
         let command = |indices: [usize; 4], modulation: [[f32; 4]; 4]| GpuCommand::Landscape {
-            base: base_id,
-            liquid_mask,
+            base: tile.base_id,
+            liquid_mask: liquid.map(|_| tile.liquid_mask_id),
             liquid,
             vertices: std::array::from_fn(|slot| {
                 let index = indices[slot];
@@ -284,7 +633,7 @@ pub(crate) fn record_gpu_landscape(
         for quad in &sampler.quads {
             emit(quad.x, quad.y, Some(quad.modulation));
         }
-    } else if indent != 0.0 {
+    } else {
         let x_ranges =
             FogSpriteSampler::axis_ranges(viewport_x, source_width, base_texture_size, false);
         let y_ranges =
@@ -301,8 +650,12 @@ pub(crate) fn record_gpu_landscape(
                 emit(x, y, None);
             }
         }
-    } else {
-        emit((0.0, source_width), (0.0, source_height), None);
+    }
+    for (base_resource, liquid_mask_resource) in cache.take_gpu_tile_resources(&used_tiles) {
+        surface.add_gpu_texture(base_resource);
+        if liquid.is_some() {
+            surface.add_gpu_texture(liquid_mask_resource);
+        }
     }
     true
 }
