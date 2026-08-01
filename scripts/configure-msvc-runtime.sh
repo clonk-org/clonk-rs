@@ -23,11 +23,8 @@ mkdir -p "$thinlto_cache"
 
 rustflags='-Ctarget-feature=+crt-static -Clinker-plugin-lto -Clinker-flavor=lld-link'
 rustflags+=" -Clink-arg=/lldltocache:$thinlto_cache_native"
-rustflags+=' -Clink-arg=/lldltocachepolicy:cache_size=0%:cache_size_bytes=512m:prune_interval=0s'
-rustflags+=' -Clink-arg=/DEBUG:NONE -Clink-arg=/OPT:REF,ICF -Clink-arg=/TIME'
-if [[ ${MSVC_THINLTO_BENCHMARK:-false} == true ]]; then
-    rustflags+=' -Clink-arg=/Brepro'
-fi
+rustflags+=' -Clink-arg=/lldltocachepolicy:cache_size=0%:cache_size_bytes=512m'
+rustflags+=' -Clink-arg=/DEBUG:NONE -Clink-arg=/OPT:REF,ICF -Clink-arg=/TIME -Clink-arg=/Brepro'
 
 # LLVM's COFF driver reads LINK/_LINK_ before explicit rustc arguments. Empty
 # both for later steps so nothing can silently override the measured contract.

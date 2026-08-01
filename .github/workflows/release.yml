@@ -281,26 +281,18 @@ jobs:
         if: matrix.runner == 'windows-latest'
         run: scripts/configure-msvc-runtime.sh
 
-      - name: Select ThinLTO cache generation
-        if: matrix.runner == 'windows-latest'
-        id: thinlto-generation
-        run: echo "value=$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
-
       - name: Restore trusted-main ThinLTO cache
         if: matrix.runner == 'windows-latest'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/clonk-msvc-thinlto
-          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}-${{ steps.thinlto-generation.outputs.value }}
-          restore-keys: |
-            clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}-
+          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}
 
       - name: Restore shipped MSVC dependency cache
         if: matrix.runner == 'windows-latest'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: windows-runtime-msvc
-          add-job-id-key: false
           save-if: false
 
       # The only pass that emits `planet`. Its archive is prefix-free and
@@ -346,6 +338,10 @@ jobs:
             -DOUTFILE="$outfile" \
             -DICON="$icon" \
             scripts/windows-installer.nsi
+
+      - name: Validate the shipped MSVC runtime
+        if: matrix.runner == 'windows-latest'
+        run: scripts/validate-msvc-runtime.sh
 
       # One pass, not one per architecture: the two builds differ only in ~20 MB
       # of executables, so a second disk image was ~340 MB of identical game

@@ -8,6 +8,7 @@ LANDING_WORKFLOW = REPOSITORY / ".github" / "workflows" / "landing.yml"
 MAIN_WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
 RELEASE_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
 MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
+MSVC_RUNTIME_VALIDATION = REPOSITORY / "scripts" / "validate-msvc-runtime.sh"
 
 
 def step_script(workflow, name):
@@ -74,9 +75,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "Test the launcher and path resolution": "-p clonk-c4group",
             "Lint Windows paths": "-p clonk-c4group",
             "Build the runtime exactly as a release ships it": "-p clonk-c4group",
-            "Check the runtime is self-contained": (
-                "for binary in clonk-app clonk-game c4group"
-            ),
+            "Check the runtime is self-contained": "scripts/validate-msvc-runtime.sh",
             "Compile the installer over a stand-in payload": (
                 '$payload_dir/bin/c4group.exe'
             ),
@@ -91,6 +90,12 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                 self.assertEqual(
                     workflow.read_text(encoding="utf-8").count(
                         "run: scripts/configure-msvc-runtime.sh"
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    workflow.read_text(encoding="utf-8").count(
+                        "run: scripts/validate-msvc-runtime.sh"
                     ),
                     1,
                 )
@@ -115,11 +120,30 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "-Clink-arg=/DEBUG:NONE",
             "-Clink-arg=/OPT:REF,ICF",
             "-Clink-arg=/TIME",
+            "-Clink-arg=/Brepro",
             "unset LINK _LINK_",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, script)
         self.assertNotIn("CARGO_PROFILE_RELEASE_LTO", script)
+        self.assertNotIn("MSVC_THINLTO_BENCHMARK", script)
+        self.assertNotIn("prune_interval", script)
+
+    def test_msvc_runtime_validation_executes_and_inspects_exact_outputs(self):
+        script = MSVC_RUNTIME_VALIDATION.read_text(encoding="utf-8")
+        for fragment in (
+            "vswhere.exe",
+            "dumpbin.exe",
+            "/DEPENDENTS",
+            "for binary in clonk-app clonk-game c4group",
+            "VCRUNTIME|MSVCP|CONCRT|UCRTBASE|API-MS-WIN-CRT|MSVCR",
+            '"$binary_dir/clonk-game.exe" --version',
+            '"$binary_dir/c4group.exe"',
+            "sha256sum",
+            "llvmcache-*",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, script)
 
     def test_thinlto_cache_is_published_only_by_trusted_main(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
@@ -148,28 +172,29 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "steps.thinlto-benchmark.outputs.cache-hit != 'true'",
         ):
             self.assertIn(guard, benchmark_save)
+        self.assertNotIn("github.run_attempt", benchmark_save)
 
         trusted_save = main[main.index("Publish trusted ThinLTO cache") :]
         for guard in (
             "github.event_name == 'push'",
+            "github.event_name == 'workflow_dispatch'",
             "github.ref == 'refs/heads/main'",
             "steps.thinlto-cache.outputs.cache-hit != 'true'",
         ):
             self.assertIn(guard, trusted_save)
+        self.assertNotIn("github.run_attempt", trusted_save)
 
-        production_prefix = (
+        production_key = (
             "clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ "
             "hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', "
             "'Cargo.lock', 'crates/**/Cargo.toml', "
-            "'scripts/configure-msvc-runtime.sh') }}-"
+            "'scripts/configure-msvc-runtime.sh') }}"
         )
         for workflow in (landing, main, release):
             with self.subTest(workflow=workflow):
-                self.assertIn(production_prefix, workflow)
-                self.assertNotIn(
-                    "restore-keys: |\n            clonk-msvc-thinlto-v1-windows-x64-\n",
-                    workflow,
-                )
+                self.assertIn(production_key, workflow)
+                self.assertNotIn("Select ThinLTO cache generation", workflow)
+                self.assertNotIn("restore-keys:", workflow)
 
     def test_windows_release_tool_build_is_post_merge_and_not_runtime_serial(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")

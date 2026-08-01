@@ -217,7 +217,6 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: windows-runtime-msvc
-          add-job-id-key: false
           save-if: false
 
       - name: Test the launcher and path resolution
@@ -282,13 +281,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
       - name: Configure the shipped MSVC runtime
-        env:
-          MSVC_THINLTO_BENCHMARK: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
         run: scripts/configure-msvc-runtime.sh
-
-      - name: Select ThinLTO cache generation
-        id: thinlto-generation
-        run: echo "value=$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
 
       # Manual runs benchmark an exact branch-scoped cache twice. This pair is
       # removed after the cold/warm result is recorded; merge groups can read
@@ -307,15 +300,14 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/clonk-msvc-thinlto
-          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}-${{ steps.thinlto-generation.outputs.value }}
-          restore-keys: |
-            clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}-
+          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: windows-runtime-msvc
-          add-job-id-key: false
-          save-if: false
+          # Temporary manual runs seed the matching dependency graph so the
+          # second identical SHA measures the production warm path.
+          save-if: ${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build the runtime exactly as a release ships it
         run: |
@@ -331,39 +323,13 @@ jobs:
           cargo build --release -p clonk-app -p clonk-game -p clonk-c4group --locked --timings
 
       - name: Check the runtime is self-contained
-        run: |
-          failed=0
-          shopt -s nullglob
-          cache_entries=("$THINLTO_CACHE_DIR"/llvmcache-*)
-          if [[ ${#cache_entries[@]} -eq 0 ]]; then
-            echo "the shipped build produced no reusable ThinLTO entries" >&2
-            failed=1
-          fi
-          du -sh "$THINLTO_CACHE_DIR"
-          for binary in clonk-app clonk-game c4group; do
-            path="target/x86_64-pc-windows-msvc/release/$binary.exe"
-            test -s "$path"
-            native_path=$(cygpath -w "$path")
-            imports=$(MSYS2_ARG_CONV_EXCL='*' dumpbin.exe /NOLOGO /DEPENDENTS "$native_path")
-            echo "$imports"
-            if grep -Eiq '(VCRUNTIME|MSVCP|UCRTBASE|API-MS-WIN-CRT)' <<<"$imports"; then
-              echo "$path imports the dynamic C/C++ runtime; +crt-static did not take" >&2
-              failed=1
-            fi
-            if [[ -e "${path%.exe}.pdb" ]]; then
-              echo "$path emitted a PDB despite /DEBUG:NONE" >&2
-              failed=1
-            fi
-            sha256sum "$path"
-          done
-          exit "$failed"
+        run: scripts/validate-msvc-runtime.sh
 
       - name: Save branch ThinLTO benchmark cache
         if: >-
           success()
           && github.event_name == 'workflow_dispatch'
           && github.ref != 'refs/heads/main'
-          && github.run_attempt == 1
           && steps.thinlto-benchmark.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

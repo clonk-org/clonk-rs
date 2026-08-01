@@ -28,7 +28,11 @@ class CiLatencyTests(unittest.TestCase):
 
         scopes = set(re.findall(r"shared-key: ([a-z0-9-]+)", landing))
         self.assertEqual(scopes, {"full-parity", "windows-runtime-msvc"})
-        self.assertEqual(landing.count("save-if: false"), 3)
+        self.assertEqual(landing.count("save-if: false"), 2)
+        self.assertIn(
+            "save-if: ${{ github.event_name == 'workflow_dispatch' }}",
+            landing,
+        )
         for scope in scopes:
             with self.subTest(scope=scope):
                 self.assertIn(f"shared-key: {scope}", main)
