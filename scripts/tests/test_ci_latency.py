@@ -208,6 +208,25 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("id: preinstalled-rust", linux)
         self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", linux)
 
+    def test_hosted_toolchains_and_cached_registry_are_reused_safely(self):
+        workflow = LANDING.read_text(encoding="utf-8")
+        linux = workflow[workflow.index("  linux:") : workflow.index("  windows-smoke:")]
+        windows_smoke = workflow[
+            workflow.index("  windows-smoke:") : workflow.index("  runtime-msvc:")
+        ]
+        runtime = workflow[
+            workflow.index("  runtime-msvc:") : workflow.index("  landing-gate:")
+        ]
+
+        for job in (linux, windows_smoke, runtime):
+            self.assertIn("rustup toolchain list", job)
+            self.assertIn('rustup run "$toolchain" rustc --version', job)
+            self.assertIn('RUSTUP_TOOLCHAIN=$toolchain', job)
+            self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", job)
+
+        self.assertIn("if ! cargo fetch --locked --offline; then", runtime)
+        self.assertIn("cargo fetch --locked", runtime)
+
     def test_literal_required_commands_remain_on_the_landing_tree(self):
         workflow = LANDING.read_text(encoding="utf-8")
         required = (
