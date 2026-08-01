@@ -124,6 +124,18 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("in_progress:none", completed.stdout)
 
+    def test_gate_waits_when_gh_uses_an_empty_running_conclusion(self):
+        self._stub(
+            'counter=.calls\n'
+            'calls=$(cat "$counter" 2>/dev/null || echo 0)\n'
+            'calls=$((calls + 1))\n'
+            'echo "$calls" > "$counter"\n'
+            'if (( calls <= 2 )); then echo in_progress:; else echo completed:success; fi\n'
+        )
+        completed = self.run_gate()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("in_progress:none", completed.stdout)
+
     def test_gate_rejects_a_terminal_failure_immediately(self):
         self._stub(
             'if [[ " $* " == *" --workflow landing.yml "* ]]; then\n'

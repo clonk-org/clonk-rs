@@ -378,6 +378,30 @@ class CiLatencyTests(unittest.TestCase):
         )
         self.assertIn("dev_feedback_render --ignored --exact", workflow[render:coverage])
 
+    def test_post_merge_replay_writes_to_the_repository_artifact_root(self):
+        workflow = MAIN.read_text(encoding="utf-8")
+        replay = workflow.index("- name: Generate deterministic replay evidence")
+        render = workflow.index("- name: Render the replay snapshot")
+
+        self.assertIn(
+            "LC_TEST_ARTIFACT_DIR: ${{ github.workspace }}/target/dev-check/replay",
+            workflow[replay:render],
+        )
+
+    def test_post_merge_render_uses_repository_artifact_paths(self):
+        workflow = MAIN.read_text(encoding="utf-8")
+        render = workflow.index("- name: Render the replay snapshot")
+        coverage = workflow.index("- name: Collect instrumented workspace coverage")
+        render_step = workflow[render:coverage]
+
+        for path in (
+            "LC_DEV_CHECK_SNAPSHOT: ${{ github.workspace }}/target/dev-check/snapshot-final.json",
+            "LC_DEV_CHECK_FRAME_PNG: ${{ github.workspace }}/target/dev-check/frame-final.png",
+            "LC_DEV_CHECK_RENDER_METRICS: ${{ github.workspace }}/target/dev-check/render-metrics.json",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, render_step)
+
     def test_dependency_guard_does_not_repeat_the_full_packaging_gate(self):
         workflow = DEPENDENCY_GUARD.read_text(encoding="utf-8")
         self.assertIn(

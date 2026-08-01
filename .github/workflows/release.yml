@@ -164,6 +164,9 @@ jobs:
                 continue
               fi
               [[ -n "$verdict" ]] || verdict=missing
+              if [[ "$verdict" == *: ]]; then
+                verdict="${verdict}none"
+              fi
               echo "$workflow $event verdict for $CI_SHA: $verdict"
               case "$verdict" in
                 completed:success) ;;
