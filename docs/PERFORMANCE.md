@@ -83,6 +83,76 @@ samples. Always retain sample counts and raw samples; a single mean hides stalls
 There is no portable measured CI baseline yet. Do not turn timings from an
 arbitrary laptop or a shared hosted runner into a blocking threshold.
 
+### Release codegen parallelism
+
+On 2026-07-31, commit `b1d71339c` and content revision `e82d6d275` were built
+on the Apple M4 Max reference machine with Rust 1.97.1. Thin LTO stayed enabled
+while release codegen units varied. Each shipped-binary build used a fresh
+target, the locked offline graph, and the real release inventory:
+
+```sh
+cgu=8
+cold_target="$(mktemp -d "${TMPDIR:-/tmp}/clonk-release-cgu.XXXXXX")"
+caffeinate -dimsu /usr/bin/time -lp env \
+  -u CARGO_INCREMENTAL \
+  -u CARGO_BUILD_JOBS \
+  -u RUSTC_WRAPPER \
+  -u RUSTC_WORKSPACE_WRAPPER \
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$cgu" \
+  CARGO_TARGET_DIR="$cold_target" \
+  cargo build --release -p clonk-app -p clonk-game -p clonk-c4group \
+    --locked --offline --timings --quiet
+```
+
+| Release codegen units | Cold wall | Build process-tree user CPU | System CPU | Target size | Three binaries |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 208.49s | 590.58s | 20.37s | 1,080,324 KiB | 43,491,408 bytes |
+| **8** | **72.38s** | 658.72s | 26.34s | 1,165,852 KiB | 54,104,384 bytes |
+| 16 | 75.29s | 694.20s | 28.21s | 1,182,436 KiB | 55,945,920 bytes |
+| 64 | 75.97s | 727.35s | 35.61s | 1,206,852 KiB | 57,716,304 bytes |
+
+The runtime control was the fixed-seed, 6,000-frame `03_Chaos` workload named
+below as the low-power regression scenario. Each arm reused its corresponding
+release target, and the three primary arms ran in balanced orders
+`1/8/16`, `16/8/1`, and `8/1/16`:
+
+```sh
+CARGO_TARGET_DIR="$cold_target" \
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$cgu" \
+  cargo build --release -p clonk-engine --example scenario_profile \
+    --locked --offline --quiet
+/usr/bin/time -lp env LC_PROFILE_MODE=tick \
+  "$cold_target/release/examples/scenario_profile" \
+  "ClonkMars.c4f/03_Chaos.c4s" 6000 424242
+```
+
+| Release codegen units | Samples | Simulation wall median | Mean/frame | p50 | p95 | p99 | Mean delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 3 | 12.054256s | 2.009012ms | 1.738625ms | 3.188125ms | 5.491166ms | baseline |
+| **8** | 3 | 12.285615s | 2.047573ms | 1.762416ms | 3.279708ms | 5.649625ms | +1.9% |
+| 16 | 3 | 12.390027s | 2.064979ms | 1.781958ms | 3.379583ms | 5.730750ms | +2.8% |
+
+Two additional reversed codegen-unit-1/64 pairs put the 64-unit mean-frame
+regression between 2.9% and 6.9%. Every runtime sample joined players `[0, 1]`,
+ended with 122 objects after 6,000 frames, and recorded no frame above the
+27.7ms native-tick budget. The profiler does not hash the final snapshot, so
+these matching outputs are a workload sanity check rather than a parity gate.
+
+Eight codegen units were selected because they reduced this cold build by
+65.3% while finishing faster, using less CPU, producing smaller binaries, and
+regressing runtime less than 16 or 64. The final binaries are 24.4% larger than
+the one-unit build; that size and the 1.9% mean-frame cost are the accepted
+tradeoff for the 136.11s local build reduction. The test profile keeps its
+explicit 256-unit override, so inheriting release does not narrow test-harness
+codegen parallelism.
+
+The build values are single sequential directional samples from fresh Cargo
+targets; later arms benefited from warmer filesystem caches. The runtime
+samples were interleaved, but the desktop session was active and on battery.
+Re-measure on the target CI and release platforms rather than treating these
+M4 measurements as portable thresholds.
+
 ### Compile-first development profile
 
 On 2026-07-30, the Apple M4 Max reference machine used fresh target directories
@@ -767,11 +837,17 @@ sample.
 
 ## CI cache interpretation
 
-The focused and full-parity jobs use separate cache scopes so concurrent jobs
-cannot replace a complete parity cache with a smaller focused cache. The cache
-is keyed by the Rust dependency/build inputs maintained by the Rust cache
-action. `CARGO_INCREMENTAL=0` keeps CI artifacts reproducible and smaller;
-the local development, play, and test profiles retain incremental behavior.
+Landing jobs restore the existing trusted-main `full-parity` and
+`windows-runtime-msvc` caches without saving short-lived merge-queue copies.
+A post-merge Linux producer compiles the complete locked workspace graph before
+it may publish; canceled runs cannot leave an incomplete immutable cache.
+Replay/render work restores that ordinary target read-only while instrumented
+coverage stays in a different target. Post-merge Windows validation refreshes
+smoke, packaging-tool, and exact static-CRT runtime artifacts only after all
+three succeed. Recording-host oracles retain their own cache. The keys include
+the Rust dependency/build inputs maintained by the Rust cache action.
+`CARGO_INCREMENTAL=0` keeps CI artifacts reproducible and smaller; the local
+development, play, and test profiles retain incremental behavior.
 
 A cache hit is not proof that every crate was reusable. Report cache state with
 the observed compile duration, and investigate unexpected rebuilds before

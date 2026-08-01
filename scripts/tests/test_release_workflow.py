@@ -1,13 +1,50 @@
-"""Release control-flow guards, exercised from the workflow's real shell."""
+"""Release validation guards, exercised from the workflow's real shell."""
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from test_release_content_handoff import step_script
+from test_release_content_handoff import WORKFLOW, step_script
+
+
+def job_block(name):
+    source = WORKFLOW.read_text(encoding="utf-8")
+    marker = f"\n  {name}:\n"
+    start = source.index(marker) + 1
+    following = re.compile(r"^  [A-Za-z0-9_-]+:$", re.MULTILINE)
+    match = following.search(source, start + 1)
+    return source[start : match.start()] if match else source[start:]
+
+
+class ReleaseWorkflowTopologyTests(unittest.TestCase):
+    def test_resolver_blocks_builds_on_exact_sha_validation(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        resolve = job_block("resolve")
+        build = job_block("build")
+
+        self.assertNotIn("\n  prepare:\n", workflow)
+        self.assertIn("actions: read", resolve)
+        self.assertIn("if: steps.resolve.outputs.release == 'true'", resolve)
+        self.assertIn("CI_SHA: ${{ steps.resolve.outputs.sha }}", resolve)
+        self.assertIn("landing.yml", resolve)
+        self.assertIn("rust.yml", resolve)
+        self.assertIn("needs: resolve", build)
+
+    def test_partial_publication_can_resume_without_persisted_git_credentials(self):
+        resolve = job_block("resolve")
+        publish = job_block("publish")
+
+        self.assertIn('"repos/${REPOSITORY}/releases/tags/v${version}"', resolve)
+        self.assertIn("--jq '.draft'", resolve)
+        self.assertIn("'(HTTP 404)'", resolve)
+        self.assertIn('if [[ "$release_state" == "false" ]]', resolve)
+        self.assertIn("persist-credentials: false", publish)
+        self.assertIn('gh release create "v${VERSION}" --draft', publish)
+        self.assertIn('gh release edit "v${VERSION}" --draft=false --latest', publish)
 
 
 @unittest.skipUnless(shutil.which("bash"), "needs bash")
@@ -17,23 +54,20 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.github_output = self.root / "github-output"
 
-    def _stub(self, name, body):
-        path = self.bin / name
+    def _stub(self, body):
+        path = self.bin / "gh"
         path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
         path.chmod(0o755)
 
-    def run_step(self, name, **extra):
-        self.github_output.write_text("", encoding="utf-8")
+    def run_gate(self, **extra):
         environment = {
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "GH_TOKEN": "stub",
-            "FORCE": "false",
             "CI_SHA": "0123456789abcdef",
-            "GITHUB_OUTPUT": str(self.github_output),
-            "REQUESTED_VERSION": "",
+            "CI_POLL_ATTEMPTS": "3",
+            "CI_POLL_SECONDS": "0",
             **extra,
         }
         return subprocess.run(
@@ -44,7 +78,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "-eo",
                 "pipefail",
                 "-c",
-                step_script(name),
+                step_script("Require exact-SHA validation"),
             ],
             cwd=self.root,
             env=environment,
@@ -52,150 +86,49 @@ class ReleaseWorkflowTests(unittest.TestCase):
             text=True,
         )
 
-    def seed_prepared_release(self, subject, version="0.5.0"):
-        scripts = self.root / "scripts"
-        scripts.mkdir()
-        prepare = scripts / "prepare-release.sh"
-        prepare.write_text("#!/usr/bin/env bash\nexit 3\n", encoding="utf-8")
-        prepare.chmod(0o755)
-        (self.root / "Cargo.toml").write_text(
-            f'[workspace.package]\nversion = "{version}"\n\n[workspace]\nmembers = []\n',
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
-        subprocess.run(
-            ["git", "config", "user.email", "release-test@example.invalid"],
-            cwd=self.root,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Release Test"],
-            cwd=self.root,
-            check=True,
-        )
-        subprocess.run(["git", "add", "Cargo.toml"], cwd=self.root, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", subject],
-            cwd=self.root,
-            check=True,
-        )
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=self.root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-
-    def test_ci_gate_accepts_only_push_runs_for_the_exact_release_sha(self):
+    def test_gate_accepts_only_the_two_exact_event_verdicts(self):
         self._stub(
-            "gh",
             '[[ " $* " == *" --commit $CI_SHA "* ]] || { echo completed:failure; exit 0; }\n'
-            '[[ " $* " == *" --event push "* ]] || { echo completed:failure; exit 0; }\n'
-            "echo completed:success\n",
+            'if [[ " $* " == *" --workflow landing.yml "* ]]; then\n'
+            '  [[ " $* " == *" --event merge_group "* ]] || { echo completed:failure; exit 0; }\n'
+            '  [[ " $* " != *" --branch "* ]] || { echo completed:failure; exit 0; }\n'
+            'elif [[ " $* " == *" --workflow rust.yml "* ]]; then\n'
+            '  [[ " $* " == *" --event push "* ]] || { echo completed:failure; exit 0; }\n'
+            '  [[ " $* " == *" --branch main "* ]] || { echo completed:failure; exit 0; }\n'
+            'else\n  echo completed:failure; exit 0\nfi\n'
+            "echo completed:success\n"
         )
-
-        completed = self.run_step("Require main's CI to be green")
-
+        completed = self.run_gate()
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_ci_gate_does_not_hide_a_newer_in_progress_run(self):
+    def test_gate_waits_for_running_checks_without_hiding_them(self):
         self._stub(
-            "gh",
-            'if [[ " $* " == *" --status completed "* ]]; then\n'
-            "  echo success\n"
-            "else\n"
-            "  echo in_progress:none\n"
-            "fi\n",
+            '[[ " $* " != *" --status completed "* ]] || exit 9\n'
+            'counter=.calls\n'
+            'calls=$(cat "$counter" 2>/dev/null || echo 0)\n'
+            'calls=$((calls + 1))\n'
+            'echo "$calls" > "$counter"\n'
+            'if (( calls <= 2 )); then echo in_progress:none; else echo completed:success; fi\n'
         )
+        completed = self.run_gate()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("in_progress:none", completed.stdout)
 
-        completed = self.run_step("Require main's CI to be green")
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("in_progress:none", completed.stderr)
-
-    def test_ci_gate_rejects_one_failed_required_workflow(self):
+    def test_gate_rejects_a_terminal_failure_immediately(self):
         self._stub(
-            "gh",
-            'if [[ " $* " == *" --workflow Windows "* ]]; then\n'
+            'if [[ " $* " == *" --workflow landing.yml "* ]]; then\n'
             "  echo completed:failure\n"
-            "else\n"
-            "  echo completed:success\n"
-            "fi\n",
+            "else\n  echo completed:success\nfi\n"
         )
-
-        completed = self.run_step("Require main's CI to be green")
-
+        completed = self.run_gate()
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("completed:failure", completed.stderr)
 
-    def test_retry_resolves_the_original_release_commit_instead_of_head(self):
-        release_sha = self.seed_prepared_release("chore: release 0.5.0")
-        (self.root / "README.md").write_text("later docs\n", encoding="utf-8")
-        subprocess.run(["git", "add", "README.md"], cwd=self.root, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "docs: later change"],
-            cwd=self.root,
-            check=True,
-        )
-
-        completed = self.run_step("Bump and commit")
-        outputs = dict(
-            line.split("=", 1)
-            for line in self.github_output.read_text(encoding="utf-8").splitlines()
-            if "=" in line
-        )
-
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(outputs["sha"], release_sha)
-
-    def test_retry_fails_closed_without_the_prepared_release_commit(self):
-        self.seed_prepared_release("docs: version metadata without release commit")
-
-        completed = self.run_step("Bump and commit")
-
+    def test_gate_times_out_when_a_verdict_never_appears(self):
+        self._stub("echo missing\n")
+        completed = self.run_gate(CI_POLL_ATTEMPTS="2")
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn(
-            "no reachable 'chore: release 0.5.0' commit exists",
-            completed.stderr,
-        )
-        self.assertNotIn(
-            "prepared=true",
-            self.github_output.read_text(encoding="utf-8"),
-        )
-
-    def test_retry_fails_closed_on_ambiguous_release_commits(self):
-        self.seed_prepared_release("chore: release 0.5.0")
-        (self.root / "README.md").write_text("duplicate release\n", encoding="utf-8")
-        subprocess.run(["git", "add", "README.md"], cwd=self.root, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "chore: release 0.5.0"],
-            cwd=self.root,
-            check=True,
-        )
-
-        completed = self.run_step("Bump and commit")
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("multiple reachable", completed.stderr)
-
-    def test_retry_rejects_a_release_subject_with_the_wrong_tree_version(self):
-        self.seed_prepared_release("chore: release 0.5.0", version="0.4.0")
-        (self.root / "Cargo.toml").write_text(
-            '[workspace.package]\nversion = "0.5.0"\n\n[workspace]\nmembers = []\n',
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "add", "Cargo.toml"], cwd=self.root, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "fix: align version metadata"],
-            cwd=self.root,
-            check=True,
-        )
-
-        completed = self.run_step("Bump and commit")
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("contains workspace version 0.4.0", completed.stderr)
+        self.assertIn("timed out", completed.stderr)
 
 
 if __name__ == "__main__":

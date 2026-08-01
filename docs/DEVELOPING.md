@@ -43,7 +43,7 @@ cargo dev-check --base origin/main --budget-seconds 60
 `cargo xtask dev-check` remains an equivalent compatibility spelling.
 
 The 60-second budget limits focused feedback; it is not a performance pass or
-a substitute for the full parity gate. Inspect the plan without running it:
+a substitute for the full landing gates. Inspect the plan without running it:
 
 ```sh
 cargo dev-check --base origin/main --plan
@@ -142,8 +142,10 @@ set. The probe uses empty sprite, cursor, and HUD assets deliberately: it
 isolates the deterministic software-render path from machine-specific asset
 discovery. It fails if repeated cached renders do not have the same checksum.
 
-GitHub Actions uploads the entire `target/dev-check` tree from the
-`focused-feedback` job even when a selected check fails or exceeds its budget.
+The post-merge main validation workflow regenerates deterministic replay
+evidence, runs the ignored render probe over that exact snapshot, and uploads
+the resulting `target/dev-check` tree. The assertions that decide whether a
+tree may land remain in the ordinary Linux test shards.
 
 ## Full pre-merge gate
 
@@ -155,7 +157,7 @@ handoff or merge:
 cargo fmt --all -- --check
 python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
-cargo test --workspace --locked
+cargo nextest run --workspace --no-fail-fast
 cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
 cargo xtask engine-snapshots verify
 cargo xtask parity verify
@@ -178,10 +180,14 @@ features.
 Behavior changes can additionally require the relevant scenario sweep/audit
 and rebuilt live C++ comparison described in `PORT_STATUS.md`.
 
-The `.github/workflows/rust.yml` workflow runs focused feedback and the full
-parity gate as separate jobs. Both check out recursive submodules and restore
-their own Rust cache. New pushes cancel obsolete runs for the same pull request
-or branch.
+`.github/workflows/landing.yml` keeps pull-request admission small, then runs
+the exhaustive workspace suite as compile-time shards against the exact merge
+queue tree. Formatting, script tests, lints, parity, snapshots, packaging,
+Windows smoke tests, and the shipped MSVC runtime feed one fail-closed
+`Landing gate`. `.github/workflows/rust.yml` runs slower diagnostic coverage,
+macOS recording-host oracles, and Windows release tooling after that SHA lands;
+releases wait for both exact-SHA workflow results. New pushes cancel superseded
+ordinary validation, while release commits retain their own run.
 
 ## Cache and timing hygiene
 

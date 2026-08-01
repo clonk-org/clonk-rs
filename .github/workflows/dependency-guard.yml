@@ -3,9 +3,9 @@ name: Dependency guard
 # Fast, submodule-free compile guard for dependency-shaped changes. It exists
 # because a Renovate security pull request once moved `rand` 0.8 -> 0.9,
 # removed `SmallRng::from_entropy()`, and broke the workspace build. The full
-# Rust workflow now runs every pull request and owns the behavioral packaging
-# gate; this workflow keeps the earlier locked-graph signal without compiling
-# that same optimized test harness twice.
+# Landing workflow owns the behavioral checks on the merge-group tree; this
+# path-filtered workflow keeps the earlier locked-graph signal without
+# compiling that same optimized test harness twice.
 
 on:
   pull_request:

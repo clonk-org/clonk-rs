@@ -47,13 +47,13 @@ class ReleasePrepareWorkflowTests(unittest.TestCase):
         self.assertNotIn("schedule:", publish)
         self.assertNotIn("workflow_dispatch:", publish)
 
-    def test_publish_resolver_does_not_depend_on_the_skipped_legacy_job(self):
-        # A skipped ancestor makes downstream implicit success() evaluate false.
+    def test_publish_resolver_has_no_legacy_preparation_ancestor(self):
         workflow = PUBLISH.read_text(encoding="utf-8")
         resolve = workflow.split("\n  resolve:\n", 1)[1].split(
             "\n  build:\n", 1
         )[0]
 
+        self.assertNotIn("\n  prepare:\n", workflow)
         self.assertNotIn("needs: [prepare]", resolve)
         self.assertNotIn("needs.prepare", resolve)
         self.assertIn("ref: ${{ github.sha }}", resolve)
