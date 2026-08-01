@@ -2,6 +2,50 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
 #[test]
+fn eliminated_player_mouse_menu_keeps_new_player_reentry_surface() {
+    // C4Viewport keeps the eliminated notice but continues to draw the local
+    // PlayerMenu control (src/C4Viewport.cpp:836-880,965-976,1511-1525).
+    // C4Game::LocalPlayerControl handles that command before its eliminated
+    // player early return (src/C4Game.cpp:3595-3622), and ActivateMain offers
+    // NewPlayer without an Eliminated gate when capacity allows
+    // (src/C4MainMenu.cpp:643-687).
+    let mut app = new_classic_running_sandbox_app();
+    let owner = app.local_owner;
+    app.snapshot = app.engine.snapshot();
+    app.snapshot
+        .players
+        .iter_mut()
+        .find(|player| player.id == owner)
+        .expect("sandbox player projection")
+        .status = PlayerStatus::Eliminated;
+    let before_players = app.engine.snapshot().players;
+
+    app.dispatch_control_event_for_local_player(
+        owner,
+        ControlEvent::Command {
+            command: ControlCommand::PlayerMenu,
+            kind: CommandKind::Press,
+        },
+    )
+    .expect("eliminated player's local PlayerMenu opens its main page");
+
+    let menu = app.ingame_menu.get(owner).expect("player menu is active");
+    assert!(menu
+        .items()
+        .iter()
+        .any(|item| item.action == MenuAction::ActivateNewPlayer));
+    assert!(
+        app.ingame_menu_has_visible_surface(owner),
+        "the eliminated viewport still exposes the C++ PlayerMenu re-entry surface"
+    );
+    assert_eq!(
+        app.engine.snapshot().players,
+        before_players,
+        "opening the local PlayerMenu does not mutate synchronized player state"
+    );
+}
+
+#[test]
 fn l053_help_suppresses_open_ingame_menu_and_right_up_exits() {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;

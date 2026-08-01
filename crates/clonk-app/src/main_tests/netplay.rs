@@ -13054,6 +13054,7 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
     client_settings.group_maker = LegacyCString::from_bytes(b"Exact maker".to_vec()).unwrap();
     app.network_mode = Some(NetworkMode::Client(client_settings));
     app.control_clients.register(7, true, false);
+    let before_players = app.engine.snapshot().players;
 
     let wire_name = clonk_engine::LegacyCString::from_bytes(
         player_path.as_os_str().as_encoded_bytes().to_vec(),
@@ -13074,6 +13075,11 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
         player_path.to_string_lossy().into_owned(),
     ))
     .expect("runtime player menu action");
+    assert_eq!(
+        app.engine.snapshot().players,
+        before_players,
+        "the client waits for the host's synchronized player-info echo before mutating players"
+    );
     assert_eq!(
         app.admission_resources.complete_path(expected_resource.id),
         Some(player_path.as_path()),
