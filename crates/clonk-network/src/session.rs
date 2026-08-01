@@ -12497,7 +12497,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn runtime_dynamic_expires_only_after_the_host_advances_past_its_tick() {
+    async fn runtime_dynamic_waits_for_the_host_second_timer_after_its_tick() {
+        // C4Network2 removes an outdated dynamic from OnSec1Timer, rather
+        // than from the control-tick callback (src/C4Network2.cpp:674-697,
+        // 1945-1980). A joiner must therefore retain a whole host timer
+        // window to retrieve the just-published runtime dynamic.
         let directories = SessionResourceDirectories::new();
         let config = HostConfig {
             resource_directory: Some(directories.host.clone()),
@@ -12545,8 +12549,56 @@ mod tests {
         .await
         .unwrap();
         assert!(
+            host.remove_runtime_dynamic().await.unwrap(),
+            "crossing the dynamic tick alone must not remove it before the host second timer"
+        );
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_runtime_dynamic_expires_on_the_host_second_timer() {
+        // C4Network2 only calls RemoveDynamic from OnSec1Timer after the
+        // control tick is stale (src/C4Network2.cpp:674-697,1945-1980).
+        // Its C4Sec1Timer is registered separately from network/control work
+        // (src/C4Network2.cpp:273-278).
+        let directories = SessionResourceDirectories::new();
+        let config = HostConfig {
+            resource_directory: Some(directories.host.clone()),
+            ..HostConfig::default()
+        };
+        let parameters = config
+            .initial_join_snapshot
+            .as_ref()
+            .unwrap()
+            .parameters
+            .clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut host = start_host(listener, config).await.unwrap();
+        let mut events = host.take_event_receiver();
+        settle_paused_network().await;
+
+        host.publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters)
+            .await
+            .unwrap();
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x35))
+            .await
+            .unwrap();
+        wait_for_host_ready_tick(&mut events, 0).await;
+        host.control_tick_reached(
+            1,
+            1,
+            DEFAULT_CONTROL_TARGET_FPS,
+            tokio::time::Instant::now(),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle_paused_network().await;
+        assert!(
             !host.remove_runtime_dynamic().await.unwrap(),
-            "the host must automatically remove a dynamic once current tick is greater"
+            "the second timer must remove an already stale runtime dynamic"
         );
 
         host.shutdown().await.unwrap();
