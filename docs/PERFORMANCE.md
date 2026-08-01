@@ -145,11 +145,10 @@ binaries, and regressing runtime less than 16 or 64. The final binaries were
 24.4% larger than the one-unit build; that size and the 1.9% mean-frame cost
 were the accepted tradeoff for the 136.11s local build reduction.
 
-A follow-up on commit `1dd151cfd` modeled the merge queue's more common state:
-release libraries restored from the trusted `main` cache, with only the final
-application rebuilt. The global profile returned to one codegen unit and only
-`clonk-app` varied. Removing the app artifacts between each arm preserved the
-same dependency artifacts and shipped `clonk-game`/`c4group` binaries:
+A follow-up on commit `1dd151cfd` modeled a warm-library build, with only the
+final application rebuilt. The global profile returned to one codegen unit and
+only `clonk-app` varied. Removing the app artifacts between each arm preserved
+the same dependency artifacts and shipped `clonk-game`/`c4group` binaries:
 
 | App codegen units | Warm app wall | Build user CPU | App binary |
 | ---: | ---: | ---: | ---: |
@@ -166,6 +165,38 @@ for the simulation libraries while cutting the measured cache-warm final tail
 by 44.4%. Because Cargo package overrides inherit into child profiles, the test
 profile repeats its explicit 256-unit app setting instead of silently
 inheriting eight.
+
+On MSVC, rustc 1.97.1 requests a PDB even though the release profile has no
+debug information, while the published archives do not contain that PDB. The
+landing, post-merge, and release builds therefore set MSVC's documented
+`_LINK_` environment variable to `/DEBUG:NONE /OPT:REF,ICF /TIME`.
+`_LINK_` is appended after rustc's linker arguments, so the final option wins;
+REF and ICF remain explicit release optimizations, and `/TIME` leaves phase
+evidence in the hosted build log. The static-CRT choice stays separately in
+`RUSTFLAGS`, preserving the dependency-cache fingerprint. If release symbols
+are published in the future, remove `/DEBUG:NONE` from all three paths and ship
+the matching PDB rather than silently producing an unused one.
+
+Hosted run `30691633087` restored an 855 MiB Windows dependency cache and took
+12m49s for the job: 11m50s in the runtime-build step and 11m10s reported by
+Cargo. An offline registry miss accounted for another 38.8s. Linker `/TIME`
+reported only 1.390s for the final `clonk-app.exe` link and 3.935s across every
+native link in the build; the roughly 8m40s final application tail is rustc
+frontend, codegen, and ThinLTO work rather than MSVC linking. A later hosted
+toolchain probe accidentally changed `CARGO_HOME` from the producer's native
+Windows path to an MSYS path, producing a cache identity that the restore-only
+landing job could never seed. Windows landing jobs therefore use the same
+pinned toolchain action as the trusted post-merge cache producer.
+
+Two exhaustive standard-runner Linux samples, runs `30693625838` and
+`30693995330`, passed every row, but shared-runner execution varied enough that
+one and four rows respectively reached five minutes. The latter sample ranged
+from 2m28s to 5m16s per row; its slow application commands spent 3m34s--3m41s
+compiling and 28--39s executing tests. A controlled four-job shard-6 probe kept
+the current app test profile: opt-level 1, opt-level 0, and 512 codegen units
+were each about 8% slower end to end than opt-level 2 with 256 units. These
+samples prove exhaustive green partitions, not a robust five-minute latency
+bound on four-vCPU hosted runners.
 
 The build values are single sequential directional samples from fresh Cargo
 targets; later arms benefited from warmer filesystem caches. The runtime

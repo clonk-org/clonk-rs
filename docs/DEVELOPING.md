@@ -182,12 +182,16 @@ and rebuilt live C++ comparison described in `PORT_STATUS.md`.
 
 `.github/workflows/landing.yml` keeps pull-request admission small, then runs
 the exhaustive workspace suite as compile-time shards against the exact merge
-queue tree. Formatting, script tests, lints, parity, snapshots, packaging,
-Windows smoke tests, and the shipped MSVC runtime feed one fail-closed
-`Landing gate`. `.github/workflows/rust.yml` runs slower diagnostic coverage,
-macOS recording-host oracles, and Windows release tooling after that SHA lands;
-releases wait for both exact-SHA workflow results. New pushes cancel superseded
-ordinary validation, while release commits retain their own run.
+queue tree. Nine application feature shards keep every fragment disjoint and
+exhaustive; the netplay feature runs as two exhaustive hash partitions, and
+the ordinary unsharded target still contains the complete test inventory. One
+full engine-integration row and exhaustive disjoint package rows cover the rest
+of the workspace. Formatting, script tests, lints, parity, snapshots,
+packaging, Windows smoke tests, and the shipped MSVC runtime feed one
+fail-closed `Landing gate`. `.github/workflows/rust.yml` runs slower diagnostic
+coverage, macOS recording-host oracles, and Windows release tooling after that
+SHA lands; releases wait for both exact-SHA workflow results. New pushes cancel
+superseded ordinary validation, while release commits retain their own run.
 
 ## Cache and timing hygiene
 
