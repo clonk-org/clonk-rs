@@ -22,12 +22,12 @@ EXPECTED_SHARDS = {
     "app-test-shard-1": {"netplay.rs"},
     "app-test-shard-2": {"menus.rs"},
     "app-test-shard-3": {"scenario_routes.rs"},
-    "app-test-shard-4": {"game_over.rs"},
+    "app-test-shard-4": {"audio.rs", "game_over.rs", "net_resources.rs"},
     "app-test-shard-5": {"chat_messages.rs", "lobby.rs"},
     "app-test-shard-6": {"league.rs", "runtime.rs"},
     "app-test-shard-7": {"scensel.rs", "startup.rs"},
     "app-test-shard-8": {"rendering.rs"},
-    "app-test-shard-9": {"audio.rs", "input.rs", "net_resources.rs", "saves.rs"},
+    "app-test-shard-9": {"input.rs", "saves.rs"},
 }
 
 

@@ -4497,17 +4497,17 @@ macro_rules! include_main_test_fragment {
 }
 
 include_main_test_fragment!("app-test-shard-3", "main_tests/scenario_routes.rs");
+include_main_test_fragment!("app-test-shard-4", "main_tests/audio.rs");
 include_main_test_fragment!("app-test-shard-4", "main_tests/game_over.rs");
+include_main_test_fragment!("app-test-shard-4", "main_tests/net_resources.rs");
 include_main_test_fragment!("app-test-shard-6", "main_tests/league.rs");
 include_main_test_fragment!("app-test-shard-5", "main_tests/lobby.rs");
-include_main_test_fragment!("app-test-shard-9", "main_tests/net_resources.rs");
 include_main_test_fragment!("app-test-shard-1", "main_tests/netplay.rs");
 include_main_test_fragment!("app-test-shard-9", "main_tests/saves.rs");
 include_main_test_fragment!("app-test-shard-7", "main_tests/scensel.rs");
 include_main_test_fragment!("app-test-shard-7", "main_tests/startup.rs");
 include_main_test_fragment!("app-test-shard-2", "main_tests/menus.rs");
 include_main_test_fragment!("app-test-shard-5", "main_tests/chat_messages.rs");
-include_main_test_fragment!("app-test-shard-9", "main_tests/audio.rs");
 include_main_test_fragment!("app-test-shard-8", "main_tests/rendering.rs");
 include_main_test_fragment!("app-test-shard-9", "main_tests/input.rs");
 include_main_test_fragment!("app-test-shard-6", "main_tests/runtime.rs");
