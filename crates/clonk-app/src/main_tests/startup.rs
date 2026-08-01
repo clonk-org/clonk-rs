@@ -4542,6 +4542,53 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
 }
 
 #[test]
+fn activate_new_player_reoffers_an_eliminated_startup_file() {
+    // ActivateNewPlayer checks Game.Players.FileInUse, not the startup
+    // selection flag; a removed C4Player therefore makes its file eligible
+    // again (src/C4MainMenu.cpp:59-121; src/C4PlayerList.cpp:433-451).
+    let player_path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../clonk-engine/tests/fixtures/embedded_player.c4p"
+    ));
+    let player_file = PlayerFile::load_from_path(player_path).expect("load player fixture");
+    let mut app = new_running_sandbox_app();
+    app.startup_player_files.push(StartupPlayerFile {
+        path: player_path.to_path_buf(),
+        file_name: "embedded_player.c4p".to_string(),
+        player_file: player_file.clone(),
+        render_model: clonk_frontend::startup_plrsel::PlrSelPlayer {
+            name: player_file.name.clone(),
+            activated: true,
+            big_icon: None,
+            portrait: None,
+            color_dw: player_file.normalized_preferred_color(),
+            score: player_file.score,
+            rounds: player_file.rounds,
+            rounds_won: player_file.rounds_won,
+            rounds_lost: player_file.rounds_lost,
+            total_playing_time: player_file.total_playing_time,
+            comment: String::new(),
+        },
+    });
+
+    app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
+        .expect("open new-player menu");
+
+    assert_eq!(
+        app.ingame_menu
+            .as_ref()
+            .expect("new-player menu opens")
+            .items()
+            .iter()
+            .map(|item| item.action.clone())
+            .collect::<Vec<_>>(),
+        [MenuAction::JoinPlayer(
+            player_path.to_string_lossy().into_owned()
+        )]
+    );
+}
+
+#[test]
 fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_full() {
     // ActivateNewPlayer preserves DirectoryIterator order, skips directory
     // groups and files already used by a joined player, and refuses to
@@ -4602,7 +4649,11 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
             .iter()
             .map(|item| item.caption.as_str())
             .collect::<Vec<_>>(),
-        ["Join player: Zulu", "Join player: Alpha"]
+        [
+            "Join player: Zulu",
+            "Join player: Active",
+            "Join player: Alpha",
+        ]
     );
     assert_eq!(
         menu.items()
@@ -4611,6 +4662,7 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
             .collect::<Vec<_>>(),
         [
             MenuAction::JoinPlayer(zulu.to_string_lossy().into_owned()),
+            MenuAction::JoinPlayer(active.to_string_lossy().into_owned()),
             MenuAction::JoinPlayer(alpha.to_string_lossy().into_owned()),
         ]
     );
