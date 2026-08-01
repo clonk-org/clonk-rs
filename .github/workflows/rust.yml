@@ -131,7 +131,7 @@ jobs:
       # only to retain a fresh snapshot for the ignored render diagnostic.
       - name: Generate deterministic replay evidence
         env:
-          LC_TEST_ARTIFACT_DIR: target/dev-check/replay
+          LC_TEST_ARTIFACT_DIR: ${{ github.workspace }}/target/dev-check/replay
           LC_KEEP_PASS_ARTIFACTS: '1'
         run: |
           cargo nextest run \
@@ -150,9 +150,9 @@ jobs:
 
       - name: Render the replay snapshot
         env:
-          LC_DEV_CHECK_SNAPSHOT: target/dev-check/snapshot-final.json
-          LC_DEV_CHECK_FRAME_PNG: target/dev-check/frame-final.png
-          LC_DEV_CHECK_RENDER_METRICS: target/dev-check/render-metrics.json
+          LC_DEV_CHECK_SNAPSHOT: ${{ github.workspace }}/target/dev-check/snapshot-final.json
+          LC_DEV_CHECK_FRAME_PNG: ${{ github.workspace }}/target/dev-check/frame-final.png
+          LC_DEV_CHECK_RENDER_METRICS: ${{ github.workspace }}/target/dev-check/render-metrics.json
         run: |
           cargo nextest run \
             -p clonk-frontend \
