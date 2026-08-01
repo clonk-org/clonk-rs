@@ -425,6 +425,19 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Open: **Runtime JoinData cleanup is tied solely to a per-host one-second
+  Tokio interval.** Native `C4Network2::Execute` removes an outdated dynamic
+  whenever `ControlTick > iDynamicTick` (`src/C4Network2.cpp:679-696`).
+  `C4Application` calls `C4Game::Execute` every running game cycle
+  (`src/C4Application.cpp:451-460`), which calls `Network.Execute` before
+  control preparation (`src/C4Game.cpp:776-782`); after
+  `C4GameControl::Ticks` advances `ControlTick` (`src/C4GameControl.cpp:325-330`),
+  the next game execution can remove the dynamic without waiting for a second.
+  Rust currently calls `remove_stale_host_runtime_dynamic` only from the
+  per-host `runtime_dynamic_timer` in `session/host_loop.rs`. Map and add the
+  post-frame/next-`C4Network2::Execute` equivalent; do not infer a guaranteed
+  one-second grace from the timer-path test.
+
 - Closed 2026-07-30: **Terrain saved under a put SolidMask survives a blast —
   oracle-faithful, not a port gap.** Reported as issue #43: a flint thrown at an
   elevator case parked on stone blows up everything visible, but moving the case
