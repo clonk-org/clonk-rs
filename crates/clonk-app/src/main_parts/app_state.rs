@@ -3576,11 +3576,20 @@ pub(crate) fn accumulate_frame_time_for_mode(
     accumulator: &mut Duration,
     elapsed: Duration,
 ) {
-    // A speed of 1 means a full 1000 ms tick. Keep the runaway-catch-up cap,
-    // but never clamp below one complete simulation interval.
-    let accumulated_limit = MAX_ACCUMULATED_TIME.max(frame_schedule.simulation_interval);
-    let clamped = elapsed.min(accumulated_limit);
-    *accumulator = (*accumulator + clamped).min(accumulated_limit);
+    // CStdApp::Execute drops a strict-more-than-two-second timer debt by
+    // reanchoring LastExecute to now (StdAppUnix.cpp:261-284). The current
+    // callback still runs, represented by one complete interval here. The
+    // accumulator is elapsed time since the previous scheduled callback, so
+    // account for its existing phase at the boundary.
+    if accumulator.saturating_add(elapsed) > Duration::from_secs(2) {
+        *accumulator = frame_schedule.simulation_interval;
+    } else {
+        // A speed of 1 means a full 1000 ms tick. Keep the runaway-catch-up
+        // cap, but never clamp below one complete simulation interval.
+        let accumulated_limit = MAX_ACCUMULATED_TIME.max(frame_schedule.simulation_interval);
+        let clamped = elapsed.min(accumulated_limit);
+        *accumulator = (*accumulator + clamped).min(accumulated_limit);
+    }
     synchronize_frame_schedule(
         mode,
         game_tick_delay_ms,

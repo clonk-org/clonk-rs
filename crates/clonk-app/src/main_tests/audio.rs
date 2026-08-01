@@ -225,6 +225,73 @@
     }
 
     #[test]
+    fn frame_timer_reanchors_only_after_two_seconds_of_timer_debt_like_cpp() {
+        // CStdApp::Execute reanchors LastExecute only when its strict
+        // more-than-two-second test is met (src/StdAppUnix.cpp:261-284). The
+        // Rust accumulator is the elapsed time since that scheduled tick, so
+        // it must participate in the same boundary. The callback still runs
+        // once, leaving one normal game interval to consume.
+        let mut schedule = frame_schedule_for_mode(AppMode::Running, 28, 1, 16);
+        let mut accumulator = Duration::from_millis(12);
+
+        accumulate_frame_time_for_mode(
+            AppMode::Running,
+            28,
+            1,
+            16,
+            &mut schedule,
+            &mut accumulator,
+            Duration::from_millis(20),
+        );
+        assert_eq!(
+            accumulator,
+            Duration::from_millis(32),
+            "ordinary frame gaps retain their timer debt"
+        );
+
+        accumulator = Duration::from_millis(12);
+        let reanchor_threshold = Duration::from_secs(2);
+        accumulate_frame_time_for_mode(
+            AppMode::Running,
+            28,
+            1,
+            16,
+            &mut schedule,
+            &mut accumulator,
+            reanchor_threshold - Duration::from_millis(12),
+        );
+        assert_eq!(
+            accumulator,
+            MAX_ACCUMULATED_TIME,
+            "exactly two seconds of timer debt keeps the bounded catch-up debt"
+        );
+
+        accumulator = Duration::from_millis(12);
+        accumulate_frame_time_for_mode(
+            AppMode::Running,
+            28,
+            1,
+            16,
+            &mut schedule,
+            &mut accumulator,
+            reanchor_threshold - Duration::from_millis(11),
+        );
+        assert_eq!(
+            accumulator,
+            schedule.simulation_interval,
+            "timer debt beyond two seconds resumes with one immediate normal-speed tick"
+        );
+
+        let mut app = new_running_sandbox_app();
+        let frame_before = app.engine.frame();
+        let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("execute the reanchored timer callback");
+        assert_eq!(outcome.executed_frames, 1);
+        assert_eq!(app.engine.frame(), frame_before + 1);
+        assert_eq!(accumulator, Duration::ZERO);
+    }
+
+    #[test]
     fn focus_loss_clears_controls_repeat_tracking_and_pointer_state() {
         let mut app = GameApp::new(
             320,
