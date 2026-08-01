@@ -18,28 +18,35 @@ CALL_PATTERN = re.compile(
     r'include_main_test_fragment!\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,?\s*\);',
     re.DOTALL,
 )
-SPLIT_CALL_PATTERN = re.compile(
-    r'include_split_main_test_fragment!\(\s*"([^"]+)"\s*,\s*"([^"]+)"'
+SHARED_CALL_PATTERN = re.compile(
+    r'include_shared_main_test_fragment!\(\s*"([^"]+)"\s*,\s*"([^"]+)"'
     r'\s*,\s*"([^"]+)"\s*,?\s*\);',
     re.DOTALL,
 )
 EXPECTED_SHARDS = {
-    "app-test-shard-1": {"netplay.rs::netplay_shard_1"},
-    "app-test-shard-2": {"menus.rs::menus_shard_1"},
-    "app-test-shard-3": {"scenario_routes.rs::scenario_routes_shard_1"},
+    "app-test-shard-1": {"netplay_1.rs"},
+    "app-test-shard-2": {"menus_1.rs"},
+    "app-test-shard-3": {"scenario_routes_1.rs"},
     "app-test-shard-4": {"audio.rs", "input.rs"},
     "app-test-shard-5": {"chat_messages.rs", "lobby.rs"},
     "app-test-shard-6": {"game_over.rs"},
     "app-test-shard-7": {"scensel.rs", "startup.rs"},
     "app-test-shard-8": {"net_resources.rs", "saves.rs"},
     "app-test-shard-9": {"league.rs", "rendering.rs"},
-    "app-test-shard-10": {"netplay.rs::netplay_shard_2"},
+    "app-test-shard-10": {"netplay_2.rs"},
     "app-test-shard-11": {
-        "menus.rs::menus_shard_2",
+        "menus_2.rs",
         "runtime.rs",
-        "scenario_routes.rs::scenario_routes_shard_2",
+        "scenario_routes_2.rs",
     },
 }
+EXPECTED_SHARED = [
+    (
+        "app-test-shard-3",
+        "app-test-shard-11",
+        "main_tests/scenario_routes_common.rs",
+    )
+]
 
 
 def feature_closure(features, roots):
@@ -87,7 +94,7 @@ class ClonkAppTestShardTests(unittest.TestCase):
 
         source = HARNESS.read_text(encoding="utf-8")
         calls = CALL_PATTERN.findall(source)
-        split_calls = SPLIT_CALL_PATTERN.findall(source)
+        shared_calls = SHARED_CALL_PATTERN.findall(source)
         assigned = defaultdict(set)
         paths = []
         for selector, relative in calls:
@@ -97,31 +104,10 @@ class ClonkAppTestShardTests(unittest.TestCase):
             assigned[selector].add(path.name)
             paths.append(path)
 
-        self.assertEqual(
-            split_calls,
-            [
-                (
-                    "app-test-shard-3",
-                    "app-test-shard-11",
-                    "main_tests/scenario_routes.rs",
-                ),
-                (
-                    "app-test-shard-1",
-                    "app-test-shard-10",
-                    "main_tests/netplay.rs",
-                ),
-                (
-                    "app-test-shard-2",
-                    "app-test-shard-11",
-                    "main_tests/menus.rs",
-                ),
-            ],
-        )
-        for first, second, relative in split_calls:
+        self.assertEqual(shared_calls, EXPECTED_SHARED)
+        for first, second, relative in shared_calls:
             path = (APP / "src" / relative).resolve()
             self.assertEqual(path.parent, FRAGMENTS.resolve())
-            assigned[first].add(f"{path.name}::{path.stem}_shard_1")
-            assigned[second].add(f"{path.name}::{path.stem}_shard_2")
             paths.append(path)
 
         self.assertEqual(dict(assigned), EXPECTED_SHARDS)
@@ -129,11 +115,12 @@ class ClonkAppTestShardTests(unittest.TestCase):
         self.assertEqual(Counter(paths), Counter(discovered))
         called_selectors = {selector for selector, _ in calls}
         called_selectors.update(
-            selector for first, second, _ in split_calls for selector in (first, second)
+            selector for first, second, _ in shared_calls for selector in (first, second)
         )
         self.assertEqual(called_selectors, selectors)
         self.assertEqual(source.count("macro_rules! include_main_test_fragment"), 1)
-        self.assertEqual(source.count("macro_rules! include_split_main_test_fragment"), 1)
+        self.assertEqual(source.count("macro_rules! include_shared_main_test_fragment"), 1)
+        self.assertNotIn("include_split_main_test_fragment", source)
         self.assertEqual(
             re.findall(r'include!\(\s*"main_tests/[^"]+"\s*\)', source),
             [],
@@ -151,7 +138,7 @@ class ClonkAppTestShardTests(unittest.TestCase):
             '#[cfg(any(not(feature="app-test-shard-mode"),feature=$first,'
             'feature=$second))]include!($path);',
             compact,
-            "the split fragment must compile for either half and ordinary tests",
+            "shared support must compile for either consumer and ordinary tests",
         )
         selector_guard = ",".join(
             f'feature="{selector}"'
@@ -164,20 +151,14 @@ class ClonkAppTestShardTests(unittest.TestCase):
             "the internal sentinel alone must not silently produce an empty shard",
         )
 
-        for fragment, first, second in (
-            ("netplay", "app-test-shard-1", "app-test-shard-10"),
-            ("scenario_routes", "app-test-shard-3", "app-test-shard-11"),
-            ("menus", "app-test-shard-2", "app-test-shard-11"),
-        ):
-            source = (FRAGMENTS / f"{fragment}.rs").read_text(encoding="utf-8")
-            compact_fragment = normalized_rust(source)
-            for index, selector in enumerate((first, second), start=1):
-                self.assertIn(
-                    '#[cfg(any(not(feature="app-test-shard-mode"),'
-                    f'feature="{selector}"))]mod{fragment}_shard_{index}'
-                    "{usesuper::*;",
-                    compact_fragment,
+        for fragment in ("netplay", "scenario_routes", "menus"):
+            for index in (1, 2):
+                part = (FRAGMENTS / f"{fragment}_{index}.rs").read_text(
+                    encoding="utf-8"
                 )
+                self.assertNotIn(f"mod {fragment}_shard_", part)
+                self.assertNotIn("#[rustfmt::skip]", part)
+                self.assertNotIn("use super::*;", part)
 
     def test_shared_harness_tests_run_once_in_shard_five(self):
         source = HARNESS.read_text(encoding="utf-8")
