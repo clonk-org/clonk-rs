@@ -190,28 +190,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Reuse exact preinstalled Rust
-        id: preinstalled-rust
-        run: |
-          required='rustc 1.97.1 '
-          exact=false
-          if command -v rustup >/dev/null; then
-            while read -r toolchain _; do
-              if version=$(rustup run "$toolchain" rustc --version 2>/dev/null) &&
-                [[ "$version" == "$required"* ]]; then
-                sysroot=$(rustup run "$toolchain" rustc --print sysroot)
-                echo "$sysroot/bin" >> "$GITHUB_PATH"
-                echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
-                exact=true
-                break
-              fi
-            done < <(rustup toolchain list)
-          fi
-          echo "exact=$exact" >> "$GITHUB_OUTPUT"
-
-      - name: Install exact Rust toolchain
-        if: steps.preinstalled-rust.outputs.exact != 'true'
-        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
         with:
@@ -277,28 +256,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Reuse exact preinstalled Rust
-        id: preinstalled-rust
-        run: |
-          required='rustc 1.97.1 '
-          exact=false
-          if command -v rustup >/dev/null; then
-            while read -r toolchain _; do
-              if version=$(rustup run "$toolchain" rustc --version 2>/dev/null) &&
-                [[ "$version" == "$required"* ]]; then
-                sysroot=$(rustup run "$toolchain" rustc --print sysroot)
-                echo "$sysroot/bin" >> "$GITHUB_PATH"
-                echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
-                exact=true
-                break
-              fi
-            done < <(rustup toolchain list)
-          fi
-          echo "exact=$exact" >> "$GITHUB_OUTPUT"
-
-      - name: Install exact Rust toolchain
-        if: steps.preinstalled-rust.outputs.exact != 'true'
-        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

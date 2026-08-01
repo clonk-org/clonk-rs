@@ -236,7 +236,7 @@ class CiLatencyTests(unittest.TestCase):
             workflow.index("  runtime-msvc:") : workflow.index("  landing-gate:")
         ]
 
-        for job in (linux, windows_smoke, runtime):
+        for job in (linux,):
             self.assertIn("rustup toolchain list", job)
             self.assertIn('rustup run "$toolchain" rustc --version', job)
             self.assertIn(
@@ -247,6 +247,15 @@ class CiLatencyTests(unittest.TestCase):
             self.assertIn('CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}', job)
             self.assertNotIn('RUSTUP_TOOLCHAIN=$toolchain', job)
             self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", job)
+
+        pinned_toolchain = (
+            "uses: dtolnay/rust-toolchain@"
+            "46511b1c83438f0dd37c02d843619ece5a4abb5b"
+        )
+        for job in (windows_smoke, runtime):
+            self.assertIn(pinned_toolchain, job)
+            self.assertNotIn("id: preinstalled-rust", job)
+            self.assertNotIn("CARGO_HOME=", job)
 
         self.assertIn("if ! cargo fetch --locked --offline; then", runtime)
         self.assertIn("cargo fetch --locked", runtime)
