@@ -282,6 +282,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: windows-runtime-msvc
+          add-job-id-key: false
 
       - name: Refresh Windows smoke-test cache
         run: cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core -p clonk-logging --locked --no-fail-fast
@@ -291,14 +292,36 @@ jobs:
       - name: Build the Windows packaging tool
         run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
 
+      - name: Configure the shipped MSVC runtime
+        run: scripts/configure-msvc-runtime.sh
+
+      - name: Select ThinLTO cache generation
+        id: thinlto-generation
+        run: echo "value=$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore trusted-main ThinLTO cache
+        id: thinlto-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clonk-msvc-thinlto
+          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}-${{ steps.thinlto-generation.outputs.value }}
+          restore-keys: |
+            clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}-
+
+      # The earlier cache serves smoke tests and the native packaging tool.
+      # Re-enter it after setting target flags so this producer has the same
+      # dependency-cache identity as the merge queue's shipped build.
+      - name: Restore or publish the shipped MSVC dependency cache
+        id: windows-runtime-cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-runtime-msvc
+          add-job-id-key: false
+
       # This exact graph is the merge queue's long Windows path. Rebuilding it
       # after landing keeps the trusted cache current without letting ephemeral
       # queue refs consume the repository cache quota.
       - name: Refresh the shipped MSVC runtime cache
-        env:
-          CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
-          RUSTFLAGS: -C target-feature=+crt-static
-          _LINK_: /DEBUG:NONE /OPT:REF,ICF /TIME
         run: |
           cargo fetch --locked
           zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
@@ -308,3 +331,25 @@ jobs:
           fi
           export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
           cargo build --release -p clonk-app -p clonk-game -p clonk-c4group --locked --timings
+
+      - name: Check the trusted ThinLTO cache
+        run: |
+          shopt -s nullglob
+          cache_entries=("$THINLTO_CACHE_DIR"/llvmcache-*)
+          if [[ ${#cache_entries[@]} -eq 0 ]]; then
+            echo "the trusted shipped build produced no reusable ThinLTO entries" >&2
+            exit 1
+          fi
+          du -sh "$THINLTO_CACHE_DIR"
+
+      - name: Publish trusted ThinLTO cache
+        if: >-
+          success()
+          && github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && github.run_attempt == 1
+          && steps.thinlto-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clonk-msvc-thinlto
+          key: ${{ steps.thinlto-cache.outputs.cache-primary-key }}

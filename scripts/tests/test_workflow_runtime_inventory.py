@@ -7,6 +7,7 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 LANDING_WORKFLOW = REPOSITORY / ".github" / "workflows" / "landing.yml"
 MAIN_WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
 RELEASE_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
+MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
 
 
 def step_script(workflow, name):
@@ -84,23 +85,90 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             with self.subTest(step=step):
                 self.assertIn(fragment, step_script(LANDING_WORKFLOW, step))
 
-    def test_msvc_builds_share_static_crt_and_link_timing_flags(self):
-        rustflags = "RUSTFLAGS: -C target-feature=+crt-static"
-        link_flags = "_LINK_: /DEBUG:NONE /OPT:REF,ICF /TIME"
-
+    def test_msvc_builds_share_cached_linker_plugin_lto_configuration(self):
         for workflow in (LANDING_WORKFLOW, MAIN_WORKFLOW, RELEASE_WORKFLOW):
             with self.subTest(workflow=workflow.name):
                 self.assertEqual(
-                    workflow.read_text(encoding="utf-8").count(rustflags),
+                    workflow.read_text(encoding="utf-8").count(
+                        "run: scripts/configure-msvc-runtime.sh"
+                    ),
                     1,
                 )
-                self.assertEqual(
-                    workflow.read_text(encoding="utf-8").count(link_flags),
-                    1,
-                )
+                self.assertNotIn("_LINK_:", workflow.read_text(encoding="utf-8"))
                 self.assertNotIn(
-                    "-C link-arg=",
+                    "CARGO_PROFILE_RELEASE_LTO",
                     workflow.read_text(encoding="utf-8"),
+                )
+
+        script = MSVC_RUNTIME_CONFIG.read_text(encoding="utf-8")
+        for fragment in (
+            "release: 1.97.1",
+            "LLVM version: 22.1.6",
+            "cargo_target=x86_64-pc-windows-msvc",
+            'CARGO_BUILD_TARGET=$cargo_target',
+            "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER",
+            "-Ctarget-feature=+crt-static",
+            "-Clinker-plugin-lto",
+            "-Clinker-flavor=lld-link",
+            "-Clink-arg=/lldltocache:",
+            "cache_size_bytes=512m",
+            "-Clink-arg=/DEBUG:NONE",
+            "-Clink-arg=/OPT:REF,ICF",
+            "-Clink-arg=/TIME",
+            "unset LINK _LINK_",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, script)
+        self.assertNotIn("CARGO_PROFILE_RELEASE_LTO", script)
+
+    def test_thinlto_cache_is_published_only_by_trusted_main(self):
+        landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        restore = (
+            "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+            " # v6.1.0"
+        )
+        save = (
+            "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+            " # v6.1.0"
+        )
+
+        self.assertEqual(landing.count(restore), 2)
+        self.assertEqual(landing.count(save), 1)
+        self.assertEqual(main.count(restore), 1)
+        self.assertEqual(main.count(save), 1)
+        self.assertEqual(release.count(restore), 1)
+        self.assertNotIn(save, release)
+
+        benchmark_save = landing[landing.index("Save branch ThinLTO benchmark cache") :]
+        for guard in (
+            "github.event_name == 'workflow_dispatch'",
+            "github.ref != 'refs/heads/main'",
+            "steps.thinlto-benchmark.outputs.cache-hit != 'true'",
+        ):
+            self.assertIn(guard, benchmark_save)
+
+        trusted_save = main[main.index("Publish trusted ThinLTO cache") :]
+        for guard in (
+            "github.event_name == 'push'",
+            "github.ref == 'refs/heads/main'",
+            "steps.thinlto-cache.outputs.cache-hit != 'true'",
+        ):
+            self.assertIn(guard, trusted_save)
+
+        production_prefix = (
+            "clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ "
+            "hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', "
+            "'Cargo.lock', 'crates/**/Cargo.toml', "
+            "'scripts/configure-msvc-runtime.sh') }}-"
+        )
+        for workflow in (landing, main, release):
+            with self.subTest(workflow=workflow):
+                self.assertIn(production_prefix, workflow)
+                self.assertNotIn(
+                    "restore-keys: |\n            clonk-msvc-thinlto-v1-windows-x64-\n",
+                    workflow,
                 )
 
     def test_windows_release_tool_build_is_post_merge_and_not_runtime_serial(self):

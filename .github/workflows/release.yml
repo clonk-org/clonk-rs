@@ -277,6 +277,32 @@ jobs:
       - name: Build the packaging tool
         run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
 
+      - name: Configure the shipped MSVC runtime
+        if: matrix.runner == 'windows-latest'
+        run: scripts/configure-msvc-runtime.sh
+
+      - name: Select ThinLTO cache generation
+        if: matrix.runner == 'windows-latest'
+        id: thinlto-generation
+        run: echo "value=$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore trusted-main ThinLTO cache
+        if: matrix.runner == 'windows-latest'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clonk-msvc-thinlto
+          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}-${{ steps.thinlto-generation.outputs.value }}
+          restore-keys: |
+            clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}-
+
+      - name: Restore shipped MSVC dependency cache
+        if: matrix.runner == 'windows-latest'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-runtime-msvc
+          add-job-id-key: false
+          save-if: false
+
       # The only pass that emits `planet`. Its archive is prefix-free and
       # therefore byte-identical on every triple, so emitting it from every pass
       # would spend the time to produce exact duplicates. `content` is not
@@ -288,21 +314,6 @@ jobs:
       - name: Package Windows installer
         if: matrix.runner == 'windows-latest'
         env:
-          # Named rather than left to the host, so the archive names and the
-          # manifest keys are decided here. It also confines RUSTFLAGS to the
-          # target's own artifacts: with a target requested, cargo does not
-          # pass them to build scripts or proc macros, which are host units
-          # and must keep the CRT their host toolchain expects.
-          CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
-          # MSVC links the C runtime dynamically; the mingw cross-build linked
-          # it statically. Without this, a machine with no VC++ redistributable
-          # fails to start the game at all — the loader reports a missing
-          # `vcruntime140.dll` before `main` runs, so nothing is logged and the
-          # launcher never sees it. The landing workflow builds the same
-          # configuration for every queued tree, which proves the /MT-vs-/MD
-          # link before this release is allowed to run.
-          RUSTFLAGS: -C target-feature=+crt-static
-          _LINK_: /DEBUG:NONE /OPT:REF,ICF /TIME
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
