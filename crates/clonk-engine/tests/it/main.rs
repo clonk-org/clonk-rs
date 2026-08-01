@@ -23,14 +23,15 @@ macro_rules! shard_modules {
     };
 }
 
-// Coverage run 30654545416 balances these at 299.799s and 299.801s after
-// keeping cross-module helper bundles atomic. Shard 1 owns recording-host tests.
+// Keep cross-module helper bundles atomic. Shard 1 owns recording-host tests;
+// bird_flight offsets shard 2's use beside the unit and parity suites in CI.
 shard_modules!(
     "engine-it-shard-1",
     action_attach,
     action_build,
     action_procedure,
     activate_entrance_native,
+    bird_flight,
     component_natives,
     component_order,
     construction_check_feedback,
@@ -80,7 +81,6 @@ shard_modules!(
 
 shard_modules!(
     "engine-it-shard-2",
-    bird_flight,
     blobby_soccer_effect_call,
     body_declarations,
     dragon_rock_audio,
