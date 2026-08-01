@@ -171,7 +171,7 @@ class CiLatencyTests(unittest.TestCase):
                 matrix_entry(workflow, f"app {index}/9"),
             )
         expected_apt = {
-            "remaining workspace 1/2": "libvulkan1 mesa-vulkan-drivers",
+            "remaining workspace 1/2": "mesa-vulkan-drivers",
             "remaining workspace 2/2": "libasound2-dev libxmp4",
             "workspace quality": "libasound2-dev libudev-dev python3-pil",
         }

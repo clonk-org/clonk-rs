@@ -94,7 +94,7 @@ jobs:
               cargo xtask parity verify || failed=1
               exit "$failed"
           - name: remaining workspace 1/2
-            apt: libvulkan1 mesa-vulkan-drivers
+            apt: mesa-vulkan-drivers
             command: cargo nextest run -p clonk-app-core -p clonk-app-menus -p clonk-app-render -p clonk-frontend -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-logging -p clonk-scaling --no-fail-fast --locked
           - name: remaining workspace 2/2
             apt: libasound2-dev libxmp4
