@@ -24,6 +24,7 @@ mod test_concat_operator;
 mod test_context_annotation;
 mod test_cowb_issue;
 mod test_division_by_zero;
+mod test_effect_check_parameter_conversion;
 mod test_elev_full;
 mod test_elev_issue;
 mod test_ellipsis_and_par;

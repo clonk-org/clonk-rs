@@ -2024,6 +2024,22 @@ impl Engine {
         Ok((result, finals))
     }
 
+    /// Exact engine-global entry for a scripted C4Effect callback. C++ builds
+    /// its callback argument set from owned C4Values, so `&` parameters do not
+    /// receive aliases unless the native caller explicitly supplied one.
+    #[doc(hidden)]
+    pub fn call_global_for_effect_callback(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Value, ScriptError> {
+        let vm = self
+            .vm()
+            .with_exact_global_link_lookup()
+            .with_effect_callback_parameter_conversion();
+        vm.call_engine_global(name, args).map_err(ScriptError::from)
+    }
+
     /// Execute an immutable function captured by a deferred native callback.
     /// The destination Engine still contributes its live host functions,
     /// globals and local-helper scope; the entry body is never re-resolved by
@@ -2078,6 +2094,31 @@ impl Engine {
             .map_err(ScriptError::from)
     }
 
+    /// Scripted-C4Effect counterpart to
+    /// [`Engine::call_pinned_with_cells_and_this`]. The selected callback
+    /// alone receives C++'s pre-STRICT3 conversion-warning compatibility.
+    #[doc(hidden)]
+    pub fn call_pinned_with_cells_and_this_for_effect_callback(
+        &self,
+        function: &Function,
+        engine_global: bool,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<Value, ScriptError> {
+        let vm = self
+            .vm()
+            .with_this(this)
+            .with_effect_callback_parameter_conversion();
+        let vm = if engine_global {
+            vm.with_exact_global_link_lookup()
+        } else {
+            vm
+        };
+        vm.call_pinned_with_cells(function, args, cells)
+            .map_err(ScriptError::from)
+    }
+
     /// Call a function with per-object local variable context
     /// Returns (result, updated_local_vars)
     pub fn call_with_locals(
@@ -2105,6 +2146,25 @@ impl Engine {
         this: Value,
     ) -> Result<Value, ScriptError> {
         let vm = self.vm().with_this(this);
+        vm.call_with_cells(name, args, cells)
+            .map_err(ScriptError::from)
+    }
+
+    /// Calls the selected scripted C4Effect callback with C++'s
+    /// `nonStrict3WarnConversionOnly` parameter behavior. Do not use for
+    /// ordinary script calls.
+    #[doc(hidden)]
+    pub fn call_effect_callback_with_cells_and_this(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<Value, ScriptError> {
+        let vm = self
+            .vm()
+            .with_this(this)
+            .with_effect_callback_parameter_conversion();
         vm.call_with_cells(name, args, cells)
             .map_err(ScriptError::from)
     }
@@ -2191,6 +2251,24 @@ impl Engine {
         this: Value,
     ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
         let vm = self.vm().with_this(this);
+        vm.call_with_locals(name, args, local_vars)
+            .map_err(ScriptError::from)
+    }
+
+    /// Scripted-C4Effect counterpart to [`Engine::call_with_locals_and_this`]
+    /// for a definition-scope callback with no object receiver.
+    #[doc(hidden)]
+    pub fn call_effect_callback_with_locals_and_this(
+        &self,
+        name: &str,
+        args: &[Value],
+        local_vars: &std::collections::HashMap<String, Value>,
+        this: Value,
+    ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
+        let vm = self
+            .vm()
+            .with_this(this)
+            .with_effect_callback_parameter_conversion();
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
     }

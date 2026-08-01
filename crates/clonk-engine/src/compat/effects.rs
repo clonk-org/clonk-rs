@@ -257,12 +257,41 @@ fn dispatch_effect_fx_callback_fail_safe(
     function: &str,
     call_args: &[Value],
 ) -> i32 {
-    match dispatch_effect_fx_callback(
-        effect.command_target,
-        effect.command_id.as_deref(),
+    fold_effect_callback_fail_safe(
         function,
-        call_args,
-    ) {
+        dispatch_effect_fx_callback(
+            effect.command_target,
+            effect.command_id.as_deref(),
+            function,
+            call_args,
+        ),
+    )
+}
+
+/// C4Effect::Check uses the same fail-safe result policy when its caller
+/// suppresses errors, but retains C++'s warning-only pre-STRICT3 conversion
+/// behavior at the checker entry (C4Effect.cpp:271-287).
+fn dispatch_effect_check_fx_callback_fail_safe(
+    effect: &EffectState,
+    function: &str,
+    call_args: &[Value],
+) -> i32 {
+    fold_effect_callback_fail_safe(
+        function,
+        dispatch_effect_check_fx_callback(
+            effect.command_target,
+            effect.command_id.as_deref(),
+            function,
+            call_args,
+        ),
+    )
+}
+
+fn fold_effect_callback_fail_safe(
+    function: &str,
+    callback: Option<Result<Value, RuntimeError>>,
+) -> i32 {
+    match callback {
         None => 0,
         Some(Ok(value)) => value_as_i32(&value),
         Some(Err(error)) => {
@@ -565,7 +594,7 @@ fn check_effect_with_policy(
         ];
         call_args.extend(values.iter().cloned());
         let result = if pass_errors {
-            match dispatch_effect_fx_callback(
+            match dispatch_effect_check_fx_callback(
                 checker.command_target,
                 checker.command_id.as_deref(),
                 &function,
@@ -575,7 +604,7 @@ fn check_effect_with_policy(
                 Some(result) => value_as_i32(&result?),
             }
         } else {
-            dispatch_effect_fx_callback_fail_safe(&checker, &function, &call_args)
+            dispatch_effect_check_fx_callback_fail_safe(&checker, &function, &call_args)
         };
         match result {
             -1 => return Ok(Value::Int(-1)),
@@ -1450,6 +1479,41 @@ fn dispatch_effect_fx_callback(
     function: &str,
     call_args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
+    dispatch_effect_fx_callback_with_parameter_conversion_policy(
+        command_target,
+        command_id,
+        function,
+        call_args,
+        EffectCallbackParameterConversionPolicy::Standard,
+    )
+}
+
+/// `C4Effect::Check` executes its retained checker with
+/// `nonStrict3WarnConversionOnly=true` (C4Effect.cpp:271-287). This call site
+/// opts into the generic scripted-effect policy without changing ordinary
+/// script calls.
+fn dispatch_effect_check_fx_callback(
+    command_target: Option<i32>,
+    command_id: Option<&str>,
+    function: &str,
+    call_args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    dispatch_effect_fx_callback_with_parameter_conversion_policy(
+        command_target,
+        command_id,
+        function,
+        call_args,
+        EffectCallbackParameterConversionPolicy::WarnForNonStrict3,
+    )
+}
+
+fn dispatch_effect_fx_callback_with_parameter_conversion_policy(
+    command_target: Option<i32>,
+    command_id: Option<&str>,
+    function: &str,
+    call_args: &[Value],
+    parameter_conversion: EffectCallbackParameterConversionPolicy,
+) -> Option<Result<Value, RuntimeError>> {
     if let Some(command_target) = command_target {
         // pFn->Exec(pCommandTarget, ...) — the command target is `this`
         // (C4Effect.cpp:443-445,456). GetFuncRecursive also reaches native
@@ -1483,10 +1547,16 @@ fn dispatch_effect_fx_callback(
                         resolution,
                         function,
                         call_args,
+                        parameter_conversion,
                     )
                 });
             }
-            return call_world_object_function_inflight(command_target, function, call_args);
+            return call_world_object_function_inflight(
+                command_target,
+                function,
+                call_args,
+                parameter_conversion,
+            );
         }
     }
     let definition_script = command_id.and_then(definition_id_for_c4id).and_then(|id| {
@@ -1517,7 +1587,12 @@ fn dispatch_effect_fx_callback(
                 })
             });
             return exact_script.and_then(|script| {
-                call_scoped_global_effect_function(script, function, call_args)
+                call_scoped_global_effect_function(
+                    script,
+                    function,
+                    call_args,
+                    parameter_conversion,
+                )
             });
         }
         let local_definition = resolution
@@ -1528,6 +1603,7 @@ fn dispatch_effect_fx_callback(
             local_definition,
             function,
             call_args,
+            parameter_conversion,
         );
     }
     // No command target at all: Game.ScriptEngine — resolve the retained
@@ -1541,8 +1617,9 @@ fn dispatch_effect_fx_callback(
                 .or_else(|| context.world.resolve_engine_host_script(function))
         })
     });
-    global_carrier
-        .and_then(|script| call_scoped_global_effect_function(script, function, call_args))
+    global_carrier.and_then(|script| {
+        call_scoped_global_effect_function(script, function, call_args, parameter_conversion)
+    })
 }
 
 /// `C4Object::GetInfoString` effect suffix: query every attached effect in
