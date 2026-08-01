@@ -36,9 +36,9 @@ EXPECTED_SHARDS = {
     "app-test-shard-10": {"netplay_2.rs"},
     "app-test-shard-11": {
         "menus_2.rs",
-        "runtime.rs",
         "scenario_routes_2.rs",
     },
+    "app-test-shard-12": {"runtime.rs"},
 }
 EXPECTED_SHARED = [
     (
