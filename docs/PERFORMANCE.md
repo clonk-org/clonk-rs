@@ -211,6 +211,14 @@ pinned Rust toolchain keeps future dependency-cache identities stable, and
 trusted `main` alone publishes both dependency and ThinLTO caches. Queue and
 release jobs restore them without writing short-lived copies.
 
+Production-plumbing run `30701547831` deliberately began with neither exact
+cache and finished green in 12m55s. Cargo reported 11m32s; the application
+rustc span was 8m08.050s and its cold LTO link consumed 4m03.251s. Validation
+found a 119 MiB reusable ThinLTO cache, no dynamic CRT or PDB dependency, and
+working executables. All three hashes matched the earlier ThinLTO builds. The
+separate Windows smoke job pinned NSIS 3.12, compiled the stand-in installer,
+and finished in 3m56s.
+
 These samples put the standard four-vCPU Windows runner above the five-minute
 landing target even with both caches exact. The remaining cost is application
 frontend and code generation, not linking. Meeting five minutes without
@@ -230,10 +238,20 @@ not a robust five-minute latency bound on four-vCPU hosted runners.
 
 The replacement queue graph uses 18 Linux rows and two Windows rows. It turns
 the two netplay runtime hash partitions into independent compile-time modules,
-rebalances the remaining nine application selectors from aggregate testcase
-duration, splits engine integration across its two feature selectors, and
-partitions all 26 remaining workspace packages exactly once across two rows.
-The ordinary unsharded suite remains the coverage reference.
+splits and rebalances the other application tests across ten selectors, splits
+engine integration across its two feature selectors, and partitions all 26
+remaining workspace packages exactly once across two rows. The ordinary
+unsharded suite remains the coverage reference.
+
+Hosted workflow-dispatch run `30702040649` exercised the final Linux partition
+at commit `6dd2b490c`. All 18 jobs started within 20 seconds and passed; workflow
+creation to the last Linux completion was 4m55s. The slowest row was remaining
+workspace 1/2 at 4m51s. Moving the eight `bird_flight` cases between the
+existing engine selectors left their paired rows at 4m00s and 3m46s instead of
+the predecessor's 4m56s critical row. Every row retained the trusted-main Rust
+cache identity, though each restored a compatible prefix rather than an exact
+file-hash key. This is a shared-runner sample with five seconds of end-to-end
+margin, not a portable timing guarantee.
 
 Because the merge queue admits one candidate at a time, three Linux
 merge-group rows and the shipped-MSVC row claim the rolling Linux-cache,
