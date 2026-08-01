@@ -57,7 +57,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             " # v7.0.1"
         )
 
-        self.assertEqual(workflow.count(checkout), 3)
+        self.assertEqual(workflow.count(checkout), 2)
         self.assertNotIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow)
         self.assertIn("tool: cargo-nextest@0.9.91", workflow)
 
@@ -70,12 +70,10 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                     line,
                 )
 
-    def test_landing_jobs_cover_c4group_everywhere_the_runtime_is_inventoried(self):
+    def test_landing_smoke_covers_c4group_everywhere_it_is_inventoried(self):
         expected = {
             "Test the launcher and path resolution": "-p clonk-c4group",
             "Lint Windows paths": "-p clonk-c4group",
-            "Build the runtime exactly as a release ships it": "-p clonk-c4group",
-            "Check the runtime is self-contained": "scripts/validate-msvc-runtime.sh",
             "Compile the installer over a stand-in payload": (
                 '$payload_dir/bin/c4group.exe'
             ),
@@ -85,7 +83,12 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                 self.assertIn(fragment, step_script(LANDING_WORKFLOW, step))
 
     def test_msvc_builds_share_cached_linker_plugin_lto_configuration(self):
-        for workflow in (LANDING_WORKFLOW, MAIN_WORKFLOW, RELEASE_WORKFLOW):
+        landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("runtime-msvc:", landing)
+        self.assertNotIn("run: scripts/configure-msvc-runtime.sh", landing)
+        self.assertNotIn("run: scripts/validate-msvc-runtime.sh", landing)
+
+        for workflow in (MAIN_WORKFLOW, RELEASE_WORKFLOW):
             with self.subTest(workflow=workflow.name):
                 self.assertEqual(
                     workflow.read_text(encoding="utf-8").count(
@@ -162,7 +165,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             " # v6.1.0"
         )
 
-        self.assertEqual(landing.count(restore), 1)
+        self.assertEqual(landing.count(restore), 0)
         self.assertNotIn(save, landing)
         self.assertEqual(main.count(restore), 1)
         self.assertEqual(main.count(save), 1)
@@ -184,16 +187,19 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "'Cargo.lock', 'crates/**/Cargo.toml', "
             "'scripts/configure-msvc-runtime.sh') }}"
         )
-        for workflow in (landing, main, release):
+        self.assertNotIn("clonk-msvc-thinlto", landing)
+        for workflow in (main, release):
             with self.subTest(workflow=workflow):
                 self.assertIn(production_key, workflow)
                 self.assertNotIn("restore-keys:", workflow)
 
-    def test_windows_release_tool_build_is_post_merge_and_not_runtime_serial(self):
+    def test_exact_msvc_runtime_build_is_post_merge_and_release_gated(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertNotIn("Build the Windows packaging tool", landing)
+        self.assertNotIn("Build the runtime exactly as a release ships it", landing)
+        self.assertNotIn("cargo build --release -p clonk-app", landing)
         self.assertIn(
             "cargo build --release --locked -p xtask --features engine-tools "
             "--bin xtask-engine-tools",
@@ -204,6 +210,8 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "--locked --timings",
             step_script(MAIN_WORKFLOW, "Refresh the shipped MSVC runtime cache"),
         )
+        release_gate = step_script(RELEASE_WORKFLOW, "Require exact-SHA validation")
+        self.assertIn("for workflow in landing.yml rust.yml", release_gate)
 
     def test_installer_smoke_compiles_the_release_icon_branch(self):
         script = step_script(

@@ -1,7 +1,8 @@
 name: Landing
 
 # Pull requests answer only the admission question. The merge queue then tests
-# the exact tree that can land, once, across independent compile-time shards.
+# the exact tree that can land across independent Linux shards and Windows
+# smoke coverage; trusted post-merge validation builds the shipped MSVC apps.
 on:
   pull_request:
     branches: [main]
@@ -198,6 +199,13 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 15
+    # A queue candidate may preempt the rolling trusted-main producer so the
+    # bounded smoke job is not delayed behind the exact post-merge app build.
+    concurrency:
+      group: >-
+        ${{ github.event_name == 'merge_group' && 'windows-landing-cache-rolling'
+          || format('landing-windows-smoke-{0}', github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'merge_group' }}
     defaults:
       run:
         shell: bash
@@ -264,56 +272,6 @@ jobs:
             scripts/windows-installer.nsi
           test -s target/dist/stand-in-setup.exe
 
-  runtime-msvc:
-    name: Shipped MSVC runtime
-    if: github.event_name != 'pull_request'
-    runs-on: windows-latest
-    timeout-minutes: 30
-    concurrency:
-      group: >-
-        ${{ github.event_name == 'merge_group' && 'windows-landing-cache-rolling'
-          || format('landing-runtime-msvc-{0}', github.run_id) }}
-      cancel-in-progress: ${{ github.event_name == 'merge_group' }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-
-      - name: Configure the shipped MSVC runtime
-        run: scripts/configure-msvc-runtime.sh
-
-      - name: Restore trusted-main ThinLTO cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/clonk-msvc-thinlto
-          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: shipped-msvc-runtime-v1
-          save-if: false
-
-      - name: Build the runtime exactly as a release ships it
-        run: |
-          if ! cargo fetch --locked --offline; then
-            cargo fetch --locked
-          fi
-          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
-          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
-            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
-            exit 1
-          fi
-          export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
-          cargo build --release -p clonk-app -p clonk-game -p clonk-c4group --locked --timings
-
-      - name: Check the runtime is self-contained
-        run: scripts/validate-msvc-runtime.sh
-
   landing-gate:
     name: Landing gate
     if: always()
@@ -323,7 +281,6 @@ jobs:
       - pull-request-title
       - linux
       - windows-smoke
-      - runtime-msvc
     defaults:
       run:
         shell: bash
@@ -334,7 +291,6 @@ jobs:
           TITLE_RESULT: ${{ needs.pull-request-title.result }}
           LINUX_RESULT: ${{ needs.linux.result }}
           WINDOWS_SMOKE_RESULT: ${{ needs.windows-smoke.result }}
-          RUNTIME_MSVC_RESULT: ${{ needs.runtime-msvc.result }}
         run: |
           failed=0
           require_result() {
@@ -349,11 +305,9 @@ jobs:
             require_result title "$TITLE_RESULT" success
             require_result linux "$LINUX_RESULT" skipped
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" skipped
-            require_result runtime-msvc "$RUNTIME_MSVC_RESULT" skipped
           else
             require_result title "$TITLE_RESULT" skipped
             require_result linux "$LINUX_RESULT" success
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" success
-            require_result runtime-msvc "$RUNTIME_MSVC_RESULT" success
           fi
           exit "$failed"

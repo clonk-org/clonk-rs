@@ -127,9 +127,9 @@ jobs:
           echo "release=true" >> "$GITHUB_OUTPUT"
           echo "sha=$RESOLVED_SHA" >> "$GITHUB_OUTPUT"
 
-      # Landing proves the merge tree; main validation retains the slower
-      # coverage, recording-host and release-tool diagnostics. Both must belong
-      # to this exact commit before any release artifact is built.
+      # Landing proves the bounded merge-tree tests. Main validation performs
+      # the exact shipped MSVC build plus the slower coverage and recording-host
+      # diagnostics. Both must belong to this commit before artifacts are built.
       - name: Require exact-SHA validation
         if: steps.resolve.outputs.release == 'true'
         env:

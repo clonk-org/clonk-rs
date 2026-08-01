@@ -260,8 +260,8 @@ jobs:
     timeout-minutes: 45
     concurrency:
       # Ordinary main runs do not interrupt this authoritative cache producer.
-      # A queue candidate may preempt its rolling lane; release commits use an
-      # exact-SHA lane.
+      # Queue Windows smoke may preempt its rolling lane; release commits use
+      # an exact-SHA lane that cannot be interrupted.
       group: "windows-landing-cache-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
       cancel-in-progress: false
     defaults:
@@ -309,9 +309,9 @@ jobs:
         with:
           shared-key: shipped-msvc-runtime-v1
 
-      # This exact graph is the merge queue's long Windows path. Rebuilding it
-      # after landing keeps the trusted cache current without letting ephemeral
-      # queue refs consume the repository cache quota.
+      # Build the exact shipped graph on trusted main after bounded queue smoke.
+      # This fail-closed validation also keeps release dependency and ThinLTO
+      # caches current without letting ephemeral queue refs publish caches.
       - name: Refresh the shipped MSVC runtime cache
         run: |
           cargo fetch --locked

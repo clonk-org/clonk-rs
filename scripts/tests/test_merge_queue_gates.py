@@ -12,7 +12,7 @@ WORKFLOWS = REPOSITORY / ".github" / "workflows"
 LANDING = WORKFLOWS / "landing.yml"
 MAIN_VALIDATION = WORKFLOWS / "rust.yml"
 LEGACY_WINDOWS = WORKFLOWS / "windows.yml"
-QUEUE_JOBS = ("linux", "windows-smoke", "runtime-msvc")
+QUEUE_JOBS = ("linux", "windows-smoke")
 
 
 def job_block(workflow: Path, job: str) -> str:
@@ -101,15 +101,14 @@ class MergeQueueGateTests(unittest.TestCase):
             "TITLE_RESULT": "skipped",
             "LINUX_RESULT": "success",
             "WINDOWS_SMOKE_RESULT": "success",
-            "RUNTIME_MSVC_RESULT": "success",
         }
 
         cases = (
-            ("pull request", {"EVENT_NAME": "pull_request", "TITLE_RESULT": "success", "LINUX_RESULT": "skipped", "WINDOWS_SMOKE_RESULT": "skipped", "RUNTIME_MSVC_RESULT": "skipped"}, 0),
+            ("pull request", {"EVENT_NAME": "pull_request", "TITLE_RESULT": "success", "LINUX_RESULT": "skipped", "WINDOWS_SMOKE_RESULT": "skipped"}, 0),
             ("merge group", {}, 0),
             ("failed child", {"LINUX_RESULT": "failure"}, 1),
             ("cancelled child", {"WINDOWS_SMOKE_RESULT": "cancelled"}, 1),
-            ("skipped merge child", {"RUNTIME_MSVC_RESULT": "skipped"}, 1),
+            ("skipped merge child", {"WINDOWS_SMOKE_RESULT": "skipped"}, 1),
         )
         for name, changed, expected in cases:
             with self.subTest(case=name):

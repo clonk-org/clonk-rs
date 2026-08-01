@@ -29,9 +29,9 @@ class CiLatencyTests(unittest.TestCase):
         scopes = set(re.findall(r"shared-key: ([a-z0-9-]+)", landing))
         self.assertEqual(
             scopes,
-            {"full-parity", "windows-runtime-msvc", "shipped-msvc-runtime-v1"},
+            {"full-parity", "windows-runtime-msvc"},
         )
-        self.assertEqual(landing.count("save-if: false"), 3)
+        self.assertEqual(landing.count("save-if: false"), 2)
         self.assertNotIn(
             "save-if: ${{ github.event_name == 'workflow_dispatch' }}",
             landing,
@@ -111,7 +111,7 @@ class CiLatencyTests(unittest.TestCase):
             "linux-landing-cache-rolling": "app 2/12",
             "main-coverage-rolling": "app 3/12",
             "main-recording-host-rolling": "app 5/12",
-            "windows-landing-cache-rolling": "runtime-msvc",
+            "windows-landing-cache-rolling": "windows-smoke",
         }
         for group, claimant in claims.items():
             with self.subTest(group=group):
@@ -124,7 +124,7 @@ class CiLatencyTests(unittest.TestCase):
             landing,
         )
         self.assertIn(
-            "format('landing-runtime-msvc-{0}', github.run_id)",
+            "format('landing-windows-smoke-{0}', github.run_id)",
             landing,
         )
         self.assertEqual(
@@ -290,7 +290,7 @@ class CiLatencyTests(unittest.TestCase):
         self.assertEqual(
             len(re.findall(r"(?m)^          - name: ", linux)),
             18,
-            "18 Linux rows plus two Windows jobs fit the 20-job Free runner cap",
+            "18 Linux rows plus Windows smoke leave one Free runner slot",
         )
 
         self.assertIn("if: matrix.apt != ''", linux)
@@ -304,10 +304,7 @@ class CiLatencyTests(unittest.TestCase):
         workflow = LANDING.read_text(encoding="utf-8")
         linux = workflow[workflow.index("  linux:") : workflow.index("  windows-smoke:")]
         windows_smoke = workflow[
-            workflow.index("  windows-smoke:") : workflow.index("  runtime-msvc:")
-        ]
-        runtime = workflow[
-            workflow.index("  runtime-msvc:") : workflow.index("  landing-gate:")
+            workflow.index("  windows-smoke:") : workflow.index("  landing-gate:")
         ]
 
         for job in (linux,):
@@ -326,13 +323,13 @@ class CiLatencyTests(unittest.TestCase):
             "uses: dtolnay/rust-toolchain@"
             "46511b1c83438f0dd37c02d843619ece5a4abb5b"
         )
-        for job in (windows_smoke, runtime):
+        for job in (windows_smoke,):
             self.assertIn(pinned_toolchain, job)
             self.assertNotIn("id: preinstalled-rust", job)
             self.assertNotIn("CARGO_HOME=", job)
 
-        self.assertIn("if ! cargo fetch --locked --offline; then", runtime)
-        self.assertIn("cargo fetch --locked", runtime)
+        self.assertNotIn("cargo build --release -p clonk-app", workflow)
+        self.assertNotIn("scripts/configure-msvc-runtime.sh", workflow)
 
     def test_literal_required_commands_remain_on_the_landing_tree(self):
         workflow = LANDING.read_text(encoding="utf-8")
