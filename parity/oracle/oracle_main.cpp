@@ -80,6 +80,31 @@
 
 extern long SineTable[9001]; // defined by the generated sine_table.cpp
 
+// The extracted conversion helper only formats diagnostics. Its messages are
+// deliberately discarded by this bounded non-interactive fixture, so supply
+// the small surface it needs without pulling the production logging stack.
+namespace std
+{
+template <typename... Args>
+string format(const char *, Args &&...)
+{
+    return {};
+}
+} // namespace std
+
+namespace spdlog::level
+{
+enum level_enum
+{
+    warn,
+};
+}
+
+template <typename... Args>
+static void DebugLog(Args &&...)
+{
+}
+
 // Real production C4Rect::Scaled body, lifted from src/C4Rect.cpp by
 // gen_golden.sh. The truncation it performs is what maps a game-unit Picture
 // rect into a scaled definition's bitmap space.
@@ -115,15 +140,45 @@ inline constexpr int C4AUL_MAX_Par = 10;
 inline constexpr int32_t C4Fx_Execute_Kill = -1;
 inline constexpr int ASS_PARSED = 1;
 
-struct C4Effect;
-struct C4Def
+enum class C4AulScriptStrict : uint8_t
 {
+    NONSTRICT = 0,
+    STRICT1 = 1,
+    STRICT2 = 2,
+    STRICT3 = 3,
 };
+
+enum C4V_Type
+{
+    C4V_Any,
+    C4V_Int,
+    C4V_Bool,
+    C4V_C4Object,
+    C4V_pC4Value,
+};
+
+static const char *GetC4VName(C4V_Type type)
+{
+    switch (type)
+    {
+    case C4V_Any: return "any";
+    case C4V_Int: return "int";
+    case C4V_Bool: return "bool";
+    case C4V_C4Object: return "object";
+    case C4V_pC4Value: return "reference";
+    }
+    return "unknown";
+}
+
+struct C4Effect;
+struct C4Def;
+struct C4AulFunc;
 
 struct C4Object
 {
     C4Effect *pEffects{};
     C4Def *Def{};
+    C4ID id{};
     int32_t Status{1};
     int32_t x{};
     int32_t y{};
@@ -144,16 +199,42 @@ struct C4Value
 {
     enum class Kind
     {
+        Nil,
         Integer,
         Object,
     };
 
-    Kind kind{Kind::Integer};
+    Kind kind{Kind::Nil};
     int32_t integer{};
     C4Object *object{};
 
     int32_t getInt() const { return integer; }
     void Set(const C4Value &value) { *this = value; }
+    void Set0() { *this = C4Value{}; }
+    void SetInt(int32_t value) { *this = C4Value{Kind::Integer, value, nullptr}; }
+    void SetBool(bool value) { SetInt(value ? 1 : 0); }
+    explicit operator bool() const
+    {
+        return kind == Kind::Object || (kind == Kind::Integer && integer != 0);
+    }
+    C4V_Type GetType() const
+    {
+        switch (kind)
+        {
+        case Kind::Nil: return C4V_Any;
+        case Kind::Integer: return C4V_Int;
+        case Kind::Object: return C4V_C4Object;
+        }
+        return C4V_Any;
+    }
+    const char *GetTypeName() const { return GetC4VName(GetType()); }
+    std::string GetDataString() const { return {}; }
+    bool ConvertTo(C4V_Type type)
+    {
+        if (type == C4V_Any || GetType() == type)
+            return true;
+        return kind == Kind::Nil && type != C4V_pC4Value;
+    }
 };
 
 static C4Value C4VObj(C4Object *object)
@@ -183,6 +264,18 @@ struct PositionProbe
 
 static PositionProbe positionProbe;
 
+struct EffectConversionProbe
+{
+    bool callbackRan{};
+    bool receivedObjectValue{};
+    bool objectIdentityMatches{};
+    bool objectIdMatches{};
+    bool objectEqualsCompanion{};
+    bool mutateObjectOnEntry{};
+};
+
+static EffectConversionProbe effectConversionProbe;
+
 struct C4AulParSet
 {
     C4Value Par[C4AUL_MAX_Par]{};
@@ -208,10 +301,27 @@ struct C4AulScript
 {
     int State{ASS_PARSED};
     C4Def *Def{};
+    C4AulScriptStrict Strict{C4AulScriptStrict::STRICT2};
+    C4AulFunc *callback{};
+
+    C4AulFunc *GetFuncRecursive(const char *)
+    {
+        return callback;
+    }
+};
+
+enum class CallbackProbeKind
+{
+    Position,
+    EffectConversion,
 };
 
 struct C4AulBCC
 {
+    CallbackProbeKind probeKind{CallbackProbeKind::Position};
+    int probeParameter{};
+    int comparisonParameter{-1};
+    C4Object *expectedObject{};
 };
 
 struct C4AulScriptFunc;
@@ -228,13 +338,34 @@ struct C4AulScriptContext : C4AulContext
 
 struct C4AulFunc
 {
+    struct NameValue
+    {
+        const char *value{};
+    };
+
+    NameValue Name{};
+    int parCount{};
+    std::array<C4V_Type, C4AUL_MAX_Par> parTypes{};
+
     virtual ~C4AulFunc() = default;
+    virtual int GetParCount() { return parCount; }
+    virtual const C4V_Type *GetParType() { return parTypes.data(); }
     virtual C4Value Exec(
         C4Object *pObj = nullptr,
         const C4AulParSet &parameters = C4AulParSet{},
         bool fPassErrors = false,
         bool nonStrict3WarnConversionOnly = false,
         bool convertNilToIntBool = true) = 0;
+};
+
+static const char *operator+(const C4AulFunc::NameValue &name)
+{
+    return name.value;
+}
+
+struct C4Def
+{
+    C4AulScript Script{};
 };
 
 struct C4ValueMapNames
@@ -249,7 +380,7 @@ struct C4AulScriptFunc : C4AulFunc
     C4AulBCC *Code{};
     C4ValueMapNames VarNamed{};
 
-    bool HasStrictNil() const noexcept { return false; }
+    bool HasStrictNil() const noexcept;
     C4Value Exec(
         C4Object *pObj = nullptr,
         const C4AulParSet &pPars = C4AulParSet{},
@@ -258,23 +389,33 @@ struct C4AulScriptFunc : C4AulFunc
         bool convertNilToIntBool = true) override;
 };
 
-static bool TryCheckConvertFunctionParameters(
-    C4Object *,
-    C4AulFunc *,
-    C4Value *,
-    bool,
-    bool,
-    bool,
-    bool)
+class C4AulError
 {
-    return true;
-}
+public:
+    virtual ~C4AulError() = default;
+    virtual void show() const {}
+};
+
+class C4AulExecError : public C4AulError
+{
+public:
+    C4AulExecError(C4Object *, std::string_view) {}
+};
+
+#include "aul_script_func_has_strict_nil.inc"
+#include "aul_parameter_conversion.inc"
 
 struct C4AulExec
 {
-    std::array<C4Value, 32> valueStack{};
+    std::array<C4Value, 128> valueStack{};
     C4Value *pCurVal{valueStack.data()};
     C4AulScriptContext currentContext{};
+
+    void Reset()
+    {
+        pCurVal = valueStack.data();
+        currentContext = C4AulScriptContext{};
+    }
 
     void PushValue(const C4Value &value)
     {
@@ -300,8 +441,30 @@ struct C4AulExec
         bool fPassErrors,
         bool fTemporaryScript = false);
 
-    C4Value Exec(C4AulBCC *, bool)
+    C4Value Exec(C4AulBCC *code, bool)
     {
+        if (code->probeKind == CallbackProbeKind::EffectConversion)
+        {
+            const C4Value &value = currentContext.Pars[code->probeParameter];
+            C4Object *target = value.object;
+            effectConversionProbe.callbackRan = true;
+            effectConversionProbe.receivedObjectValue =
+                value.GetType() == C4V_C4Object;
+            effectConversionProbe.objectIdentityMatches =
+                target == code->expectedObject;
+            effectConversionProbe.objectIdMatches =
+                target && code->expectedObject &&
+                target->id == code->expectedObject->id;
+            effectConversionProbe.objectEqualsCompanion =
+                code->comparisonParameter >= 0 &&
+                value.GetType() == C4V_C4Object &&
+                currentContext.Pars[code->comparisonParameter].GetType() == C4V_C4Object &&
+                target == currentContext.Pars[code->comparisonParameter].object;
+            if (effectConversionProbe.mutateObjectOnEntry && target)
+                target->x = 999;
+            return C4VInt(0);
+        }
+
         C4Object *target = currentContext.Pars[0].object;
 
         positionProbe.callbackRan = true;
@@ -324,6 +487,7 @@ static C4AulExec AulExec;
 
 struct C4Effect
 {
+    C4AulFunc::NameValue Name{};
     C4Object *pCommandTarget{};
     C4ID idCommandTarget{};
     int32_t iPriority{100};
@@ -336,16 +500,43 @@ struct C4Effect
     bool IsDead() { return !iPriority; }
     void Kill(C4Object *) { iPriority = 0; }
     void Execute(C4Object *pObj);
+    C4Value DoCall(
+        C4Object *pObj,
+        const char *szFn,
+        const C4Value &rVal1,
+        const C4Value &rVal2,
+        const C4Value &rVal3,
+        const C4Value &rVal4,
+        const C4Value &rVal5,
+        const C4Value &rVal6,
+        const C4Value &rVal7,
+        bool passErrors,
+        bool convertNilToIntBool);
+};
+
+struct DefinitionRegistry
+{
+    C4Def *definition{};
+
+    C4Def *ID2Def(C4ID)
+    {
+        return definition;
+    }
 };
 
 struct GameState
 {
     C4Effect *pGlobalEffects{};
+    DefinitionRegistry Defs{};
+    C4AulScript ScriptEngine{};
 };
 
 static GameState Game;
 
+inline constexpr char PSF_FxCustom[] = "";
+
 #include "effect_execute.inc"
+#include "effect_do_call.inc"
 
 static void printOptional(std::optional<C4ValueInt> value)
 {
@@ -397,6 +588,181 @@ static void printDefinitionCommandedEffectPositionCase()
     printf(",\"explicit_y\":");
     printOptional(positionProbe.explicitY);
     printf("}");
+}
+
+struct EffectConversionResult
+{
+    bool callbackRan{};
+    bool receivedObjectValue{};
+    bool objectIdentityMatches{};
+    bool objectIdMatches{};
+    bool objectEqualsCompanion{};
+    bool carrierMutated{};
+};
+
+static EffectConversionResult runEffectCallbackConversionCase(
+    C4AulScriptStrict strict,
+    C4V_Type declaredType,
+    bool callbackWouldMutateCarrier)
+{
+    effectConversionProbe = EffectConversionProbe{};
+    effectConversionProbe.mutateObjectOnEntry = callbackWouldMutateCarrier;
+    Game = GameState{};
+    AulExec.Reset();
+
+    C4Object carrier;
+    carrier.id = 0x544d4850UL; // TMHP fixture definition ID
+    carrier.x = 37;
+    C4AulScript callbackOwner;
+    callbackOwner.Strict = strict;
+    C4AulBCC callbackCode;
+    callbackCode.probeKind = CallbackProbeKind::EffectConversion;
+    callbackCode.expectedObject = &carrier;
+    C4AulScriptFunc timer;
+    timer.Name.value = "FxOracleTimer";
+    timer.Owner = &callbackOwner;
+    timer.pOrgScript = &callbackOwner;
+    timer.Code = &callbackCode;
+    timer.parCount = 1;
+    timer.parTypes[0] = declaredType;
+    C4Effect effect;
+    effect.pFnTimer = &timer;
+    carrier.pEffects = &effect;
+
+    // The production Execute body supplies C4VObj(carrier) to the callback
+    // and its engine-call entry passes true for warning-only conversion.
+    effect.Execute(&carrier);
+    return {
+        effectConversionProbe.callbackRan,
+        effectConversionProbe.receivedObjectValue,
+        effectConversionProbe.objectIdentityMatches,
+        effectConversionProbe.objectIdMatches,
+        effectConversionProbe.objectEqualsCompanion,
+        carrier.x != 37,
+    };
+}
+
+static EffectConversionResult runEffectCallConversionCase(
+    C4AulScriptStrict strict,
+    C4V_Type declaredExtraType,
+    bool callbackWouldMutateExtra)
+{
+    effectConversionProbe = EffectConversionProbe{};
+    effectConversionProbe.mutateObjectOnEntry = callbackWouldMutateExtra;
+    Game = GameState{};
+    AulExec.Reset();
+
+    C4Object carrier;
+    carrier.id = 0x45434850UL; // ECHP fixture definition ID
+    carrier.x = 37;
+    C4Def callbackDefinition;
+    callbackDefinition.Script.Def = &callbackDefinition;
+    callbackDefinition.Script.Strict = strict;
+    C4AulBCC callbackCode;
+    callbackCode.probeKind = CallbackProbeKind::EffectConversion;
+    callbackCode.probeParameter = 2;
+    callbackCode.comparisonParameter = 0;
+    callbackCode.expectedObject = &carrier;
+    C4AulScriptFunc callback;
+    callback.Name.value = "FxOracleProbe";
+    callback.Owner = &callbackDefinition.Script;
+    callback.pOrgScript = &callbackDefinition.Script;
+    callback.Code = &callbackCode;
+    callback.parCount = 3;
+    callback.parTypes[0] = C4V_C4Object;
+    callback.parTypes[1] = C4V_Int;
+    callback.parTypes[2] = declaredExtraType;
+    callbackDefinition.Script.callback = &callback;
+    Game.Defs.definition = &callbackDefinition;
+    C4Effect effect;
+    effect.Name.value = "Oracle";
+    effect.idCommandTarget = 1;
+
+    // This is the exact EffectCall route: extracted DoCall resolves the
+    // command-id script, copies the extra C4Value into C4AulParSet, and calls
+    // the callback with nonStrict3WarnConversionOnly=true.
+    try
+    {
+        effect.DoCall(
+            &carrier,
+            "Probe",
+            C4VObj(&carrier),
+            C4VNull,
+            C4VNull,
+            C4VNull,
+            C4VNull,
+            C4VNull,
+            C4VNull,
+            true,
+            true);
+    }
+    catch (const C4AulError &)
+    {
+        // FnEffectCall asks DoCall to pass errors. STRICT3 must therefore
+        // reject before the probe body receives or mutates the extra object.
+    }
+    return {
+        effectConversionProbe.callbackRan,
+        effectConversionProbe.receivedObjectValue,
+        effectConversionProbe.objectIdentityMatches,
+        effectConversionProbe.objectIdMatches,
+        effectConversionProbe.objectEqualsCompanion,
+        carrier.x != 37,
+    };
+}
+
+static void printEffectCallbackConversionCase()
+{
+    const auto preStrict3 = runEffectCallbackConversionCase(
+        C4AulScriptStrict::STRICT2, C4V_Int, true);
+    const auto strict3 = runEffectCallbackConversionCase(
+        C4AulScriptStrict::STRICT3, C4V_Int, false);
+    const auto strict3Reference = runEffectCallbackConversionCase(
+        C4AulScriptStrict::STRICT3, C4V_pC4Value, true);
+    const auto effectCallPreStrict3 = runEffectCallConversionCase(
+        C4AulScriptStrict::STRICT2, C4V_Int, true);
+    const auto effectCallStrict3 = runEffectCallConversionCase(
+        C4AulScriptStrict::STRICT3, C4V_Int, false);
+    const auto effectCallStrict3Reference = runEffectCallConversionCase(
+        C4AulScriptStrict::STRICT3, C4V_pC4Value, true);
+
+    printf("\"effect_callback_conversion\":{"
+           "\"pre_strict3_callback_ran\":%d,"
+           "\"pre_strict3_original_object\":%d,"
+           "\"strict3_rejected\":%d,"
+           "\"strict3_callback_ran\":%d,"
+           "\"strict3_reference_rejected\":%d,"
+           "\"strict3_reference_callback_ran\":%d,"
+           "\"strict3_reference_object_mutated\":%d,"
+           "\"effect_call_pre_strict3_callback_ran\":%d,"
+           "\"effect_call_pre_strict3_type_is_object\":%d,"
+           "\"effect_call_pre_strict3_identity_matches\":%d,"
+           "\"effect_call_pre_strict3_id_matches\":%d,"
+           "\"effect_call_pre_strict3_target_equals_extra\":%d,"
+           "\"effect_call_pre_strict3_object_mutated\":%d,"
+           "\"effect_call_strict3_rejected\":%d,"
+           "\"effect_call_strict3_callback_ran\":%d,"
+           "\"effect_call_strict3_reference_rejected\":%d,"
+           "\"effect_call_strict3_reference_callback_ran\":%d,"
+           "\"effect_call_strict3_reference_object_mutated\":%d}",
+           preStrict3.callbackRan,
+           preStrict3.receivedObjectValue,
+           !strict3.callbackRan,
+           strict3.callbackRan,
+           !strict3Reference.callbackRan,
+           strict3Reference.callbackRan,
+           strict3Reference.carrierMutated,
+           effectCallPreStrict3.callbackRan,
+           effectCallPreStrict3.receivedObjectValue,
+           effectCallPreStrict3.objectIdentityMatches,
+           effectCallPreStrict3.objectIdMatches,
+           effectCallPreStrict3.objectEqualsCompanion,
+           effectCallPreStrict3.carrierMutated,
+           !effectCallStrict3.callbackRan,
+           effectCallStrict3.callbackRan,
+           !effectCallStrict3Reference.callbackRan,
+           effectCallStrict3Reference.callbackRan,
+           effectCallStrict3Reference.carrierMutated);
 }
 } // namespace effect_position_oracle
 
@@ -2651,6 +3017,13 @@ int main()
     // 10c. C4ID-only effect callbacks retain their affected object as the
     //      first callback argument but execute with a null object receiver.
     effect_position_oracle::printDefinitionCommandedEffectPositionCase();
+    printf(",\n");
+
+    // 10d. Effect callbacks alone are warning-only below STRICT3. The
+    // production parameter conversion helper preserves the original object
+    // on that warning path; strict integer and reference declarations reject
+    // before the callback body can mutate or alias the carrier.
+    effect_position_oracle::printEffectCallbackConversionCase();
     printf(",\n");
 
     // 11. C4Landscape::_PathFree coarse-cell occupancy. The edge-water case

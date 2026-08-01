@@ -268,9 +268,10 @@ fn dispatch_effect_fx_callback_fail_safe(
     )
 }
 
-/// C4Effect::Check uses the same fail-safe result policy when its caller
-/// suppresses errors, but retains C++'s warning-only pre-STRICT3 conversion
-/// behavior at the checker entry (C4Effect.cpp:271-287).
+/// C4Effect::Check keeps its own entry point because its caller selects the
+/// checker-specific pass-errors result policy (C4Effect.cpp:271-287). Its
+/// callback conversion is the same warning-only C4Effect policy as the other
+/// immediate Fx callbacks.
 fn dispatch_effect_check_fx_callback_fail_safe(
     effect: &EffectState,
     function: &str,
@@ -1484,14 +1485,14 @@ fn dispatch_effect_fx_callback(
         command_id,
         function,
         call_args,
-        EffectCallbackParameterConversionPolicy::Standard,
+        EffectCallbackParameterConversionPolicy::WarnForNonStrict3,
     )
 }
 
-/// `C4Effect::Check` executes its retained checker with
-/// `nonStrict3WarnConversionOnly=true` (C4Effect.cpp:271-287). This call site
-/// opts into the generic scripted-effect policy without changing ordinary
-/// script calls.
+/// `C4Effect::Check` executes its retained checker through the same
+/// warning-only callback conversion as the remaining C4Effect entry points
+/// (C4Effect.cpp:271-287). Keep this named boundary with its specialized
+/// result policy instead of folding its control flow into ordinary DoCall.
 fn dispatch_effect_check_fx_callback(
     command_target: Option<i32>,
     command_id: Option<&str>,

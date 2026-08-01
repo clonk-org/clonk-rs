@@ -11309,30 +11309,37 @@ fn dispatch_global_effect_callback(
                 compat::register_session_local_cells(session_id, context_cells.clone());
             }
             if callback.engine_global_entry {
-                if context_object.is_some() {
-                    return callback
-                        .script
-                        .call_pinned_with_cells_and_this(
-                            &callback.resolution.function,
-                            true,
-                            &args,
-                            &context_cells,
-                            context_this,
-                        )
-                        .map(|value| Some((value, context_cells.snapshot())));
-                }
                 return callback
                     .script
-                    .call_pinned_with_ref_args(&callback.resolution.function, true, &args)
-                    .map(|(value, _)| Some((value, HashMap::new())));
+                    .call_pinned_with_cells_and_this_for_effect_callback(
+                        &callback.resolution.function,
+                        true,
+                        &args,
+                        &context_cells,
+                        context_this,
+                    )
+                    .map(|value| Some((value, context_cells.snapshot())));
             }
-            callback.script.call_effect_callback_in_context_with_cells(
-                &effect.name,
-                event,
-                &args,
-                &context_cells,
-                context_this,
-            )
+            if context_object.is_some() {
+                return callback
+                    .script
+                    .call_effect_callback_with_cells_and_this(
+                        &callback_name,
+                        &args,
+                        &context_cells,
+                        context_this,
+                    )
+                    .map(|value| Some((value, context_cells.snapshot())));
+            }
+            callback
+                .script
+                .call_effect_callback_with_locals_and_this(
+                    &callback_name,
+                    &args,
+                    &context_locals,
+                    context_this,
+                )
+                .map(Some)
         },
     );
     let rng = guard.finish();
@@ -13062,6 +13069,10 @@ mod audio_detach_regression;
 #[cfg(test)]
 #[path = "lib_tests/deferred_rank_extension_regression.rs"]
 mod deferred_rank_extension_regression;
+
+#[cfg(test)]
+#[path = "lib_tests/issue_62_scheduled_global_effect_callbacks.rs"]
+mod issue_62_scheduled_global_effect_callbacks;
 
 pub use definition::*;
 pub use object::*;

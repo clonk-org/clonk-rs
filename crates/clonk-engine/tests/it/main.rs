@@ -10,6 +10,7 @@ mod action_build;
 mod action_procedure;
 mod activate_entrance_native;
 mod bird_flight;
+mod blobby_soccer_effect_call;
 mod body_declarations;
 mod component_natives;
 mod component_order;

@@ -4396,7 +4396,7 @@ impl Definition {
             world,
             game_over_triggered,
             audio,
-            compat::EffectCallbackParameterConversionPolicy::Standard,
+            compat::EffectCallbackParameterConversionPolicy::WarnForNonStrict3,
         )
     }
 
