@@ -21,7 +21,19 @@ pub(crate) fn retained_gpu_gamma_mode(
 pub(crate) enum RetainedGpuPresentRecovery {
     RebuildDevice,
     Retry,
+    CpuFallback,
     Fatal,
+}
+
+/// Whether the current frame may enter retained GPU capture.
+///
+/// A source or shader texture over the device's dimension limit is permanent
+/// for this renderer/device pair, so a later frame must use the CPU presenter
+/// directly instead of repeating the failed retained capture.
+pub(crate) const fn should_attempt_retained_gpu_presentation(
+    cpu_presentation_required: bool,
+) -> bool {
+    !cpu_presentation_required
 }
 
 pub(crate) fn wgpu_device_loss_panic_detail(
@@ -55,6 +67,15 @@ pub(crate) fn retained_gpu_present_recovery(error: &anyhow::Error) -> RetainedGp
         )
     }) {
         return RetainedGpuPresentRecovery::RebuildDevice;
+    }
+    if error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<gpu_renderer::GpuRendererError>(),
+            Some(gpu_renderer::GpuRendererError::TextureDimensionExceeded { kind, .. })
+                if kind.supports_cpu_fallback()
+        )
+    }) {
+        return RetainedGpuPresentRecovery::CpuFallback;
     }
     match error.downcast_ref::<pixels::Error>() {
         Some(pixels::Error::Surface(

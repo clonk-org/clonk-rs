@@ -2617,6 +2617,31 @@ fn m06_l033_surface_error_policy_rebuilds_or_retries_only_recoverable_errors() {
         retained_gpu_present_recovery(&validation),
         RetainedGpuPresentRecovery::Fatal
     );
+
+    let oversized_source =
+        anyhow::Error::new(gpu_renderer::GpuRendererError::TextureDimensionExceeded {
+            kind: gpu_renderer::RetainedGpuTextureKind::Source,
+            id: None,
+            extent: [33_900, 1],
+            max_texture_dimension_2d: 32_768,
+        });
+    assert_eq!(
+        retained_gpu_present_recovery(&oversized_source),
+        RetainedGpuPresentRecovery::CpuFallback
+    );
+    assert!(should_attempt_retained_gpu_presentation(false));
+    assert!(!should_attempt_retained_gpu_presentation(true));
+    let oversized_composition =
+        anyhow::Error::new(gpu_renderer::GpuRendererError::TextureDimensionExceeded {
+            kind: gpu_renderer::RetainedGpuTextureKind::Composition,
+            id: None,
+            extent: [33_900, 1],
+            max_texture_dimension_2d: 32_768,
+        });
+    assert_eq!(
+        retained_gpu_present_recovery(&oversized_composition),
+        RetainedGpuPresentRecovery::Fatal
+    );
 }
 
 struct FakeSystemFontProvider {

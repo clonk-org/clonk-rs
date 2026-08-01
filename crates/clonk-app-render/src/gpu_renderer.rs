@@ -544,6 +544,15 @@ pub enum GpuRendererError {
     },
     #[error("texture {id:?} publishes dirty data without advancing revision {revision}")]
     DirtyRevisionNotAdvanced { id: GpuTextureId, revision: u64 },
+    #[error(
+        "retained GPU {kind:?} texture {id:?} extent {extent:?} exceeds the device 2D texture limit {max_texture_dimension_2d}"
+    )]
+    TextureDimensionExceeded {
+        kind: RetainedGpuTextureKind,
+        id: Option<GpuTextureId>,
+        extent: [u32; 2],
+        max_texture_dimension_2d: u32,
+    },
     #[error("draw command references missing texture {0:?}")]
     MissingTexture(GpuTextureId),
     #[error("draw command expected texture {id:?} to be {expected:?}, found {actual:?}")]
@@ -583,6 +592,28 @@ pub enum GpuRendererError {
         reason: RetainedGpuFatalReason,
         detail: String,
     },
+}
+
+/// A retained 2D texture created by this renderer.
+///
+/// Source and shader-composer textures can fall back to the existing CPU
+/// presentation path. The composition target has the same physical extent as
+/// that CPU presentation, so it is reported separately rather than promising
+/// a fallback that the device cannot display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedGpuTextureKind {
+    Source,
+    Composition,
+    ShaderLandscapeIndex,
+    ShaderLandscapeShading,
+    ShaderLandscapeAtlas,
+    ShaderLandscapeOutput,
+}
+
+impl RetainedGpuTextureKind {
+    pub const fn supports_cpu_fallback(self) -> bool {
+        !matches!(self, Self::Composition)
+    }
 }
 
 /// Per-frame evidence that source retention and dirty updates are working.
@@ -801,6 +832,11 @@ pub struct RetainedGpuRenderer {
     composition: Option<CompositionTarget>,
     last_presented_monitor_gamma: Option<bool>,
     last_stats: GpuRendererStats,
+    /// Once a scene needs a source texture larger than this device supports,
+    /// presentation stays on the CPU reference path until the device is
+    /// recreated. Repeating GPU capture would only rediscover the same limit
+    /// and spam the operator log.
+    cpu_presentation_required: bool,
 }
 
 impl RetainedGpuRenderer {
@@ -1128,6 +1164,7 @@ impl RetainedGpuRenderer {
             composition: None,
             last_presented_monitor_gamma: None,
             last_stats: GpuRendererStats::default(),
+            cpu_presentation_required: false,
         }
     }
 
@@ -1212,6 +1249,13 @@ impl RetainedGpuRenderer {
         self.last_stats
     }
 
+    /// True after this device has rejected a retained source or shader texture
+    /// by dimension. Callers should use their CPU presentation path directly
+    /// instead of retrying retained GPU capture every frame.
+    pub fn requires_cpu_presentation(&self) -> bool {
+        self.cpu_presentation_required
+    }
+
     /// Encodes a copy of the most recently presented composition before the
     /// next render pass overwrites its retained target.
     pub fn readback_last_presentation(
@@ -1267,8 +1311,28 @@ impl RetainedGpuRenderer {
         request_readback: bool,
     ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
         self.check_health()?;
-        let resources = validate_layers(layers)?;
         let base = layers.first().ok_or(GpuRendererError::NoSceneLayers)?;
+        let resources = validate_layers(layers)?;
+        let shader_landscape = self
+            .pending_shader_landscape
+            .as_ref()
+            .filter(|_| self.shader_landscape)
+            .map(|(_, plan)| plan);
+        let limit = device.limits().max_texture_dimension_2d;
+        if let Err(error) = validate_retained_texture_limits(
+            &resources,
+            base.presentation.physical_extent,
+            shader_landscape,
+            self.landscape_detail,
+            limit,
+        ) {
+            self.cpu_presentation_required |= matches!(
+                &error,
+                GpuRendererError::TextureDimensionExceeded { kind, .. }
+                    if kind.supports_cpu_fallback()
+            );
+            return Err(error);
+        }
         let scene = base.scene;
         self.last_stats = GpuRendererStats::default();
         self.texture_epoch = self.texture_epoch.wrapping_add(1).max(1);
@@ -1533,6 +1597,10 @@ impl RetainedGpuRenderer {
             slots: &slots,
             detail: self.landscape_detail,
         };
+        validate_shader_landscape_texture_limits(
+            &inputs,
+            device.limits().max_texture_dimension_2d,
+        )?;
         let extent = inputs.composed_extent();
         let composer = self
             .landscape_composer
@@ -3120,6 +3188,117 @@ fn texture_upload_plan(
     }
 }
 
+fn validate_retained_texture_limits(
+    resources: &[GpuTextureResource],
+    composition_extent: [u32; 2],
+    shader_landscape: Option<&clonk_graphics::ShaderLandscapePlan>,
+    landscape_detail: u32,
+    max_texture_dimension_2d: u32,
+) -> Result<(), GpuRendererError> {
+    // The CPU presentation buffer must use this same physical extent, so
+    // reject it before promising a source-texture fallback that cannot be
+    // presented by the device either.
+    validate_texture_extent(
+        RetainedGpuTextureKind::Composition,
+        None,
+        composition_extent,
+        max_texture_dimension_2d,
+    )?;
+    validate_source_texture_limits(resources, max_texture_dimension_2d)?;
+    if let Some(plan) = shader_landscape {
+        validate_shader_landscape_texture_extents(
+            plan.extent,
+            plan.shading_plane.is_some(),
+            plan.atlas_extent,
+            landscape_detail,
+            max_texture_dimension_2d,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_source_texture_limits(
+    resources: &[GpuTextureResource],
+    max_texture_dimension_2d: u32,
+) -> Result<(), GpuRendererError> {
+    resources.iter().try_for_each(|resource| {
+        validate_texture_extent(
+            RetainedGpuTextureKind::Source,
+            Some(resource.id),
+            resource.extent,
+            max_texture_dimension_2d,
+        )
+    })
+}
+
+fn validate_shader_landscape_texture_limits(
+    inputs: &ShaderLandscapeInputs<'_>,
+    max_texture_dimension_2d: u32,
+) -> Result<(), GpuRendererError> {
+    validate_shader_landscape_texture_extents(
+        inputs.extent,
+        inputs.shading_plane.is_some(),
+        inputs.atlas_extent,
+        inputs.detail,
+        max_texture_dimension_2d,
+    )
+}
+
+fn validate_shader_landscape_texture_extents(
+    extent: [u32; 2],
+    has_shading: bool,
+    atlas_extent: [u32; 2],
+    detail: u32,
+    max_texture_dimension_2d: u32,
+) -> Result<(), GpuRendererError> {
+    validate_texture_extent(
+        RetainedGpuTextureKind::ShaderLandscapeIndex,
+        None,
+        extent,
+        max_texture_dimension_2d,
+    )?;
+    if has_shading {
+        validate_texture_extent(
+            RetainedGpuTextureKind::ShaderLandscapeShading,
+            None,
+            extent,
+            max_texture_dimension_2d,
+        )?;
+    }
+    validate_texture_extent(
+        RetainedGpuTextureKind::ShaderLandscapeAtlas,
+        None,
+        atlas_extent,
+        max_texture_dimension_2d,
+    )?;
+    validate_texture_extent(
+        RetainedGpuTextureKind::ShaderLandscapeOutput,
+        None,
+        [
+            extent[0].saturating_mul(detail.max(1)),
+            extent[1].saturating_mul(detail.max(1)),
+        ],
+        max_texture_dimension_2d,
+    )
+}
+
+fn validate_texture_extent(
+    kind: RetainedGpuTextureKind,
+    id: Option<GpuTextureId>,
+    extent: [u32; 2],
+    max_texture_dimension_2d: u32,
+) -> Result<(), GpuRendererError> {
+    if extent[0] > max_texture_dimension_2d || extent[1] > max_texture_dimension_2d {
+        return Err(GpuRendererError::TextureDimensionExceeded {
+            kind,
+            id,
+            extent,
+            max_texture_dimension_2d,
+        });
+    }
+    Ok(())
+}
+
 fn validate_primitive_count(
     topology: GpuPrimitiveTopology,
     vertices: usize,
@@ -4239,6 +4418,131 @@ mod tests {
     };
     use clonk_gui::{ImageData, Rect as GuiRect};
     use std::sync::Arc;
+
+    #[test]
+    fn source_texture_limit_rejects_oversized_landscape_before_gpu_work() {
+        let id = GpuTextureId::fresh();
+        let resource = GpuTextureResource::immutable_rgba(
+            id,
+            33_900,
+            1,
+            Arc::from(vec![0_u8; 33_900 * 4].into_boxed_slice()),
+        );
+
+        assert!(matches!(
+            validate_source_texture_limits(std::slice::from_ref(&resource), 32_768),
+            Err(GpuRendererError::TextureDimensionExceeded {
+                kind: RetainedGpuTextureKind::Source,
+                id: Some(found),
+                extent: [33_900, 1],
+                max_texture_dimension_2d: 32_768,
+            }) if found == id
+        ));
+    }
+
+    #[test]
+    fn retained_texture_limit_covers_composition_and_shader_targets() {
+        let resources = Vec::<GpuTextureResource>::new();
+        assert!(matches!(
+            validate_retained_texture_limits(&resources, [32_769, 1], None, 1, 32_768),
+            Err(GpuRendererError::TextureDimensionExceeded {
+                kind: RetainedGpuTextureKind::Composition,
+                id: None,
+                extent: [32_769, 1],
+                max_texture_dimension_2d: 32_768,
+            })
+        ));
+
+        let shader_plan = clonk_graphics::ShaderLandscapePlan {
+            extent: [8, 8],
+            index_plane: Vec::new(),
+            shading_plane: None,
+            atlas: Vec::new(),
+            atlas_extent: [1, 1],
+            slots: Vec::new(),
+        };
+        assert!(matches!(
+            validate_retained_texture_limits(&resources, [1, 1], Some(&shader_plan), 4, 31,),
+            Err(GpuRendererError::TextureDimensionExceeded {
+                kind: RetainedGpuTextureKind::ShaderLandscapeOutput,
+                id: None,
+                extent: [32, 32],
+                max_texture_dimension_2d: 31,
+            })
+        ));
+    }
+
+    #[test]
+    fn source_limit_requires_cpu_presentation_without_poisoning_device() {
+        let Some((runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping retained texture limit device check");
+            return;
+        };
+        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
+        let width = max_texture_dimension_2d
+            .checked_add(1)
+            .expect("test device texture limit leaves one larger extent");
+        let source = GpuTextureResource::immutable_rgba(
+            GpuTextureId::fresh(),
+            width,
+            1,
+            Arc::from(vec![0_u8; width as usize * 4].into_boxed_slice()),
+        );
+        let scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![source],
+            commands: Vec::new(),
+        };
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lc_gpu_texture_limit_test_target"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_texture_limit_test_encoder"),
+        });
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        assert!(matches!(
+            renderer.render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                &scene,
+                &GpuPresentation::identity(1, 1),
+                false,
+            ),
+            Err(GpuRendererError::TextureDimensionExceeded {
+                kind: RetainedGpuTextureKind::Source,
+                extent: [found, 1],
+                max_texture_dimension_2d: found_limit,
+                ..
+            }) if found == width && found_limit == max_texture_dimension_2d
+        ));
+        assert!(renderer.requires_cpu_presentation());
+        assert_eq!(renderer.health(), RetainedGpuRendererHealth::Healthy);
+        let validation = runtime.block_on(device.pop_error_scope());
+        assert!(
+            validation.is_none(),
+            "source-limit preflight must not poison the device: {validation:?}"
+        );
+    }
 
     #[test]
     fn fragmented_large_texture_delta_prefers_one_full_upload() {
@@ -5518,10 +5822,26 @@ mod tests {
 
         // With the opt-in off the CPU upload must survive untouched, and the
         // plan must still be consumed rather than queued for a later frame.
+        // The plan may describe a map that this device could not compose at
+        // the requested detail, but it is unused while the opt-in is off and
+        // must not force the already-valid CPU upload onto the fallback path.
+        let mut disabled_plan = plan;
+        disabled_plan.extent = [
+            device
+                .limits()
+                .max_texture_dimension_2d
+                .checked_add(1)
+                .expect("test device texture limit leaves one larger extent"),
+            1,
+        ];
+        disabled_plan.index_plane.clear();
+        disabled_plan.shading_plane = None;
+        disabled_plan.atlas.clear();
+        disabled_plan.atlas_extent = [1, 1];
         let mut renderer =
             RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         renderer.set_landscape_detail(3);
-        renderer.set_pending_shader_landscape(Some((base, plan)));
+        renderer.set_pending_shader_landscape(Some((base, disabled_plan)));
         let _ = render_readback(
             &mut renderer,
             &device,
