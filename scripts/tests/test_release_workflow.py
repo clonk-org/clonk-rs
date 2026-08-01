@@ -21,6 +21,16 @@ def job_block(name):
 
 
 class ReleaseWorkflowTopologyTests(unittest.TestCase):
+    def test_release_commits_have_a_sha_specific_concurrency_lane(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'group: "release-${{ startsWith(github.event.head_commit.message, '
+            "'chore: release ') && github.sha || 'rolling' }}\"",
+            workflow,
+        )
+        self.assertIn("cancel-in-progress: false", workflow)
+
     def test_resolver_blocks_builds_on_exact_sha_validation(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         resolve = job_block("resolve")

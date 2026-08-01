@@ -19,7 +19,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: release
+  # GitHub retains only one pending run per group even when cancellation is
+  # disabled. Keep each real release in its own lane so an ordinary later push
+  # cannot replace it before the resolver starts; no-op pushes may coalesce.
+  group: "release-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
   cancel-in-progress: false
 
 env:
