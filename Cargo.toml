@@ -48,13 +48,18 @@ publish = false
 block = { path = "third_party/block" }
 
 # The shipped profile. Thin LTO retains cross-crate optimization for the
-# simulation loop and C4Script tree-walk. Eight codegen units cut the measured
-# cold shipped-binary build by 65% versus one, while keeping the representative
-# real-scenario mean-frame cost within 2%; 16 and 64 were no faster and cost
-# more runtime and binary size. `panic` deliberately stays `unwind`: the app
-# relies on catching a panic to survive GPU device loss.
+# simulation loop and C4Script tree-walk. One codegen unit keeps library runtime
+# and cache identity stable; the large final app gets measured parallel codegen
+# below. `panic` deliberately stays `unwind`: the app relies on catching a panic
+# to survive GPU device loss.
 [profile.release]
 lto = "thin"
+codegen-units = 1
+
+# On a four-job proxy, eight units cut the cache-warm app tail by 40% versus one
+# and beat both four and sixteen. Keeping this override app-only lets Cargo
+# reuse every release library compiled with the stable one-unit profile.
+[profile.release.package.clonk-app]
 codegen-units = 8
 
 # Keep the ordinary edit/build loop compile-first. Debug assertions, line
@@ -135,6 +140,9 @@ overflow-checks = true
 # avoiding the longest level-3 codegen tail on this 192k-line wrapper.
 [profile.test.package.clonk-app]
 opt-level = 2
+# Package overrides inherit across profiles, so explicitly retain the broad
+# test-harness parallelism instead of inheriting the shipped app's eight units.
+codegen-units = 256
 
 # The large async clonk-network harness is a cold-build tail, while its complete
 # suite remains only a few seconds without LLVM optimization. Skip optimization

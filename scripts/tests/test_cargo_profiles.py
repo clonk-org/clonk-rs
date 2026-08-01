@@ -18,13 +18,18 @@ class CargoProfilesTests(unittest.TestCase):
         release = self.profiles["release"]
 
         self.assertEqual(release["lto"], "thin")
-        self.assertEqual(release["codegen-units"], 8)
+        self.assertEqual(release["codegen-units"], 1)
+        self.assertEqual(
+            release["package"],
+            {"clonk-app": {"codegen-units": 8}},
+        )
 
     def test_test_profile_keeps_explicit_parallel_codegen(self):
         test = self.profiles["test"]
 
         self.assertEqual(test["inherits"], "release")
         self.assertEqual(test["codegen-units"], 256)
+        self.assertEqual(test["package"]["clonk-app"]["codegen-units"], 256)
 
 
 if __name__ == "__main__":

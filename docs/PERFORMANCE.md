@@ -139,13 +139,33 @@ ended with 122 objects after 6,000 frames, and recorded no frame above the
 27.7ms native-tick budget. The profiler does not hash the final snapshot, so
 these matching outputs are a workload sanity check rather than a parity gate.
 
-Eight codegen units were selected because they reduced this cold build by
-65.3% while finishing faster, using less CPU, producing smaller binaries, and
-regressing runtime less than 16 or 64. The final binaries are 24.4% larger than
-the one-unit build; that size and the 1.9% mean-frame cost are the accepted
-tradeoff for the 136.11s local build reduction. The test profile keeps its
-explicit 256-unit override, so inheriting release does not narrow test-harness
-codegen parallelism.
+Eight global codegen units were the initial selection because they reduced this
+cold build by 65.3% while finishing faster, using less CPU, producing smaller
+binaries, and regressing runtime less than 16 or 64. The final binaries were
+24.4% larger than the one-unit build; that size and the 1.9% mean-frame cost
+were the accepted tradeoff for the 136.11s local build reduction.
+
+A follow-up on commit `1dd151cfd` modeled the merge queue's more common state:
+release libraries restored from the trusted `main` cache, with only the final
+application rebuilt. The global profile returned to one codegen unit and only
+`clonk-app` varied. Removing the app artifacts between each arm preserved the
+same dependency artifacts and shipped `clonk-game`/`c4group` binaries:
+
+| App codegen units | Warm app wall | Build user CPU | App binary |
+| ---: | ---: | ---: | ---: |
+| 1 | 106.96s | 261.58s | 40,235,120 bytes |
+| **8** | **59.45s** | 264.36s | 43,185,232 bytes |
+| 16 | 59.66s | 271.21s | 43,606,736 bytes |
+
+A four-Cargo-job proxy for the hosted Windows runner kept eight ahead of four
+(69.38s versus 77.61s) and sixteen (73.34s). Cargo rebuilt only `clonk-app`
+when moving from global-one to app-eight, confirming that the narrow override
+preserves the cached libraries. The shipped profile therefore keeps one unit
+globally and grants eight only to the app. This retains the baseline codegen
+for the simulation libraries while cutting the measured cache-warm final tail
+by 44.4%. Because Cargo package overrides inherit into child profiles, the test
+profile repeats its explicit 256-unit app setting instead of silently
+inheriting eight.
 
 The build values are single sequential directional samples from fresh Cargo
 targets; later arms benefited from warmer filesystem caches. The runtime
