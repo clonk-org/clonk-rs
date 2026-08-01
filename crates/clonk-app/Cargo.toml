@@ -9,6 +9,15 @@ repository.workspace = true
 readme.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+app-test-shard-mode = []
+app-test-shard-1 = ["app-test-shard-mode"]
+app-test-shard-2 = ["app-test-shard-mode"]
+app-test-shard-3 = ["app-test-shard-mode"]
+app-test-shard-4 = ["app-test-shard-mode"]
+app-test-shard-5 = ["app-test-shard-mode"]
+
 [dependencies]
 anyhow = "1.0"
 arboard = { version = "3.3", default-features = false }

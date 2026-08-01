@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "app-test-shard-mode", allow(unused_imports))]
+
 use super::*;
 use clonk_app_core::pictures::{
     centered_picture_transform, compose_inventory_picture,
@@ -4471,18 +4473,37 @@ fn cleanup_quicksave_file() {
 
 // Area part files spliced into this same `tests` module: each part is a
 // bare item sequence (not a child module), so test ids stay `tests::<fn>`.
-include!("main_tests/scenario_routes.rs");
-include!("main_tests/game_over.rs");
-include!("main_tests/league.rs");
-include!("main_tests/lobby.rs");
-include!("main_tests/net_resources.rs");
-include!("main_tests/netplay.rs");
-include!("main_tests/saves.rs");
-include!("main_tests/scensel.rs");
-include!("main_tests/startup.rs");
-include!("main_tests/menus.rs");
-include!("main_tests/chat_messages.rs");
-include!("main_tests/audio.rs");
-include!("main_tests/rendering.rs");
-include!("main_tests/input.rs");
-include!("main_tests/runtime.rs");
+#[cfg(all(
+    feature = "app-test-shard-mode",
+    not(any(
+        feature = "app-test-shard-1",
+        feature = "app-test-shard-2",
+        feature = "app-test-shard-3",
+        feature = "app-test-shard-4",
+        feature = "app-test-shard-5",
+    )),
+))]
+compile_error!("app-test-shard-mode requires at least one numbered shard feature");
+
+macro_rules! include_main_test_fragment {
+    ($selector:literal, $path:literal) => {
+        #[cfg(any(not(feature = "app-test-shard-mode"), feature = $selector))]
+        include!($path);
+    };
+}
+
+include_main_test_fragment!("app-test-shard-3", "main_tests/scenario_routes.rs");
+include_main_test_fragment!("app-test-shard-4", "main_tests/game_over.rs");
+include_main_test_fragment!("app-test-shard-3", "main_tests/league.rs");
+include_main_test_fragment!("app-test-shard-5", "main_tests/lobby.rs");
+include_main_test_fragment!("app-test-shard-1", "main_tests/net_resources.rs");
+include_main_test_fragment!("app-test-shard-1", "main_tests/netplay.rs");
+include_main_test_fragment!("app-test-shard-5", "main_tests/saves.rs");
+include_main_test_fragment!("app-test-shard-2", "main_tests/scensel.rs");
+include_main_test_fragment!("app-test-shard-3", "main_tests/startup.rs");
+include_main_test_fragment!("app-test-shard-2", "main_tests/menus.rs");
+include_main_test_fragment!("app-test-shard-2", "main_tests/chat_messages.rs");
+include_main_test_fragment!("app-test-shard-2", "main_tests/audio.rs");
+include_main_test_fragment!("app-test-shard-4", "main_tests/rendering.rs");
+include_main_test_fragment!("app-test-shard-4", "main_tests/input.rs");
+include_main_test_fragment!("app-test-shard-5", "main_tests/runtime.rs");

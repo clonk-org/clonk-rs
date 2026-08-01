@@ -1191,6 +1191,7 @@ fn snapshot_hash(snapshot: &SimulationSnapshot) -> String {
     format!("{hash:016x}")
 }
 
+#[cfg(any(not(feature = "engine-it-sharded"), feature = "engine-it-shard-1",))]
 #[test]
 fn snapshot_hash_ignores_serialized_debug_draw_sidecars() {
     let mut engine = Engine::with_seed(0);
