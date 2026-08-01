@@ -19907,7 +19907,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
     assert_eq!(game.time, 12);
 
     let title_png = saved.read_file("Title.png").expect("read saved Title.png");
-    let decoder = Decoder::new(io::Cursor::new(title_png));
+    let decoder = png::Decoder::new(io::Cursor::new(title_png));
     let reader = decoder.read_info().expect("decode saved Title.png");
     assert_eq!(
         (reader.info().width, reader.info().height),

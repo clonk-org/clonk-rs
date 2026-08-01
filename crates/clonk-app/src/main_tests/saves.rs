@@ -1538,7 +1538,7 @@ fn runtime_point_filtering_reloads_after_advanced_config_save() {
 
 fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
     let file = File::open(path).expect("open screenshot");
-    let decoder = Decoder::new(file);
+    let decoder = png::Decoder::new(file);
     let mut reader = decoder.read_info().expect("read screenshot header");
     let mut buffer = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buffer).expect("decode screenshot");
@@ -1573,7 +1573,7 @@ fn retained_gpu_save_thumbnail_waits_for_the_presented_frame() {
 fn retained_gpu_save_thumbnail_matches_cpp_title_extent() {
     let encoded = encode_presented_save_thumbnail(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255])
         .expect("encode retained GPU thumbnail");
-    let decoder = Decoder::new(io::Cursor::new(encoded));
+    let decoder = png::Decoder::new(io::Cursor::new(encoded));
     let mut reader = decoder.read_info().expect("read thumbnail header");
     let mut buffer = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buffer).expect("decode thumbnail");

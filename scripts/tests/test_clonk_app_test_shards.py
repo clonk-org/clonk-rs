@@ -19,16 +19,15 @@ CALL_PATTERN = re.compile(
     re.DOTALL,
 )
 EXPECTED_SHARDS = {
-    "app-test-shard-1": {"net_resources.rs", "netplay.rs"},
-    "app-test-shard-2": {
-        "audio.rs",
-        "chat_messages.rs",
-        "menus.rs",
-        "scensel.rs",
-    },
-    "app-test-shard-3": {"league.rs", "scenario_routes.rs", "startup.rs"},
-    "app-test-shard-4": {"game_over.rs", "input.rs", "rendering.rs"},
-    "app-test-shard-5": {"lobby.rs", "runtime.rs", "saves.rs"},
+    "app-test-shard-1": {"netplay.rs"},
+    "app-test-shard-2": {"menus.rs"},
+    "app-test-shard-3": {"scenario_routes.rs"},
+    "app-test-shard-4": {"game_over.rs"},
+    "app-test-shard-5": {"chat_messages.rs", "lobby.rs"},
+    "app-test-shard-6": {"league.rs", "runtime.rs"},
+    "app-test-shard-7": {"scensel.rs", "startup.rs"},
+    "app-test-shard-8": {"input.rs", "rendering.rs"},
+    "app-test-shard-9": {"audio.rs", "net_resources.rs", "saves.rs"},
 }
 
 
