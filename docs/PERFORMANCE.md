@@ -168,14 +168,15 @@ inheriting eight.
 
 On MSVC, rustc 1.97.1 requests a PDB even though the release profile has no
 debug information, while the published archives do not contain that PDB. The
-landing, post-merge, and release builds therefore set MSVC's documented
-`_LINK_` environment variable to `/DEBUG:NONE /OPT:REF,ICF /TIME`.
-`_LINK_` is appended after rustc's linker arguments, so the final option wins;
-REF and ICF remain explicit release optimizations, and `/TIME` leaves phase
-evidence in the hosted build log. The static-CRT choice stays separately in
-`RUSTFLAGS`, preserving the dependency-cache fingerprint. If release symbols
-are published in the future, remove `/DEBUG:NONE` from all three paths and ship
-the matching PDB rather than silently producing an unused one.
+landing, post-merge, and release builds therefore share one configuration
+script that selects rustc's bundled LLD and passes `/DEBUG:NONE`,
+`/OPT:REF,ICF`, `/TIME`, and `/Brepro` explicitly. The same script enables
+linker-plugin LTO and a bounded 512 MiB ThinLTO cache while retaining the static
+CRT. It clears inherited `LINK` and `_LINK_` values before exporting the
+fingerprinted Rust flags, so runner-image defaults cannot silently override the
+contract. If release symbols are published in the future, remove
+`/DEBUG:NONE` from all three paths and ship the matching PDB rather than
+silently producing an unused one.
 
 Hosted run `30691633087` restored an 855 MiB Windows dependency cache and took
 12m49s for the job: 11m50s in the runtime-build step and 11m10s reported by
@@ -187,6 +188,35 @@ toolchain probe accidentally changed `CARGO_HOME` from the producer's native
 Windows path to an MSYS path, producing a cache identity that the restore-only
 landing job could never seed. Windows landing jobs therefore use the same
 pinned toolchain action as the trusted post-merge cache producer.
+
+Later native-MSVC measurements isolated the remaining warm path. Cold hosted
+run `30698792424` used linker-plugin ThinLTO and finished in 16m48s;
+Cargo reported 14m43s and the application LTO phase alone took 331.775s. It
+published a 27.6 MiB LLD cache and a 496 MiB Rust dependency cache. Run
+`30699399606` then measured the same revision twice. The first attempt's only
+exact hit was the LLD cache; its dependency inventory differed, and it finished
+in 11m13s. The second hit both exact caches and
+finished in 8m19s: 7m11s in the build step and 6m31s reported by Cargo. Its
+observable final application tail was 4m40.219s, while all three native links
+together took 3.809s and their LTO work took 1.243s. The three executable
+hashes matched both earlier ThinLTO builds.
+
+The comparison arm disabled LTO only for these MSVC builds. Cold run
+`30700375081` finished in 14m14s, with a 13m19s build step, 12m23s reported by
+Cargo, and 5.480s across all links. An exact dependency-cache rerun was still
+compiling after 10m11s and was stopped before the final application link. This
+arm is rejected: disabling LTO made the relevant warm path slower while also
+changing the shipped optimization contract. Normalizing the runner to the one
+pinned Rust toolchain keeps future dependency-cache identities stable, and
+trusted `main` alone publishes both dependency and ThinLTO caches. Queue and
+release jobs restore them without writing short-lived copies.
+
+These samples put the standard four-vCPU Windows runner above the five-minute
+landing target even with both caches exact. The remaining cost is application
+frontend and code generation, not linking. Meeting five minutes without
+weakening the shipped profile therefore requires either a faster trusted
+runner or a substantial application-crate decomposition, each with a new
+hosted measurement.
 
 Two exhaustive standard-runner Linux samples of the predecessor graph, runs
 `30693625838` and `30693995330`, passed every row, but shared-runner execution
@@ -901,15 +931,19 @@ sample.
 
 ## CI cache interpretation
 
-Landing jobs restore the existing trusted-main `full-parity` and
-`windows-runtime-msvc` caches without saving short-lived merge-queue copies.
+Landing jobs restore the existing trusted-main `full-parity`,
+`windows-runtime-msvc`, shipped-runtime dependency, and ThinLTO caches without
+saving short-lived merge-queue copies.
 A post-merge Linux producer compiles the complete locked workspace graph before
 it may publish; canceled runs cannot leave an incomplete immutable cache.
 Replay/render work restores that ordinary target read-only while instrumented
 coverage stays in a different target. Post-merge Windows validation refreshes
 smoke, packaging-tool, and exact static-CRT runtime artifacts only after all
-three succeed. Recording-host oracles retain their own cache. The keys include
-the Rust dependency/build inputs maintained by the Rust cache action.
+three succeed, then publishes the bounded linker cache if its exact key was
+absent. Recording-host oracles retain their own cache. The keys include the
+Rust dependency/build inputs maintained by the Rust cache action; the ThinLTO
+key additionally pins the Rust and LLVM versions plus manifests and the shared
+configuration script.
 `CARGO_INCREMENTAL=0` keeps CI artifacts reproducible and smaller; the local
 development, play, and test profiles retain incremental behavior.
 
