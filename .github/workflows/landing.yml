@@ -56,9 +56,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: app 1/9
+          - name: app netplay 1/2
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-1 --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app --features app-test-shard-1 --partition hash:1/2 --no-fail-fast --locked
+          - name: app netplay 2/2
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-1 --partition hash:2/2 --no-fail-fast --locked
           - name: app 2/9
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-2 --no-fail-fast --locked
@@ -83,10 +86,8 @@ jobs:
           - name: app 9/9
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-9 --no-fail-fast --locked
-          - name: engine integration 1/2
-            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
-          - name: engine integration 2/2
-            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
+          - name: engine integration
+            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --no-fail-fast --locked
           - name: workspace unit and parity
             command: |
               failed=0
@@ -95,10 +96,10 @@ jobs:
               exit "$failed"
           - name: remaining workspace 1/2
             apt: mesa-vulkan-drivers
-            command: cargo nextest run -p clonk-app-core -p clonk-app-menus -p clonk-app-render -p clonk-frontend -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-logging -p clonk-scaling --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app-core -p clonk-app-menus -p clonk-app-netplay -p clonk-app-render -p clonk-frontend -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-logging -p clonk-scaling --no-fail-fast --locked
           - name: remaining workspace 2/2
             apt: libasound2-dev libxmp4
-            command: cargo nextest run -p clonk-app-netplay -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-network -p clonk-platform -p clonk-resources -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
+            command: cargo nextest run -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-network -p clonk-platform -p clonk-resources -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
           - name: workspace quality
             apt: libasound2-dev libudev-dev python3-pil
             command: |

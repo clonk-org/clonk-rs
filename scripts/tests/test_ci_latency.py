@@ -89,17 +89,22 @@ class CiLatencyTests(unittest.TestCase):
     def test_normal_workspace_is_an_exhaustive_compile_time_partition(self):
         workflow = LANDING.read_text(encoding="utf-8")
 
-        app_selectors = re.findall(
-            r"cargo nextest run -p clonk-app --features (app-test-shard-[1-9][0-9]*)",
+        app_commands = re.findall(
+            r"cargo nextest run -p clonk-app --features (app-test-shard-[1-9][0-9]*)"
+            r"(?: --partition (hash:[12]/2))? --no-fail-fast --locked",
             workflow,
         )
-        engine_selectors = re.findall(
-            r"cargo nextest run -p clonk-engine-integration-tests --test engine_it "
-            r"--features (engine-it-shard-[1-9][0-9]*)",
-            workflow,
+        self.assertEqual(
+            app_commands,
+            [("app-test-shard-1", "hash:1/2"), ("app-test-shard-1", "hash:2/2")]
+            + [(f"app-test-shard-{index}", "") for index in range(2, 10)],
         )
-        self.assertEqual(app_selectors, [f"app-test-shard-{index}" for index in range(1, 10)])
-        self.assertEqual(engine_selectors, ["engine-it-shard-1", "engine-it-shard-2"])
+        engine_command = (
+            "cargo nextest run -p clonk-engine-integration-tests --test engine_it "
+            "--no-fail-fast --locked"
+        )
+        self.assertEqual(workflow.count(engine_command), 1)
+        self.assertNotIn("--features engine-it-shard-", workflow)
         unit_and_parity = matrix_entry(workflow, "workspace unit and parity")
         self.assertIn(
             "cargo nextest run -p clonk-engine-unit-tests "
@@ -141,6 +146,8 @@ class CiLatencyTests(unittest.TestCase):
             remaining_packages,
             Counter(workspace_packages - dedicated_packages),
         )
+        self.assertIn("-p clonk-app-netplay", remaining_shards[0][2])
+        self.assertNotIn("-p clonk-app-netplay", remaining_shards[1][2])
         self.assertNotIn(
             "cargo nextest run --workspace --no-fail-fast --locked",
             workflow,
@@ -190,10 +197,13 @@ class CiLatencyTests(unittest.TestCase):
 
         self.assertIn("runs-on: ubuntu-24.04", linux)
         self.assertNotIn("filter: blob:none", linux)
-        for index in range(1, 10):
+        app_rows = ["app netplay 1/2", "app netplay 2/2"] + [
+            f"app {index}/9" for index in range(2, 10)
+        ]
+        for name in app_rows:
             self.assertIn(
                 "apt: libasound2-dev libudev-dev",
-                matrix_entry(workflow, f"app {index}/9"),
+                matrix_entry(workflow, name),
             )
         expected_apt = {
             "remaining workspace 1/2": "mesa-vulkan-drivers",
@@ -203,8 +213,7 @@ class CiLatencyTests(unittest.TestCase):
         for name, packages in expected_apt.items():
             self.assertIn(f"apt: {packages}", matrix_entry(workflow, name))
         for name in (
-            "engine integration 1/2",
-            "engine integration 2/2",
+            "engine integration",
             "workspace unit and parity",
             "engine contracts",
         ):
