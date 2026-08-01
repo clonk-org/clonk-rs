@@ -79,6 +79,18 @@ fn u(v: &Value, key: &str) -> u64 {
         .unwrap_or_else(|| panic!("golden entry missing unsigned field `{key}`: {v}"))
 }
 
+fn register_real_c4_effect_definition(engine: &mut Engine, id: &str, name: &str, source: &str) {
+    let mut definition = Definition::from_script(id, name, source)
+        .unwrap_or_else(|error| panic!("{id} effect fixture compiles: {error}"));
+    // Production resource loading enables this on every real C4Script
+    // definition (scenario/core.rs:303-307); the command-DSL proplist
+    // convention is intentionally test-fixture-only.
+    definition.set_c4_callback_convention(true);
+    engine
+        .register_definition(definition)
+        .unwrap_or_else(|error| panic!("{id} effect fixture registers: {error}"));
+}
+
 /// Assert two values are equal, panicking with a precise first-divergence report.
 fn expect_eq(section: &str, index: usize, field: &str, cpp: i64, rust: i64) {
     if cpp != rust {
@@ -2730,6 +2742,430 @@ func FxOriginTimer(object target, int number, int time)
                 field,
                 section[field].clone(),
                 position_var(effect_var, field),
+            );
+        }
+    }
+
+    // 10d. C4Effect routes the warning-only conversion marker at its
+    // callback boundary only. The golden is emitted by the pinned C++
+    // Execute and DoCall bodies together with their extracted script-function
+    // conversion entry, so verify both deferred Timer and EffectCall paths.
+    {
+        let section = &golden["effect_callback_conversion"];
+        let raw_fixed_x = |engine: &Engine, object| {
+            let snapshot = engine
+                .object_snapshot(object)
+                .expect("effect conversion carrier remains live");
+            snapshot
+                .fixed_velocity
+                .unwrap_or_else(|| FixedVec2::from_ints(snapshot.velocity.x, snapshot.velocity.y))
+                .x
+                .val()
+        };
+
+        let mut timer_pre_strict3 = Engine::new();
+        register_real_c4_effect_definition(
+            &mut timer_pre_strict3,
+            "TMHP",
+            "Timer warning conversion host",
+            r#"#strict 2
+func Arm()
+{
+  return(AddEffect("Oracle", this(), 100, 1, 0, TMCP));
+}
+func Read()
+{
+  return(ReadTimerPreStrict3Value());
+}
+"#,
+        );
+        register_real_c4_effect_definition(
+            &mut timer_pre_strict3,
+            "TMCP",
+            "Timer warning conversion callback",
+            r#"#strict 2
+static callback_value;
+func FxOracleTimer(int target, int number, int time)
+{
+  callback_value = GetType(target) == 4;
+  return(0);
+}
+global func ReadTimerPreStrict3Value() { return(callback_value); }
+"#,
+        );
+        let timer_pre_object = timer_pre_strict3
+            .spawn_object(SpawnConfig::new("TMHP"))
+            .expect("pre-strict3 timer carrier spawns");
+        let timer_pre_index = timer_pre_strict3
+            .find_object_index(timer_pre_object)
+            .expect("pre-strict3 timer carrier exists");
+        timer_pre_strict3
+            .call_object_function(timer_pre_index, "Arm", Vec::new())
+            .expect("pre-strict3 timer installs");
+        timer_pre_strict3
+            .tick_without_snapshot()
+            .expect("pre-strict3 timer warns and runs");
+        let timer_pre_reader = timer_pre_strict3
+            .spawn_object(SpawnConfig::new("TMCP"))
+            .expect("pre-strict3 timer callback reader spawns");
+        let timer_pre_index = timer_pre_strict3
+            .find_object_index(timer_pre_reader)
+            .expect("pre-strict3 timer callback reader remains live");
+        let timer_pre_value = timer_pre_strict3
+            .call_object_function(timer_pre_index, "ReadTimerPreStrict3Value", Vec::new())
+            .expect("pre-strict3 timer callback value reads");
+        let mut timer_strict3 = Engine::new();
+        register_real_c4_effect_definition(
+            &mut timer_strict3,
+            "TMHS",
+            "Strict timer conversion host",
+            r#"#strict 3
+func Arm()
+{
+  return(AddEffect("Oracle", this(), 100, 1, nil, TMCS));
+}
+func Read()
+{
+  return(ReadTimerStrict3Value());
+}
+"#,
+        );
+        register_real_c4_effect_definition(
+            &mut timer_strict3,
+            "TMCS",
+            "Strict timer conversion callback",
+            r#"#strict 3
+static callback_value;
+func FxOracleTimer(int target, int number, int time)
+{
+  callback_value = 1;
+  return(0);
+}
+global func ReadTimerStrict3Value() { return(callback_value); }
+"#,
+        );
+        let timer_strict_object = timer_strict3
+            .spawn_object(SpawnConfig::new("TMHS"))
+            .expect("strict timer carrier spawns");
+        let timer_strict_index = timer_strict3
+            .find_object_index(timer_strict_object)
+            .expect("strict timer carrier exists");
+        timer_strict3
+            .call_object_function(timer_strict_index, "Arm", Vec::new())
+            .expect("strict timer installs");
+        timer_strict3
+            .tick_without_snapshot()
+            .expect("strict timer conversion fails safe");
+        let timer_strict_reader = timer_strict3
+            .spawn_object(SpawnConfig::new("TMCS"))
+            .expect("strict timer callback reader spawns");
+        let timer_strict_index = timer_strict3
+            .find_object_index(timer_strict_reader)
+            .expect("strict timer callback reader remains live");
+        let timer_strict_value = timer_strict3
+            .call_object_function(timer_strict_index, "ReadTimerStrict3Value", Vec::new())
+            .expect("strict timer callback value reads");
+
+        let mut timer_strict3_reference = Engine::new();
+        register_real_c4_effect_definition(
+            &mut timer_strict3_reference,
+            "TMHR",
+            "Strict timer reference host",
+            r#"#strict 3
+func Arm()
+{
+  return(AddEffect("Oracle", this(), 100, 1, nil, TMCR));
+}
+func Read()
+{
+  return(ReadTimerStrict3ReferenceValue());
+}
+"#,
+        );
+        register_real_c4_effect_definition(
+            &mut timer_strict3_reference,
+            "TMCR",
+            "Strict timer reference callback",
+            r#"#strict 3
+static callback_value;
+func FxOracleTimer(int &target, int number, int time)
+{
+  SetXDir(17, target);
+  callback_value = 1;
+  return(0);
+}
+global func ReadTimerStrict3ReferenceValue() { return(callback_value); }
+"#,
+        );
+        let timer_reference_object = timer_strict3_reference
+            .spawn_object(SpawnConfig::new("TMHR"))
+            .expect("strict reference timer carrier spawns");
+        let timer_reference_index = timer_strict3_reference
+            .find_object_index(timer_reference_object)
+            .expect("strict reference timer carrier exists");
+        timer_strict3_reference
+            .call_object_function(timer_reference_index, "Arm", Vec::new())
+            .expect("strict reference timer installs");
+        timer_strict3_reference
+            .tick_without_snapshot()
+            .expect("strict reference timer conversion fails safe");
+        let timer_reference_reader = timer_strict3_reference
+            .spawn_object(SpawnConfig::new("TMCR"))
+            .expect("strict reference timer callback reader spawns");
+        let timer_reference_index = timer_strict3_reference
+            .find_object_index(timer_reference_reader)
+            .expect("strict reference timer callback reader remains live");
+        let timer_reference_value = timer_strict3_reference
+            .call_object_function(
+                timer_reference_index,
+                "ReadTimerStrict3ReferenceValue",
+                Vec::new(),
+            )
+            .expect("strict reference timer callback value reads");
+
+        let mut call_pre_strict3 = Engine::new();
+        register_real_c4_effect_definition(
+            &mut call_pre_strict3,
+            "ECHP",
+            "EffectCall warning conversion host",
+            r#"#strict 2
+func Probe()
+{
+  var number = AddEffect("Oracle", this(), 100, 0, 0, ECCP);
+  return(EffectCall(this(), number, "Probe", this()));
+}
+"#,
+        );
+        register_real_c4_effect_definition(
+            &mut call_pre_strict3,
+            "ECCP",
+            "EffectCall warning conversion callback",
+            r#"#strict 2
+func FxOracleProbe(object target, int number, int declared_but_unused)
+{
+  var id_matches = GetID(target) == ECHP;
+  var same_object = target == declared_but_unused;
+  var type_is_object = GetType(target) == 4;
+  GetNeededMatStr(target);
+  SetXDir(17, target);
+  return([id_matches, same_object, type_is_object]);
+}
+"#,
+        );
+        let call_pre_object = call_pre_strict3
+            .spawn_object(SpawnConfig::new("ECHP"))
+            .expect("pre-strict3 EffectCall carrier spawns");
+        let call_pre_index = call_pre_strict3
+            .find_object_index(call_pre_object)
+            .expect("pre-strict3 EffectCall carrier exists");
+        let call_pre_result = call_pre_strict3
+            .call_object_function(call_pre_index, "Probe", Vec::new())
+            .expect("pre-strict3 EffectCall warns and runs");
+
+        let mut call_strict3 = Engine::new();
+        register_real_c4_effect_definition(
+            &mut call_strict3,
+            "ECHS",
+            "Strict EffectCall conversion host",
+            r#"#strict 3
+func Probe()
+{
+  var number = AddEffect("Oracle", this(), 100, 0, nil, ECCS);
+  return(EffectCall(this(), number, "Probe", this()));
+}
+func Read()
+{
+  return(ReadEffectCallStrict3Value());
+}
+"#,
+        );
+        register_real_c4_effect_definition(
+            &mut call_strict3,
+            "ECCS",
+            "Strict EffectCall conversion callback",
+            r#"#strict 3
+static callback_value;
+func FxOracleProbe(object target, int number, int declared_but_unused)
+{
+  callback_value = 1;
+  return(0);
+}
+global func ReadEffectCallStrict3Value() { return(callback_value); }
+"#,
+        );
+        let call_strict_object = call_strict3
+            .spawn_object(SpawnConfig::new("ECHS"))
+            .expect("strict EffectCall carrier spawns");
+        let call_strict_index = call_strict3
+            .find_object_index(call_strict_object)
+            .expect("strict EffectCall carrier exists");
+        let call_strict_rejected = call_strict3
+            .call_object_function(call_strict_index, "Probe", Vec::new())
+            .is_err();
+        let call_strict_reader = call_strict3
+            .spawn_object(SpawnConfig::new("ECCS"))
+            .expect("strict EffectCall callback reader spawns");
+        let call_strict_index = call_strict3
+            .find_object_index(call_strict_reader)
+            .expect("strict EffectCall callback reader remains live");
+        let call_strict_value = call_strict3
+            .call_object_function(call_strict_index, "ReadEffectCallStrict3Value", Vec::new())
+            .expect("strict EffectCall callback value reads");
+
+        let mut call_strict3_reference = Engine::new();
+        register_real_c4_effect_definition(
+            &mut call_strict3_reference,
+            "ECHR",
+            "Strict EffectCall reference host",
+            r#"#strict 3
+func Probe()
+{
+  var number = AddEffect("Oracle", this(), 100, 0, nil, ECCR);
+  return(EffectCall(this(), number, "Probe", this()));
+}
+func Read()
+{
+  return(ReadEffectCallStrict3ReferenceValue());
+}
+"#,
+        );
+        register_real_c4_effect_definition(
+            &mut call_strict3_reference,
+            "ECCR",
+            "Strict EffectCall reference callback",
+            r#"#strict 3
+static callback_value;
+func FxOracleProbe(object target, int number, int &declared_but_unused)
+{
+  SetXDir(17, target);
+  callback_value = 1;
+  return(0);
+}
+global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
+"#,
+        );
+        let call_reference_object = call_strict3_reference
+            .spawn_object(SpawnConfig::new("ECHR"))
+            .expect("strict reference EffectCall carrier spawns");
+        let call_reference_index = call_strict3_reference
+            .find_object_index(call_reference_object)
+            .expect("strict reference EffectCall carrier exists");
+        let call_reference_rejected = call_strict3_reference
+            .call_object_function(call_reference_index, "Probe", Vec::new())
+            .is_err();
+        let call_reference_reader = call_strict3_reference
+            .spawn_object(SpawnConfig::new("ECCR"))
+            .expect("strict reference EffectCall callback reader spawns");
+        let call_reference_index = call_strict3_reference
+            .find_object_index(call_reference_reader)
+            .expect("strict reference EffectCall callback reader remains live");
+        let call_reference_value = call_strict3_reference
+            .call_object_function(
+                call_reference_index,
+                "ReadEffectCallStrict3ReferenceValue",
+                Vec::new(),
+            )
+            .expect("strict reference EffectCall callback value reads");
+
+        let fields = [
+            (
+                "pre_strict3_callback_ran",
+                i64::from(!matches!(&timer_pre_value, ScriptValue::Nil)),
+            ),
+            (
+                "pre_strict3_original_object",
+                i64::from(matches!(&timer_pre_value, ScriptValue::Bool(true))),
+            ),
+            (
+                "strict3_rejected",
+                i64::from(matches!(&timer_strict_value, ScriptValue::Nil)),
+            ),
+            (
+                "strict3_callback_ran",
+                i64::from(!matches!(&timer_strict_value, ScriptValue::Nil)),
+            ),
+            (
+                "strict3_reference_rejected",
+                i64::from(matches!(&timer_reference_value, ScriptValue::Nil)),
+            ),
+            (
+                "strict3_reference_callback_ran",
+                i64::from(!matches!(&timer_reference_value, ScriptValue::Nil)),
+            ),
+            (
+                "strict3_reference_object_mutated",
+                i64::from(raw_fixed_x(&timer_strict3_reference, timer_reference_object) != 0),
+            ),
+            (
+                "effect_call_pre_strict3_callback_ran",
+                i64::from(matches!(&call_pre_result, ScriptValue::Array(_))),
+            ),
+            (
+                "effect_call_pre_strict3_type_is_object",
+                i64::from(matches!(
+                    &call_pre_result,
+                    ScriptValue::Array(values)
+                        if matches!(values.get(2), Some(ScriptValue::Bool(true)))
+                )),
+            ),
+            (
+                "effect_call_pre_strict3_identity_matches",
+                i64::from(matches!(
+                    &call_pre_result,
+                    ScriptValue::Array(values)
+                        if matches!(values.get(1), Some(ScriptValue::Bool(true)))
+                )),
+            ),
+            (
+                "effect_call_pre_strict3_id_matches",
+                i64::from(matches!(
+                    &call_pre_result,
+                    ScriptValue::Array(values)
+                        if matches!(values.first(), Some(ScriptValue::Bool(true)))
+                )),
+            ),
+            (
+                "effect_call_pre_strict3_target_equals_extra",
+                i64::from(matches!(
+                    &call_pre_result,
+                    ScriptValue::Array(values)
+                        if matches!(values.get(1), Some(ScriptValue::Bool(true)))
+                )),
+            ),
+            (
+                "effect_call_pre_strict3_object_mutated",
+                i64::from(
+                    raw_fixed_x(&call_pre_strict3, call_pre_object) == itofix_prec(17, 10).val(),
+                ),
+            ),
+            (
+                "effect_call_strict3_rejected",
+                i64::from(call_strict_rejected),
+            ),
+            (
+                "effect_call_strict3_callback_ran",
+                i64::from(!matches!(&call_strict_value, ScriptValue::Nil)),
+            ),
+            (
+                "effect_call_strict3_reference_rejected",
+                i64::from(call_reference_rejected),
+            ),
+            (
+                "effect_call_strict3_reference_callback_ran",
+                i64::from(!matches!(&call_reference_value, ScriptValue::Nil)),
+            ),
+            (
+                "effect_call_strict3_reference_object_mutated",
+                i64::from(raw_fixed_x(&call_strict3_reference, call_reference_object) != 0),
+            ),
+        ];
+        for (index, (field, rust)) in fields.into_iter().enumerate() {
+            expect_eq(
+                "effect_callback_conversion",
+                index,
+                field,
+                i(section, field),
+                rust,
             );
         }
     }

@@ -122,11 +122,38 @@ awk '
 ' "$src/C4Effect.cpp" > "$gen/effect_execute.inc"
 
 awk '
+  /^C4Value C4Effect::DoCall\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Effect.cpp" > "$gen/effect_do_call.inc"
+
+awk '
   /^C4Value C4AulScriptFunc::Exec\(C4Object \*pObj,/ { p = 1 }
   p { print }
   p && /^}$/ { found = 1; exit }
   END { if (!found) exit 1 }
 ' "$src/C4AulExec.cpp" > "$gen/aul_script_func_exec.inc"
+
+# Keep the strictness predicate and the conversion helper in the C++ fixture
+# as source extracts too. The effect-callback case below relies on this exact
+# onlyWarn plus non-strict decision: pre-STRICT3 callbacks warn and run, while
+# STRICT3 callbacks reject before their body can observe or alias the
+# incompatible object argument.
+awk '
+  /^bool C4AulScriptFunc::HasStrictNil\(\) const noexcept/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4AulExec.cpp" > "$gen/aul_script_func_has_strict_nil.inc"
+
+awk '
+  /^static void ErrorOrWarning\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { closures++ }
+  p && closures == 3 { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4AulExec.cpp" > "$gen/aul_parameter_conversion.inc"
 
 awk '
   /^C4Value C4AulExec::Exec\(C4AulScriptFunc \*pSFunc,/ { p = 1 }

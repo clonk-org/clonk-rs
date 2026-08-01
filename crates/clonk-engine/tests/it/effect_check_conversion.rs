@@ -1,5 +1,413 @@
-use clonk_engine::{EffectState, Engine, SpawnConfig};
+use clonk_engine::math::{itofix_prec, FixedVec2};
+use clonk_engine::{Definition, EffectState, Engine, SpawnConfig};
 use clonk_script::Value;
+
+#[test]
+fn real_c4_effect_call_preserves_object_identity_and_object_only_hosts() {
+    // `C4Effect::DoCall` passes the affected C4Object first and preserves the
+    // by-value FnEffectCall extras (src/C4Effect.cpp:439-457;
+    // src/C4Script.cpp:5583-5595). Real loaded C4Script uses the C++ callback
+    // argument convention, not the synthetic command-DSL state proplist.
+    let mut engine = Engine::new();
+    let mut host = Definition::from_script(
+        "C4HP",
+        "Real C4 effect callback host",
+        r#"#strict 2
+func Probe()
+{
+  var number = AddEffect("Canonical", this(), 100, 0, 0, C4CB);
+  return(EffectCall(this(), number, "Probe", this()));
+}
+"#,
+    )
+    .expect("real C4 host compiles");
+    host.set_c4_callback_convention(true);
+    engine
+        .register_definition(host)
+        .expect("real C4 host registers");
+    let mut callback = Definition::from_script(
+        "C4CB",
+        "Real C4 effect callback",
+        r#"#strict 2
+func FxCanonicalProbe(object target, int number, int declared_but_unused)
+{
+  var id_matches = GetID(target) == C4HP;
+  var same_object = target == declared_but_unused;
+  var type_is_object = GetType(target) == 4;
+  GetNeededMatStr(target);
+  SetXDir(17, target);
+  return([id_matches, same_object, type_is_object]);
+}
+"#,
+    )
+    .expect("real C4 callback compiles");
+    callback.set_c4_callback_convention(true);
+    engine
+        .register_definition(callback)
+        .expect("real C4 callback registers");
+
+    let object = engine
+        .spawn_object(SpawnConfig::new("C4HP"))
+        .expect("real C4 carrier spawns");
+    let index = engine
+        .find_object_index(object)
+        .expect("real C4 carrier remains live");
+    assert_eq!(
+        engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("pre-strict3 effect callback warns and continues"),
+        Value::Array(vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true)
+        ]),
+        "GetID, object equality, and GetType must see C4VObj rather than a proplist"
+    );
+    let snapshot = engine
+        .object_snapshot(object)
+        .expect("object-only callback host keeps carrier live");
+    let fixed_velocity = snapshot
+        .fixed_velocity
+        .unwrap_or_else(|| FixedVec2::from_ints(snapshot.velocity.x, snapshot.velocity.y));
+    assert_eq!(fixed_velocity.x.val(), itofix_prec(17, 10).val());
+}
+
+#[test]
+fn effect_call_object_local_callback_keeps_a_pre_strict3_object_argument() {
+    // FnEffectCall retains its by-value extra arguments before C4Effect::DoCall
+    // dispatches the selected Fx callback (src/C4Script.cpp:5583-5595;
+    // src/C4Effect.cpp:439-457). C4AulFunc::Exec asks pre-STRICT3 callbacks to
+    // warn, rather than abort, on a failed conversion (src/C4AulExec.cpp:1364-1397,
+    // 1610-1627,1638-1656), so the declared-but-unused int still receives the
+    // original object value.
+    let mut engine = Engine::new();
+    engine
+        .register_script_definition(
+            "OLOC",
+            "Object-local EffectCall conversion probe",
+            r#"#strict 2
+func Probe()
+{
+  AddEffect("Aura", this(), 100, 0, this());
+  return(EffectCall(this(), GetEffect("Aura", this()), "Probe", this()));
+}
+
+func FxAuraProbe(object target, int number, int declared_but_unused)
+{
+  return(declared_but_unused);
+}
+"#,
+        )
+        .expect("object-local EffectCall probe registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("OLOC"))
+        .expect("probe object spawns");
+    let index = engine
+        .find_object_index(object)
+        .expect("probe object remains live");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("pre-strict3 effect callback warns and continues"),
+        Value::Object(object.as_u64())
+    );
+}
+
+#[test]
+fn deferred_effect_timer_keeps_a_pre_strict3_object_argument() {
+    // C4Effect::Execute invokes Fx*Timer with the affected object first
+    // (src/C4Effect.cpp:319-363, especially :345). Like the constructor,
+    // C4AulScriptFunc::Exec applies warning-only conversion for an effect
+    // callback below #strict 3 (src/C4AulExec.cpp:1610-1627,1638-1656).
+    let mut engine = Engine::new();
+    engine
+        .register_script_definition(
+            "DTMR",
+            "Deferred timer conversion probe",
+            r#"#strict 2
+local timer_calls;
+
+func Install()
+{
+  return(AddEffect("Pulse", this(), 100, 1, this()));
+}
+
+func FxPulseTimer(int declared_but_unused, int number, int time)
+{
+  ++timer_calls;
+  return(-1);
+}
+
+func ReadTimerCalls()
+{
+  return(timer_calls);
+}
+"#,
+        )
+        .expect("deferred timer probe registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("DTMR"))
+        .expect("probe object spawns");
+    let index = engine
+        .find_object_index(object)
+        .expect("probe object remains live");
+    engine
+        .call_object_function(index, "Install", Vec::new())
+        .expect("effect installs");
+
+    engine.tick().expect("deferred timer dispatch succeeds");
+
+    let index = engine
+        .find_object_index(object)
+        .expect("timer callback keeps object live");
+    assert_eq!(
+        engine
+            .call_object_function(index, "ReadTimerCalls", Vec::new())
+            .expect("timer-call counter reads"),
+        Value::Int(1)
+    );
+}
+
+#[test]
+fn effect_call_reaches_every_callback_carrier_with_pre_strict3_warning_conversion() {
+    // C4Effect selects the callback source through command target, command
+    // ID, or Game.ScriptEngine (src/C4Effect.cpp:31-57), then `DoCall`
+    // invokes the resolved function with its owned callback values
+    // (src/C4Effect.cpp:439-457). Pre-STRICT3 function conversion warns and
+    // keeps the original value (src/C4AulExec.cpp:1364-1397,1610-1627,
+    // 1638-1656).
+    let mut engine = Engine::new();
+    engine
+        .register_script_definition(
+            "ELOC",
+            "Definition-local EffectCall carrier",
+            r#"#strict 2
+func FxDefinitionLocalProbe(object target, int number, int declared_but_unused)
+{
+  return(declared_but_unused);
+}
+"#,
+        )
+        .expect("definition-local carrier registers");
+    engine
+        .register_script_definition(
+            "EGLB",
+            "Definition-global EffectCall carrier",
+            r#"#strict 2
+global func FxDefinitionGlobalProbe(object target, int number, int declared_but_unused)
+{
+  return(declared_but_unused);
+}
+"#,
+        )
+        .expect("definition-global carrier registers");
+    assert_eq!(
+        engine.install_additional_global_scripts(&[(
+            "Issue62System.c".to_string(),
+            r#"#strict 2
+global func FxEngineGlobalProbe(object target, int number, int declared_but_unused)
+{
+  return(declared_but_unused);
+}
+"#
+            .to_string(),
+        )]),
+        1
+    );
+    engine
+        .register_script_definition(
+            "ECRR",
+            "EffectCall carrier driver",
+            r#"#strict 2
+func FxObjectLocalProbe(object target, int number, int declared_but_unused)
+{
+  return(declared_but_unused);
+}
+
+global func FxObjectGlobalProbe(object target, int number, int declared_but_unused)
+{
+  return(declared_but_unused);
+}
+
+func Probe()
+{
+  var object_local = AddEffect("ObjectLocal", this(), 500, 0, this());
+  var object_global = AddEffect("ObjectGlobal", this(), 500, 0, this());
+  var definition_local = AddEffect("DefinitionLocal", this(), 500, 0, 0, ELOC);
+  var definition_global = AddEffect("DefinitionGlobal", this(), 500, 0, 0, EGLB);
+  var engine_global = AddEffect("EngineGlobal", this(), 500, 0);
+  return([
+    EffectCall(this(), object_local, "Probe", this()),
+    EffectCall(this(), object_global, "Probe", this()),
+    EffectCall(this(), definition_local, "Probe", this()),
+    EffectCall(this(), definition_global, "Probe", this()),
+    EffectCall(this(), engine_global, "Probe", this())
+  ]);
+}
+"#,
+        )
+        .expect("carrier driver registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("ECRR"))
+        .expect("carrier driver spawns");
+    let index = engine
+        .find_object_index(object)
+        .expect("carrier driver remains live");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("all pre-strict3 callback carriers warn and continue"),
+        Value::Array(vec![Value::Object(object.as_u64()); 5])
+    );
+}
+
+#[test]
+fn effect_callback_warning_is_pre_strict3_only_and_does_not_leak_to_nested_calls() {
+    // C4AulScriptFunc::Exec enables warning-only conversion only when the
+    // selected callback is below strict 3 (src/C4AulExec.cpp:1610-1627,
+    // 1638-1656). The callback's C4AulParSet owns values, so a strict-3 `&`
+    // parameter rejects rather than aliasing EffectCall's argument
+    // (src/C4Script.cpp:5583-5595).
+    let strict_callback = r#"#strict 3
+local reference_callback_ran;
+
+func CallInt()
+{
+  AddEffect("Int", this(), 100, 0, this());
+  return(EffectCall(this(), GetEffect("Int", this()), "Probe", this()));
+}
+
+func FxIntProbe(object target, int number, int declared_but_unused)
+{
+  return(declared_but_unused);
+}
+
+func CallReference()
+{
+  AddEffect("Reference", this(), 100, 0, this());
+  return(EffectCall(this(), GetEffect("Reference", this()), "Probe", this()));
+}
+
+func FxReferenceProbe(object target, int number, &declared_but_unused)
+{
+  reference_callback_ran = 1;
+  declared_but_unused = nil;
+  return(0);
+}
+
+func ReadReferenceCallbackRan()
+{
+  return(reference_callback_ran);
+}
+
+func OrdinaryStrictInt(int value)
+{
+  return(value);
+}
+
+func OuterEffectCallKeepsStrict()
+{
+  AddEffect("Outer", this(), 100, 0, this());
+  return(EffectCall(this(), this(), "Probe", this()));
+}
+
+func FxOuterProbe(object target, int number, object value)
+{
+  return(value);
+}
+"#;
+    let mut engine = Engine::new();
+    engine
+        .register_script_definition("S3FX", "Strict effect callback probe", strict_callback)
+        .expect("strict callback probe registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("S3FX"))
+        .expect("strict callback object spawns");
+    let index = engine
+        .find_object_index(object)
+        .expect("strict callback object remains live");
+
+    for (function, callback, expected) in [
+        ("CallInt", "FxIntProbe", r#"expected \"int\""#),
+        ("CallReference", "FxReferenceProbe", r#"expected \"&\""#),
+    ] {
+        let error = engine
+            .call_object_function(index, function, Vec::new())
+            .expect_err("strict-3 callback conversion remains fatal");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains(callback) && diagnostic.contains(expected),
+            "unexpected strict-3 callback diagnostic: {diagnostic}"
+        );
+    }
+    assert_eq!(
+        engine
+            .call_object_function(index, "ReadReferenceCallbackRan", Vec::new())
+            .expect("reference callback state reads"),
+        Value::Nil,
+        "a rejected owned value never enters the `&` callback body"
+    );
+    let ordinary_error = engine
+        .call_object_function(
+            index,
+            "OrdinaryStrictInt",
+            vec![Value::Object(object.as_u64())],
+        )
+        .expect_err("ordinary host calls remain strict");
+    assert!(
+        format!("{ordinary_error:?}").contains(r#"expected \"int\""#),
+        "the effect marker does not leak into ordinary calls"
+    );
+    let outer_error = engine
+        .call_object_function(index, "OuterEffectCallKeepsStrict", Vec::new())
+        .expect_err("the outer EffectCall host invocation remains ordinary");
+    let outer_diagnostic = format!("{outer_error:?}");
+    assert!(
+        outer_diagnostic.contains("EffectCall") && outer_diagnostic.contains(r#"expected \"int\""#),
+        "the effect marker must not loosen EffectCall's own native arguments: {outer_diagnostic}"
+    );
+
+    let mut nested_engine = Engine::new();
+    nested_engine
+        .register_script_definition(
+            "NSTC",
+            "Nested callback conversion probe",
+            r#"#strict 2
+func Call()
+{
+  AddEffect("Nested", this(), 100, 0, this());
+  return(EffectCall(this(), GetEffect("Nested", this()), "Probe", this()));
+}
+
+func FxNestedProbe(object target, int number, int declared_but_unused)
+{
+  return(NestedStrictInt(declared_but_unused));
+}
+
+func NestedStrictInt(int value)
+{
+  return(value);
+}
+"#,
+        )
+        .expect("nested conversion probe registers");
+    let object = nested_engine
+        .spawn_object(SpawnConfig::new("NSTC"))
+        .expect("nested conversion object spawns");
+    let index = nested_engine
+        .find_object_index(object)
+        .expect("nested conversion object remains live");
+    let nested_error = nested_engine
+        .call_object_function(index, "Call", Vec::new())
+        .expect_err("nested call does not inherit effect callback warning mode");
+    assert!(
+        format!("{nested_error:?}").contains("NestedStrictInt")
+            && format!("{nested_error:?}").contains(r#"expected \"int\""#),
+        "nested script call must retain ordinary conversion behavior"
+    );
+}
 
 #[test]
 fn conversion_policy_reaches_every_effect_check_callback_carrier() {
