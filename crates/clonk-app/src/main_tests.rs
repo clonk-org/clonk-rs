@@ -4505,7 +4505,11 @@ macro_rules! include_split_main_test_fragment {
     };
 }
 
-include_main_test_fragment!("app-test-shard-3", "main_tests/scenario_routes.rs");
+include_split_main_test_fragment!(
+    "app-test-shard-3",
+    "app-test-shard-11",
+    "main_tests/scenario_routes.rs",
+);
 include_main_test_fragment!("app-test-shard-4", "main_tests/audio.rs");
 include_main_test_fragment!("app-test-shard-4", "main_tests/input.rs");
 include_main_test_fragment!("app-test-shard-6", "main_tests/game_over.rs");

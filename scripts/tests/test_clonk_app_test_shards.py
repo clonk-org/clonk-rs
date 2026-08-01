@@ -26,7 +26,7 @@ SPLIT_CALL_PATTERN = re.compile(
 EXPECTED_SHARDS = {
     "app-test-shard-1": {"netplay.rs::netplay_shard_1"},
     "app-test-shard-2": {"menus.rs"},
-    "app-test-shard-3": {"scenario_routes.rs"},
+    "app-test-shard-3": {"scenario_routes.rs::scenario_routes_shard_1"},
     "app-test-shard-4": {"audio.rs", "input.rs"},
     "app-test-shard-5": {"chat_messages.rs", "lobby.rs"},
     "app-test-shard-6": {"game_over.rs"},
@@ -34,7 +34,10 @@ EXPECTED_SHARDS = {
     "app-test-shard-8": {"net_resources.rs", "saves.rs"},
     "app-test-shard-9": {"league.rs", "rendering.rs"},
     "app-test-shard-10": {"netplay.rs::netplay_shard_2"},
-    "app-test-shard-11": {"runtime.rs"},
+    "app-test-shard-11": {
+        "runtime.rs",
+        "scenario_routes.rs::scenario_routes_shard_2",
+    },
 }
 
 
@@ -97,6 +100,11 @@ class ClonkAppTestShardTests(unittest.TestCase):
             split_calls,
             [
                 (
+                    "app-test-shard-3",
+                    "app-test-shard-11",
+                    "main_tests/scenario_routes.rs",
+                ),
+                (
                     "app-test-shard-1",
                     "app-test-shard-10",
                     "main_tests/netplay.rs",
@@ -106,8 +114,8 @@ class ClonkAppTestShardTests(unittest.TestCase):
         for first, second, relative in split_calls:
             path = (APP / "src" / relative).resolve()
             self.assertEqual(path.parent, FRAGMENTS.resolve())
-            assigned[first].add(f"{path.name}::netplay_shard_1")
-            assigned[second].add(f"{path.name}::netplay_shard_2")
+            assigned[first].add(f"{path.name}::{path.stem}_shard_1")
+            assigned[second].add(f"{path.name}::{path.stem}_shard_2")
             paths.append(path)
 
         self.assertEqual(dict(assigned), EXPECTED_SHARDS)
@@ -150,18 +158,19 @@ class ClonkAppTestShardTests(unittest.TestCase):
             "the internal sentinel alone must not silently produce an empty shard",
         )
 
-        netplay = (FRAGMENTS / "netplay.rs").read_text(encoding="utf-8")
-        compact_netplay = normalized_rust(netplay)
-        self.assertIn(
-            '#[cfg(any(not(feature="app-test-shard-mode"),'
-            'feature="app-test-shard-1"))]modnetplay_shard_1{usesuper::*;',
-            compact_netplay,
-        )
-        self.assertIn(
-            '#[cfg(any(not(feature="app-test-shard-mode"),'
-            'feature="app-test-shard-10"))]modnetplay_shard_2{usesuper::*;',
-            compact_netplay,
-        )
+        for fragment, first, second in (
+            ("netplay", "app-test-shard-1", "app-test-shard-10"),
+            ("scenario_routes", "app-test-shard-3", "app-test-shard-11"),
+        ):
+            source = (FRAGMENTS / f"{fragment}.rs").read_text(encoding="utf-8")
+            compact_fragment = normalized_rust(source)
+            for index, selector in enumerate((first, second), start=1):
+                self.assertIn(
+                    '#[cfg(any(not(feature="app-test-shard-mode"),'
+                    f'feature="{selector}"))]mod{fragment}_shard_{index}'
+                    "{usesuper::*;",
+                    compact_fragment,
+                )
 
     def test_inline_test_modules_run_once_in_shard_five(self):
         expected_cfg = normalized_rust(

@@ -2172,6 +2172,87 @@
             })
     }
 
+    fn real_tutorial_app(tutorial: u8, player_name: &str) -> RealTutorialApp {
+        real_installed_scenario_app(
+            &format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s"),
+            player_name,
+        )
+    }
+
+    fn real_tutorial_app_with_roster(tutorial: u8, player_name: &str) -> RealTutorialApp {
+        real_installed_scenario_app_with_roster(
+            &format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s"),
+            player_name,
+            true,
+        )
+    }
+
+    fn app_tutorial09_system_names_preserve_cpp_ready_conkit_route(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
+        // C4Game::InitScriptEngine loads System.c4g/Names.txt before players
+        // join. C4ObjectInfoCore::Default consumes its synchronized name draw
+        // before PlaceReadyCrew's position draw, leaving the seed-zero CLNK
+        // just left of CNKT so the shipped rightward lesson route collects it
+        // (C4Game.cpp:2767-2792; C4InfoCore.cpp:34-55;
+        // C4Player.cpp:481-520).
+        let mut app = prepared.instantiate("Tutorial 9 app name parity", false);
+        let clonk = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial09 starts with one cursor CLNK");
+        assert_eq!(
+            app.engine
+                .object_snapshot(clonk)
+                .expect("Tutorial09 CLNK survives startup")
+                .position,
+            Vector2::new(278, 130),
+            "System names keep the C++ seed-zero ready-crew placement"
+        );
+        advance_app_until(&mut app, "Tutorial09 asks for an igloo", 240, |app| {
+            app_tutorial_message_contains(app, "build an igloo")
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "physical C collects Tutorial09 CNKT",
+            30,
+            |app| app_clonk_carries(app, clonk, "CNKT"),
+        );
+    }
+
+    fn run_real_tutorial01_app_subcase(
+        name: &'static str,
+        failures: &mut Vec<&'static str>,
+        subcase: impl FnOnce(),
+    ) {
+        eprintln!("running Tutorial01 app subcase `{name}`");
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(subcase)).is_err() {
+            eprintln!("Tutorial01 app subcase `{name}` failed; continuing batch");
+            failures.push(name);
+        }
+    }
+
+    fn assert_no_real_tutorial01_app_subcase_failures(failures: Vec<&str>) {
+        assert!(
+            failures.is_empty(),
+            "Tutorial01 app subcase(s) failed: {}",
+            failures.join(", ")
+        );
+    }
+
+// The two child modules are independent compile-time shards; ordinary tests
+// include both. Keep their existing bodies unindented so this structural split
+// stays reviewable; format new code before placing it inside either wrapper.
+
+#[rustfmt::skip]
+#[cfg(any(
+    not(feature = "app-test-shard-mode"),
+    feature = "app-test-shard-3"
+))]
+mod scenario_routes_shard_1 {
+    use super::*;
+
     #[test]
     fn real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running() {
         let user_data = tempdir().expect("isolated Hazard override user data");
@@ -2259,21 +2340,6 @@
             pristine_scroll.pixels().as_ptr(),
             "teardown must restore the pristine startup scroll sheet"
         );
-    }
-
-    fn real_tutorial_app(tutorial: u8, player_name: &str) -> RealTutorialApp {
-        real_installed_scenario_app(
-            &format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s"),
-            player_name,
-        )
-    }
-
-    fn real_tutorial_app_with_roster(tutorial: u8, player_name: &str) -> RealTutorialApp {
-        real_installed_scenario_app_with_roster(
-            &format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s"),
-            player_name,
-            true,
-        )
     }
 
     #[test]
@@ -3529,26 +3595,6 @@
             || scale_three_tutorial_message_commits_native_pixels_after_filtered_base(&prepared),
         );
         assert_no_real_tutorial01_app_subcase_failures(failures);
-    }
-
-    fn run_real_tutorial01_app_subcase(
-        name: &'static str,
-        failures: &mut Vec<&'static str>,
-        subcase: impl FnOnce(),
-    ) {
-        eprintln!("running Tutorial01 app subcase `{name}`");
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(subcase)).is_err() {
-            eprintln!("Tutorial01 app subcase `{name}` failed; continuing batch");
-            failures.push(name);
-        }
-    }
-
-    fn assert_no_real_tutorial01_app_subcase_failures(failures: Vec<&str>) {
-        assert!(
-            failures.is_empty(),
-            "Tutorial01 app subcase(s) failed: {}",
-            failures.join(", ")
-        );
     }
 
     fn real_tutorial01_renders_cpp_decorated_portrait_message(
@@ -7806,6 +7852,16 @@
             r"Tutorial.c4f\Tutorial05.c4s"
         );
     }
+
+}
+
+#[rustfmt::skip]
+#[cfg(any(
+    not(feature = "app-test-shard-mode"),
+    feature = "app-test-shard-11"
+))]
+mod scenario_routes_shard_2 {
+    use super::*;
 
     #[test]
     fn app_virtual_keyboard_flings_tutorial05_wood_to_the_right_hill() {
@@ -13269,40 +13325,6 @@
         );
     }
 
-    fn app_tutorial09_system_names_preserve_cpp_ready_conkit_route(
-        prepared: &PreparedRealInstalledScenario,
-    ) {
-        // C4Game::InitScriptEngine loads System.c4g/Names.txt before players
-        // join. C4ObjectInfoCore::Default consumes its synchronized name draw
-        // before PlaceReadyCrew's position draw, leaving the seed-zero CLNK
-        // just left of CNKT so the shipped rightward lesson route collects it
-        // (C4Game.cpp:2767-2792; C4InfoCore.cpp:34-55;
-        // C4Player.cpp:481-520).
-        let mut app = prepared.instantiate("Tutorial 9 app name parity", false);
-        let clonk = app
-            .engine
-            .crew_cursor(app.local_owner)
-            .expect("Tutorial09 starts with one cursor CLNK");
-        assert_eq!(
-            app.engine
-                .object_snapshot(clonk)
-                .expect("Tutorial09 CLNK survives startup")
-                .position,
-            Vector2::new(278, 130),
-            "System names keep the C++ seed-zero ready-crew placement"
-        );
-        advance_app_until(&mut app, "Tutorial09 asks for an igloo", 240, |app| {
-            app_tutorial_message_contains(app, "build an igloo")
-        });
-        hold_app_key_until(
-            &mut app,
-            VirtualKeyCode::C,
-            "physical C collects Tutorial09 CNKT",
-            30,
-            |app| app_clonk_carries(app, clonk, "CNKT"),
-        );
-    }
-
     #[test]
     fn real_tutorial01_saved_game_music_subcases_batch() {
         let prepared =
@@ -13452,3 +13474,5 @@
             Some("Theme*")
         );
     }
+
+}
