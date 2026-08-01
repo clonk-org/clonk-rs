@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${THINLTO_CACHE_DIR:?ThinLTO cache directory is required}"
-
 binary_dir=${1:-target/x86_64-pc-windows-msvc/release}
 vswhere='/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe'
 test -f "$vswhere"
@@ -18,14 +16,6 @@ dumpbin=$(cygpath -u "$dumpbin_native")
 test -f "$dumpbin"
 
 failed=0
-shopt -s nullglob
-cache_entries=("$THINLTO_CACHE_DIR"/llvmcache-*)
-if [[ ${#cache_entries[@]} -eq 0 ]]; then
-    echo "the shipped build produced no reusable ThinLTO entries" >&2
-    failed=1
-fi
-du -sh "$THINLTO_CACHE_DIR"
-
 for binary in clonk-app clonk-game c4group; do
     path="$binary_dir/$binary.exe"
     if [[ ! -s "$path" ]]; then

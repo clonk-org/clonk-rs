@@ -27,7 +27,10 @@ class CiLatencyTests(unittest.TestCase):
         main = MAIN.read_text(encoding="utf-8")
 
         scopes = set(re.findall(r"shared-key: ([a-z0-9-]+)", landing))
-        self.assertEqual(scopes, {"full-parity", "windows-runtime-msvc"})
+        self.assertEqual(
+            scopes,
+            {"full-parity", "windows-runtime-msvc", "shipped-msvc-runtime-v1"},
+        )
         self.assertEqual(landing.count("save-if: false"), 2)
         self.assertIn(
             "save-if: ${{ github.event_name == 'workflow_dispatch' }}",

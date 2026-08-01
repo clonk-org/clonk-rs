@@ -281,28 +281,9 @@ jobs:
       - name: Configure the shipped MSVC runtime
         run: scripts/configure-msvc-runtime.sh
 
-      # Manual runs benchmark an exact branch-scoped cache twice. This pair is
-      # removed after the cold/warm result is recorded; merge groups can read
-      # only the trusted cache published from main below.
-      - name: Restore branch ThinLTO benchmark cache
-        if: github.event_name == 'workflow_dispatch'
-        id: thinlto-benchmark
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/clonk-msvc-thinlto
-          key: clonk-msvc-thinlto-benchmark-v1-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}-${{ github.sha }}
-
-      - name: Restore trusted-main ThinLTO cache
-        if: github.event_name != 'workflow_dispatch'
-        id: thinlto-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/clonk-msvc-thinlto
-          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}
-
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: windows-runtime-msvc
+          shared-key: shipped-msvc-runtime-v1
           # Temporary manual runs seed the matching dependency graph so the
           # second identical SHA measures the production warm path.
           save-if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -322,17 +303,6 @@ jobs:
 
       - name: Check the runtime is self-contained
         run: scripts/validate-msvc-runtime.sh
-
-      - name: Save branch ThinLTO benchmark cache
-        if: >-
-          success()
-          && github.event_name == 'workflow_dispatch'
-          && github.ref != 'refs/heads/main'
-          && steps.thinlto-benchmark.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/clonk-msvc-thinlto
-          key: ${{ steps.thinlto-benchmark.outputs.cache-primary-key }}
 
   landing-gate:
     name: Landing gate
