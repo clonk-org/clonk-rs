@@ -47,15 +47,15 @@ publish = false
 [patch.crates-io]
 block = { path = "third_party/block" }
 
-# The shipped profile. Cargo's defaults (no LTO, 16 codegen units) leave real
-# throughput on the table for a workload dominated by the simulation loop and
-# the C4Script tree-walk, both of which cross crate boundaries constantly.
-# Thin LTO measured no worse than fat at a fraction of the link cost, so the
-# extra fat-LTO time buys nothing here. `panic` deliberately stays `unwind`:
-# the app relies on catching a panic to survive GPU device loss.
+# The shipped profile. Thin LTO retains cross-crate optimization for the
+# simulation loop and C4Script tree-walk. Eight codegen units cut the measured
+# cold shipped-binary build by 65% versus one, while keeping the representative
+# real-scenario mean-frame cost within 2%; 16 and 64 were no faster and cost
+# more runtime and binary size. `panic` deliberately stays `unwind`: the app
+# relies on catching a panic to survive GPU device loss.
 [profile.release]
 lto = "thin"
-codegen-units = 1
+codegen-units = 8
 
 # Keep the ordinary edit/build loop compile-first. Debug assertions, line
 # tables, and incremental reuse retain useful development diagnostics while
@@ -117,9 +117,10 @@ lto = "off"
 # Release inheritance avoids the dev dependency wildcard, but local test
 # rebuilds still need the incremental cache that the test profile normally has.
 incremental = true
-# CI disables incremental compilation for cache portability. Keep the same
-# broad codegen parallelism Cargo gives incremental local builds so the large
-# app and engine test wrappers do not become single long LLVM/link tails.
+# CI disables incremental compilation for cache portability. Explicitly
+# override the inherited release value with the broad codegen parallelism Cargo
+# gives incremental local builds so the large app and engine test wrappers do
+# not become single long LLVM/link tails.
 codegen-units = 256
 # Test-profile debug data increases codegen, link I/O, and target size without
 # affecting assertions or runtime. Panic-site text and function symbols remain;
