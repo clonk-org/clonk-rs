@@ -56,12 +56,14 @@ jobs:
           fallback: none
 
       - name: Restore or publish the exhaustive Linux cache
+        id: linux-cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: . -> target
           shared-key: full-parity
 
       - name: Compile the complete landing dependency graph
+        if: steps.linux-cache.outputs.cache-hit != 'true'
         run: cargo nextest run --workspace --features xtask/engine-tools --no-run --locked
 
   coverage:

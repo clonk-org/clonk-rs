@@ -27,6 +27,11 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("workspaces: . -> target", linux_producer)
         self.assertIn("shared-key: full-parity", linux_producer)
         self.assertNotIn("cache-on-failure:", linux_producer)
+        self.assertIn("id: linux-cache", linux_producer)
+        self.assertIn(
+            "if: steps.linux-cache.outputs.cache-hit != 'true'",
+            linux_producer,
+        )
         self.assertIn(
             "cargo nextest run --workspace --features xtask/engine-tools "
             "--no-run --locked",
