@@ -22,6 +22,7 @@ app-test-shard-7 = ["app-test-shard-mode"]
 app-test-shard-8 = ["app-test-shard-mode"]
 app-test-shard-9 = ["app-test-shard-mode"]
 app-test-shard-10 = ["app-test-shard-mode"]
+app-test-shard-11 = ["app-test-shard-mode"]
 
 [dependencies]
 anyhow = "1.0"

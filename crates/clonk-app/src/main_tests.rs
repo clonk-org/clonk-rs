@@ -4486,6 +4486,7 @@ fn cleanup_quicksave_file() {
         feature = "app-test-shard-8",
         feature = "app-test-shard-9",
         feature = "app-test-shard-10",
+        feature = "app-test-shard-11",
     )),
 ))]
 compile_error!("app-test-shard-mode requires at least one numbered shard feature");
@@ -4522,4 +4523,4 @@ include_main_test_fragment!("app-test-shard-8", "main_tests/net_resources.rs");
 include_main_test_fragment!("app-test-shard-8", "main_tests/saves.rs");
 include_main_test_fragment!("app-test-shard-9", "main_tests/league.rs");
 include_main_test_fragment!("app-test-shard-9", "main_tests/rendering.rs");
-include_main_test_fragment!("app-test-shard-6", "main_tests/runtime.rs");
+include_main_test_fragment!("app-test-shard-11", "main_tests/runtime.rs");

@@ -21,8 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
-      # Finish the current authoritative cache before moving to the newest
-      # main revision. Release commits keep an exact-SHA lane of their own.
+      # Ordinary main runs finish the current authoritative cache before moving
+      # on. A queue candidate may preempt this rolling lane; release commits
+      # keep an exact-SHA lane of their own.
       group: "linux-landing-cache-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
       cancel-in-progress: false
     defaults:
@@ -258,8 +259,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     concurrency:
-      # This job is the authoritative producer for the cache consumed by both
-      # Windows landing jobs, so a newer push must not interrupt its save.
+      # Ordinary main runs do not interrupt this authoritative cache producer.
+      # A queue candidate may preempt its rolling lane; release commits use an
+      # exact-SHA lane.
       group: "windows-landing-cache-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
       cancel-in-progress: false
     defaults:

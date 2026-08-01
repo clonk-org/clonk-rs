@@ -24,19 +24,17 @@ SPLIT_CALL_PATTERN = re.compile(
     re.DOTALL,
 )
 EXPECTED_SHARDS = {
-    "app-test-shard-1": {
-        "netplay.rs::netplay_shard_1",
-        "netplay.rs::netplay_shard_2",
-    },
+    "app-test-shard-1": {"netplay.rs::netplay_shard_1"},
     "app-test-shard-2": {"menus.rs"},
     "app-test-shard-3": {"scenario_routes.rs"},
     "app-test-shard-4": {"audio.rs", "input.rs"},
     "app-test-shard-5": {"chat_messages.rs", "lobby.rs"},
-    "app-test-shard-6": {"game_over.rs", "runtime.rs"},
+    "app-test-shard-6": {"game_over.rs"},
     "app-test-shard-7": {"scensel.rs", "startup.rs"},
     "app-test-shard-8": {"net_resources.rs", "saves.rs"},
     "app-test-shard-9": {"league.rs", "rendering.rs"},
     "app-test-shard-10": {"netplay.rs::netplay_shard_2"},
+    "app-test-shard-11": {"runtime.rs"},
 }
 
 
@@ -109,7 +107,6 @@ class ClonkAppTestShardTests(unittest.TestCase):
             path = (APP / "src" / relative).resolve()
             self.assertEqual(path.parent, FRAGMENTS.resolve())
             assigned[first].add(f"{path.name}::netplay_shard_1")
-            assigned[first].add(f"{path.name}::netplay_shard_2")
             assigned[second].add(f"{path.name}::netplay_shard_2")
             paths.append(path)
 
@@ -162,8 +159,7 @@ class ClonkAppTestShardTests(unittest.TestCase):
         )
         self.assertIn(
             '#[cfg(any(not(feature="app-test-shard-mode"),'
-            'feature="app-test-shard-1",feature="app-test-shard-10"))]'
-            'modnetplay_shard_2{usesuper::*;',
+            'feature="app-test-shard-10"))]modnetplay_shard_2{usesuper::*;',
             compact_netplay,
         )
 

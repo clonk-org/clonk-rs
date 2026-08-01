@@ -6809,11 +6809,9 @@ fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
 
 }
 
-// Preserve the old feature-one inventory until the landing matrix changes.
 #[rustfmt::skip]
 #[cfg(any(
     not(feature = "app-test-shard-mode"),
-    feature = "app-test-shard-1",
     feature = "app-test-shard-10"
 ))]
 mod netplay_shard_2 {

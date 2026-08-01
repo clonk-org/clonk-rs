@@ -188,15 +188,28 @@ Windows path to an MSYS path, producing a cache identity that the restore-only
 landing job could never seed. Windows landing jobs therefore use the same
 pinned toolchain action as the trusted post-merge cache producer.
 
-Two exhaustive standard-runner Linux samples, runs `30693625838` and
-`30693995330`, passed every row, but shared-runner execution varied enough that
-one and four rows respectively reached five minutes. The latter sample ranged
-from 2m28s to 5m16s per row; its slow application commands spent 3m34s--3m41s
-compiling and 28--39s executing tests. A controlled four-job shard-6 probe kept
-the current app test profile: opt-level 1, opt-level 0, and 512 codegen units
-were each about 8% slower end to end than opt-level 2 with 256 units. These
-samples prove exhaustive green partitions, not a robust five-minute latency
-bound on four-vCPU hosted runners.
+Two exhaustive standard-runner Linux samples of the predecessor graph, runs
+`30693625838` and `30693995330`, passed every row, but shared-runner execution
+varied enough that one and four rows respectively reached five minutes. The
+latter sample ranged from 2m28s to 5m16s per row; its slow application commands
+spent 3m34s--3m41s compiling and 28--39s executing tests. A controlled four-job
+shard-6 probe kept the current app test profile: opt-level 1, opt-level 0, and
+512 codegen units were each about 8% slower end to end than opt-level 2 with
+256 units. These samples prove the predecessor partitions exhaustive and green,
+not a robust five-minute latency bound on four-vCPU hosted runners.
+
+The replacement queue graph uses 18 Linux rows and two Windows rows. It turns
+the two netplay runtime hash partitions into independent compile-time modules,
+rebalances the remaining nine application selectors from aggregate testcase
+duration, splits engine integration across its two feature selectors, and
+partitions all 26 remaining workspace packages exactly once across two rows.
+The ordinary unsharded suite remains the coverage reference.
+
+Because the merge queue admits one candidate at a time, three Linux
+merge-group rows and the shipped-MSVC row claim the rolling Linux-cache,
+coverage, recording-host, and Windows-cache concurrency groups. Required queue
+work therefore preempts stale ordinary post-merge owners; release pushes use
+SHA-specific groups and are unaffected.
 
 The build values are single sequential directional samples from fresh Cargo
 targets; later arms benefited from warmer filesystem caches. The runtime

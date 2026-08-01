@@ -86,25 +86,72 @@ class CiLatencyTests(unittest.TestCase):
         ]
         self.assertNotIn("\n  push:\n", triggers)
 
+    def test_merge_group_rows_preempt_only_rolling_post_merge_work(self):
+        landing = LANDING.read_text(encoding="utf-8")
+        main = MAIN.read_text(encoding="utf-8")
+
+        claims = {
+            "linux-landing-cache-rolling": "app 2/11",
+            "main-coverage-rolling": "app 3/11",
+            "main-recording-host-rolling": "app 5/11",
+            "windows-landing-cache-rolling": "runtime-msvc",
+        }
+        for group, claimant in claims.items():
+            with self.subTest(group=group):
+                self.assertEqual(landing.count(f"'{group}'"), 1)
+                self.assertIn(claimant, landing)
+                self.assertIn(group.removesuffix("rolling"), main)
+
+        self.assertIn(
+            "format('landing-linux-{0}-{1}', github.run_id, matrix.name)",
+            landing,
+        )
+        self.assertIn(
+            "format('landing-runtime-msvc-{0}', github.run_id)",
+            landing,
+        )
+        self.assertEqual(
+            landing.count(
+                "cancel-in-progress: ${{ github.event_name == 'merge_group' }}"
+            ),
+            2,
+        )
+
     def test_normal_workspace_is_an_exhaustive_compile_time_partition(self):
         workflow = LANDING.read_text(encoding="utf-8")
 
         app_commands = re.findall(
             r"cargo nextest run -p clonk-app --features (app-test-shard-[1-9][0-9]*)"
-            r"(?: --partition (hash:[12]/2))? --no-fail-fast --locked",
+            r" --no-fail-fast --locked",
             workflow,
         )
         self.assertEqual(
             app_commands,
-            [("app-test-shard-1", "hash:1/2"), ("app-test-shard-1", "hash:2/2")]
-            + [(f"app-test-shard-{index}", "") for index in range(2, 10)],
+            ["app-test-shard-1", "app-test-shard-10"]
+            + [f"app-test-shard-{index}" for index in range(2, 10)]
+            + ["app-test-shard-11"],
         )
-        engine_command = (
-            "cargo nextest run -p clonk-engine-integration-tests --test engine_it "
-            "--no-fail-fast --locked"
+        app_manifest = tomllib.loads(
+            (REPOSITORY / "crates" / "clonk-app" / "Cargo.toml").read_text(
+                encoding="utf-8"
+            )
         )
-        self.assertEqual(workflow.count(engine_command), 1)
-        self.assertNotIn("--features engine-it-shard-", workflow)
+        selectors = {
+            feature
+            for feature in app_manifest["features"]
+            if re.fullmatch(r"app-test-shard-[1-9][0-9]*", feature)
+        }
+        self.assertEqual(Counter(app_commands), Counter(selectors))
+
+        engine_commands = re.findall(
+            r"cargo nextest run -p clonk-engine-integration-tests --test engine_it "
+            r"--features (engine-it-shard-[12]) --no-fail-fast --locked",
+            workflow,
+        )
+        self.assertEqual(
+            engine_commands,
+            ["engine-it-shard-1", "engine-it-shard-2"],
+        )
         unit_and_parity = matrix_entry(workflow, "workspace unit and parity")
         self.assertIn(
             "cargo nextest run -p clonk-engine-unit-tests "
@@ -198,8 +245,8 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", linux)
         self.assertNotIn("filter: blob:none", linux)
         app_rows = ["app netplay 1/2", "app netplay 2/2"] + [
-            f"app {index}/9" for index in range(2, 10)
-        ]
+            f"app {index}/11" for index in range(2, 10)
+        ] + ["app 11/11"]
         for name in app_rows:
             self.assertIn(
                 "apt: libasound2-dev libudev-dev",
@@ -213,11 +260,18 @@ class CiLatencyTests(unittest.TestCase):
         for name, packages in expected_apt.items():
             self.assertIn(f"apt: {packages}", matrix_entry(workflow, name))
         for name in (
-            "engine integration",
+            "engine integration 1/2",
+            "engine integration 2/2",
             "workspace unit and parity",
             "engine contracts",
         ):
             self.assertNotIn("\n            apt:", matrix_entry(workflow, name))
+
+        self.assertEqual(
+            len(re.findall(r"(?m)^          - name: ", linux)),
+            18,
+            "18 Linux rows plus two Windows jobs fit the 20-job Free runner cap",
+        )
 
         self.assertIn("if: matrix.apt != ''", linux)
         self.assertIn("if ! sudo apt-get install", linux)
