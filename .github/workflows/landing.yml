@@ -54,9 +54,9 @@ jobs:
     # they can consume the standard runner budget. Release-SHA lanes differ.
     concurrency:
       group: >-
-        ${{ github.event_name == 'merge_group' && matrix.name == 'app 2/11' && 'linux-landing-cache-rolling'
-          || github.event_name == 'merge_group' && matrix.name == 'app 3/11' && 'main-coverage-rolling'
-          || github.event_name == 'merge_group' && matrix.name == 'app 5/11' && 'main-recording-host-rolling'
+        ${{ github.event_name == 'merge_group' && matrix.name == 'app 2/12' && 'linux-landing-cache-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 3/12' && 'main-coverage-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 5/12' && 'main-recording-host-rolling'
           || format('landing-linux-{0}-{1}', github.run_id, matrix.name) }}
       cancel-in-progress: ${{ github.event_name == 'merge_group' }}
     defaults:
@@ -72,41 +72,42 @@ jobs:
           - name: app netplay 2/2
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-10 --no-fail-fast --locked
-          - name: app 2/11
+          - name: app 2/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-2 --no-fail-fast --locked
-          - name: app 3/11
+          - name: app 3/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-3 --no-fail-fast --locked
-          - name: app 4/11
+          - name: app 4/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-4 --no-fail-fast --locked
-          - name: app 5/11
+          - name: app 5/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
-          - name: app 6/11
+          - name: app 6/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-6 --no-fail-fast --locked
-          - name: app 7/11
+          - name: app 7/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-7 --no-fail-fast --locked
-          - name: app 8/11
+          - name: app 8/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-8 --no-fail-fast --locked
-          - name: app 9/11
+          - name: app 9/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-9 --no-fail-fast --locked
-          - name: app 11/11
+          - name: app 11/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-11 --no-fail-fast --locked
+          - name: app 12/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-12 --no-fail-fast --locked
           - name: engine integration 1/2
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
-          - name: engine integration 2/2
-            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
           - name: workspace unit and parity
             command: |
               failed=0
-              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked || failed=1
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests -p clonk-engine-integration-tests --features clonk-engine-integration-tests/engine-it-shard-2 --no-fail-fast --locked || failed=1
               cargo xtask parity verify || failed=1
               exit "$failed"
           - name: remaining workspace 1/2

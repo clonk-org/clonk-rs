@@ -108,9 +108,9 @@ class CiLatencyTests(unittest.TestCase):
         main = MAIN.read_text(encoding="utf-8")
 
         claims = {
-            "linux-landing-cache-rolling": "app 2/11",
-            "main-coverage-rolling": "app 3/11",
-            "main-recording-host-rolling": "app 5/11",
+            "linux-landing-cache-rolling": "app 2/12",
+            "main-coverage-rolling": "app 3/12",
+            "main-recording-host-rolling": "app 5/12",
             "windows-landing-cache-rolling": "runtime-msvc",
         }
         for group, claimant in claims.items():
@@ -146,7 +146,7 @@ class CiLatencyTests(unittest.TestCase):
             app_commands,
             ["app-test-shard-1", "app-test-shard-10"]
             + [f"app-test-shard-{index}" for index in range(2, 10)]
-            + ["app-test-shard-11"],
+            + ["app-test-shard-11", "app-test-shard-12"],
         )
         app_manifest = tomllib.loads(
             (REPOSITORY / "crates" / "clonk-app" / "Cargo.toml").read_text(
@@ -161,8 +161,8 @@ class CiLatencyTests(unittest.TestCase):
         self.assertEqual(Counter(app_commands), Counter(selectors))
 
         engine_commands = re.findall(
-            r"cargo nextest run -p clonk-engine-integration-tests --test engine_it "
-            r"--features (engine-it-shard-[12]) --no-fail-fast --locked",
+            r"--features (?:clonk-engine-integration-tests/)?(engine-it-shard-[12]) "
+            r"--no-fail-fast --locked",
             workflow,
         )
         self.assertEqual(
@@ -172,7 +172,9 @@ class CiLatencyTests(unittest.TestCase):
         unit_and_parity = matrix_entry(workflow, "workspace unit and parity")
         self.assertIn(
             "cargo nextest run -p clonk-engine-unit-tests "
-            "-p clonk-frontend-unit-tests --no-fail-fast --locked",
+            "-p clonk-frontend-unit-tests -p clonk-engine-integration-tests "
+            "--features clonk-engine-integration-tests/engine-it-shard-2 "
+            "--no-fail-fast --locked",
             unit_and_parity,
         )
         self.assertIn("cargo xtask parity verify", unit_and_parity)
@@ -262,8 +264,8 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", linux)
         self.assertNotIn("filter: blob:none", linux)
         app_rows = ["app netplay 1/2", "app netplay 2/2"] + [
-            f"app {index}/11" for index in range(2, 10)
-        ] + ["app 11/11"]
+            f"app {index}/12" for index in range(2, 10)
+        ] + ["app 11/12", "app 12/12"]
         for name in app_rows:
             self.assertIn(
                 "apt: libasound2-dev libudev-dev",
@@ -278,7 +280,6 @@ class CiLatencyTests(unittest.TestCase):
             self.assertIn(f"apt: {packages}", matrix_entry(workflow, name))
         for name in (
             "engine integration 1/2",
-            "engine integration 2/2",
             "workspace unit and parity",
             "engine contracts",
         ):
