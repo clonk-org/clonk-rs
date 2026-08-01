@@ -256,10 +256,15 @@ jobs:
       - name: Install the Windows installer toolchain
         if: matrix.runner == 'windows-latest'
         run: |
-          choco install nsis --yes --no-progress
+          choco install nsis --version 3.12.0 --yes --no-progress
           nsis_dir='/c/Program Files (x86)/NSIS'
           if [[ ! -x "$nsis_dir/makensis.exe" ]]; then
             echo "chocolatey installed nsis but $nsis_dir/makensis.exe is missing" >&2
+            exit 1
+          fi
+          nsis_version=$(MSYS2_ARG_CONV_EXCL='*' "$nsis_dir/makensis.exe" /VERSION | tr -d '\r')
+          if [[ "$nsis_version" != 'v3.12' ]]; then
+            echo "expected NSIS v3.12, found: $nsis_version" >&2
             exit 1
           fi
           echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"

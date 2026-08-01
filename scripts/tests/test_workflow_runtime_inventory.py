@@ -181,6 +181,20 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertIn("crates/clonk-icon/res/windows/c4x.ico", script)
         self.assertIn('-DICON="$icon"', script)
 
+    def test_windows_installer_toolchain_is_exactly_pinned(self):
+        scripts = (
+            step_script(LANDING_WORKFLOW, "Install NSIS"),
+            step_script(RELEASE_WORKFLOW, "Install the Windows installer toolchain"),
+        )
+        for script in scripts:
+            with self.subTest(script=script):
+                self.assertIn(
+                    "choco install nsis --version 3.12.0 --yes --no-progress",
+                    script,
+                )
+                self.assertIn('"$nsis_dir/makensis.exe" /VERSION', script)
+                self.assertIn("expected NSIS v3.12", script)
+
     def test_universal_release_verifies_every_shipped_binary(self):
         script = step_script(RELEASE_WORKFLOW, "Check the macOS build is universal")
 
