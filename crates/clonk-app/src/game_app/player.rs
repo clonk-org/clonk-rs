@@ -922,7 +922,6 @@ impl GameApp {
             .iter()
             .filter(|player| {
                 player.path.is_file()
-                    && !player.render_model.activated
                     && !joined_player_paths.iter().any(|joined| {
                         match (
                             offline_player_real_path(joined),
