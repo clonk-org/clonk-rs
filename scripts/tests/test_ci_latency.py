@@ -155,10 +155,8 @@ class CiLatencyTests(unittest.TestCase):
             self.assertIn("failed=0", entry)
             self.assertIn('exit "$failed"', entry)
         self.assertIn("cargo xtask parity verify || failed=1", unit_and_parity)
-        self.assertIn(
-            "rustup component add clippy rustfmt || failed=1",
-            quality,
-        )
+        self.assertIn("cargo clippy --version || failed=1", quality)
+        self.assertIn("rustfmt --version || failed=1", quality)
         for command in (
             "cargo fmt --all -- --check || failed=1",
             "python3 -m unittest discover -s scripts/tests -p 'test_*.py' || failed=1",
@@ -232,7 +230,13 @@ class CiLatencyTests(unittest.TestCase):
         for job in (linux, windows_smoke, runtime):
             self.assertIn("rustup toolchain list", job)
             self.assertIn('rustup run "$toolchain" rustc --version', job)
-            self.assertIn('RUSTUP_TOOLCHAIN=$toolchain', job)
+            self.assertIn(
+                'rustup run "$toolchain" rustc --print sysroot',
+                job,
+            )
+            self.assertIn('echo "$sysroot/bin" >> "$GITHUB_PATH"', job)
+            self.assertIn('CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}', job)
+            self.assertNotIn('RUSTUP_TOOLCHAIN=$toolchain', job)
             self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", job)
 
         self.assertIn("if ! cargo fetch --locked --offline; then", runtime)
