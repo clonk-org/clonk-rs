@@ -111,10 +111,10 @@ jobs:
               exit "$failed"
           - name: remaining workspace 1/2
             apt: mesa-vulkan-drivers
-            command: cargo nextest run -p clonk-app-core -p clonk-app-menus -p clonk-app-render -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app-core -p clonk-app-menus -p clonk-app-netplay -p clonk-app-render -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui --no-fail-fast --locked
           - name: remaining workspace 2/2
             apt: libasound2-dev libxmp4
-            command: cargo nextest run -p clonk-app-netplay -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-network -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
+            command: cargo nextest run -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-network -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
           - name: workspace quality
             apt: libasound2-dev libudev-dev python3-pil
             command: |
@@ -150,8 +150,6 @@ jobs:
 
       - name: Reuse exact preinstalled Rust
         id: preinstalled-rust
-        env:
-          RUSTUP_AUTO_INSTALL: '0'
         run: |
           required='rustc 1.97.1 '
           exact=false

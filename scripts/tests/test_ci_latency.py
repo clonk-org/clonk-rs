@@ -90,7 +90,7 @@ class CiLatencyTests(unittest.TestCase):
         ]
         self.assertNotIn("\n  push:\n", triggers)
 
-    def test_preinstalled_rust_probe_never_downloads_a_toolchain(self):
+    def test_preinstalled_rust_probe_preserves_cache_toolchain_inventory(self):
         landing = LANDING.read_text(encoding="utf-8")
         probe = landing[
             landing.index("      - name: Reuse exact preinstalled Rust") : landing.index(
@@ -98,7 +98,7 @@ class CiLatencyTests(unittest.TestCase):
             )
         ]
 
-        self.assertIn("RUSTUP_AUTO_INSTALL: '0'", probe)
+        self.assertNotIn("RUSTUP_AUTO_INSTALL", probe)
 
     def test_merge_group_rows_preempt_only_rolling_post_merge_work(self):
         landing = LANDING.read_text(encoding="utf-8")
@@ -207,8 +207,8 @@ class CiLatencyTests(unittest.TestCase):
             remaining_packages,
             Counter(workspace_packages - dedicated_packages),
         )
-        self.assertNotIn("-p clonk-app-netplay", remaining_shards[0][2])
-        self.assertIn("-p clonk-app-netplay", remaining_shards[1][2])
+        self.assertIn("-p clonk-app-netplay", remaining_shards[0][2])
+        self.assertNotIn("-p clonk-app-netplay", remaining_shards[1][2])
         self.assertNotIn(
             "cargo nextest run --workspace --no-fail-fast --locked",
             workflow,
