@@ -214,6 +214,8 @@ class CiLatencyTests(unittest.TestCase):
         )
         self.assertIn("-p clonk-app-netplay", remaining_shards[0][2])
         self.assertNotIn("-p clonk-app-netplay", remaining_shards[1][2])
+        self.assertNotIn("-p clonk-app-menus", remaining_shards[0][2])
+        self.assertIn("-p clonk-app-menus", remaining_shards[1][2])
         self.assertNotIn(
             "cargo nextest run --workspace --no-fail-fast --locked",
             workflow,
