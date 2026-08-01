@@ -257,12 +257,22 @@ fn dispatch_effect_fx_callback_fail_safe(
     function: &str,
     call_args: &[Value],
 ) -> i32 {
-    match dispatch_effect_fx_callback(
-        effect.command_target,
-        effect.command_id.as_deref(),
+    fold_effect_callback_fail_safe(
         function,
-        call_args,
-    ) {
+        dispatch_effect_fx_callback(
+            effect.command_target,
+            effect.command_id.as_deref(),
+            function,
+            call_args,
+        ),
+    )
+}
+
+fn fold_effect_callback_fail_safe(
+    function: &str,
+    callback: Option<Result<Value, RuntimeError>>,
+) -> i32 {
+    match callback {
         None => 0,
         Some(Ok(value)) => value_as_i32(&value),
         Some(Err(error)) => {
