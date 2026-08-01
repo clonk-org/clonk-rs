@@ -1120,7 +1120,10 @@ fn run() -> Result<()> {
                 if matches!(
                     app.mode,
                     AppMode::Menu | AppMode::Loading | AppMode::Running
-                ) {
+                ) && should_attempt_retained_gpu_presentation(
+                    retained_gpu_renderer.requires_cpu_presentation(),
+                )
+                {
                     app.retained_gpu_presentation_active = true;
                     if pixels.context().texture_extent.width != 1
                         || pixels.context().texture_extent.height != 1
@@ -1131,7 +1134,7 @@ fn run() -> Result<()> {
                             return;
                         }
                     }
-                    match present_retained_gpu_frame(
+                    let fallback_to_cpu = match present_retained_gpu_frame(
                         &mut app,
                         pixels,
                         presenter,
@@ -1188,6 +1191,7 @@ fn run() -> Result<()> {
                                     );
                                 }
                             }
+                            false
                         }
                         Err(error) => match retained_gpu_present_recovery(&error) {
                             RetainedGpuPresentRecovery::RebuildDevice => {
@@ -1209,6 +1213,7 @@ fn run() -> Result<()> {
                                         control_flow.set_exit();
                                     }
                                 }
+                                false
                             }
                             RetainedGpuPresentRecovery::Retry => {
                                 tracing::warn!(
@@ -1216,18 +1221,48 @@ fn run() -> Result<()> {
                                     "retained GPU surface timed out; retrying presentation"
                                 );
                                 window.request_redraw();
+                                false
+                            }
+                            RetainedGpuPresentRecovery::CpuFallback => {
+                                // `render_layers` validated the composition
+                                // extent against this device before returning
+                                // this source/shader limit error. The ordinary
+                                // CPU presenter below therefore has a valid
+                                // physical target and is the exact reference
+                                // fallback for this device.
+                                tracing::warn!(
+                                    ?error,
+                                    "retained GPU texture exceeds device limit; using CPU presentation"
+                                );
+                                true
                             }
                             RetainedGpuPresentRecovery::Fatal => {
                                 tracing::error!(?error, "retained GPU render failed");
                                 control_flow.set_exit();
+                                false
                             }
                         },
+                    };
+                    if !fallback_to_cpu {
+                        window.set_cursor_visible(app.platform_cursor_visible());
+                        return;
                     }
-                    window.set_cursor_visible(app.platform_cursor_visible());
-                    return;
                 }
                 app.retained_gpu_presentation_active = false;
                 let (physical_width, physical_height) = presenter.physical_size();
+                let max_texture_dimension_2d = pixels.device().limits().max_texture_dimension_2d;
+                if physical_width > max_texture_dimension_2d
+                    || physical_height > max_texture_dimension_2d
+                {
+                    tracing::error!(
+                        physical_width,
+                        physical_height,
+                        max_texture_dimension_2d,
+                        "CPU presentation extent exceeds the device texture limit"
+                    );
+                    control_flow.set_exit();
+                    return;
+                }
                 if pixels.context().texture_extent.width != physical_width
                     || pixels.context().texture_extent.height != physical_height
                 {
