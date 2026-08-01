@@ -347,6 +347,9 @@ pub(crate) async fn run_host(
     let mut route_tasks = tokio::task::JoinSet::<()>::new();
     let mut resync_timer = interval(state.config.resync_interval);
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
+    // Runtime dynamics age out from C4Network2::OnSec1Timer, not from the
+    // simulation/control clock (oracle-src-pinned src/C4Network2.cpp:674-697).
+    let mut runtime_dynamic_timer = interval(Duration::from_secs(1));
     let mut published_control_send_time_epoch = None;
 
     if let Some(error) = udp_start_error {
@@ -612,7 +615,6 @@ pub(crate) async fn run_host(
                         reached_at,
                     } => {
                         state.control_tick_reached(tick, control_rate, target_fps, reached_at);
-                        remove_stale_host_runtime_dynamic(&mut state);
                     }
                     HostCommand::ControlTickConsumed {
                         tick,
@@ -862,6 +864,9 @@ pub(crate) async fn run_host(
                     let actions = state.resource_catalog.on_timer(now_seconds);
                     dispatch_host_resource_actions(actions, &mut state).await;
                 }
+            }
+            _ = runtime_dynamic_timer.tick() => {
+                remove_stale_host_runtime_dynamic(&mut state);
             }
         }
     }
