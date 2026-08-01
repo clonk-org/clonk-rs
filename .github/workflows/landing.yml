@@ -73,8 +73,12 @@ jobs:
             command: cargo nextest run -p clonk-engine-unit-tests --no-fail-fast --locked
           - name: frontend unit
             command: cargo nextest run -p clonk-frontend-unit-tests --no-fail-fast --locked
-          - name: remaining workspace
-            command: cargo nextest run --workspace --exclude clonk-app --exclude clonk-engine-integration-tests --exclude clonk-engine-unit-tests --exclude clonk-frontend-unit-tests --no-fail-fast --locked
+          - name: remaining workspace 1/3
+            command: cargo nextest run -p clonk-app-netplay -p clonk-app-menus -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-platform -p clonk-audio -p clonk-game -p clonk-update -p clonk-update-net --no-fail-fast --locked
+          - name: remaining workspace 2/3
+            command: cargo nextest run -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-launcher -p clonk-logging -p clonk-icon -p clonk-c4group -p clonk-resources -p clonk-script --no-fail-fast --locked
+          - name: remaining workspace 3/3
+            command: cargo nextest run -p clonk-network -p clonk-app-core -p clonk-app-render -p clonk-frontend -p clonk-graphics -p clonk-gui -p clonk-scaling -p xtask --no-fail-fast --locked
           - name: workspace lints
             command: cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
           - name: C++ parity

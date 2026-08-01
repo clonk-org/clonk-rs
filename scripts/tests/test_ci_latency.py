@@ -1,7 +1,9 @@
 """Static guards for the landing path's coverage and latency budget."""
 
 import re
+import tomllib
 import unittest
+from collections import Counter
 from pathlib import Path
 
 
@@ -82,18 +84,39 @@ class CiLatencyTests(unittest.TestCase):
             "cargo nextest run -p clonk-frontend-unit-tests --no-fail-fast --locked",
             workflow,
         )
-        remainder = next(
-            line.strip()
-            for line in workflow.splitlines()
-            if "cargo nextest run --workspace --exclude clonk-app" in line
-        )
-        for package in (
+        dedicated_packages = {
             "clonk-app",
             "clonk-engine-integration-tests",
             "clonk-engine-unit-tests",
             "clonk-frontend-unit-tests",
-        ):
-            self.assertIn(f"--exclude {package}", remainder)
+        }
+        workspace = tomllib.loads(
+            (REPOSITORY / "Cargo.toml").read_text(encoding="utf-8")
+        )["workspace"]
+        workspace_packages = {
+            tomllib.loads(
+                (REPOSITORY / member / "Cargo.toml").read_text(encoding="utf-8")
+            )["package"]["name"]
+            for member in workspace["members"]
+        }
+        remaining_shards = re.findall(
+            r"          - name: remaining workspace ([1-9][0-9]*)/([1-9][0-9]*)\n"
+            r"            command: cargo nextest run (.*?) --no-fail-fast --locked",
+            workflow,
+        )
+        self.assertEqual(
+            [(index, total) for index, total, _ in remaining_shards],
+            [("1", "3"), ("2", "3"), ("3", "3")],
+        )
+        remaining_packages = Counter()
+        for _, _, arguments in remaining_shards:
+            tokens = arguments.split()
+            self.assertEqual(tokens[::2], ["-p"] * (len(tokens) // 2))
+            remaining_packages.update(tokens[1::2])
+        self.assertEqual(
+            remaining_packages,
+            Counter(workspace_packages - dedicated_packages),
+        )
         self.assertNotIn(
             "cargo nextest run --workspace --no-fail-fast --locked",
             workflow,
