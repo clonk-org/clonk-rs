@@ -18,16 +18,25 @@ CALL_PATTERN = re.compile(
     r'include_main_test_fragment!\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,?\s*\);',
     re.DOTALL,
 )
+SPLIT_CALL_PATTERN = re.compile(
+    r'include_split_main_test_fragment!\(\s*"([^"]+)"\s*,\s*"([^"]+)"'
+    r'\s*,\s*"([^"]+)"\s*,?\s*\);',
+    re.DOTALL,
+)
 EXPECTED_SHARDS = {
-    "app-test-shard-1": {"netplay.rs"},
+    "app-test-shard-1": {
+        "netplay.rs::netplay_shard_1",
+        "netplay.rs::netplay_shard_2",
+    },
     "app-test-shard-2": {"menus.rs"},
     "app-test-shard-3": {"scenario_routes.rs"},
-    "app-test-shard-4": {"audio.rs", "game_over.rs", "net_resources.rs"},
+    "app-test-shard-4": {"audio.rs", "input.rs"},
     "app-test-shard-5": {"chat_messages.rs", "lobby.rs"},
-    "app-test-shard-6": {"league.rs", "runtime.rs"},
+    "app-test-shard-6": {"game_over.rs", "runtime.rs"},
     "app-test-shard-7": {"scensel.rs", "startup.rs"},
-    "app-test-shard-8": {"rendering.rs"},
-    "app-test-shard-9": {"input.rs", "saves.rs"},
+    "app-test-shard-8": {"net_resources.rs", "saves.rs"},
+    "app-test-shard-9": {"league.rs", "rendering.rs"},
+    "app-test-shard-10": {"netplay.rs::netplay_shard_2"},
 }
 
 
@@ -76,6 +85,7 @@ class ClonkAppTestShardTests(unittest.TestCase):
 
         source = HARNESS.read_text(encoding="utf-8")
         calls = CALL_PATTERN.findall(source)
+        split_calls = SPLIT_CALL_PATTERN.findall(source)
         assigned = defaultdict(set)
         paths = []
         for selector, relative in calls:
@@ -85,11 +95,34 @@ class ClonkAppTestShardTests(unittest.TestCase):
             assigned[selector].add(path.name)
             paths.append(path)
 
+        self.assertEqual(
+            split_calls,
+            [
+                (
+                    "app-test-shard-1",
+                    "app-test-shard-10",
+                    "main_tests/netplay.rs",
+                )
+            ],
+        )
+        for first, second, relative in split_calls:
+            path = (APP / "src" / relative).resolve()
+            self.assertEqual(path.parent, FRAGMENTS.resolve())
+            assigned[first].add(f"{path.name}::netplay_shard_1")
+            assigned[first].add(f"{path.name}::netplay_shard_2")
+            assigned[second].add(f"{path.name}::netplay_shard_2")
+            paths.append(path)
+
         self.assertEqual(dict(assigned), EXPECTED_SHARDS)
         discovered = [path.resolve() for path in FRAGMENTS.glob("*.rs")]
         self.assertEqual(Counter(paths), Counter(discovered))
-        self.assertEqual({selector for selector, _ in calls}, selectors)
+        called_selectors = {selector for selector, _ in calls}
+        called_selectors.update(
+            selector for first, second, _ in split_calls for selector in (first, second)
+        )
+        self.assertEqual(called_selectors, selectors)
         self.assertEqual(source.count("macro_rules! include_main_test_fragment"), 1)
+        self.assertEqual(source.count("macro_rules! include_split_main_test_fragment"), 1)
         self.assertEqual(
             re.findall(r'include!\(\s*"main_tests/[^"]+"\s*\)', source),
             [],
@@ -103,14 +136,35 @@ class ClonkAppTestShardTests(unittest.TestCase):
             compact,
             "without shard mode the macro must include every fragment",
         )
+        self.assertIn(
+            '#[cfg(any(not(feature="app-test-shard-mode"),feature=$first,'
+            'feature=$second))]include!($path);',
+            compact,
+            "the split fragment must compile for either half and ordinary tests",
+        )
         selector_guard = ",".join(
-            f'feature="{selector}"' for selector in sorted(selectors)
+            f'feature="{selector}"'
+            for selector in sorted(selectors, key=lambda name: int(name.rsplit("-", 1)[1]))
         )
         self.assertIn(
             f'#[cfg(all(feature="{SENTINEL}",not(any({selector_guard}))))]'
             "compile_error!",
             compact,
             "the internal sentinel alone must not silently produce an empty shard",
+        )
+
+        netplay = (FRAGMENTS / "netplay.rs").read_text(encoding="utf-8")
+        compact_netplay = normalized_rust(netplay)
+        self.assertIn(
+            '#[cfg(any(not(feature="app-test-shard-mode"),'
+            'feature="app-test-shard-1"))]modnetplay_shard_1{usesuper::*;',
+            compact_netplay,
+        )
+        self.assertIn(
+            '#[cfg(any(not(feature="app-test-shard-mode"),'
+            'feature="app-test-shard-1",feature="app-test-shard-10"))]'
+            'modnetplay_shard_2{usesuper::*;',
+            compact_netplay,
         )
 
     def test_inline_test_modules_run_once_in_shard_five(self):

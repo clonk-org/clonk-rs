@@ -1,5 +1,15 @@
-// Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
-// sequence, not a child module, so test ids stay `tests::<fn>`.
+// Spliced into `mod tests` (src/main_tests.rs) via include!. The two child
+// modules are independent compile-time shards; ordinary tests include both.
+// Keep their existing bodies unindented so this structural split stays
+// reviewable; format new code before placing it inside either skipped wrapper.
+
+#[rustfmt::skip]
+#[cfg(any(
+    not(feature = "app-test-shard-mode"),
+    feature = "app-test-shard-1"
+))]
+mod netplay_shard_1 {
+    use super::*;
 
 #[cfg(unix)]
 #[test]
@@ -6796,6 +6806,18 @@ fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
     );
     assert_one_pixel_native_edge(&chrome, &rendered, 1920, 1440, upper, 3.0);
 }
+
+}
+
+// Preserve the old feature-one inventory until the landing matrix changes.
+#[rustfmt::skip]
+#[cfg(any(
+    not(feature = "app-test-shard-mode"),
+    feature = "app-test-shard-1",
+    feature = "app-test-shard-10"
+))]
+mod netplay_shard_2 {
+    use super::*;
 
 #[test]
 fn direct_runtime_repairs_urls_truncated_by_the_old_rust_parser() {
@@ -20507,4 +20529,6 @@ fn losing_the_last_local_viewport_flashes_the_native_observer_hint() {
             .map(|message| message.text.clone()),
         Some(expected)
     );
+}
+
 }
