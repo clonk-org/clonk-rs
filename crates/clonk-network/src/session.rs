@@ -12496,12 +12496,12 @@ mod tests {
         host.shutdown().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn runtime_dynamic_waits_for_the_host_second_timer_after_its_tick() {
-        // C4Network2 removes an outdated dynamic from OnSec1Timer, rather
-        // than from the control-tick callback (src/C4Network2.cpp:674-697,
-        // 1945-1980). A joiner must therefore retain a whole host timer
-        // window to retrieve the just-published runtime dynamic.
+    #[tokio::test(start_paused = true)]
+    async fn runtime_dynamic_is_not_removed_synchronously_when_its_tick_is_crossed() {
+        // C4Network2 removes an outdated dynamic while executing, rather than
+        // in its control-tick notification path (src/C4Network2.cpp:679-696).
+        // A normal game execution reaches that check only after ControlTick
+        // advances (src/C4Game.cpp:776-782; src/C4GameControl.cpp:325-330).
         let directories = SessionResourceDirectories::new();
         let config = HostConfig {
             resource_directory: Some(directories.host.clone()),
@@ -12516,6 +12516,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut host = start_host(listener, config).await.unwrap();
         let mut events = host.take_event_receiver();
+        // Tokio intervals are initially ready. Drain that startup tick before
+        // publishing a dynamic so this test isolates the control-tick handler
+        // from a real timer pass.
+        settle_paused_network().await;
 
         host.publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters.clone())
             .await
@@ -12550,7 +12554,7 @@ mod tests {
         .unwrap();
         assert!(
             host.remove_runtime_dynamic().await.unwrap(),
-            "crossing the dynamic tick alone must not remove it before the host second timer"
+            "the control-tick handler must not synchronously remove a stale runtime dynamic"
         );
 
         host.shutdown().await.unwrap();
@@ -12558,10 +12562,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stale_runtime_dynamic_expires_on_the_host_second_timer() {
-        // C4Network2 only calls RemoveDynamic from OnSec1Timer after the
-        // control tick is stale (src/C4Network2.cpp:674-697,1945-1980).
-        // Its C4Sec1Timer is registered separately from network/control work
-        // (src/C4Network2.cpp:273-278).
+        // C4Network2::OnSec1Timer invokes Execute, which removes a dynamic
+        // after its control tick is stale (src/C4Network2.cpp:674-696). The
+        // regular game loop is another Execute path; this test covers the
+        // host's timer path specifically (src/C4Game.cpp:776-782).
         let directories = SessionResourceDirectories::new();
         let config = HostConfig {
             resource_directory: Some(directories.host.clone()),
