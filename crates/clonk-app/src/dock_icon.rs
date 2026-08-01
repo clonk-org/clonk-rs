@@ -48,7 +48,10 @@ pub(crate) fn set_dock_icon() {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn set_dock_icon() {}
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use super::*;
     use winit::event::Event;
@@ -120,7 +123,10 @@ mod macos {
         clonk_icon::png_bytes(&clonk_icon::resize_square(&square, DOCK_ICON_SIDE))
     }
 
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+    ))]
     mod tests {
         use super::*;
 

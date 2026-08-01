@@ -1,0 +1,313 @@
+name: Landing
+
+# Pull requests answer only the admission question. The merge queue then tests
+# the exact tree that can land across independent Linux shards and Windows
+# smoke coverage; trusted post-merge validation builds the shipped MSVC apps.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "landing-${{ github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pull-request-title:
+    name: Pull request title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the title is a Conventional Commit subject
+        env:
+          # Untrusted text belongs in the environment, never interpolated into
+          # the shell program by the Actions expression evaluator.
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|style|test)!?: .+'
+          if [[ "$TITLE" == *$'\n'* || ! "$TITLE" =~ $pattern ]]; then
+            echo "::error::Pull request title is not a Conventional Commit subject: ${TITLE}"
+            echo "The merge queue squashes this title onto main verbatim." >&2
+            exit 1
+          fi
+
+  linux:
+    name: Linux / ${{ matrix.name }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The queue admits one candidate at a time. Three long required rows also
+    # hold the rolling post-merge groups, canceling obsolete diagnostics before
+    # they can consume the standard runner budget. Release-SHA lanes differ.
+    concurrency:
+      group: >-
+        ${{ github.event_name == 'merge_group' && matrix.name == 'app 2/12' && 'linux-landing-cache-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 3/12' && 'main-coverage-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 5/12' && 'main-recording-host-rolling'
+          || format('landing-linux-{0}-{1}', github.run_id, matrix.name) }}
+      cancel-in-progress: ${{ github.event_name == 'merge_group' }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: app netplay 1/2
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-1 --no-fail-fast --locked
+          - name: app netplay 2/2
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-10 --no-fail-fast --locked
+          - name: app 2/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-2 --no-fail-fast --locked
+          - name: app 3/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-3 --no-fail-fast --locked
+          - name: app 4/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-4 --no-fail-fast --locked
+          - name: app 5/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
+          - name: app 6/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-6 --no-fail-fast --locked
+          - name: app 7/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-7 --no-fail-fast --locked
+          - name: app 8/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-8 --no-fail-fast --locked
+          - name: app 9/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-9 --no-fail-fast --locked
+          - name: app 11/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-11 --no-fail-fast --locked
+          - name: app 12/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-12 --no-fail-fast --locked
+          - name: engine integration 1/2
+            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
+          - name: workspace unit and parity
+            command: |
+              failed=0
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests -p clonk-engine-integration-tests --features clonk-engine-integration-tests/engine-it-shard-2 --no-fail-fast --locked || failed=1
+              cargo xtask parity verify || failed=1
+              exit "$failed"
+          - name: remaining workspace 1/2
+            apt: mesa-vulkan-drivers
+            command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-app-render -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui --no-fail-fast --locked
+          - name: remaining workspace 2/2
+            apt: libasound2-dev libxmp4
+            command: cargo nextest run -p clonk-app-menus -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-network -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
+          - name: workspace quality
+            apt: libasound2-dev libudev-dev python3-pil
+            command: |
+              failed=0
+              cargo clippy --version || failed=1
+              rustfmt --version || failed=1
+              cargo fmt --all -- --check || failed=1
+              git fetch --no-tags --depth=1 origin 7d43b47b7d789b533f32d005e64596e0a07019cd || failed=1
+              python3 -m unittest discover -s scripts/tests -p 'test_*.py' || failed=1
+              cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings || failed=1
+              exit "$failed"
+          - name: engine contracts
+            command: |
+              cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
+              cargo xtask engine-snapshots verify
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install native dependencies
+        if: matrix.apt != ''
+        env:
+          APT_PACKAGES: ${{ matrix.apt }}
+        run: |
+          read -r -a packages <<< "$APT_PACKAGES"
+          if ! sudo apt-get install --yes --no-install-recommends "${packages[@]}"; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends "${packages[@]}"
+          fi
+
+      - name: Reuse exact preinstalled Rust
+        id: preinstalled-rust
+        run: |
+          required='rustc 1.97.1 '
+          exact=false
+          if command -v rustup >/dev/null; then
+            while read -r toolchain _; do
+              if version=$(rustup run "$toolchain" rustc --version 2>/dev/null) &&
+                [[ "$version" == "$required"* ]]; then
+                sysroot=$(rustup run "$toolchain" rustc --print sysroot)
+                echo "$sysroot/bin" >> "$GITHUB_PATH"
+                echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
+                exact=true
+                break
+              fi
+            done < <(rustup toolchain list)
+          fi
+          echo "exact=$exact" >> "$GITHUB_OUTPUT"
+
+      - name: Install exact Rust toolchain
+        if: steps.preinstalled-rust.outputs.exact != 'true'
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-nextest@0.9.91
+          fallback: none
+
+      # Restore the dependency cache produced from trusted main. Merge-queue
+      # refs are short-lived and must not consume the repository's 10 GiB cache
+      # quota with immutable copies that no later candidate can restore.
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: . -> target
+          shared-key: full-parity
+          save-if: false
+
+      - name: Run ${{ matrix.name }}
+        env:
+          SHARD_COMMAND: ${{ matrix.command }}
+        run: bash -euo pipefail -c "$SHARD_COMMAND"
+
+  windows-smoke:
+    name: Windows smoke tests
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    # A queue candidate may preempt the rolling trusted-main producer so the
+    # bounded smoke job is not delayed behind the exact post-merge app build.
+    concurrency:
+      group: >-
+        ${{ github.event_name == 'merge_group' && 'windows-landing-cache-rolling'
+          || format('landing-windows-smoke-{0}', github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'merge_group' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-nextest@0.9.91
+          fallback: none
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-runtime-msvc
+          save-if: false
+
+      - name: Test the launcher and path resolution
+        run: cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core --locked --no-fail-fast
+
+      - name: Test the Windows crash-log descriptor
+        run: cargo nextest run -p clonk-logging --test crash_log_descriptor --locked
+
+      - name: Lint Windows paths
+        run: cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings
+
+      - name: Install NSIS
+        run: |
+          choco install nsis --version 3.12.0 --yes --no-progress
+          nsis_dir='/c/Program Files (x86)/NSIS'
+          if [[ ! -x "$nsis_dir/makensis.exe" ]]; then
+            echo "chocolatey installed nsis but $nsis_dir/makensis.exe is missing" >&2
+            exit 1
+          fi
+          nsis_version=$(MSYS2_ARG_CONV_EXCL='*' "$nsis_dir/makensis.exe" /VERSION | tr -d '\r')
+          if [[ "$nsis_version" != 'v3.12' ]]; then
+            echo "expected NSIS v3.12, found: $nsis_version" >&2
+            exit 1
+          fi
+          echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
+
+      - name: Compile the installer over a stand-in payload
+        run: |
+          payload_dir=target/dist/clonk-rust
+          mkdir -p "$payload_dir"/bin "$payload_dir"/planet "$payload_dir"/content
+          echo stand-in > "$payload_dir/bin/clonk-game.exe"
+          echo stand-in > "$payload_dir/bin/clonk-app.exe"
+          echo stand-in > "$payload_dir/bin/c4group.exe"
+          echo stand-in > "$payload_dir/planet/System.c4g.txt"
+          echo stand-in > "$payload_dir/content/Objects.txt"
+          echo stand-in > "$payload_dir/README.md"
+
+          payload=$(cygpath -w "$PWD/$payload_dir")
+          outfile=$(cygpath -w "$PWD/target/dist/stand-in-setup.exe")
+          icon=$(cygpath -w "$PWD/crates/clonk-icon/res/windows/c4x.ico")
+          makensis -NOCD \
+            -DVERSION=0.0.0 \
+            -DPAYLOAD="$payload" \
+            -DOUTFILE="$outfile" \
+            -DICON="$icon" \
+            scripts/windows-installer.nsi
+          test -s target/dist/stand-in-setup.exe
+
+  landing-gate:
+    name: Landing gate
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - pull-request-title
+      - linux
+      - windows-smoke
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Enforce landing results
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TITLE_RESULT: ${{ needs.pull-request-title.result }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+          WINDOWS_SMOKE_RESULT: ${{ needs.windows-smoke.result }}
+        run: |
+          failed=0
+          require_result() {
+            local name=$1 actual=$2 expected=$3
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::$name result was '$actual', expected '$expected'"
+              failed=1
+            fi
+          }
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            require_result title "$TITLE_RESULT" success
+            require_result linux "$LINUX_RESULT" skipped
+            require_result windows-smoke "$WINDOWS_SMOKE_RESULT" skipped
+          else
+            require_result title "$TITLE_RESULT" skipped
+            require_result linux "$LINUX_RESULT" success
+            require_result windows-smoke "$WINDOWS_SMOKE_RESULT" success
+          fi
+          exit "$failed"

@@ -298,7 +298,10 @@ impl LocalControlRegistry {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use super::*;
     use clonk_engine::{CommandKind, ControlButton, ControlCommand, ControlEvent};

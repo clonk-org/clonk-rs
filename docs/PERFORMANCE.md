@@ -83,6 +83,189 @@ samples. Always retain sample counts and raw samples; a single mean hides stalls
 There is no portable measured CI baseline yet. Do not turn timings from an
 arbitrary laptop or a shared hosted runner into a blocking threshold.
 
+### Release codegen parallelism
+
+On 2026-07-31, commit `b1d71339c` and content revision `e82d6d275` were built
+on the Apple M4 Max reference machine with Rust 1.97.1. Thin LTO stayed enabled
+while release codegen units varied. Each shipped-binary build used a fresh
+target, the locked offline graph, and the real release inventory:
+
+```sh
+cgu=8
+cold_target="$(mktemp -d "${TMPDIR:-/tmp}/clonk-release-cgu.XXXXXX")"
+caffeinate -dimsu /usr/bin/time -lp env \
+  -u CARGO_INCREMENTAL \
+  -u CARGO_BUILD_JOBS \
+  -u RUSTC_WRAPPER \
+  -u RUSTC_WORKSPACE_WRAPPER \
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$cgu" \
+  CARGO_TARGET_DIR="$cold_target" \
+  cargo build --release -p clonk-app -p clonk-game -p clonk-c4group \
+    --locked --offline --timings --quiet
+```
+
+| Release codegen units | Cold wall | Build process-tree user CPU | System CPU | Target size | Three binaries |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 208.49s | 590.58s | 20.37s | 1,080,324 KiB | 43,491,408 bytes |
+| **8** | **72.38s** | 658.72s | 26.34s | 1,165,852 KiB | 54,104,384 bytes |
+| 16 | 75.29s | 694.20s | 28.21s | 1,182,436 KiB | 55,945,920 bytes |
+| 64 | 75.97s | 727.35s | 35.61s | 1,206,852 KiB | 57,716,304 bytes |
+
+The runtime control was the fixed-seed, 6,000-frame `03_Chaos` workload named
+below as the low-power regression scenario. Each arm reused its corresponding
+release target, and the three primary arms ran in balanced orders
+`1/8/16`, `16/8/1`, and `8/1/16`:
+
+```sh
+CARGO_TARGET_DIR="$cold_target" \
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$cgu" \
+  cargo build --release -p clonk-engine --example scenario_profile \
+    --locked --offline --quiet
+/usr/bin/time -lp env LC_PROFILE_MODE=tick \
+  "$cold_target/release/examples/scenario_profile" \
+  "ClonkMars.c4f/03_Chaos.c4s" 6000 424242
+```
+
+| Release codegen units | Samples | Simulation wall median | Mean/frame | p50 | p95 | p99 | Mean delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 3 | 12.054256s | 2.009012ms | 1.738625ms | 3.188125ms | 5.491166ms | baseline |
+| **8** | 3 | 12.285615s | 2.047573ms | 1.762416ms | 3.279708ms | 5.649625ms | +1.9% |
+| 16 | 3 | 12.390027s | 2.064979ms | 1.781958ms | 3.379583ms | 5.730750ms | +2.8% |
+
+Two additional reversed codegen-unit-1/64 pairs put the 64-unit mean-frame
+regression between 2.9% and 6.9%. Every runtime sample joined players `[0, 1]`,
+ended with 122 objects after 6,000 frames, and recorded no frame above the
+27.7ms native-tick budget. The profiler does not hash the final snapshot, so
+these matching outputs are a workload sanity check rather than a parity gate.
+
+Eight global codegen units were the initial selection because they reduced this
+cold build by 65.3% while finishing faster, using less CPU, producing smaller
+binaries, and regressing runtime less than 16 or 64. The final binaries were
+24.4% larger than the one-unit build; that size and the 1.9% mean-frame cost
+were the accepted tradeoff for the 136.11s local build reduction.
+
+A follow-up on commit `1dd151cfd` modeled a warm-library build, with only the
+final application rebuilt. The global profile returned to one codegen unit and
+only `clonk-app` varied. Removing the app artifacts between each arm preserved
+the same dependency artifacts and shipped `clonk-game`/`c4group` binaries:
+
+| App codegen units | Warm app wall | Build user CPU | App binary |
+| ---: | ---: | ---: | ---: |
+| 1 | 106.96s | 261.58s | 40,235,120 bytes |
+| **8** | **59.45s** | 264.36s | 43,185,232 bytes |
+| 16 | 59.66s | 271.21s | 43,606,736 bytes |
+
+A four-Cargo-job proxy for the hosted Windows runner kept eight ahead of four
+(69.38s versus 77.61s) and sixteen (73.34s). Cargo rebuilt only `clonk-app`
+when moving from global-one to app-eight, confirming that the narrow override
+preserves the cached libraries. The shipped profile therefore keeps one unit
+globally and grants eight only to the app. This retains the baseline codegen
+for the simulation libraries while cutting the measured cache-warm final tail
+by 44.4%. Because Cargo package overrides inherit into child profiles, the test
+profile repeats its explicit 256-unit app setting instead of silently
+inheriting eight.
+
+On MSVC, rustc 1.97.1 requests a PDB even though the release profile has no
+debug information, while the published archives do not contain that PDB. The
+post-merge and release builds therefore share one configuration
+script that selects rustc's bundled LLD and passes `/DEBUG:NONE`,
+`/OPT:REF,ICF`, `/TIME`, and `/Brepro` explicitly. The same script enables
+linker-plugin LTO and a bounded 512 MiB ThinLTO cache while retaining the static
+CRT. It clears inherited `LINK` and `_LINK_` values before exporting the
+fingerprinted Rust flags, so runner-image defaults cannot silently override the
+contract. If release symbols are published in the future, remove
+`/DEBUG:NONE` from both paths and ship the matching PDB rather than
+silently producing an unused one.
+
+Hosted run `30691633087` restored an 855 MiB Windows dependency cache and took
+12m49s for the job: 11m50s in the runtime-build step and 11m10s reported by
+Cargo. An offline registry miss accounted for another 38.8s. Linker `/TIME`
+reported only 1.390s for the final `clonk-app.exe` link and 3.935s across every
+native link in the build; the roughly 8m40s final application tail is rustc
+frontend, codegen, and ThinLTO work rather than MSVC linking. A later hosted
+toolchain probe accidentally changed `CARGO_HOME` from the producer's native
+Windows path to an MSYS path, producing a cache identity that the restore-only
+landing job could never seed. Windows smoke therefore uses the same pinned
+toolchain action as the trusted post-merge cache producer.
+
+Later native-MSVC measurements isolated the remaining warm path. Cold hosted
+run `30698792424` used linker-plugin ThinLTO and finished in 16m48s;
+Cargo reported 14m43s and the application LTO phase alone took 331.775s. It
+published a 27.6 MiB LLD cache and a 496 MiB Rust dependency cache. Run
+`30699399606` then measured the same revision twice. The first attempt's only
+exact hit was the LLD cache; its dependency inventory differed, and it finished
+in 11m13s. The second hit both exact caches and
+finished in 8m19s: 7m11s in the build step and 6m31s reported by Cargo. Its
+observable final application tail was 4m40.219s, while all three native links
+together took 3.809s and their LTO work took 1.243s. The three executable
+hashes matched both earlier ThinLTO builds.
+
+The comparison arm disabled LTO only for these MSVC builds. Cold run
+`30700375081` finished in 14m14s, with a 13m19s build step, 12m23s reported by
+Cargo, and 5.480s across all links. An exact dependency-cache rerun was still
+compiling after 10m11s and was stopped before the final application link. This
+arm is rejected: disabling LTO made the relevant warm path slower while also
+changing the shipped optimization contract. Normalizing the runner to the one
+pinned Rust toolchain keeps future dependency-cache identities stable, and
+trusted `main` alone publishes both dependency and ThinLTO caches. Release jobs
+restore them without writing short-lived copies.
+
+Production-plumbing run `30701547831` deliberately began with neither exact
+cache and finished green in 12m55s. Cargo reported 11m32s; the application
+rustc span was 8m08.050s and its cold LTO link consumed 4m03.251s. Validation
+found a 119 MiB reusable ThinLTO cache, no dynamic CRT or PDB dependency, and
+working executables. All three hashes matched the earlier ThinLTO builds. The
+separate Windows smoke job pinned NSIS 3.12, compiled the stand-in installer,
+and finished in 3m56s.
+
+These samples put the standard four-vCPU Windows runner above the five-minute
+landing target even with both caches exact. The remaining cost is application
+frontend and code generation, not linking. The bounded queue therefore retains
+Windows tests, path linting, and an NSIS installer smoke compile, while trusted
+post-merge validation performs the exact static-CRT release build and runtime
+inspection. Release remains fail-closed on both the merge-group Landing run and
+the exact-SHA post-merge validation run.
+
+Two exhaustive standard-runner Linux samples of the predecessor graph, runs
+`30693625838` and `30693995330`, passed every row, but shared-runner execution
+varied enough that one and four rows respectively reached five minutes. The
+latter sample ranged from 2m28s to 5m16s per row; its slow application commands
+spent 3m34s--3m41s compiling and 28--39s executing tests. A controlled four-job
+shard-6 probe kept the current app test profile: opt-level 1, opt-level 0, and
+512 codegen units were each about 8% slower end to end than opt-level 2 with
+256 units. These samples prove the predecessor partitions exhaustive and green,
+not a robust five-minute latency bound on four-vCPU hosted runners.
+
+The replacement queue graph uses 18 Linux rows and one Windows smoke row. It turns
+the two netplay runtime hash partitions into independent compile-time modules,
+splits and rebalances the other application tests across ten selectors, splits
+engine integration across its two feature selectors, and partitions all 26
+remaining workspace packages exactly once across two rows. The ordinary
+unsharded suite remains the coverage reference.
+
+Hosted workflow-dispatch run `30702040649` exercised the final Linux partition
+at commit `6dd2b490c`. All 18 jobs started within 20 seconds and passed; workflow
+creation to the last Linux completion was 4m55s. The slowest row was remaining
+workspace 1/2 at 4m51s. Moving the eight `bird_flight` cases between the
+existing engine selectors left their paired rows at 4m00s and 3m46s instead of
+the predecessor's 4m56s critical row. Every row retained the trusted-main Rust
+cache identity, though each restored a compatible prefix rather than an exact
+file-hash key. This is a shared-runner sample with five seconds of end-to-end
+margin, not a portable timing guarantee.
+
+Because the merge queue admits one candidate at a time, three Linux
+merge-group rows and Windows smoke claim the rolling Linux-cache, coverage,
+recording-host, and Windows-cache concurrency groups. Required queue work
+therefore preempts stale ordinary post-merge owners; release pushes use
+SHA-specific groups and are unaffected.
+
+The build values are single sequential directional samples from fresh Cargo
+targets; later arms benefited from warmer filesystem caches. The runtime
+samples were interleaved, but the desktop session was active and on battery.
+Re-measure on the target CI and release platforms rather than treating these
+M4 measurements as portable thresholds.
+
 ### Compile-first development profile
 
 On 2026-07-30, the Apple M4 Max reference machine used fresh target directories
@@ -767,11 +950,20 @@ sample.
 
 ## CI cache interpretation
 
-The focused and full-parity jobs use separate cache scopes so concurrent jobs
-cannot replace a complete parity cache with a smaller focused cache. The cache
-is keyed by the Rust dependency/build inputs maintained by the Rust cache
-action. `CARGO_INCREMENTAL=0` keeps CI artifacts reproducible and smaller;
-the local development, play, and test profiles retain incremental behavior.
+Landing jobs restore the existing trusted-main `full-parity` and
+`windows-runtime-msvc` caches without saving short-lived merge-queue copies.
+A post-merge Linux producer compiles the complete locked workspace graph before
+it may publish; canceled runs cannot leave an incomplete immutable cache.
+Replay/render work restores that ordinary target read-only while instrumented
+coverage stays in a different target. Post-merge Windows validation refreshes
+smoke, packaging-tool, and exact static-CRT runtime artifacts only after all
+three succeed, then publishes the shipped-runtime dependency cache and bounded
+linker cache. Release restores those trusted caches. Recording-host oracles
+retain their own cache. The keys include the Rust dependency/build inputs
+maintained by the Rust cache action; the ThinLTO key additionally pins the Rust
+and LLVM versions plus manifests and the shared configuration script.
+`CARGO_INCREMENTAL=0` keeps CI artifacts reproducible and smaller; the local
+development, play, and test profiles retain incremental behavior.
 
 A cache hit is not proof that every crate was reusable. Report cache state with
 the observed compile duration, and investigate unexpected rebuilds before

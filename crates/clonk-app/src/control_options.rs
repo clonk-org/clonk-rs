@@ -334,7 +334,10 @@ pub fn format_key_label(key: VirtualKeyCode) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use super::*;
 

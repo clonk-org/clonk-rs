@@ -1,4 +1,4 @@
-"""The Rust workflow keeps code coverage as a visible, reproducible gate."""
+"""Main validation keeps post-merge coverage visible and reproducible."""
 
 import re
 import unittest

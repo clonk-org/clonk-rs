@@ -134,11 +134,14 @@ pull request is reviewed.
 
 | | Jobs | When |
 |---|---|---|
-| Per pull request | formatting, workspace lints, focused feedback, macOS material-order oracles, Windows launcher and installer (+ dependency guard on manifest changes) | every push to the branch, ~14 min |
-| In the queue | full parity gate, code coverage, MSVC runtime builds | up to 3 entries build at once, 1 merges at a time |
+| Per pull request | pull-request title admission (+ dependency guard on manifest changes) | every push to the branch, normally under 1 min |
+| In the queue | exhaustive compile-time Linux test shards, formatting/scripts, workspace lints, parity/snapshots/package tests, Windows smoke tests and the shipped MSVC runtime | 1 entry builds at a time; target at or below 5 min |
+| After landing | code coverage, macOS material-order oracles and Windows release tooling | exact landed SHA; blocks releases, not the next merge |
 
-A green pull request is therefore **not** a green parity gate, and an entry can
-be evicted after the pull request itself went green.
+A green pull request has passed admission, not the landing gate. The fail-closed
+`Landing gate` is the sole required queue result and rejects any failed,
+cancelled or unexpectedly skipped child job. An entry can therefore still be
+evicted after its pull request first goes green.
 
 - Run the [required gates](#done--all-required-gates-green) locally *before*
   opening the pull request. The queue is a safety net, not your test runner — an
@@ -170,11 +173,11 @@ cargo xtask engine-snapshots verify
 cargo xtask parity verify
 ```
 
-`.github/workflows/rust.yml` additionally runs `cargo fmt --all -- --check`,
+`.github/workflows/landing.yml` additionally runs `cargo fmt --all -- --check`,
 `python3 -m unittest discover -s scripts/tests -p 'test_*.py'`, and `cargo test
 -p xtask --features engine-tools --bin xtask-engine-tools --locked`. Run all
-three yourself: only the fmt check answers your pull request — the other two
-first report from the queue, where a failure evicts you.
+three yourself: they first report against the merge-group tree, where any
+failure rejects the `Landing gate` and evicts the entry.
 
 These are requirements, not a status report on this worktree — run and report
 them for the revision you are completing; focused tests do not imply the gates

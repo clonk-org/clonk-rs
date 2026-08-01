@@ -1,5 +1,5 @@
 # Local quality gates. These mirror the cheap, deterministic parts of
-# `.github/workflows/rust.yml` so a mistake is caught before it reaches CI —
+# `.github/workflows/landing.yml` so a mistake is caught before it reaches CI —
 # they do not replace it. Everything here is check-only and fast.
 #
 # This checkout is shared with concurrent sessions and worktrees (`.git` is
@@ -121,4 +121,4 @@ pre-push:
 #
 # Run it by hand before opening a pull request instead:
 #   cargo dev-check --base origin/main
-# CI's focused-feedback job runs it unbounded on every push.
+# CI runs the exhaustive compile-time shards against the queued merge tree.

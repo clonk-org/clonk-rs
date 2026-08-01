@@ -1409,7 +1409,10 @@ impl GameApp {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod save_thumbnail_tests {
     use super::*;
     use png::Decoder;

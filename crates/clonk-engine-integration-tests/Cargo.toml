@@ -10,6 +10,12 @@ readme.workspace = true
 publish.workspace = true
 autotests = false
 
+[features]
+default = []
+engine-it-sharded = []
+engine-it-shard-1 = ["engine-it-sharded"]
+engine-it-shard-2 = ["engine-it-sharded"]
+
 [[test]]
 name = "engine_it"
 path = "../clonk-engine/tests/it/main.rs"

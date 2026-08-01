@@ -299,8 +299,6 @@ use offline_startup::{
     offline_player_paths_identical, offline_player_real_path, OfflineStartupPlayers,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
-#[cfg(test)]
-use png::Decoder;
 use png::{BitDepth, ColorType, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
 use serde::{

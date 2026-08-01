@@ -1,4 +1,4 @@
-"""The host-specific material oracles stay visible in the Rust CI workflow."""
+"""Main validation keeps post-merge host-specific material oracles visible."""
 
 import re
 import unittest

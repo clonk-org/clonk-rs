@@ -47,15 +47,20 @@ publish = false
 [patch.crates-io]
 block = { path = "third_party/block" }
 
-# The shipped profile. Cargo's defaults (no LTO, 16 codegen units) leave real
-# throughput on the table for a workload dominated by the simulation loop and
-# the C4Script tree-walk, both of which cross crate boundaries constantly.
-# Thin LTO measured no worse than fat at a fraction of the link cost, so the
-# extra fat-LTO time buys nothing here. `panic` deliberately stays `unwind`:
-# the app relies on catching a panic to survive GPU device loss.
+# The shipped profile. Thin LTO retains cross-crate optimization for the
+# simulation loop and C4Script tree-walk. One codegen unit keeps library runtime
+# and cache identity stable; the large final app gets measured parallel codegen
+# below. `panic` deliberately stays `unwind`: the app relies on catching a panic
+# to survive GPU device loss.
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# On a four-job proxy, eight units cut the cache-warm app tail by 40% versus one
+# and beat both four and sixteen. Keeping this override app-only lets Cargo
+# reuse every release library compiled with the stable one-unit profile.
+[profile.release.package.clonk-app]
+codegen-units = 8
 
 # Keep the ordinary edit/build loop compile-first. Debug assertions, line
 # tables, and incremental reuse retain useful development diagnostics while
@@ -117,9 +122,10 @@ lto = "off"
 # Release inheritance avoids the dev dependency wildcard, but local test
 # rebuilds still need the incremental cache that the test profile normally has.
 incremental = true
-# CI disables incremental compilation for cache portability. Keep the same
-# broad codegen parallelism Cargo gives incremental local builds so the large
-# app and engine test wrappers do not become single long LLVM/link tails.
+# CI disables incremental compilation for cache portability. Explicitly
+# override the inherited release value with the broad codegen parallelism Cargo
+# gives incremental local builds so the large app and engine test wrappers do
+# not become single long LLVM/link tails.
 codegen-units = 256
 # Test-profile debug data increases codegen, link I/O, and target size without
 # affecting assertions or runtime. Panic-site text and function symbols remain;
@@ -134,6 +140,9 @@ overflow-checks = true
 # avoiding the longest level-3 codegen tail on this 192k-line wrapper.
 [profile.test.package.clonk-app]
 opt-level = 2
+# Package overrides inherit across profiles, so explicitly retain the broad
+# test-harness parallelism instead of inheriting the shipped app's eight units.
+codegen-units = 256
 
 # The large async clonk-network harness is a cold-build tail, while its complete
 # suite remains only a few seconds without LLVM optimization. Skip optimization

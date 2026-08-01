@@ -325,7 +325,10 @@ fn encode_local_group_filename(filename: &[u8]) -> Vec<u8> {
     encoded
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use clonk_engine::{
         LiveC4SaveNamedComponent, NetworkResourceCore, PLAYER_INFO_FLAG_INVISIBLE,

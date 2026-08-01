@@ -19,7 +19,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: release
+  # GitHub retains only one pending run per group even when cancellation is
+  # disabled. Keep each real release in its own lane so an ordinary later push
+  # cannot replace it before the resolver starts; no-op pushes may coalesce.
+  group: "release-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
   cancel-in-progress: false
 
 env:
@@ -27,203 +30,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  prepare:
-    name: Prepare the version
-    # Only the scheduled and manual paths bump. The push path is reacting to a
-    # release commit that already exists.
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: write
-      # `gh run list --workflow` reads the Actions API; without this it fails
-      # with "Resource not accessible by integration".
-      actions: read
-    defaults:
-      run:
-        shell: bash
-    outputs:
-      prepared: ${{ steps.bump.outputs.prepared }}
-      # The exact commit to build, tag and release. Everything downstream
-      # pins to this rather than to main's tip, which moves during a build.
-      sha: ${{ steps.bump.outputs.sha }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-
-      # Nothing here reviews the code, so refuse to release a tree whose own
-      # CI is failing. Both workflows run on every push to main, so require
-      # their push verdicts for this exact commit rather than a nearby main tip.
-      #
-      # `Windows` is checked as well as `Clonk Rust CI` because the Windows
-      # binaries are built on their own runner and nothing else covers them:
-      # a shipped Windows build was once unable to start at all, and only that
-      # workflow would have caught it.
-      - name: Require main's CI to be green
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FORCE: 'false'
-          CI_SHA: ${{ github.sha }}
-        run: |
-          # Tolerate a failing lookup: `set -e` would otherwise kill the step
-          # here, before the force branch below could override anything — which
-          # is precisely when an override is wanted. An unknown verdict is
-          # treated as not-green, so it still blocks unless forced.
-          conclusion=completed:success
-          for workflow in "Clonk Rust CI" "Windows"; do
-            latest=$(gh run list --workflow "$workflow" --branch main \
-              --commit "$CI_SHA" --event push \
-              --limit 1 --json status,conclusion \
-              --jq '[.[0].status // "none", .[0].conclusion // "none"] | join(":")' \
-              2>/dev/null || echo "unknown")
-            [[ -n "$latest" ]] || latest="unknown"
-            echo "$workflow push verdict for $CI_SHA: $latest"
-            if [[ "$latest" != "completed:success" ]]; then
-              conclusion="$latest"
-            fi
-          done
-          if [[ "$conclusion" == "completed:success" ]]; then
-            exit 0
-          fi
-          if [[ "$FORCE" == "true" ]]; then
-            # Deliberate override, recorded in the run log so a forced release
-            # is auditable afterwards rather than indistinguishable from a
-            # green one.
-            echo "::warning::releasing with CI '$conclusion' because force was requested"
-            exit 0
-          fi
-          echo "refusing to release: main's CI is '$conclusion'" >&2
-          echo "re-run this workflow with force=true to override" >&2
-          exit 1
-
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libasound2-dev \
-            libudev-dev \
-            pkg-config
-
-      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: release-prepare
-          cache-on-failure: true
-
-      - name: Cache git-cliff
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/release-tools
-          key: git-cliff-${{ runner.os }}-${{ hashFiles('scripts/prepare-release.sh') }}
-
-      # prepare-release.sh runs `cargo update --offline`, which needs the
-      # registry present. On a cold runner cache it would otherwise fail.
-      - name: Populate the cargo registry
-        run: cargo fetch --locked
-
-      - name: Bump and commit
-        id: bump
-        env:
-          REQUESTED_VERSION: ''
-        run: |
-          # Exit 3 means "no releasable commits"; any other non-zero is a real
-          # failure and must not be mistaken for a quiet skip.
-          set +e
-          if [[ -n "$REQUESTED_VERSION" ]]; then
-            scripts/prepare-release.sh "$REQUESTED_VERSION"
-          else
-            scripts/prepare-release.sh
-          fi
-          status=$?
-          set -e
-          if [[ "$status" -ne 0 && "$status" -ne 3 ]]; then
-            echo "prepare-release.sh failed with status $status" >&2
-            exit "$status"
-          fi
-
-          read_version() {
-            python3 - <<'PY'
-          import re
-          from pathlib import Path
-          text = Path("Cargo.toml").read_text(encoding="utf-8")
-          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
-          print(re.search(r'^version = "([^"]+)"$', section.group(1), re.M).group(1))
-          PY
-          }
-          version=$(read_version)
-
-          # Exit 3 is "no releasable commits". That is only a true skip when the
-          # current version is already tagged; if a previous run bumped the
-          # version but its build failed before tagging, the release is still
-          # owed and must not be skipped forever.
-          if [[ "$status" -eq 3 ]]; then
-            if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
-              echo "no releasable commits since the last tag"
-              echo "prepared=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            release_candidates=$(
-              git log --first-parent --format='%H%x09%s' |
-                awk -F '\t' -v expected="chore: release ${version}" \
-                  '$2 == expected { print $1 }'
-            )
-            release_candidate_count=$(
-              printf '%s\n' "$release_candidates" |
-                awk 'NF { count += 1 } END { print count + 0 }'
-            )
-            if [[ "$release_candidate_count" -eq 0 ]]; then
-              echo "v${version} is untagged, but no reachable 'chore: release ${version}' commit exists" >&2
-              exit 1
-            fi
-            if [[ "$release_candidate_count" -ne 1 ]]; then
-              echo "v${version} is untagged, but multiple reachable 'chore: release ${version}' commits exist" >&2
-              exit 1
-            fi
-            release_sha=$release_candidates
-            release_version=$(
-              git show "${release_sha}:Cargo.toml" |
-                python3 -c '
-          import re
-          import sys
-          text = sys.stdin.read()
-          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
-          print(re.search(r"""^version = "([^"]+)"$""", section.group(1), re.M).group(1))
-          '
-            )
-            if [[ "$release_version" != "$version" ]]; then
-              echo "${release_sha} contains workspace version ${release_version}, not ${version}" >&2
-              exit 1
-            fi
-            echo "v${version} was prepared earlier but never tagged; releasing ${release_sha}"
-            echo "sha=${release_sha}" >> "$GITHUB_OUTPUT"
-            echo "prepared=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- Cargo.toml Cargo.lock CHANGELOG.md
-          # Re-preparing a version the tree already carries stages nothing;
-          # committing then would fail rather than reuse the existing commit.
-          if git diff --cached --quiet; then
-            echo "tree is already at ${version}; reusing the existing commit"
-          else
-            git commit -m "chore: release ${version}"
-            git push origin HEAD:main
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "prepared=true" >> "$GITHUB_OUTPUT"
-
   resolve:
     name: Resolve the version
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 190
     # Read-only: nothing is tagged or published until the builds have passed.
     permissions:
       contents: read
+      actions: read
     defaults:
       run:
         shell: bash
@@ -238,6 +52,7 @@ jobs:
           # is running.
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Decide whether this commit releases
         id: resolve
@@ -250,6 +65,8 @@ jobs:
           # testing the subject there would reject every scheduled release.
           EVENT_NAME: ${{ github.event_name }}
           RESOLVED_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           subject=${HEAD_SUBJECT%%$'\n'*}
           if [[ "$EVENT_NAME" == "push" && "$subject" != "chore: release "* ]]; then
@@ -267,16 +84,111 @@ jobs:
           PY
           )
 
-          # Idempotent: re-running on the same commit must not double-release.
+          # A completed release is idempotent. A tag with no release, or a
+          # draft whose asset upload failed, must resume instead of abandoning
+          # this version forever.
           if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
-            echo "v${version} already tagged; nothing to do"
-            echo "release=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            tag_sha=$(git rev-list -n 1 "refs/tags/v${version}")
+            if [[ "$tag_sha" != "$RESOLVED_SHA" ]]; then
+              echo "v${version} points at ${tag_sha}, not ${RESOLVED_SHA}" >&2
+              exit 1
+            fi
+
+            lookup_error="${RUNNER_TEMP}/release-lookup.err"
+            set +e
+            release_state=$(gh api \
+              "repos/${REPOSITORY}/releases/tags/v${version}" \
+              --jq '.draft' 2>"$lookup_error")
+            lookup_status=$?
+            set -e
+            if [[ "$lookup_status" -ne 0 ]]; then
+              if grep -q '(HTTP 404)' "$lookup_error"; then
+                release_state=missing
+              else
+                cat "$lookup_error" >&2
+                echo "looking up v${version} failed" >&2
+                exit 1
+              fi
+            fi
+
+            if [[ "$release_state" == "false" ]]; then
+              echo "v${version} is already published; nothing to do"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$release_state" != "true" && "$release_state" != "missing" ]]; then
+              echo "unexpected v${version} release state: ${release_state}" >&2
+              exit 1
+            fi
+            echo "resuming incomplete v${version} publication"
           fi
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release=true" >> "$GITHUB_OUTPUT"
           echo "sha=$RESOLVED_SHA" >> "$GITHUB_OUTPUT"
+
+      # Landing proves the bounded merge-tree tests. Main validation performs
+      # the exact shipped MSVC build plus the slower coverage and recording-host
+      # diagnostics. Both must belong to this commit before artifacts are built.
+      - name: Require exact-SHA validation
+        if: steps.resolve.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_SHA: ${{ steps.resolve.outputs.sha }}
+          CI_POLL_ATTEMPTS: '360'
+          CI_POLL_SECONDS: '30'
+        run: |
+          for ((attempt = 1; attempt <= CI_POLL_ATTEMPTS; attempt++)); do
+            waiting=0
+            for workflow in landing.yml rust.yml; do
+              if [[ "$workflow" == "landing.yml" ]]; then
+                event=merge_group
+              else
+                event=push
+              fi
+              args=(
+                run list
+                --workflow "$workflow"
+                --commit "$CI_SHA"
+                --event "$event"
+                --limit 1
+                --json status,conclusion
+                --jq 'if length == 0 then "missing" else "\(.[0].status):\(.[0].conclusion // "none")" end'
+              )
+              if [[ "$event" == "push" ]]; then
+                args+=(--branch main)
+              fi
+              if ! verdict=$(gh "${args[@]}" 2>/dev/null); then
+                echo "$workflow lookup failed for $CI_SHA; retrying"
+                waiting=1
+                continue
+              fi
+              [[ -n "$verdict" ]] || verdict=missing
+              echo "$workflow $event verdict for $CI_SHA: $verdict"
+              case "$verdict" in
+                completed:success) ;;
+                completed:*)
+                  echo "refusing to release: $workflow is $verdict" >&2
+                  exit 1
+                  ;;
+                missing|queued:none|requested:none|waiting:none|pending:none|in_progress:none)
+                  waiting=1
+                  ;;
+                *)
+                  echo "refusing to release: unexpected $workflow state '$verdict'" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            if [[ "$waiting" -eq 0 ]]; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt "$CI_POLL_ATTEMPTS" ]]; then
+              sleep "$CI_POLL_SECONDS"
+            fi
+          done
+          echo "timed out waiting for exact-SHA landing and main validation" >&2
+          exit 1
 
   build:
     name: Build ${{ matrix.name }}
@@ -302,7 +214,7 @@ jobs:
           # Windows used to be cross-compiled from the ubuntu pass with mingw,
           # because this repository was private and Windows runners billed at
           # 2x. It is public now, so they are free — and building natively
-          # means the toolchain that is tested (`windows.yml`) is finally the
+          # means the toolchain that the landing gate tests is finally the
           # toolchain that ships.
           - name: windows
             runner: windows-latest
@@ -344,10 +256,15 @@ jobs:
       - name: Install the Windows installer toolchain
         if: matrix.runner == 'windows-latest'
         run: |
-          choco install nsis --yes --no-progress
+          choco install nsis --version 3.12.0 --yes --no-progress
           nsis_dir='/c/Program Files (x86)/NSIS'
           if [[ ! -x "$nsis_dir/makensis.exe" ]]; then
             echo "chocolatey installed nsis but $nsis_dir/makensis.exe is missing" >&2
+            exit 1
+          fi
+          nsis_version=$(MSYS2_ARG_CONV_EXCL='*' "$nsis_dir/makensis.exe" /VERSION | tr -d '\r')
+          if [[ "$nsis_version" != 'v3.12' ]]; then
+            echo "expected NSIS v3.12, found: $nsis_version" >&2
             exit 1
           fi
           echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
@@ -365,6 +282,24 @@ jobs:
       - name: Build the packaging tool
         run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
 
+      - name: Configure the shipped MSVC runtime
+        if: matrix.runner == 'windows-latest'
+        run: scripts/configure-msvc-runtime.sh
+
+      - name: Restore trusted-main ThinLTO cache
+        if: matrix.runner == 'windows-latest'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clonk-msvc-thinlto
+          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}
+
+      - name: Restore shipped MSVC dependency cache
+        if: matrix.runner == 'windows-latest'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: shipped-msvc-runtime-v1
+          save-if: false
+
       # The only pass that emits `planet`. Its archive is prefix-free and
       # therefore byte-identical on every triple, so emitting it from every pass
       # would spend the time to produce exact duplicates. `content` is not
@@ -376,19 +311,6 @@ jobs:
       - name: Package Windows installer
         if: matrix.runner == 'windows-latest'
         env:
-          # Named rather than left to the host, so the archive names and the
-          # manifest keys are decided here. It also confines RUSTFLAGS to the
-          # target's own artifacts: with a target requested, cargo does not
-          # pass them to build scripts or proc macros, which are host units
-          # and must keep the CRT their host toolchain expects.
-          CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
-          # MSVC links the C runtime dynamically; the mingw cross-build linked
-          # it statically. Without this, a machine with no VC++ redistributable
-          # fails to start the game at all — the loader reports a missing
-          # `vcruntime140.dll` before `main` runs, so nothing is logged and the
-          # launcher never sees it. `windows.yml` builds the same configuration
-          # on every push, which is where the /MT-vs-/MD link is proven.
-          RUSTFLAGS: -C target-feature=+crt-static
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
@@ -421,6 +343,10 @@ jobs:
             -DOUTFILE="$outfile" \
             -DICON="$icon" \
             scripts/windows-installer.nsi
+
+      - name: Validate the shipped MSVC runtime
+        if: matrix.runner == 'windows-latest'
+        run: scripts/validate-msvc-runtime.sh
 
       # One pass, not one per architecture: the two builds differ only in ~20 MB
       # of executables, so a second disk image was ~340 MB of identical game
@@ -577,6 +503,7 @@ jobs:
           # assets came from even if main has moved on during the build.
           ref: ${{ needs.resolve.outputs.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       # Scoped by pattern rather than downloading everything: merging into one
       # directory is what the whole-payload globs below rely on, and the
@@ -823,20 +750,19 @@ jobs:
           # against the SHA-256 in `manifest.json`, and `content.zip` against
           # the `content.sha256` its own repository publishes.
 
-          # Created non-draft with its assets in one step: there is no window
-          # in which an empty release is visible. The components go up in that
-          # same step, so `latest/download/manifest.json` can never resolve
-          # before the archives it names exist.
+          # Create a draft first so a failed asset upload is never public and a
+          # rerun can repair it. Publish only after the whole payload exists, so
+          # `latest/download/manifest.json` cannot resolve before its archives.
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
             gh release upload "v${VERSION}" \
               assets/clonk-rust-* \
               components/*.zip manifest/manifest.json --clobber
             gh release edit "v${VERSION}" --draft=false --latest
           else
-            gh release create "v${VERSION}" \
+            gh release create "v${VERSION}" --draft \
               --title "Clonk Rust ${VERSION}" \
               --notes-file release-notes.md \
-              --latest \
               assets/clonk-rust-* \
               components/*.zip manifest/manifest.json
+            gh release edit "v${VERSION}" --draft=false --latest
           fi

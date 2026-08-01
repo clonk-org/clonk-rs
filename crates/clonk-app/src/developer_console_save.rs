@@ -1013,7 +1013,10 @@ fn unix_time_now() -> u32 {
         .as_secs() as u32
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
 mod tests {
     use clonk_engine::{LegacyCString, LiveC4SaveNamedComponent, LiveC4ValueEnumeration};
 

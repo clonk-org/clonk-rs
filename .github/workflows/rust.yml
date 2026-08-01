@@ -1,121 +1,37 @@
-name: Clonk Rust CI
+name: Main validation
 
-# The full parity gate. Runs the whole suite, so it needs the `content/`
-# submodule; that is why it was trigger-disabled while clonk-rs-content was
-# private, and why it works again now that the repository is public.
-#
-# `dependency-guard.yml` stays separate: it is submodule-free and cheap, and
-# fires on dependency-shaped changes only.
+# Long diagnostics run after the merge queue has exercised the exact landing
+# tree. Their exact-SHA result blocks releases, while the next candidate can
+# use the standard runner fleet immediately.
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-  # Required checks must report on the merge group, or a queued pull request
-  # waits forever for a status that never runs.
-  merge_group:
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  # Preserve the exact-SHA verdict recorded for a release commit. Ordinary
-  # pushes and pull requests supersede stale work on the same ref.
-  group: "rust-${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || github.event.pull_request.number || github.ref }}"
-  cancel-in-progress: true
 
 env:
   CARGO_INCREMENTAL: '0'
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Deliberately its own job. While this was the first step of `full-parity`,
-  # every step after it was `skipped` whenever it failed, so ~82 hunks of
-  # cosmetic whitespace drift hid the workspace tests, the lints, the engine
-  # snapshots and the C++ oracle parity check for as long as the drift lasted.
-  # A formatting failure must never mask a determinism failure again.
-  #
-  # rustfmt only parses, so this needs no submodule, no build cache and no
-  # dependency download — it reports in well under a minute.
-  formatting:
-    name: Rust formatting
+  linux-landing-cache:
+    name: Warm the Linux landing cache
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
+    concurrency:
+      # Ordinary main runs finish the current authoritative cache before moving
+      # on. A queue candidate may preempt this rolling lane; release commits
+      # keep an exact-SHA lane of their own.
+      group: "linux-landing-cache-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
+      cancel-in-progress: false
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-        with:
-          components: rustfmt
-
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-
-  # The queue squashes, so the pull request title becomes the commit subject on
-  # `main` verbatim, and it is the only subject git-cliff ever reads. With
-  # `filter_unconventional = true` in `cliff.toml` a title that does not parse
-  # is dropped in silence: no changelog entry, and no contribution to the
-  # release bump. `--fill` titles a multi-commit pull request from the branch
-  # slug, which is exactly that case, so this is a slip waiting to happen.
-  #
-  # Scopes are tolerated even though hand-written subjects take none: Renovate
-  # opens `chore(deps): ...` and `cliff.toml` groups that by name. Rejecting
-  # scopes here would block every dependency update.
-  #
-  # Deliberately its own job rather than a step on `formatting`, and it reports
-  # on the merge group too. There is nothing to check there — a merge group
-  # carries no pull request title — but a required check that never runs on the
-  # queue leaves an entry waiting forever, so this stays safe to promote into
-  # the required contexts.
-  pull-request-title:
-    name: Pull request title
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Check the title is a Conventional Commit subject
-        if: github.event_name == 'pull_request'
-        # Through the environment, never interpolated into the script: a title
-        # is untrusted text and `${{ }}` would paste it into the shell.
-        env:
-          TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|style|test)(\([a-z0-9._/-]+\))?!?: .+'
-          if [[ ! "$TITLE" =~ $pattern ]]; then
-            echo "::error::Pull request title is not a Conventional Commit subject: ${TITLE}"
-            echo "The merge queue squashes, so this title becomes the commit subject" >&2
-            echo "on main verbatim. cliff.toml sets filter_unconventional = true, so a" >&2
-            echo "title that does not parse is dropped from the changelog and earns no" >&2
-            echo "version bump." >&2
-            echo "" >&2
-            echo "Retitle it, keeping the subject line only:" >&2
-            echo "  gh pr edit --repo clonk-org/clonk-rs --title 'fix: ...'" >&2
-            exit 1
-          fi
-          echo "Title is a Conventional Commit subject: ${TITLE}"
-
-  focused-feedback:
-    name: Focused developer feedback
-    runs-on: ubuntu-latest
-    # Was 15, which a cold-cache run of the full command set can exceed.
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          filter: blob:none
           persist-credentials: false
           submodules: recursive
 
@@ -133,127 +49,35 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-        with:
-          components: clippy, rustfmt
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
         with:
           tool: cargo-nextest@0.9.91
+          fallback: none
 
-      - name: Restore Rust build cache
+      - name: Restore or publish the exhaustive Linux cache
+        id: linux-cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: . -> target
-          shared-key: focused-feedback
-          cache-on-failure: true
+          shared-key: full-parity
 
-      - name: Select comparison revision
-        id: comparison
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            base="$PULL_REQUEST_BASE"
-          elif [[ -n "$PUSH_BEFORE" ]] &&
-            [[ ! "$PUSH_BEFORE" =~ ^0+$ ]] &&
-            git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
-            base="$PUSH_BEFORE"
-          elif base="$(git rev-parse HEAD^ 2>/dev/null)"; then
-            :
-          else
-            base="$(git rev-parse HEAD)"
-          fi
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-
-      # No `--budget-seconds`: dev-check treats an exhausted budget as a
-      # failure, and the local fast-feedback budget cannot be met from a cold
-      # runner cache. CI wants every selected command to run; the job timeout
-      # is the real bound.
-      - name: Run change-aware checks
-        env:
-          COMPARISON_BASE: ${{ steps.comparison.outputs.base }}
-        run: cargo dev-check --base "$COMPARISON_BASE"
-
-      - name: Upload developer-feedback artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rust-dev-check-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/dev-check
-          if-no-files-found: warn
-          retention-days: 14
-
-  # Unpacked C4Groups intentionally expose the host filesystem's native entry
-  # order, exactly like C++. The checked-in raw material-index oracles were
-  # recorded on APFS, so they cannot be compared to an ext4 enumeration. Keep
-  # those oracle values as a visible required job instead of silently sorting
-  # the engine or accepting Linux-specific replacements. Ubuntu still runs the
-  # same real scenarios through host-repeatability and semantic assertions.
-  recording-host-oracles:
-    name: Recording-host material-order oracles (macOS)
-    runs-on: macos-latest
-    timeout-minutes: 45
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: recursive
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
-        with:
-          tool: cargo-nextest@0.9.91
-
-      - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: . -> target
-          shared-key: recording-host-oracles
-          cache-on-failure: true
-
-      # scripts/tests/test_rust_ci_recording_host_gate.py requires every test
-      # carrying the recording-host ignore marker to appear in this block.
-      - name: Run recording-host material-order oracles
-        run: |
-          cargo nextest run \
-            -p clonk-app \
-            -p clonk-engine-integration-tests \
-            -p clonk-frontend-unit-tests \
-            --bin clonk-app \
-            --test engine_it \
-            --test frontend_inline \
-            --locked \
-            -E 'test(/(alchemy_real_scenario_subcases_batch_4|app_virtual_keyboard_completes_real_tutorial02_route|committed_real_scenario_replays_are_deterministic|real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence|tutorial02_virtual_player_completes_the_real_tutorial_route|tutorial07_seed_zero_landscape_matches_cpp_surface8)$/)'
+      - name: Compile the complete landing dependency graph
+        if: steps.linux-cache.outputs.cache-hit != 'true'
+        run: cargo nextest run --workspace --features xtask/engine-tools --no-run --locked
 
   coverage:
     name: Rust code coverage
-    # Queue-time, not pull-request time. At ~150 commits a day a 21-minute job
-    # per open pull request saturates the 20 concurrent jobs a public
-    # repository gets, and the merge queue validates a whole batch at once.
-    # Skipped jobs report as skipped, which satisfies the required check on the
-    # pull request; the merge group then runs it for real.
-    if: github.event_name != 'pull_request'
+    needs: linux-landing-cache
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    concurrency:
+      group: "main-coverage-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
+      cancel-in-progress: true
     env:
-      # The clean Ubuntu baseline on the pinned toolchain is 79.72%.
-      # A whole-number floor leaves limited runner headroom while still
-      # rejecting regressions.
       COVERAGE_MIN_LINE_PERCENT: '79'
-      # cargo-llvm-cov already ignores conventional tests/ and *_tests.rs
-      # paths. These are this workspace's additional test-only source paths.
       COVERAGE_IGNORE_REGEX: '/(main_tests|lib_tests)/|/(parity_differential|test_game_call_ex|test_support)\.rs$'
-      # Nextest launches one process per test. LLVM's online merge pool keeps
-      # that from producing about 21 GiB of redundant per-process profiles.
       LLVM_PROFILE_FILE_NAME: 'clonk-%8m.profraw'
     defaults:
       run:
@@ -293,18 +117,54 @@ jobs:
           tool: cargo-llvm-cov@0.8.7
           fallback: none
 
-      # Instrumented artifacts live under target/llvm-cov-target and are both
-      # large and incompatible with normal builds. Cache only Cargo downloads.
-      - name: Restore Cargo registry cache
+      # Replay/render use the ordinary landing target while coverage keeps its
+      # instrumented artifacts elsewhere. This diagnostic never publishes a
+      # partial cache if a newer main commit supersedes it.
+      - name: Restore Linux landing cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          cache-targets: false
-          shared-key: coverage-registry
+          workspaces: . -> target
+          shared-key: full-parity
+          save-if: false
 
-      # --no-report lets the same profile data produce the gate, LCOV, and
-      # browsable HTML without running the workspace three times. It disables
-      # cargo-llvm-cov's implicit clean, so keep the explicit clean first.
+      # The ordinary landing suite runs the replay assertion. Repeat it here
+      # only to retain a fresh snapshot for the ignored render diagnostic.
+      - name: Generate deterministic replay evidence
+        env:
+          LC_TEST_ARTIFACT_DIR: target/dev-check/replay
+          LC_KEEP_PASS_ARTIFACTS: '1'
+        run: |
+          cargo nextest run \
+            -p clonk-engine-integration-tests \
+            --test engine_it \
+            --locked \
+            -- \
+            dev_feedback_replay::real_scenario_replays_repeat_with_native_group_order \
+            --exact
+          snapshot=$(find target/dev-check/replay -type f -name final.json -print | sort | tail -1)
+          if [[ -z "$snapshot" ]]; then
+            echo "deterministic replay produced no final snapshot" >&2
+            exit 1
+          fi
+          cp "$snapshot" target/dev-check/snapshot-final.json
+
+      - name: Render the replay snapshot
+        env:
+          LC_DEV_CHECK_SNAPSHOT: target/dev-check/snapshot-final.json
+          LC_DEV_CHECK_FRAME_PNG: target/dev-check/frame-final.png
+          LC_DEV_CHECK_RENDER_METRICS: target/dev-check/render-metrics.json
+        run: |
+          cargo nextest run \
+            -p clonk-frontend \
+            --features dev-feedback-render \
+            --test dev_feedback_render \
+            --locked \
+            -- \
+            dev_feedback_render --ignored --exact
+
       - name: Collect instrumented workspace coverage
+        env:
+          CARGO_TARGET_DIR: target/coverage-build
         run: |
           cargo llvm-cov clean --workspace
           cargo llvm-cov --no-report nextest \
@@ -314,6 +174,8 @@ jobs:
             --locked
 
       - name: Generate Rust coverage reports
+        env:
+          CARGO_TARGET_DIR: target/coverage-build
         run: |
           mkdir -p target/coverage
           cargo llvm-cov report --lcov --output-path target/coverage/lcov.info \
@@ -322,9 +184,20 @@ jobs:
             --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
 
       - name: Enforce line coverage floor
+        env:
+          CARGO_TARGET_DIR: target/coverage-build
         run: |
           cargo llvm-cov report --fail-under-lines "$COVERAGE_MIN_LINE_PERCENT" \
             --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+
+      - name: Upload developer-feedback artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: developer-feedback-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/dev-check
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload Rust coverage reports
         if: always()
@@ -335,10 +208,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  workspace-lints:
-    name: Rust workspace lints
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  recording-host-oracles:
+    name: Recording-host material-order oracles (macOS)
+    needs: linux-landing-cache
+    runs-on: macos-latest
+    timeout-minutes: 45
+    concurrency:
+      group: "main-recording-host-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
+      cancel-in-progress: true
     defaults:
       run:
         shell: bash
@@ -348,108 +225,114 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - name: Install native Rust dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libasound2-dev \
-            libfreetype6-dev \
-            libvulkan1 \
-            libxmp4 \
-            libudev-dev \
-            mesa-vulkan-drivers \
-            pkg-config
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-        with:
-          components: clippy
-
-      # The full-parity job owns this cache. Lints restore the same dependency
-      # graph without racing it to save a smaller concurrent build.
-      - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: . -> target
-          shared-key: full-parity
-          save-if: false
-
-      - name: Run workspace lints
-        run: cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
-
-  full-parity:
-    name: Full Rust parity gate
-    # Queue-time, not pull-request time: see `coverage`. The determinism
-    # guarantee this gate exists for is a property of what actually lands on
-    # main, which is exactly what the merge group is.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    # Was 60, which a cold-cache run exceeded: the first run after the gate was
-    # re-enabled was killed at 60m31s during `Run workspace tests`. The
-    # scheduled release refuses to publish unless this gate is green, so a
-    # timeout here silently stops releases.
-    timeout-minutes: 120
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Repository script tests verify the pinned LegacyClonk commit.
-          fetch-depth: 0
-          persist-credentials: false
-          submodules: recursive
-
-      - name: Install native Rust dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libasound2-dev \
-            libfreetype6-dev \
-            libvulkan1 \
-            libxmp4 \
-            libudev-dev \
-            mesa-vulkan-drivers \
-            pkg-config \
-            python3-pil
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-        with:
-          components: clippy, rustfmt
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
         with:
           tool: cargo-nextest@0.9.91
+          fallback: none
 
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: . -> target
-          shared-key: full-parity
-          cache-on-failure: true
+          shared-key: recording-host-oracles
 
-      - name: Run repository script tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      # scripts/tests/test_rust_ci_recording_host_gate.py requires every test
+      # carrying the recording-host marker to appear here.
+      - name: Run recording-host material-order oracles
+        run: |
+          cargo nextest run \
+            -p clonk-app \
+            -p clonk-engine-integration-tests \
+            -p clonk-frontend-unit-tests \
+            --bin clonk-app \
+            --test engine_it \
+            --test frontend_inline \
+            --locked \
+            -E 'test(/(alchemy_real_scenario_subcases_batch_4|app_virtual_keyboard_completes_real_tutorial02_route|committed_real_scenario_replays_are_deterministic|real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence|tutorial02_virtual_player_completes_the_real_tutorial_route|tutorial07_seed_zero_landscape_matches_cpp_surface8)$/)'
 
-      # nextest, not `cargo test`: this job already installs cargo-nextest, and
-      # only nextest reads `.config/nextest.toml`, where the retries for the
-      # known load-sensitive socket tests and the priority order that front-loads
-      # the long scenario routes live. Under `cargo test` both were silently
-      # inert. `--no-fail-fast` reports every failure instead of stopping at the
-      # first failing binary, which is what CLAUDE.md documents as the gate.
-      - name: Run workspace tests
-        run: cargo nextest run --workspace --no-fail-fast --locked
+  windows-release-tools:
+    name: Windows release tooling
+    runs-on: windows-latest
+    timeout-minutes: 45
+    concurrency:
+      # Ordinary main runs do not interrupt this authoritative cache producer.
+      # Queue Windows smoke may preempt its rolling lane; release commits use
+      # an exact-SHA lane that cannot be interrupted.
+      group: "windows-landing-cache-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      # Keep this immediately after the workspace test graph. The differential
-      # lives in that default-feature graph, and the lightweight xtask
-      # dispatcher selects it without linking the release-tool binary first.
-      - name: Verify pinned C++ oracle parity
-        run: cargo xtask parity verify
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
-      - name: Run packaging and release-tool tests
-        run: cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-nextest@0.9.91
+          fallback: none
 
-      - name: Verify deterministic engine snapshots
-        run: cargo xtask engine-snapshots verify
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-runtime-msvc
+
+      - name: Refresh Windows smoke-test cache
+        run: cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core -p clonk-logging --locked --no-fail-fast
+
+      # Release invokes this binary on the Windows host. Build its real release
+      # graph here without serializing it ahead of the merge-critical runtime.
+      - name: Build the Windows packaging tool
+        run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
+
+      - name: Configure the shipped MSVC runtime
+        run: scripts/configure-msvc-runtime.sh
+
+      - name: Restore trusted ThinLTO cache
+        id: thinlto-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clonk-msvc-thinlto
+          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}
+
+      # The earlier cache serves smoke tests and the native packaging tool.
+      # Re-enter it after setting target flags so this producer has the same
+      # dependency-cache identity as the merge queue's shipped build.
+      - name: Restore or publish the shipped MSVC dependency cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: shipped-msvc-runtime-v1
+
+      # Build the exact shipped graph on trusted main after bounded queue smoke.
+      # This fail-closed validation also keeps release dependency and ThinLTO
+      # caches current without letting ephemeral queue refs publish caches.
+      - name: Refresh the shipped MSVC runtime cache
+        run: |
+          cargo fetch --locked
+          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
+          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
+            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
+            exit 1
+          fi
+          export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
+          cargo build --release -p clonk-app -p clonk-game -p clonk-c4group --locked --timings
+
+      - name: Validate the shipped MSVC runtime
+        run: scripts/validate-msvc-runtime.sh
+
+      - name: Publish trusted ThinLTO cache
+        if: >-
+          success()
+          && github.ref == 'refs/heads/main'
+          && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          && steps.thinlto-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clonk-msvc-thinlto
+          key: ${{ steps.thinlto-cache.outputs.cache-primary-key }}

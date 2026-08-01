@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "app-test-shard-mode", allow(unused_imports))]
+
 use super::*;
 use clonk_app_core::pictures::{
     centered_picture_transform, compose_inventory_picture,
@@ -2859,6 +2861,7 @@ fn test_game_app(
     GameApp::new(width, height, audio_options, paths, test_runtime_config())
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     let directory = tempdir().expect("client preload resource directory");
@@ -3158,6 +3161,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     assert!(!combined_path.exists());
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn l021_client_go_combines_scenario_once_and_defers_100_until_final_init() {
     // RetrieveScenario waits for Parameters.Scenario and ResDynamic, merges
@@ -3682,6 +3686,7 @@ fn set_control_test_player(id: i32, team: i32, flags: u16) -> clonk_engine::Cont
     }
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn l052_ready_tick_local_join_opens_one_viewport_with_feedback() {
     // C4Control executes the complete list in packet order, so PlrInfo is
@@ -3762,6 +3767,7 @@ fn l052_ready_tick_local_join_opens_one_viewport_with_feedback() {
     );
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn l052_synchronized_remote_join_has_no_local_viewport_feedback() {
     // C4ControlJoinPlayer passes iAtClient through C4Game::JoinPlayer and
@@ -3853,6 +3859,7 @@ fn l052_synchronized_remote_join_has_no_local_viewport_feedback() {
     );
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn synchronized_join_for_a_missing_client_is_ignored() {
     // C4ControlJoinPlayer resolves AtClient before joining and returns
@@ -4317,6 +4324,7 @@ fn runtime_flash_text(app: &GameApp) -> Option<&str> {
         .map(|message| message.text.as_str())
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn runtime_f1_help_columns_match_cpp_rows_keys_and_us_labels() {
     let table = parse_runtime_help_language_table(
@@ -4362,6 +4370,7 @@ fn runtime_f1_help_columns_match_cpp_rows_keys_and_us_labels() {
     );
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn default_rank_resource_names_decode_shipped_tables_and_preserve_segments() {
     let us = parse_runtime_language_table(
@@ -4396,6 +4405,7 @@ fn default_rank_resource_names_decode_shipped_tables_and_preserve_segments() {
     );
 }
 
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn presentation_material_and_texture_overload_chains_stop_independently() {
     // InitMaterialTexture carries separate OverloadMaterials and
@@ -4471,18 +4481,59 @@ fn cleanup_quicksave_file() {
 
 // Area part files spliced into this same `tests` module: each part is a
 // bare item sequence (not a child module), so test ids stay `tests::<fn>`.
-include!("main_tests/scenario_routes.rs");
-include!("main_tests/game_over.rs");
-include!("main_tests/league.rs");
-include!("main_tests/lobby.rs");
-include!("main_tests/net_resources.rs");
-include!("main_tests/netplay.rs");
-include!("main_tests/saves.rs");
-include!("main_tests/scensel.rs");
-include!("main_tests/startup.rs");
-include!("main_tests/menus.rs");
-include!("main_tests/chat_messages.rs");
-include!("main_tests/audio.rs");
-include!("main_tests/rendering.rs");
-include!("main_tests/input.rs");
-include!("main_tests/runtime.rs");
+#[cfg(all(
+    feature = "app-test-shard-mode",
+    not(any(
+        feature = "app-test-shard-1",
+        feature = "app-test-shard-2",
+        feature = "app-test-shard-3",
+        feature = "app-test-shard-4",
+        feature = "app-test-shard-5",
+        feature = "app-test-shard-6",
+        feature = "app-test-shard-7",
+        feature = "app-test-shard-8",
+        feature = "app-test-shard-9",
+        feature = "app-test-shard-10",
+        feature = "app-test-shard-11",
+        feature = "app-test-shard-12",
+    )),
+))]
+compile_error!("app-test-shard-mode requires at least one numbered shard feature");
+
+macro_rules! include_main_test_fragment {
+    ($selector:literal, $path:literal) => {
+        #[cfg(any(not(feature = "app-test-shard-mode"), feature = $selector))]
+        include!($path);
+    };
+}
+
+macro_rules! include_shared_main_test_fragment {
+    ($first:literal, $second:literal, $path:literal $(,)?) => {
+        #[cfg(any(not(feature = "app-test-shard-mode"), feature = $first, feature = $second))]
+        include!($path);
+    };
+}
+
+include_shared_main_test_fragment!(
+    "app-test-shard-3",
+    "app-test-shard-11",
+    "main_tests/scenario_routes_common.rs",
+);
+include_main_test_fragment!("app-test-shard-3", "main_tests/scenario_routes_1.rs");
+include_main_test_fragment!("app-test-shard-11", "main_tests/scenario_routes_2.rs");
+include_main_test_fragment!("app-test-shard-4", "main_tests/audio.rs");
+include_main_test_fragment!("app-test-shard-4", "main_tests/input.rs");
+include_main_test_fragment!("app-test-shard-6", "main_tests/game_over.rs");
+include_main_test_fragment!("app-test-shard-5", "main_tests/lobby.rs");
+include_main_test_fragment!("app-test-shard-1", "main_tests/netplay_1.rs");
+include_main_test_fragment!("app-test-shard-10", "main_tests/netplay_2.rs");
+include_main_test_fragment!("app-test-shard-7", "main_tests/scensel.rs");
+include_main_test_fragment!("app-test-shard-7", "main_tests/startup.rs");
+include_main_test_fragment!("app-test-shard-2", "main_tests/menus_1.rs");
+include_main_test_fragment!("app-test-shard-11", "main_tests/menus_2.rs");
+include_main_test_fragment!("app-test-shard-5", "main_tests/chat_messages.rs");
+include_main_test_fragment!("app-test-shard-8", "main_tests/net_resources.rs");
+include_main_test_fragment!("app-test-shard-8", "main_tests/saves.rs");
+include_main_test_fragment!("app-test-shard-9", "main_tests/league.rs");
+include_main_test_fragment!("app-test-shard-9", "main_tests/rendering.rs");
+include_main_test_fragment!("app-test-shard-12", "main_tests/runtime.rs");
