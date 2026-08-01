@@ -105,6 +105,7 @@ jobs:
               failed=0
               rustup component add clippy rustfmt || failed=1
               cargo fmt --all -- --check || failed=1
+              git fetch --no-tags --depth=1 origin 7d43b47b7d789b533f32d005e64596e0a07019cd || failed=1
               python3 -m unittest discover -s scripts/tests -p 'test_*.py' || failed=1
               cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings || failed=1
               exit "$failed"

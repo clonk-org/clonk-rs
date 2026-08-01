@@ -175,6 +175,17 @@ class CiLatencyTests(unittest.TestCase):
             self.assertNotIn(f"          - name: {old_name}\n", workflow)
         self.assertNotIn("components: clippy, rustfmt", workflow)
 
+    def test_quality_fetches_only_the_pinned_oracle_history(self):
+        workflow = LANDING.read_text(encoding="utf-8")
+        quality = matrix_entry(workflow, "workspace quality")
+        fetch = (
+            "git fetch --no-tags --depth=1 origin "
+            "7d43b47b7d789b533f32d005e64596e0a07019cd"
+        )
+
+        self.assertIn(fetch, quality)
+        self.assertLess(quality.index(fetch), quality.index("python3 -m unittest"))
+
     def test_linux_setup_is_pinned_fast_and_matrix_scoped(self):
         workflow = LANDING.read_text(encoding="utf-8")
         linux = workflow[workflow.index("  linux:") : workflow.index("  windows-smoke:")]
