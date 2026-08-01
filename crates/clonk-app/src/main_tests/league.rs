@@ -1875,7 +1875,13 @@ fn l143_exclusive_vote_outside_hit_still_reaches_exposed_chart() {
 }
 
 #[test]
-fn eliminated_and_surrendered_viewports_draw_localized_notice_instead_of_menus() {
+fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_player_menus() {
+    // C4Viewport::DrawMenu keeps the localized elimination notice
+    // (src/C4Viewport.cpp:965-976), but DrawOverlay still emits the local
+    // PlayerMenu control afterward (src/C4Viewport.cpp:836-880,1511-1525).
+    // LocalPlayerControl handles that command before its eliminated-player
+    // gameplay gate (src/C4Game.cpp:3595-3622). The port exposes only that
+    // app-owned re-entry surface; script/object and save menus remain hidden.
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
     let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
@@ -1901,14 +1907,17 @@ fn eliminated_and_surrendered_viewports_draw_localized_notice_instead_of_menus()
     install_test_cursor_menu(&mut app, cursor, invalid_hidden_menu);
     app.ingame_menu.replace(
         owner,
-        Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
+        IngameMenuState::main_menu(
+            &MainMenuConditions::default(),
+            &IngameMenuLabels::default(),
+        ),
     );
-    let mut with_hidden_menus = vec![0_u8; app.graphics.surface().pixels().len()];
-    app.render(&mut with_hidden_menus)
-        .expect("eliminated viewport skips menu preflight and drawing");
-    assert_eq!(
-        with_hidden_menus, notice_only,
-        "script and player menus contribute no eliminated-viewport pixels"
+    let mut with_player_menu = vec![0_u8; app.graphics.surface().pixels().len()];
+    app.render(&mut with_player_menu)
+        .expect("eliminated viewport retains PlayerMenu re-entry while skipping script menus");
+    assert_ne!(
+        with_player_menu, notice_only,
+        "the app-owned PlayerMenu remains visible over the eliminated viewport"
     );
 
     app.ingame_menu.clear();

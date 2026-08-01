@@ -4675,8 +4675,34 @@ impl GameApp {
             .and_then(|pending| pending.controller.tooltip_at(point))
     }
 
-    pub(crate) fn ingame_menu_has_visible_surface(&self, menu_owner: i32) -> bool {
+    /// Whether an app-owned `C4MainMenu` may use its owning viewport.
+    ///
+    /// An eliminated player still receives the local `COM_PlayerMenu` path:
+    /// C++ draws the eliminated notice, retains the PlayerMenu control, and
+    /// lets it activate the capacity-gated New Player page
+    /// (src/C4Viewport.cpp:836-880,965-976,1511-1525;
+    /// src/C4MouseControl.cpp:1056-1064; src/C4MainMenu.cpp:643-687).
+    /// Keep that one UI surface available without relaxing the eliminated
+    /// viewport suppression used for script/object menus or world controls.
+    pub(crate) fn ingame_menu_owner_has_visible_surface(&self, menu_owner: i32) -> bool {
         if self.menu_owner_has_unsuppressed_viewport(menu_owner) {
+            return true;
+        }
+        menu_owner != OWNER_NONE
+            && self.ingame_menu.contains(menu_owner)
+            && self
+                .snapshot
+                .players
+                .iter()
+                .any(|player| player.id == menu_owner)
+            && self
+                .physical_viewports
+                .iter()
+                .any(|viewport| viewport.displayed_player == menu_owner)
+    }
+
+    pub(crate) fn ingame_menu_has_visible_surface(&self, menu_owner: i32) -> bool {
+        if self.ingame_menu_owner_has_visible_surface(menu_owner) {
             return true;
         }
         // Preserve the generic whole-surface compatibility path only for an

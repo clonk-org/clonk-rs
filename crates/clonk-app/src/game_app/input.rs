@@ -7763,7 +7763,7 @@ impl GameApp {
             }
             _ => return None,
         };
-        if !self.menu_owner_has_unsuppressed_viewport(player) {
+        if !self.ingame_menu_owner_has_visible_surface(player) {
             return None;
         }
         let area = if player == OWNER_NONE {
