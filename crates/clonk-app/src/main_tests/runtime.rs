@@ -1686,6 +1686,88 @@
     }
 
     #[test]
+    fn standard_macos_entrypoint_recovers_planet_before_validated_path_discovery() {
+        let directory = tempdir().expect("bundle parent");
+        let bundle = directory.path().join("Clonk Rust.app");
+        let resources = bundle.join("Contents/Resources");
+        let executable = bundle.join("Contents/MacOS/clonk-app");
+        fs::create_dir_all(&resources).expect("create bundle resources");
+        fs::create_dir_all(executable.parent().expect("MacOS directory"))
+            .expect("create bundle executables");
+        fs::write(&executable, b"runtime").expect("write bundle entrypoint");
+        let nonce = "macos-missing-planet";
+        let work = clonk_update::InstallLayout::macos_bundle(&bundle).work_dir();
+        let backup = work.join(format!("clonk-update-backup-{nonce}/planet"));
+        fs::create_dir_all(&backup).expect("create backed-up planet");
+        fs::write(backup.join("System.c4g"), b"stub").expect("write backed-up system group");
+        let mut step = clonk_update::JournalStep::new(
+            "planet",
+            &"aa".repeat(32),
+            "Contents/Resources/planet",
+        );
+        step.state = clonk_update::StepState::BackupMoved;
+        let mut journal = clonk_update::Journal::new(
+            "0.7.0",
+            nonce,
+            fs::canonicalize(&bundle).expect("canonical bundle"),
+            vec![step],
+        );
+        journal.previous_bundle_icon_present = Some(false);
+        fs::create_dir_all(&work).expect("create bundle update work directory");
+        journal
+            .save(&work)
+            .expect("save interrupted update journal");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(resources.as_path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+
+        assert!(!resources.join("planet/System.c4g").exists());
+        let outcome = recover_interrupted_update_before_path_discovery_with(
+            &clonk_update::FakePlatform::new(),
+        )
+        .expect("recover bundle before validating resources");
+        let paths = discover_validated_startup_paths(None)
+            .expect("validate recovered paths")
+            .expect("recovered bundle paths");
+
+        assert_eq!(
+            outcome,
+            clonk_update::ResumeOutcome::RolledBack {
+                version: "0.7.0".to_string()
+            }
+        );
+        assert_eq!(
+            fs::read(paths.system_group_path()).expect("read restored system group"),
+            b"stub"
+        );
+    }
+
+    #[test]
+    fn launcher_recovery_marker_skips_a_second_exclusive_recovery() {
+        let install = tempdir().expect("install root");
+        fs::write(
+            install.path().join(clonk_update::JOURNAL_FILE_NAME),
+            b"{ malformed",
+        )
+        .expect("malformed journal sentinel");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            (
+                "LC_GAME_UPDATE_RECOVERY_COMPLETE",
+                Some(Path::new("1")),
+            ),
+        ]);
+
+        assert_eq!(
+            recover_interrupted_update_before_path_discovery()
+                .expect("the launcher already completed recovery"),
+            clonk_update::ResumeOutcome::NothingToDo
+        );
+    }
+
+    #[test]
     fn l032_environment_config_repairs_instead_of_custom_abort() {
         let install = tempdir().expect("install root");
         let user_data = tempdir().expect("user data");

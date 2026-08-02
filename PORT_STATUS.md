@@ -425,6 +425,41 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Open: **An omitted `content/` entry cannot yet be classified as release-owned
+  or user-added.** Component archives are complete snapshots, but installed
+  state records only their digest and version, not the top-level names the
+  archive owned. The updater therefore preserves omitted content packs to avoid
+  deleting user-installed scenarios or definitions; if a later release removes
+  an official pack entirely, that pack can remain as hybrid content. Engine and
+  planet swaps are exact and do not have this ambiguity. Closing it requires
+  package/installed-state ownership inventory so the applier can retain only
+  names that were never owned by the previous release.
+
+- Open: **A hard power loss during the engine directory's two-rename swap can
+  leave no launcher available to start recovery.** The component updater keeps
+  a durable journal before every live-tree mutation and ordinary process
+  failures either roll back immediately or resume on the next launch. The
+  engine component still replaces the whole `bin` directory (or
+  `Contents/MacOS`): after the installed directory has moved to its backup and
+  before the staged directory takes its name, neither `clonk-game` nor
+  `clonk-app` exists at the path a shortcut opens. The journal and backup are
+  intact, but a reboot in that narrow window has no automatic executable entry
+  point from which to consume them. Closing this requires either a stable
+  bootstrap outside the replaced directory, with package/shortcut changes on
+  every platform, or a separately designed file-level engine transaction; it
+  is not covered by `parity verify` or the normal interrupted-process recovery
+  tests.
+
+- Open: **Bundle recovery is keyed by pathname, not a stable installation
+  identity.** The external journal namespace and stored install root isolate
+  sibling bundles and reject a different canonical path, but an unrelated
+  bundle installed later at the same path can still accept stale recovery
+  state. Conversely, moving or renaming an interrupted bundle leaves its
+  sidecar in the old parent namespace, so startup from the new path cannot find
+  it. Closing this requires a persistent installation identity (or equivalent
+  filesystem identity) plus a sidecar lookup/migration design that survives a
+  bundle move without admitting same-path replacements.
+
 - Open: **Runtime JoinData cleanup is tied solely to a per-host one-second
   Tokio interval.** Native `C4Network2::Execute` removes an outdated dynamic
   whenever `ControlTick > iDynamicTick` (`src/C4Network2.cpp:679-696`).

@@ -69,7 +69,7 @@ impl AppPaths {
     pub fn discover_with_config_file(
         explicit_config_file: Option<&Path>,
     ) -> Result<Self, PathsError> {
-        let install_root = discover_install_root()?;
+        let install_root = discover_unvalidated_install_root()?;
         // Select the config from the platform/explicit bootstrap root first.
         // General.UserPath changes the user-data root, not the file from which
         // C4Config was loaded.
@@ -453,55 +453,60 @@ pub fn macos_bundle_working_directory(executable: &Path) -> Option<PathBuf> {
     Some(directory.to_path_buf())
 }
 
-fn discover_install_root() -> Result<PathBuf, PathsError> {
+/// Locates the installation without requiring any game-data file to exist.
+///
+/// Update recovery must run before [`AppPaths`] validates `planet/System.c4g`:
+/// an interrupted directory swap can temporarily leave that exact path absent.
+/// Environment overrides and packaged executable shapes therefore identify the
+/// root on their own; the existing data-based ancestor search remains a
+/// development-layout fallback.
+pub fn discover_unvalidated_install_root() -> Result<PathBuf, PathsError> {
     if let Some(path) = env_path("LC_INSTALL_ROOT") {
         return Ok(path);
     }
     if let Some(path) = env_path("LC_APP_ROOT") {
         return Ok(path);
     }
-    if let Some(path) = env_path("CARGO_MANIFEST_DIR") {
-        if let Some(root) = find_root_starting_at(path) {
-            return Ok(root);
-        }
-    }
-    if let Ok(exe) = env::current_exe() {
-        // A quarantined bundle runs from a read-only AppTranslocation mount
-        // whose siblings are absent, so recover the original path first.
-        #[cfg(target_os = "macos")]
-        let exe = non_translocated_executable(&exe);
-        #[cfg(target_os = "macos")]
-        if let Some(root) = macos_bundle_install_root(&exe) {
-            return Ok(root);
-        }
-        if let Some(root) = find_root_starting_at(exe) {
-            return Ok(root);
-        }
-    }
-    if let Ok(current_dir) = env::current_dir() {
-        if let Some(root) = find_root_starting_at(current_dir) {
-            return Ok(root);
-        }
+    let executable = env::current_exe().ok();
+    #[cfg(target_os = "macos")]
+    let executable = executable.map(|executable| non_translocated_executable(&executable));
+    let manifest = env_path("CARGO_MANIFEST_DIR");
+    let current_dir = env::current_dir().ok();
+    if let Some(root) = install_root_from_candidates(
+        executable.as_deref(),
+        manifest.as_deref(),
+        current_dir.as_deref(),
+    ) {
+        return Ok(root);
     }
     Err(PathsError::InstallRootNotFound)
 }
 
-/// Resolve the install root of a macOS application bundle.
-///
-/// A bundle keeps its executable in `Contents/MacOS` and its game data in the
-/// sibling `Contents/Resources`, so the ancestor walk below never sees a
-/// directory holding `planet/System.c4g`.
-#[cfg(target_os = "macos")]
-fn macos_bundle_install_root(executable: &Path) -> Option<PathBuf> {
-    let macos_dir = executable.parent()?;
-    if macos_dir.file_name()? != "MacOS" {
+fn install_root_from_candidates(
+    executable: Option<&Path>,
+    manifest: Option<&Path>,
+    current_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    manifest
+        .and_then(|path| find_root_starting_at(path.to_path_buf()))
+        .or_else(|| executable.and_then(|path| find_root_starting_at(path.to_path_buf())))
+        .or_else(|| current_dir.and_then(|path| find_root_starting_at(path.to_path_buf())))
+        .or_else(|| executable.and_then(install_root_from_executable_shape))
+}
+
+/// Recognises the two shipped executable layouts without probing mutable data.
+fn install_root_from_executable_shape(executable: &Path) -> Option<PathBuf> {
+    let executable_dir = executable.parent()?;
+    if executable_dir.file_name()? == "bin" {
+        return executable_dir.parent().map(Path::to_path_buf);
+    }
+    if executable_dir.file_name()? != "MacOS" {
         return None;
     }
-    let resources = macos_dir.parent()?.join("Resources");
-    resources
-        .join("planet/System.c4g")
-        .exists()
-        .then_some(resources)
+    let contents = executable_dir.parent()?;
+    let bundle = contents.parent()?;
+    (contents.file_name()? == "Contents" && bundle.extension()? == "app")
+        .then(|| contents.join("Resources"))
 }
 
 /// The `Contents` directory when `install_root` is a bundle's
@@ -790,6 +795,42 @@ mod tests {
     }
 
     #[test]
+    fn unvalidated_discovery_derives_a_plain_root_from_its_bin_executable() {
+        let executable = Path::new("/opt/clonk-rust/bin/clonk-game");
+
+        assert_eq!(
+            install_root_from_executable_shape(executable).as_deref(),
+            Some(Path::new("/opt/clonk-rust"))
+        );
+    }
+
+    #[test]
+    fn validated_development_root_precedes_an_unrelated_bin_executable_shape() {
+        let directory = TempDir::new().expect("candidate roots");
+        let development = directory.path().join("workspace");
+        fs::create_dir_all(development.join("planet/System.c4g"))
+            .expect("development system group");
+        let manifest = development.join("crates/clonk-platform");
+        fs::create_dir_all(&manifest).expect("manifest directory");
+        let unrelated = directory.path().join("usr/bin/clonk-app");
+
+        assert_eq!(
+            install_root_from_candidates(Some(&unrelated), Some(&manifest), None).as_deref(),
+            Some(development.as_path())
+        );
+    }
+
+    #[test]
+    fn unvalidated_discovery_derives_bundle_resources_without_game_data() {
+        let executable = Path::new("/Applications/Clonk Rust.app/Contents/MacOS/clonk-app");
+
+        assert_eq!(
+            install_root_from_executable_shape(executable).as_deref(),
+            Some(Path::new("/Applications/Clonk Rust.app/Contents/Resources"))
+        );
+    }
+
+    #[test]
     fn a_resources_directory_outside_a_bundle_is_not_treated_as_one() {
         let root = Path::new("/srv/game/Resources");
         assert_eq!(binaries_dir_for(root), root.join("bin"));
@@ -869,6 +910,17 @@ mod tests {
             }
             other => panic!("expected SystemGroupMissing, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn unvalidated_discovery_accepts_an_explicit_root_without_the_system_group() {
+        let install_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(install_dir.path()))]);
+
+        assert_eq!(
+            discover_unvalidated_install_root().expect("discover install root before validation"),
+            install_dir.path()
+        );
     }
 
     #[test]
@@ -1127,7 +1179,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_bundle_resources_are_the_install_root() {
+    fn macos_bundle_resources_are_the_unvalidated_install_root() {
         // A packaged `.app` keeps its executable in `Contents/MacOS` and its
         // game data in the sibling `Contents/Resources`, so no ancestor of the
         // executable holds `planet/System.c4g`.
@@ -1136,11 +1188,10 @@ mod tests {
         let executable = contents.join("MacOS/clonk-app");
         let resources = contents.join("Resources");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        fs::create_dir_all(resources.join("planet/System.c4g")).unwrap();
         fs::write(&executable, b"runtime").unwrap();
 
         assert_eq!(
-            macos_bundle_install_root(&executable),
+            install_root_from_executable_shape(&executable),
             Some(resources),
             "the bundle's Resources directory is the install root"
         );
@@ -1148,13 +1199,16 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_plain_unix_executable_is_not_treated_as_a_bundle() {
+    fn a_plain_unix_executable_resolves_its_packaged_install_root() {
         let install = TempDir::new().unwrap();
         let executable = install.path().join("bin/clonk-app");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
         fs::write(&executable, b"runtime").unwrap();
 
-        assert_eq!(macos_bundle_install_root(&executable), None);
+        assert_eq!(
+            install_root_from_executable_shape(&executable).as_deref(),
+            Some(install.path())
+        );
     }
 
     #[test]
@@ -1214,7 +1268,7 @@ mod tests {
         let resources = bundle.path().join("Clonk.app/Contents/Resources");
         fs::create_dir_all(resources.join("planet/System.c4g")).expect("bundle resources");
         assert_eq!(
-            macos_bundle_install_root(&non_translocated_executable(&executable)),
+            install_root_from_executable_shape(&non_translocated_executable(&executable)),
             Some(resources)
         );
     }

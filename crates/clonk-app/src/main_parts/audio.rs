@@ -3721,8 +3721,12 @@ pub(crate) enum MessageDialogContinuation {
     UpdateCheckWait,
     /// `IDS_MSG_ANUPDATETOVERSIONISAVAILA` (`C4UpdateDlg.cpp:383-385`).
     UpdatePrompt {
+        manifest_base_url: String,
         version: String,
+        components: Vec<clonk_update::PlannedComponent>,
     },
+    /// Cancellable component download after the update prompt is accepted.
+    UpdateDownloadWait,
     /// Every informational update result: no update, a failure, or a release
     /// this build cannot install in place.
     UpdateNotice,

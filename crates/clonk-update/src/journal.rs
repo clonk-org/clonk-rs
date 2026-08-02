@@ -24,7 +24,9 @@ use thiserror::Error;
 
 /// The journal's own schema, independent of the manifest's and the installed
 /// state's.
-pub const JOURNAL_SCHEMA: u32 = 1;
+pub const JOURNAL_SCHEMA: u32 = 3;
+const LEGACY_JOURNAL_SCHEMA: u32 = 1;
+const UNBOUND_JOURNAL_SCHEMA: u32 = 2;
 
 pub const JOURNAL_FILE_NAME: &str = "clonk-update-journal.json";
 
@@ -42,10 +44,34 @@ pub enum StepState {
     Completed,
 }
 
+/// Which direction recovery must continue after a process or machine failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionPhase {
+    #[default]
+    Applying,
+    RollingBack,
+}
+
+/// Exact installed-state bytes that must be restored with the old trees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "bytes")]
+pub enum PreviousInstalledState {
+    Absent,
+    Present(Vec<u8>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalStep {
     /// `content`, `planet` or `engine`.
     pub component: String,
+    /// Digest of the verified archive that produced the staged tree.
+    ///
+    /// `default` keeps journals written by the first updater build parseable so
+    /// recovery can reject them before mutating the install. An absent digest
+    /// cannot be upgraded safely to the current journal schema.
+    #[serde(default)]
+    pub sha256: String,
     /// Where the component lands, relative to the install root, `/`-separated.
     pub destination: String,
     /// Top-level names moved out of the old tree into the staged one because
@@ -55,15 +81,27 @@ pub struct JournalStep {
     /// them back without having to guess which entries were ours.
     pub carried: Vec<String>,
     pub state: StepState,
+    /// Whether the destination existed before staging began. Schema 2+
+    /// records this explicitly so rollback can distinguish restored absence
+    /// from a missing old tree.
+    #[serde(default)]
+    pub destination_existed: Option<bool>,
+    /// Durable rollback progress. Once true, retries must leave the restored
+    /// destination alone even though the forward state remains `Completed`.
+    #[serde(default)]
+    pub rollback_complete: bool,
 }
 
 impl JournalStep {
-    pub fn new(component: &str, destination: &str) -> Self {
+    pub fn new(component: &str, sha256: &str, destination: &str) -> Self {
         Self {
             component: component.to_string(),
+            sha256: sha256.to_string(),
             destination: destination.to_string(),
             carried: Vec::new(),
             state: StepState::Pending,
+            destination_existed: Some(true),
+            rollback_complete: false,
         }
     }
 
@@ -89,7 +127,25 @@ pub struct Journal {
     /// Names every staging and backup path of this attempt, so a second
     /// attempt can never collide with the leftovers of the first.
     pub nonce: String,
+    /// Canonical install root this transaction was created for.
+    ///
+    /// macOS keeps journals beside the `.app`, where sibling bundles share a
+    /// directory. Recovery must bind the document to its exact bundle before
+    /// deriving any live, staged or backup path from it.
+    #[serde(default)]
+    pub install_root: PathBuf,
     pub steps: Vec<JournalStep>,
+    #[serde(default)]
+    pub phase: TransactionPhase,
+    /// `None` is reserved for schema-1 journals, whose updater never wrote
+    /// InstalledState as part of apply. New transactions always record either
+    /// exact prior bytes or explicit absence.
+    #[serde(default)]
+    pub previous_installed_state: Option<PreviousInstalledState>,
+    /// `None` is a schema-1 journal. Schema 2+ records exact presence so
+    /// rollback can remove an icon introduced into a previously iconless app.
+    #[serde(default)]
+    pub previous_bundle_icon_present: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -116,6 +172,16 @@ pub enum JournalError {
     UnsupportedSchema { path: PathBuf, found: u32 },
     #[error("update journal names destination {destination:?}, which is not inside the install")]
     UnsafeDestination { destination: String },
+    #[error("update journal records unsafe transaction nonce {nonce:?}")]
+    UnsafeNonce { nonce: String },
+    #[error("update journal records unknown or unsafe component {component:?}")]
+    UnsafeComponent { component: String },
+    #[error("update journal carries unsafe entry {entry:?} for component {component:?}")]
+    UnsafeCarriedEntry { component: String, entry: String },
+    #[error("update journal records a malformed archive digest for component {component:?}")]
+    InvalidDigest { component: String },
+    #[error("schema-2 update journal is missing required recovery field {field}")]
+    MissingSafetyField { field: &'static str },
 }
 
 /// Reads nothing but the schema, so a newer journal is refused on its version
@@ -147,6 +213,15 @@ fn relative_path(text: &str) -> Option<PathBuf> {
         .then_some(path)
 }
 
+pub(crate) fn safe_child_name(name: &str) -> bool {
+    !name.is_empty()
+        && !matches!(name, "." | "..")
+        && !name.bytes().any(|byte| matches!(byte, b'/' | b'\\' | b':'))
+        && Path::new(name)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
 /// The staging partner for an atomic save: a sibling of the journal, because
 /// `rename` is atomic only within one filesystem.
 fn temporary_path_in(directory: &Path) -> PathBuf {
@@ -171,12 +246,21 @@ fn sync_directory(_directory: &Path) -> std::io::Result<()> {
 }
 
 impl Journal {
-    pub fn new(version: &str, nonce: &str, steps: Vec<JournalStep>) -> Self {
+    pub fn new(
+        version: &str,
+        nonce: &str,
+        install_root: impl Into<PathBuf>,
+        steps: Vec<JournalStep>,
+    ) -> Self {
         Self {
             schema: JOURNAL_SCHEMA,
             version: version.to_string(),
             nonce: nonce.to_string(),
+            install_root: install_root.into(),
             steps,
+            phase: TransactionPhase::Applying,
+            previous_installed_state: Some(PreviousInstalledState::Absent),
+            previous_bundle_icon_present: None,
         }
     }
 
@@ -200,18 +284,102 @@ impl Journal {
             source,
         };
         let probe: SchemaProbe = serde_json::from_slice(&bytes).map_err(malformed)?;
-        (probe.schema == JOURNAL_SCHEMA)
-            .then_some(())
-            .ok_or_else(|| JournalError::UnsupportedSchema {
-                path: path.clone(),
-                found: probe.schema,
-            })?;
-        let journal: Self = serde_json::from_slice(&bytes).map_err(malformed)?;
+        matches!(
+            probe.schema,
+            LEGACY_JOURNAL_SCHEMA | UNBOUND_JOURNAL_SCHEMA | JOURNAL_SCHEMA
+        )
+        .then_some(())
+        .ok_or_else(|| JournalError::UnsupportedSchema {
+            path: path.clone(),
+            found: probe.schema,
+        })?;
+        let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(malformed)?;
+        if probe.schema >= UNBOUND_JOURNAL_SCHEMA {
+            let root = document
+                .as_object()
+                .ok_or(JournalError::MissingSafetyField { field: "phase" })?;
+            for field in [
+                "phase",
+                "previous_installed_state",
+                "previous_bundle_icon_present",
+            ] {
+                root.contains_key(field)
+                    .then_some(())
+                    .ok_or(JournalError::MissingSafetyField { field })?;
+            }
+            root.get("previous_installed_state")
+                .is_some_and(|value| !value.is_null())
+                .then_some(())
+                .ok_or(JournalError::MissingSafetyField {
+                    field: "previous_installed_state",
+                })?;
+            let steps = root
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .ok_or(JournalError::MissingSafetyField { field: "steps" })?;
+            for step in steps {
+                let fields = step.as_object().ok_or(JournalError::MissingSafetyField {
+                    field: "destination_existed",
+                })?;
+                for field in ["destination_existed", "rollback_complete"] {
+                    fields
+                        .get(field)
+                        .is_some_and(|value| !value.is_null())
+                        .then_some(())
+                        .ok_or(JournalError::MissingSafetyField { field })?;
+                }
+            }
+            if probe.schema == JOURNAL_SCHEMA {
+                root.get("install_root")
+                    .is_some_and(|value| !value.is_null())
+                    .then_some(())
+                    .ok_or(JournalError::MissingSafetyField {
+                        field: "install_root",
+                    })?;
+            }
+        }
+        let journal: Self = serde_json::from_value(document).map_err(malformed)?;
+        (!journal.nonce.is_empty()
+            && journal.nonce.len() <= 128
+            && journal
+                .nonce
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+        .then_some(())
+        .ok_or_else(|| JournalError::UnsafeNonce {
+            nonce: journal.nonce.clone(),
+        })?;
         // Validated on the way in, so no later code has to remember to.
         journal
             .steps
             .iter()
             .try_for_each(|step| step.destination_in(Path::new("")).map(|_| ()))?;
+        journal.steps.iter().try_for_each(|step| {
+            matches!(step.component.as_str(), "content" | "planet" | "engine")
+                .then_some(())
+                .ok_or_else(|| JournalError::UnsafeComponent {
+                    component: step.component.clone(),
+                })
+        })?;
+        journal.steps.iter().try_for_each(|step| {
+            step.carried.iter().try_for_each(|entry| {
+                safe_child_name(entry).then_some(()).ok_or_else(|| {
+                    JournalError::UnsafeCarriedEntry {
+                        component: step.component.clone(),
+                        entry: entry.clone(),
+                    }
+                })
+            })
+        })?;
+        journal.steps.iter().try_for_each(|step| {
+            ((journal.schema == LEGACY_JOURNAL_SCHEMA && step.sha256.is_empty())
+                || (step.sha256.len() == 64
+                    && step.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())))
+            .then_some(())
+            .ok_or_else(|| JournalError::InvalidDigest {
+                component: step.component.clone(),
+            })
+        })?;
         Ok(Some(journal))
     }
 
@@ -284,14 +452,18 @@ mod tests {
         Journal::new(
             "0.4.0",
             "beef1234",
+            "/install",
             vec![
                 JournalStep {
                     component: "content".to_string(),
+                    sha256: "aa".repeat(32),
                     destination: "content".to_string(),
                     carried: vec!["MyPack.c4f".to_string()],
                     state: StepState::Completed,
+                    destination_existed: Some(true),
+                    rollback_complete: false,
                 },
-                JournalStep::new("engine", "bin"),
+                JournalStep::new("engine", &"bb".repeat(32), "bin"),
             ],
         )
     }
@@ -312,6 +484,74 @@ mod tests {
         // mid-update reads no journal, and that is not a failure.
         let directory = TempDir::new().expect("directory");
         assert_eq!(Journal::load(directory.path()).expect("load"), None);
+    }
+
+    #[test]
+    fn a_first_schema_journal_without_digests_is_loadable_for_fail_closed_recovery() {
+        let directory = TempDir::new().expect("directory");
+        std::fs::write(
+            Journal::path_in(directory.path()),
+            br#"{
+                "schema": 1,
+                "version": "0.3.0",
+                "nonce": "legacy",
+                "steps": [{
+                    "component": "content",
+                    "destination": "content",
+                    "carried": [],
+                    "state": "completed"
+                }]
+            }"#,
+        )
+        .expect("write legacy journal");
+
+        let journal = Journal::load(directory.path())
+            .expect("load")
+            .expect("journal");
+        assert_eq!(journal.steps[0].sha256, "");
+        assert_eq!(journal.schema, LEGACY_JOURNAL_SCHEMA);
+    }
+
+    #[test]
+    fn a_current_schema_journal_requires_every_component_digest() {
+        let directory = TempDir::new().expect("directory");
+        let mut written = journal();
+        written.steps[0].sha256.clear();
+        written.save(directory.path()).expect("save");
+
+        assert!(matches!(
+            Journal::load(directory.path()),
+            Err(JournalError::InvalidDigest { component }) if component == "content"
+        ));
+    }
+
+    #[test]
+    fn a_second_schema_journal_cannot_default_away_recovery_safety_fields() {
+        let directory = TempDir::new().expect("directory");
+        std::fs::write(
+            Journal::path_in(directory.path()),
+            format!(
+                r#"{{
+                    "schema": 2,
+                    "version": "0.4.0",
+                    "nonce": "missing-safety",
+                    "steps": [{{
+                        "component": "content",
+                        "sha256": "{}",
+                        "destination": "content",
+                        "carried": [],
+                        "state": "completed"
+                    }}]
+                }}"#,
+                "aa".repeat(32)
+            ),
+        )
+        .expect("write incomplete v2 journal");
+
+        assert!(matches!(
+            Journal::load(directory.path()),
+            Err(JournalError::MissingSafetyField { field }) if field == "phase"
+        ));
     }
 
     #[test]
@@ -366,7 +606,7 @@ mod tests {
             "./content",
             "",
         ] {
-            let step = JournalStep::new("content", destination);
+            let step = JournalStep::new("content", &"aa".repeat(32), destination);
             assert!(
                 matches!(
                     step.destination_in(Path::new("/install")),
@@ -390,8 +630,60 @@ mod tests {
     }
 
     #[test]
+    fn a_journal_naming_a_malformed_component_digest_is_refused_on_load() {
+        let directory = TempDir::new().expect("directory");
+        let mut written = journal();
+        written.steps[0].sha256 = "not a sha256".to_string();
+        written.save(directory.path()).expect("save");
+
+        assert!(matches!(
+            Journal::load(directory.path()),
+            Err(JournalError::InvalidDigest { component }) if component == "content"
+        ));
+    }
+
+    #[test]
+    fn a_journal_nonce_cannot_escape_the_update_work_directory() {
+        let directory = TempDir::new().expect("directory");
+        let mut written = journal();
+        written.nonce = "../../Documents".to_string();
+        written.save(directory.path()).expect("save");
+
+        assert!(matches!(
+            Journal::load(directory.path()),
+            Err(JournalError::UnsafeNonce { .. })
+        ));
+    }
+
+    #[test]
+    fn a_journal_component_cannot_name_a_backup_outside_its_quarantine() {
+        let directory = TempDir::new().expect("directory");
+        let mut written = journal();
+        written.steps[0].component = "../../Documents".to_string();
+        written.save(directory.path()).expect("save");
+
+        assert!(matches!(
+            Journal::load(directory.path()),
+            Err(JournalError::UnsafeComponent { .. })
+        ));
+    }
+
+    #[test]
+    fn a_journal_carried_name_cannot_escape_the_component_tree() {
+        let directory = TempDir::new().expect("directory");
+        let mut written = journal();
+        written.steps[0].carried = vec!["../../Documents".to_string()];
+        written.save(directory.path()).expect("save");
+
+        assert!(matches!(
+            Journal::load(directory.path()),
+            Err(JournalError::UnsafeCarriedEntry { .. })
+        ));
+    }
+
+    #[test]
     fn a_safe_destination_resolves_under_the_install_root() {
-        let step = JournalStep::new("content", "Contents/Resources/content");
+        let step = JournalStep::new("content", &"aa".repeat(32), "Contents/Resources/content");
         assert_eq!(
             step.destination_in(Path::new("/install")).expect("resolve"),
             Path::new("/install/Contents/Resources/content")

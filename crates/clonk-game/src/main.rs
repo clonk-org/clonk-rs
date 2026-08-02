@@ -28,13 +28,24 @@ use clonk_launcher::{
     write_launcher_summary, LauncherLog, ReportSearchTriageSummary, SupportBundleReport,
     UpdateTelemetrySummary,
 };
-use clonk_platform::AppPaths;
+use clonk_platform::{discover_unvalidated_install_root, AppPaths};
+use clonk_update::{
+    acquire_install_use, apply_update, resume_interrupted_update, ApplyOutcome, ApplyPlan,
+    InstallLayout, PlatformOps, RealPlatform, ResumeOutcome,
+};
 use legacy_registry::{
     read_legacy_windows_registry, serialize_legacy_registry_config, LegacyRegistryConfig,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const SKIP_PATCHER_VALIDATION_ENV: &str = "LC_GAME_SKIP_PATCHER_CHECK";
+const LAUNCHER_PID_ENV: &str = "LC_GAME_LAUNCHER_PID";
+const UPDATE_NOTICE_ENV: &str = "LC_GAME_UPDATE_NOTICE";
+const UPDATE_RESULT_FILE_NAME: &str = "update-result.json";
+const UPDATE_OWNER_FILE_PREFIX: &str = ".owner-";
+const UPDATE_RESULT_SCHEMA: u32 = 1;
+const UPDATE_PROCESS_WAIT_SECONDS: u64 = 120;
+const UPDATE_CLEANUP_ATTEMPTS: usize = 100;
 const FORCE_WINDOW_ENV: &str = "LC_GAME_FORCE_WINDOW";
 const FORCE_FULLSCREEN_ENV: &str = "LC_GAME_FORCE_FULLSCREEN";
 const DISABLE_HEADLESS_GUARD_ENV: &str = "LC_GAME_DISABLE_HEADLESS_GUARD";
@@ -48,6 +59,25 @@ const CLASSIC_CONFIG_VERSION: u32 = clonk_core::version::ENGINE_VERSION[4] as u3
 const CLASSIC_CONFIG_VERSION_VALUE: &str = "362";
 const CLASSIC_UNVERSIONED_CONFIG_VERSION: u32 = 347;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct UpdateResultDocument {
+    schema: u32,
+    #[serde(flatten)]
+    status: UpdateResultStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum UpdateResultStatus {
+    Applied {
+        version: String,
+        components: Vec<String>,
+    },
+    Failed {
+        message: String,
+    },
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "clonk-game",
@@ -56,6 +86,71 @@ const CLASSIC_UNVERSIONED_CONFIG_VERSION: u32 = 347;
     author
 )]
 struct Cli {
+    /// Apply a downloaded update plan instead of launching the runtime
+    #[arg(
+        long = "apply-update",
+        value_name = "PLAN",
+        requires_all = ["install_root", "relaunch"],
+        conflicts_with_all = [
+            "finish_update",
+            "binary",
+            "support_bundle_only",
+            "automation_report",
+            "forwarded"
+        ]
+    )]
+    apply_update: Option<PathBuf>,
+
+    /// Installation the update plan replaces
+    #[arg(long = "install-root", value_name = "PATH", requires = "apply_update")]
+    install_root: Option<PathBuf>,
+
+    /// Process that must exit before the update may replace installed files
+    #[arg(
+        long = "wait-pid",
+        value_name = "PID",
+        requires = "apply_update",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    wait_pids: Vec<u32>,
+
+    /// Start the updated launcher after applying the plan
+    #[arg(long, requires = "apply_update")]
+    relaunch: bool,
+
+    /// Complete cleanup after a detached update helper exits
+    #[arg(
+        long = "finish-update",
+        value_name = "PENDING_DIR",
+        hide = true,
+        requires_all = ["update_result", "update_helper_pid"],
+        conflicts_with_all = [
+            "apply_update",
+            "install_root",
+            "wait_pids",
+            "relaunch",
+            "binary",
+            "support_bundle_only",
+            "automation_report",
+            "forwarded"
+        ]
+    )]
+    finish_update: Option<PathBuf>,
+
+    /// Typed result written by the detached update helper
+    #[arg(long, value_name = "RESULT", hide = true, requires = "finish_update")]
+    update_result: Option<PathBuf>,
+
+    /// Detached helper that must exit before its staging directory is removed
+    #[arg(
+        long,
+        value_name = "PID",
+        hide = true,
+        requires = "finish_update",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    update_helper_pid: Option<u32>,
+
     /// Override the detected Clonk Rust runtime binary location
     #[arg(long = "binary", value_name = "PATH")]
     binary: Option<PathBuf>,
@@ -86,22 +181,68 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    run_cli(Cli::parse())
+}
+
+fn run_cli(cli: Cli) -> Result<()> {
     let Cli {
+        apply_update,
+        install_root,
+        wait_pids,
+        relaunch,
+        finish_update,
+        update_result,
+        update_helper_pid,
         binary,
         support_bundle_only,
         automation_report,
         forwarded,
-    } = Cli::parse();
+    } = cli;
 
+    if let Some(plan_path) = apply_update {
+        let install_root = install_root
+            .ok_or_else(|| anyhow!("--apply-update requires an explicit --install-root"))?;
+        apply_update_plan(
+            &plan_path,
+            &install_root,
+            &wait_pids,
+            relaunch,
+            &RealPlatform,
+        )?;
+        return Ok(());
+    }
+
+    let update_recovery = recover_interrupted_update_before_path_discovery()
+        .context("failed to recover interrupted component update")?;
     let paths = AppPaths::discover().context("failed to discover application paths")?;
+    let _install_use = acquire_install_use(&InstallLayout::for_app_paths(&paths))
+        .context("the installation is being updated by another process")?;
     paths
         .ensure_user_dirs()
         .context("failed to prepare user directories")?;
+
+    let update_notice = match finish_update {
+        Some(pending_dir) => {
+            let result_path =
+                update_result.ok_or_else(|| anyhow!("--finish-update requires --update-result"))?;
+            let helper_pid = update_helper_pid
+                .ok_or_else(|| anyhow!("--finish-update requires --update-helper-pid"))?;
+            finish_update_mode(
+                &paths,
+                &pending_dir,
+                &result_path,
+                helper_pid,
+                &RealPlatform,
+            )?
+        }
+        None => recover_abandoned_pending_updates(&paths, &RealPlatform),
+    };
 
     let logger = LauncherLogger::new(&paths).context("failed to initialise launcher logging")?;
     logger
         .log_line("launcher initialised")
         .context("failed to write initial log entry")?;
+    log_update_recovery(&update_recovery, &logger)?;
 
     if support_bundle_only {
         if binary.is_some() {
@@ -153,7 +294,14 @@ fn run() -> Result<()> {
         .context("failed to prepare runtime assets for launch")?;
 
     let runtime_start = SystemTime::now();
-    let status = launch_runtime(&binary, &paths, &config_path, &forwarded, &logger)?;
+    let status = launch_runtime(
+        &binary,
+        &paths,
+        &config_path,
+        &forwarded,
+        update_notice.as_deref(),
+        &logger,
+    )?;
     let log_collection_result = collect_runtime_logs(&paths, runtime_start, &logger);
     let crash_report_result = collect_crash_reports(&paths, runtime_start, &logger);
 
@@ -245,33 +393,12 @@ fn ensure_runtime_assets(paths: &AppPaths, binary: &Path, logger: &LauncherLogge
         )
     })?;
 
-    let mut target_roots = vec![paths.install_root().to_path_buf()];
-    if !target_roots.iter().any(|root| root == binary_dir) {
-        target_roots.push(binary_dir.to_path_buf());
-    }
-
     #[cfg(target_os = "macos")]
-    {
-        if binary_dir.file_name().and_then(|name| name.to_str()) == Some("MacOS") {
-            if let Some(contents_dir) = binary_dir.parent() {
-                if contents_dir.file_name().and_then(|name| name.to_str()) == Some("Contents") {
-                    if let Some(app_dir) = contents_dir.parent() {
-                        if app_dir
-                            .extension()
-                            .and_then(|ext| ext.to_str())
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
-                        {
-                            if let Some(bundle_root) = app_dir.parent() {
-                                if !target_roots.iter().any(|root| root == bundle_root) {
-                                    target_roots.push(bundle_root.to_path_buf());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let target_roots = macos_bundle_external_runtime_root(binary_dir)
+        .map(|root| vec![root])
+        .unwrap_or_else(|| ordinary_runtime_asset_roots(paths.install_root(), binary_dir));
+    #[cfg(not(target_os = "macos"))]
+    let target_roots = ordinary_runtime_asset_roots(paths.install_root(), binary_dir);
 
     for root in target_roots {
         ensure_runtime_asset(
@@ -289,6 +416,27 @@ fn ensure_runtime_assets(paths: &AppPaths, binary: &Path, logger: &LauncherLogge
     }
 
     Ok(())
+}
+
+fn ordinary_runtime_asset_roots(install_root: &Path, binary_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![install_root.to_path_buf()];
+    if roots.iter().all(|root| root != binary_dir) {
+        roots.push(binary_dir.to_path_buf());
+    }
+    roots
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bundle_external_runtime_root(binary_dir: &Path) -> Option<PathBuf> {
+    let contents = (binary_dir.file_name()? == "MacOS")
+        .then(|| binary_dir.parent())
+        .flatten()?;
+    let bundle = (contents.file_name()? == "Contents")
+        .then(|| contents.parent())
+        .flatten()?;
+    (bundle.extension()?.eq_ignore_ascii_case("app"))
+        .then(|| bundle.parent().map(Path::to_path_buf))
+        .flatten()
 }
 
 fn ensure_runtime_asset(
@@ -454,23 +602,10 @@ fn launch_runtime(
     paths: &AppPaths,
     config_path: &Path,
     forwarded: &[OsString],
+    update_notice: Option<&str>,
     logger: &LauncherLogger,
 ) -> Result<ExitStatus> {
-    let mut command = Command::new(binary);
-    command.current_dir(paths.install_root());
-    command.args(forwarded);
-
-    command.env("LC_INSTALL_ROOT", paths.install_root());
-    command.env("LC_APP_ROOT", paths.install_root());
-    command.env("LC_USER_DATA_DIR", paths.user_data_dir());
-    command.env("LC_CACHE_DIR", paths.cache_dir());
-    command.env("LC_LOGS_DIR", paths.logs_dir());
-    command.env("LC_TEMP_DIR", paths.temp_dir());
-    command.env("LC_CONFIG_DIR", paths.config_dir());
-    command.env("LC_CONFIG_FILE", config_path);
-
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
+    let mut command = runtime_command(binary, paths, config_path, forwarded, update_notice);
 
     let runtime_output = RuntimeOutputCollector::new();
 
@@ -531,6 +666,519 @@ fn launch_runtime(
         .context("failed to log runtime status")?;
 
     Ok(status)
+}
+
+fn runtime_command(
+    binary: &Path,
+    paths: &AppPaths,
+    config_path: &Path,
+    forwarded: &[OsString],
+    update_notice: Option<&str>,
+) -> Command {
+    let mut command = Command::new(binary);
+    command.current_dir(paths.install_root());
+    command.args(forwarded);
+
+    command.env("LC_INSTALL_ROOT", paths.install_root());
+    command.env("LC_APP_ROOT", paths.install_root());
+    command.env("LC_USER_DATA_DIR", paths.user_data_dir());
+    command.env("LC_CACHE_DIR", paths.cache_dir());
+    command.env("LC_LOGS_DIR", paths.logs_dir());
+    command.env("LC_TEMP_DIR", paths.temp_dir());
+    command.env("LC_CONFIG_DIR", paths.config_dir());
+    command.env("LC_CONFIG_FILE", config_path);
+    command.env(LAUNCHER_PID_ENV, std::process::id().to_string());
+    command.env(clonk_update::UPDATE_RECOVERY_COMPLETE_ENV, "1");
+    match update_notice {
+        Some(notice) => command.env(UPDATE_NOTICE_ENV, notice),
+        None => command.env_remove(UPDATE_NOTICE_ENV),
+    };
+
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command
+}
+
+fn recover_interrupted_update_before_path_discovery() -> Result<ResumeOutcome> {
+    let install_root = discover_unvalidated_install_root()
+        .context("failed to locate the installation for update recovery")?;
+    resume_interrupted_update(&install_root).map_err(Into::into)
+}
+
+fn log_update_recovery(outcome: &ResumeOutcome, logger: &LauncherLogger) -> Result<()> {
+    let message = match outcome {
+        ResumeOutcome::NothingToDo => "no interrupted component update to recover".to_string(),
+        ResumeOutcome::RolledForward { version } => {
+            format!("completed interrupted component update to {version}")
+        }
+        ResumeOutcome::RolledBack { version } => {
+            format!("rolled back interrupted component update to {version}")
+        }
+    };
+    logger
+        .log_line(&message)
+        .context("failed to log component update recovery")
+}
+
+fn apply_update_plan(
+    plan_path: &Path,
+    install_root: &Path,
+    wait_pids: &[u32],
+    relaunch: bool,
+    platform: &dyn PlatformOps,
+) -> Result<ApplyOutcome> {
+    apply_update_plan_with_relauncher(
+        plan_path,
+        install_root,
+        wait_pids,
+        relaunch,
+        platform,
+        std::process::id(),
+        relaunch_updated_game,
+    )
+}
+
+fn apply_update_plan_with_relauncher<F>(
+    plan_path: &Path,
+    install_root: &Path,
+    wait_pids: &[u32],
+    relaunch: bool,
+    platform: &dyn PlatformOps,
+    helper_pid: u32,
+    relauncher: F,
+) -> Result<ApplyOutcome>
+where
+    F: FnOnce(&InstallLayout, &Path, &Path, u32) -> Result<()>,
+{
+    let pending_dir = plan_path.parent().ok_or_else(|| {
+        anyhow!(
+            "update plan {} has no parent directory",
+            plan_path.display()
+        )
+    })?;
+    let result_path = pending_dir.join(UPDATE_RESULT_FILE_NAME);
+    let layout = InstallLayout::discover(install_root);
+    record_update_owner(pending_dir, helper_pid)
+        .context("failed to record the active update helper")?;
+    let mut first_wait_error = None;
+    for pid in wait_pids {
+        if let Err(error) = platform.wait_for_process(
+            *pid,
+            std::time::Duration::from_secs(UPDATE_PROCESS_WAIT_SECONDS),
+        ) {
+            first_wait_error.get_or_insert_with(|| {
+                anyhow::Error::new(error).context(format!("failed while waiting for process {pid}"))
+            });
+        }
+    }
+    if let Some(error) = first_wait_error {
+        let result = UpdateResultDocument {
+            schema: UPDATE_RESULT_SCHEMA,
+            status: UpdateResultStatus::Failed {
+                message: format!("{error:#}"),
+            },
+        };
+        if let Err(write_error) = write_update_result(&result_path, &result) {
+            tracing::warn!(error = ?write_error, "could not write failed update result");
+        }
+        return Err(error);
+    }
+
+    let operation = (|| {
+        let plan_bytes = fs::read(plan_path)
+            .with_context(|| format!("failed to read update plan {}", plan_path.display()))?;
+        let plan: ApplyPlan = serde_json::from_slice(&plan_bytes)
+            .with_context(|| format!("failed to parse update plan {}", plan_path.display()))?;
+        apply_update(&layout, &plan, platform)
+            .with_context(|| format!("failed to apply update plan {}", plan_path.display()))
+    })();
+    let result = match &operation {
+        Ok(outcome) => UpdateResultDocument {
+            schema: UPDATE_RESULT_SCHEMA,
+            status: UpdateResultStatus::Applied {
+                version: outcome.version.clone(),
+                components: outcome.applied.clone(),
+            },
+        },
+        Err(error) => UpdateResultDocument {
+            schema: UPDATE_RESULT_SCHEMA,
+            status: UpdateResultStatus::Failed {
+                message: format!("{error:#}"),
+            },
+        },
+    };
+    let write_result = write_update_result(&result_path, &result);
+    let relaunch_result = match relaunch {
+        true => relauncher(&layout, pending_dir, &result_path, helper_pid)
+            .context("failed to start the updated launcher"),
+        false => Ok(()),
+    };
+
+    match operation {
+        Err(error) => {
+            if let Err(write_error) = write_result {
+                tracing::warn!(error = ?write_error, "could not write failed update result");
+            }
+            if let Err(relaunch_error) = relaunch_result {
+                tracing::warn!(error = ?relaunch_error, "could not relaunch after failed update");
+            }
+            Err(error)
+        }
+        Ok(outcome) => {
+            write_result?;
+            relaunch_result?;
+            Ok(outcome)
+        }
+    }
+}
+
+fn write_update_result(path: &Path, result: &UpdateResultDocument) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(result).context("failed to serialize update result")?;
+    let mut file = File::create(path)
+        .with_context(|| format!("failed to create update result {}", path.display()))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("failed to write update result {}", path.display()))
+}
+
+fn record_update_owner(directory: &Path, pid: u32) -> Result<()> {
+    if pid == 0 {
+        bail!("an update staging owner must have a nonzero process ID");
+    }
+    let path = directory.join(format!("{UPDATE_OWNER_FILE_PREFIX}{pid}"));
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file
+            .sync_all()
+            .with_context(|| format!("failed to persist update owner {}", path.display())),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("failed to inspect update owner {}", path.display()))?;
+            if metadata.file_type().is_file() {
+                Ok(())
+            } else {
+                bail!("update owner {} is not a regular file", path.display())
+            }
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to record update owner {}", path.display()))
+        }
+    }
+}
+
+fn finish_update_mode(
+    paths: &AppPaths,
+    pending_dir: &Path,
+    result_path: &Path,
+    helper_pid: u32,
+    platform: &dyn PlatformOps,
+) -> Result<Option<String>> {
+    finish_update_mode_with_cleanup(
+        paths,
+        pending_dir,
+        result_path,
+        helper_pid,
+        platform,
+        remove_pending_update_with_retry,
+    )
+}
+
+fn finish_update_mode_with_cleanup<F>(
+    paths: &AppPaths,
+    pending_dir: &Path,
+    result_path: &Path,
+    helper_pid: u32,
+    platform: &dyn PlatformOps,
+    cleanup: F,
+) -> Result<Option<String>>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let (pending_dir, result_path) =
+        validate_pending_update_paths(paths, pending_dir, result_path)?;
+    record_update_owner(&pending_dir, std::process::id())?;
+    platform
+        .wait_for_process(
+            helper_pid,
+            std::time::Duration::from_secs(UPDATE_PROCESS_WAIT_SECONDS),
+        )
+        .with_context(|| format!("failed while waiting for update helper {helper_pid}"))?;
+    let result = read_update_result(&result_path);
+    let mut notice = match result {
+        Ok(UpdateResultDocument {
+            status: UpdateResultStatus::Applied { .. },
+            ..
+        }) => None,
+        Ok(UpdateResultDocument {
+            status: UpdateResultStatus::Failed { message },
+            ..
+        }) => Some(message),
+        Err(error) => Some(format!("{error:#}")),
+    };
+    if let Err(error) = cleanup(&pending_dir) {
+        let cleanup = format!("Could not remove temporary update files: {error:#}");
+        if let Some(detail) = notice.as_mut() {
+            detail.push_str("\n\n");
+            detail.push_str(&cleanup);
+        } else {
+            tracing::warn!(%error, path = %pending_dir.display(), "could not clean successful update staging");
+        }
+    }
+    Ok(notice)
+}
+
+fn validate_pending_update_paths(
+    paths: &AppPaths,
+    pending_dir: &Path,
+    result_path: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let updates = fs::canonicalize(paths.cache_dir().join("Updates")).with_context(|| {
+        format!(
+            "failed to resolve update cache {}",
+            paths.cache_dir().join("Updates").display()
+        )
+    })?;
+    let pending = fs::canonicalize(pending_dir)
+        .with_context(|| format!("failed to resolve pending update {}", pending_dir.display()))?;
+    let valid_pending_name = pending
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("pending-") && name.len() > "pending-".len());
+    if !valid_pending_name {
+        bail!("pending update directory has an invalid name");
+    }
+    if pending.parent() != Some(updates.as_path()) {
+        bail!(
+            "pending update {} is not a direct child of {}",
+            pending.display(),
+            updates.display()
+        );
+    }
+
+    let result_parent = result_path
+        .parent()
+        .ok_or_else(|| anyhow!("update result {} has no parent", result_path.display()))?;
+    let result_parent = fs::canonicalize(result_parent).with_context(|| {
+        format!(
+            "failed to resolve update result parent {}",
+            result_parent.display()
+        )
+    })?;
+    if result_parent != pending || result_path.file_name() != Some(UPDATE_RESULT_FILE_NAME.as_ref())
+    {
+        bail!(
+            "update result {} does not belong to pending update {}",
+            result_path.display(),
+            pending.display()
+        );
+    }
+    if fs::symlink_metadata(result_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        bail!(
+            "update result {} must not be a symlink",
+            result_path.display()
+        );
+    }
+    Ok((pending.clone(), pending.join(UPDATE_RESULT_FILE_NAME)))
+}
+
+fn read_update_result(path: &Path) -> Result<UpdateResultDocument> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read update result {}", path.display()))?;
+    let result: UpdateResultDocument = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse update result {}", path.display()))?;
+    if result.schema != UPDATE_RESULT_SCHEMA {
+        bail!(
+            "update result {} uses schema {}; expected {UPDATE_RESULT_SCHEMA}",
+            path.display(),
+            result.schema
+        );
+    }
+    Ok(result)
+}
+
+fn recover_abandoned_pending_updates(
+    paths: &AppPaths,
+    platform: &dyn PlatformOps,
+) -> Option<String> {
+    let updates = paths.cache_dir().join("Updates");
+    let entries = match fs::read_dir(&updates) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!(%error, path = %updates.display(), "could not inspect update staging");
+            return None;
+        }
+    };
+    let mut candidates = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect::<Vec<_>>();
+    candidates.sort();
+    let mut notices = Vec::new();
+    for pending in candidates {
+        let valid_name = pending
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("pending-") && name.len() > "pending-".len());
+        let is_plain_directory = fs::symlink_metadata(&pending)
+            .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if !valid_name || !is_plain_directory || !pending_update_owners_are_gone(&pending, platform)
+        {
+            continue;
+        }
+
+        let result_path = pending.join(UPDATE_RESULT_FILE_NAME);
+        let result_is_symlink = fs::symlink_metadata(&result_path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        let mut notice = if result_is_symlink {
+            Some("An earlier update left an unsafe result marker.".to_string())
+        } else {
+            match read_update_result(&result_path) {
+                Ok(UpdateResultDocument {
+                    status: UpdateResultStatus::Applied { .. },
+                    ..
+                }) => None,
+                Ok(UpdateResultDocument {
+                    status: UpdateResultStatus::Failed { message },
+                    ..
+                }) => Some(message),
+                Err(_) if !result_path.exists() => Some(
+                    "An earlier update was interrupted before it could report a result."
+                        .to_string(),
+                ),
+                Err(error) => Some(format!("{error:#}")),
+            }
+        };
+        if let Err(error) = remove_pending_update_with_retry(&pending) {
+            let cleanup = format!("Could not remove temporary update files: {error:#}");
+            if let Some(detail) = notice.as_mut() {
+                detail.push_str("\n\n");
+                detail.push_str(&cleanup);
+            } else {
+                tracing::warn!(%error, path = %pending.display(), "could not reclaim successful update staging");
+            }
+        }
+        if let Some(notice) = notice {
+            notices.push(notice);
+        }
+    }
+    (!notices.is_empty()).then(|| notices.join("\n\n"))
+}
+
+fn pending_update_owners_are_gone(pending: &Path, platform: &dyn PlatformOps) -> bool {
+    let entries = match fs::read_dir(pending) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(%error, path = %pending.display(), "could not inspect update owners");
+            return false;
+        }
+    };
+    let mut saw_owner = false;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(%error, path = %pending.display(), "could not inspect an update owner");
+                return false;
+            }
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(pid_text) = name.strip_prefix(UPDATE_OWNER_FILE_PREFIX) else {
+            continue;
+        };
+        saw_owner = true;
+        let marker_is_file = entry
+            .file_type()
+            .map(|kind| kind.is_file() && !kind.is_symlink())
+            .unwrap_or(false);
+        let Ok(pid) = pid_text.parse::<u32>() else {
+            return false;
+        };
+        if !marker_is_file || pid == 0 || pid == std::process::id() {
+            return false;
+        }
+        match platform.wait_for_process(pid, std::time::Duration::ZERO) {
+            Ok(()) => {}
+            Err(clonk_update::PlatformError::WaitTimeout { .. }) => return false,
+            Err(error) => {
+                tracing::warn!(%error, pid, "could not prove an update owner exited");
+                return false;
+            }
+        }
+    }
+    saw_owner
+}
+
+fn remove_pending_update_with_retry(path: &Path) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 0..UPDATE_CLEANUP_ATTEMPTS {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < UPDATE_CLEANUP_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    Err(last_error
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow!("failed to remove pending update {}", path.display())))
+    .with_context(|| format!("failed to remove pending update {}", path.display()))
+}
+
+fn updated_launcher_command(
+    layout: &InstallLayout,
+    pending_dir: &Path,
+    result_path: &Path,
+    helper_pid: u32,
+) -> Command {
+    let mut command = Command::new(
+        layout
+            .binaries_dir()
+            .join(format!("clonk-game{}", env::consts::EXE_SUFFIX)),
+    );
+    command
+        .arg("--finish-update")
+        .arg(pending_dir)
+        .arg("--update-result")
+        .arg(result_path)
+        .arg("--update-helper-pid")
+        .arg(helper_pid.to_string());
+    command.current_dir(
+        pending_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| layout.work_dir()),
+    );
+    command.env_remove(LAUNCHER_PID_ENV);
+    command.env_remove(UPDATE_NOTICE_ENV);
+    command.env_remove(clonk_update::UPDATE_RECOVERY_COMPLETE_ENV);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    command
+}
+
+fn relaunch_updated_game(
+    layout: &InstallLayout,
+    pending_dir: &Path,
+    result_path: &Path,
+    helper_pid: u32,
+) -> Result<()> {
+    let mut command = updated_launcher_command(layout, pending_dir, result_path, helper_pid);
+    let program = command.get_program().to_os_string();
+    let child = command
+        .spawn()
+        .with_context(|| format!("failed to start {}", PathBuf::from(program).display()))?;
+    record_update_owner(pending_dir, child.id())?;
+    Ok(())
 }
 
 fn candidate_binaries(install_root: &Path) -> Vec<PathBuf> {
@@ -2469,6 +3117,10 @@ mod tests {
         ProviderAutomationRecord, ProviderAutomationSnapshot, ProviderAutomationState,
         ProviderBulkRetargetRecord, ProviderBulkRetargetSummary, ProviderPathStatus,
     };
+    use clonk_update::{
+        sha256_file, FakePlatform, InstalledState, Journal, JournalStep, PlatformCall,
+        PlatformError, StagedComponent, StepState,
+    };
     use serde_json::Value;
     use std::cell::Cell;
     use std::env;
@@ -2478,7 +3130,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
-    use zip::ZipArchive;
+    use zip::write::FileOptions;
+    use zip::{ZipArchive, ZipWriter};
 
     fn test_logger(dir: &TempDir) -> LauncherLogger {
         let log_path = dir.path().join("test.log");
@@ -2528,6 +3181,857 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
+    struct FailingWaitPlatform {
+        waited: Mutex<Vec<u32>>,
+    }
+
+    impl FailingWaitPlatform {
+        fn new() -> Self {
+            Self {
+                waited: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl PlatformOps for FailingWaitPlatform {
+        fn available_space(&self, _path: &Path) -> Result<u64, PlatformError> {
+            Ok(u64::MAX)
+        }
+
+        fn wait_for_process(&self, pid: u32, _timeout: Duration) -> Result<(), PlatformError> {
+            self.waited
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(pid);
+            Err(PlatformError::WaitTimeout { pid, seconds: 120 })
+        }
+
+        fn codesign(&self, _arguments: &[&str], _target: &Path) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn set_installed_version(&self, _version: &str) -> Result<(), PlatformError> {
+            Ok(())
+        }
+    }
+
+    struct LivenessPlatform {
+        alive: Vec<u32>,
+        waited: Mutex<Vec<u32>>,
+    }
+
+    impl LivenessPlatform {
+        fn new(alive: Vec<u32>) -> Self {
+            Self {
+                alive,
+                waited: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl PlatformOps for LivenessPlatform {
+        fn available_space(&self, _path: &Path) -> Result<u64, PlatformError> {
+            Ok(u64::MAX)
+        }
+
+        fn wait_for_process(&self, pid: u32, _timeout: Duration) -> Result<(), PlatformError> {
+            self.waited
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(pid);
+            if self.alive.contains(&pid) {
+                Err(PlatformError::WaitTimeout { pid, seconds: 0 })
+            } else {
+                Ok(())
+            }
+        }
+
+        fn codesign(&self, _arguments: &[&str], _target: &Path) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn set_installed_version(&self, _version: &str) -> Result<(), PlatformError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn update_apply_cli_requires_an_explicit_plan_root_and_accepts_each_wait_pid() {
+        let cli = Cli::try_parse_from([
+            "clonk-game",
+            "--apply-update",
+            "pending-plan.json",
+            "--install-root",
+            "/opt/clonk",
+            "--wait-pid",
+            "41",
+            "--wait-pid",
+            "42",
+            "--relaunch",
+        ])
+        .expect("parse update apply mode");
+
+        assert_eq!(cli.apply_update, Some(PathBuf::from("pending-plan.json")));
+        assert_eq!(cli.install_root, Some(PathBuf::from("/opt/clonk")));
+        assert_eq!(cli.wait_pids, [41, 42]);
+        assert!(cli.relaunch);
+        assert!(
+            Cli::try_parse_from(["clonk-game", "--apply-update", "pending-plan.json"]).is_err(),
+            "apply mode must not infer an install root from its temporary executable"
+        );
+        assert!(
+            Cli::try_parse_from(["clonk-game", "--install-root", "/opt/clonk"]).is_err(),
+            "an install root is meaningful only in apply mode"
+        );
+    }
+
+    #[test]
+    fn finish_update_cli_carries_the_staging_result_and_helper_process() {
+        let cli = Cli::try_parse_from([
+            "clonk-game",
+            "--finish-update",
+            "/cache/Updates/pending-abc",
+            "--update-result",
+            "/cache/Updates/pending-abc/update-result.json",
+            "--update-helper-pid",
+            "73",
+        ])
+        .expect("parse hidden finish mode");
+
+        assert_eq!(
+            cli.finish_update,
+            Some(PathBuf::from("/cache/Updates/pending-abc"))
+        );
+        assert_eq!(
+            cli.update_result,
+            Some(PathBuf::from(
+                "/cache/Updates/pending-abc/update-result.json"
+            ))
+        );
+        assert_eq!(cli.update_helper_pid, Some(73));
+    }
+
+    #[test]
+    fn finish_update_waits_reports_failure_and_removes_the_whole_pending_directory() {
+        let install = TempDir::new().expect("install root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
+        let user = TempDir::new().expect("user data");
+        let cache = TempDir::new().expect("cache");
+        let updates = cache.path().join("Updates");
+        let pending = updates.join("pending-failed-apply");
+        fs::create_dir_all(&pending).expect("pending directory");
+        fs::write(pending.join("plan.json"), b"plan").expect("plan");
+        fs::write(pending.join("0-content.zip"), b"archive").expect("archive");
+        fs::write(pending.join("clonk-game"), b"helper").expect("helper");
+        let result_path = pending.join(UPDATE_RESULT_FILE_NAME);
+        write_update_result(
+            &result_path,
+            &UpdateResultDocument {
+                schema: UPDATE_RESULT_SCHEMA,
+                status: UpdateResultStatus::Failed {
+                    message: "digest mismatch".to_string(),
+                },
+            },
+        )
+        .expect("write result");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user.path())),
+            ("LC_CACHE_DIR", Some(cache.path())),
+        ]);
+        let platform = FakePlatform::new();
+        let paths = AppPaths::discover().expect("discover paths");
+
+        let notice = finish_update_mode(&paths, &pending, &result_path, 73, &platform)
+            .expect("finish failed update");
+
+        assert_eq!(platform.calls(), [PlatformCall::WaitForProcess { pid: 73 }]);
+        assert_eq!(notice.as_deref(), Some("digest mismatch"));
+        assert!(!pending.exists(), "finisher must remove every staged file");
+    }
+
+    #[test]
+    fn finish_update_rejects_a_pending_directory_outside_the_discovered_cache() {
+        let install = TempDir::new().expect("install root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
+        let user = TempDir::new().expect("user data");
+        let cache = TempDir::new().expect("cache");
+        fs::create_dir(cache.path().join("Updates")).expect("updates directory");
+        let outside = TempDir::new().expect("outside directory");
+        let pending = outside.path().join("pending-escape");
+        fs::create_dir(&pending).expect("pending directory");
+        let result_path = pending.join(UPDATE_RESULT_FILE_NAME);
+        write_update_result(
+            &result_path,
+            &UpdateResultDocument {
+                schema: UPDATE_RESULT_SCHEMA,
+                status: UpdateResultStatus::Applied {
+                    version: "0.7.0".to_string(),
+                    components: Vec::new(),
+                },
+            },
+        )
+        .expect("result");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user.path())),
+            ("LC_CACHE_DIR", Some(cache.path())),
+        ]);
+        let platform = FakePlatform::new();
+        let paths = AppPaths::discover().expect("discover paths");
+
+        let error = finish_update_mode(&paths, &pending, &result_path, 73, &platform)
+            .expect_err("outside pending directory must be rejected");
+
+        assert!(error.to_string().contains("not a direct child"));
+        assert!(
+            platform.calls().is_empty(),
+            "untrusted paths must be rejected before process interaction"
+        );
+        assert!(pending.exists(), "rejected paths must never be removed");
+    }
+
+    #[test]
+    fn successful_update_does_not_become_a_failure_notice_when_cleanup_exhausts_retries() {
+        let install = TempDir::new().expect("install root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
+        let user = TempDir::new().expect("user data");
+        let cache = TempDir::new().expect("cache");
+        let pending = cache.path().join("Updates/pending-cleanup-busy");
+        fs::create_dir_all(&pending).expect("pending directory");
+        let result_path = pending.join(UPDATE_RESULT_FILE_NAME);
+        write_update_result(
+            &result_path,
+            &UpdateResultDocument {
+                schema: UPDATE_RESULT_SCHEMA,
+                status: UpdateResultStatus::Applied {
+                    version: "0.7.0".to_string(),
+                    components: vec!["engine".to_string()],
+                },
+            },
+        )
+        .expect("result");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user.path())),
+            ("LC_CACHE_DIR", Some(cache.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover paths");
+
+        let notice = finish_update_mode_with_cleanup(
+            &paths,
+            &pending,
+            &result_path,
+            73,
+            &FakePlatform::new(),
+            |_| bail!("directory is still busy"),
+        )
+        .expect("cleanup exhaustion is nonfatal");
+
+        assert_eq!(notice, None);
+        assert!(pending.exists());
+    }
+
+    #[test]
+    fn startup_recovery_never_removes_staging_owned_by_a_live_process() {
+        let install = TempDir::new().expect("install root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
+        let user = TempDir::new().expect("user data");
+        let cache = TempDir::new().expect("cache");
+        let pending = cache.path().join("Updates/pending-active-download");
+        fs::create_dir_all(&pending).expect("pending directory");
+        fs::write(pending.join(".owner-41"), b"").expect("owner marker");
+        fs::write(pending.join("plan.json"), b"active").expect("active plan");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user.path())),
+            ("LC_CACHE_DIR", Some(cache.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover paths");
+        let platform = LivenessPlatform::new(vec![41]);
+
+        let notice = recover_abandoned_pending_updates(&paths, &platform);
+
+        assert_eq!(notice, None);
+        assert!(pending.exists(), "live staging must never be reclaimed");
+        assert_eq!(
+            *platform
+                .waited
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [41]
+        );
+    }
+
+    #[test]
+    fn startup_recovery_reports_and_reclaims_staging_after_its_owner_crashes() {
+        let install = TempDir::new().expect("install root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
+        let user = TempDir::new().expect("user data");
+        let cache = TempDir::new().expect("cache");
+        let pending = cache.path().join("Updates/pending-crashed-download");
+        fs::create_dir_all(&pending).expect("pending directory");
+        fs::write(pending.join(".owner-41"), b"").expect("owner marker");
+        fs::write(pending.join("0-engine.zip"), b"partial").expect("partial archive");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user.path())),
+            ("LC_CACHE_DIR", Some(cache.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover paths");
+        let platform = LivenessPlatform::new(Vec::new());
+
+        let notice = recover_abandoned_pending_updates(&paths, &platform)
+            .expect("interrupted update notice");
+
+        assert!(notice.contains("interrupted before it could report"));
+        assert!(!pending.exists(), "dead staging must be reclaimed");
+    }
+
+    #[test]
+    fn wait_failure_records_a_terminal_result_without_relaunching() {
+        let directory = TempDir::new().expect("update directory");
+        let pending = directory.path().join("pending-wait-failure");
+        fs::create_dir(&pending).expect("pending directory");
+        let missing_plan = pending.join("plan.json");
+        let install_root = directory.path().join("install");
+        fs::create_dir(&install_root).expect("install root");
+        let platform = FailingWaitPlatform::new();
+        let relaunched = Cell::new(false);
+
+        let error = apply_update_plan_with_relauncher(
+            &missing_plan,
+            &install_root,
+            &[41, 42],
+            true,
+            &platform,
+            73,
+            |_, _, _, _| {
+                relaunched.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("wait failure must stop the helper");
+
+        assert!(error.to_string().contains("waiting for process 41"));
+        assert_eq!(
+            *platform
+                .waited
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [41, 42]
+        );
+        assert!(pending.exists(), "staging must remain for diagnosis/retry");
+        let result = read_update_result(&pending.join(UPDATE_RESULT_FILE_NAME))
+            .expect("wait failure result");
+        assert!(matches!(
+            result.status,
+            UpdateResultStatus::Failed { message }
+                if message.contains("waiting for process 41")
+        ));
+        assert!(
+            !relaunched.get(),
+            "a live old process makes relaunch unsafe"
+        );
+    }
+
+    #[test]
+    fn helper_refuses_to_wait_or_apply_without_a_regular_owner_marker() {
+        let directory = TempDir::new().expect("update directory");
+        let pending = directory.path().join("pending-owner-blocked");
+        fs::create_dir(&pending).expect("pending directory");
+        fs::create_dir(pending.join(".owner-73")).expect("block owner marker");
+        let plan_path = pending.join("plan.json");
+        fs::write(&plan_path, br#"{"version":"0.7.0","components":[]}"#).expect("write plan");
+        let install_root = directory.path().join("install");
+        fs::create_dir(&install_root).expect("install root");
+        let platform = FakePlatform::new();
+
+        let error = apply_update_plan_with_relauncher(
+            &plan_path,
+            &install_root,
+            &[41],
+            true,
+            &platform,
+            73,
+            |_, _, _, _| Ok(()),
+        )
+        .expect_err("an invalid ownership marker must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("record the active update helper"));
+        assert!(platform.calls().is_empty(), "waiting must not begin");
+        assert!(!pending.join(UPDATE_RESULT_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn malformed_plan_records_failure_and_relaunches_without_cleanup() {
+        let directory = TempDir::new().expect("update directory");
+        let pending = directory.path().join("pending-malformed");
+        fs::create_dir(&pending).expect("pending directory");
+        let plan_path = pending.join("plan.json");
+        fs::write(&plan_path, b"{ not json").expect("malformed plan");
+        let archive = pending.join("0-content.zip");
+        fs::write(&archive, b"staged archive").expect("staged archive");
+        let install_root = directory.path().join("install");
+        fs::create_dir(&install_root).expect("install root");
+        let relaunched = Cell::new(false);
+
+        let error = apply_update_plan_with_relauncher(
+            &plan_path,
+            &install_root,
+            &[],
+            true,
+            &FakePlatform::new(),
+            73,
+            |layout, finish_pending, result_path, helper_pid| {
+                assert_eq!(layout, &InstallLayout::plain(&install_root));
+                assert_eq!(finish_pending, pending);
+                assert_eq!(result_path, pending.join("update-result.json"));
+                assert_eq!(helper_pid, 73);
+                let result: Value = serde_json::from_slice(
+                    &fs::read(result_path).expect("read typed update result"),
+                )
+                .expect("parse typed update result");
+                assert_eq!(result["schema"], 1);
+                assert_eq!(result["status"], "failed");
+                assert!(result["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("parse update plan")));
+                relaunched.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("malformed plan remains the helper's result");
+
+        assert!(error.to_string().contains("parse update plan"));
+        assert!(relaunched.get(), "parse failure must relaunch the game");
+        assert!(pending.exists());
+        assert!(plan_path.exists());
+        assert!(archive.exists());
+    }
+
+    #[test]
+    fn apply_failure_relaunches_and_remains_primary_when_relaunch_also_fails() {
+        let directory = TempDir::new().expect("update directory");
+        let pending = directory.path().join("pending-apply-failure");
+        fs::create_dir(&pending).expect("pending directory");
+        let archive = pending.join("0-content.zip");
+        fs::write(&archive, b"not the promised archive").expect("archive");
+        let plan_path = pending.join("plan.json");
+        let plan = ApplyPlan {
+            version: "0.7.0".to_string(),
+            components: vec![StagedComponent {
+                name: "content".to_string(),
+                archive: archive.clone(),
+                sha256: "00".repeat(32),
+                size: fs::metadata(&archive).expect("archive metadata").len(),
+                destination: PathBuf::from("content"),
+            }],
+        };
+        fs::write(
+            &plan_path,
+            serde_json::to_vec(&plan).expect("serialize plan"),
+        )
+        .expect("plan");
+        let install_root = directory.path().join("install");
+        fs::create_dir_all(install_root.join("content")).expect("install content");
+        let relaunched = Cell::new(false);
+
+        let error = apply_update_plan_with_relauncher(
+            &plan_path,
+            &install_root,
+            &[],
+            true,
+            &FakePlatform::new(),
+            73,
+            |_, _, result_path, _| {
+                relaunched.set(true);
+                assert!(result_path.exists(), "failure result must precede relaunch");
+                bail!("synthetic relaunch failure")
+            },
+        )
+        .expect_err("apply must fail");
+
+        assert!(relaunched.get());
+        assert!(error.to_string().contains("failed to apply update plan"));
+        assert!(!error.to_string().contains("synthetic relaunch failure"));
+        assert!(pending.exists(), "finisher owns failed staging cleanup");
+    }
+
+    #[test]
+    fn update_apply_cli_rejects_process_id_zero() {
+        let parsed = Cli::try_parse_from([
+            "clonk-game",
+            "--apply-update",
+            "pending-plan.json",
+            "--install-root",
+            "/opt/clonk",
+            "--wait-pid",
+            "0",
+        ]);
+
+        assert!(
+            parsed.is_err(),
+            "PID zero addresses the current process group"
+        );
+    }
+
+    #[test]
+    fn update_apply_cli_rejects_normal_launcher_options() {
+        let apply = [
+            "clonk-game",
+            "--apply-update",
+            "pending-plan.json",
+            "--install-root",
+            "/opt/clonk",
+            "--relaunch",
+        ];
+        for incompatible in [
+            vec!["--binary", "alternate-clonk-app"],
+            vec!["--support-bundle-only"],
+            vec!["--automation-report"],
+            vec!["Scenario.c4s"],
+        ] {
+            let parsed = Cli::try_parse_from(apply.into_iter().chain(incompatible.iter().copied()));
+            assert!(
+                parsed.is_err(),
+                "apply mode accepted normal launcher arguments {incompatible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_command_names_the_launcher_process_for_update_handoff() {
+        let install_dir = TempDir::new().expect("install root");
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).expect("create planet directory");
+        fs::write(planet_dir.join("System.c4g"), b"stub").expect("write system group");
+        let user_dir = TempDir::new().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover paths");
+
+        let command = runtime_command(
+            Path::new("clonk-app"),
+            &paths,
+            &paths.config_file(),
+            &[],
+            Some("digest mismatch"),
+        );
+        let launcher_pid = command
+            .get_envs()
+            .find_map(|(name, value)| {
+                (name == LAUNCHER_PID_ENV)
+                    .then(|| value.map(std::ffi::OsStr::to_os_string))
+                    .flatten()
+            })
+            .expect("launcher PID environment variable");
+
+        assert_eq!(launcher_pid, OsString::from(std::process::id().to_string()));
+        assert_eq!(
+            command
+                .get_envs()
+                .find_map(|(name, value)| (name == UPDATE_NOTICE_ENV).then_some(value).flatten()),
+            Some(std::ffi::OsStr::new("digest mismatch"))
+        );
+        let no_notice = runtime_command(
+            Path::new("clonk-app"),
+            &paths,
+            &paths.config_file(),
+            &[],
+            None,
+        );
+        assert_eq!(
+            no_notice
+                .get_envs()
+                .find_map(|(name, value)| (name == UPDATE_NOTICE_ENV).then_some(value)),
+            Some(None),
+            "ordinary launches must clear a stale update notice"
+        );
+    }
+
+    #[test]
+    fn update_apply_mode_waits_for_every_process_and_records_a_successful_plan() {
+        let directory = TempDir::new().expect("update directory");
+        let install_root = directory.path().join("install");
+        fs::create_dir(&install_root).expect("create install root");
+        let plan_path = directory.path().join("pending-plan.json");
+        fs::write(&plan_path, br#"{"version":"0.7.0","components":[]}"#).expect("write apply plan");
+        let platform = FakePlatform::new();
+
+        let outcome = apply_update_plan(&plan_path, &install_root, &[41, 42], false, &platform)
+            .expect("apply empty plan");
+
+        assert_eq!(outcome.version, "0.7.0");
+        assert!(outcome.applied.is_empty());
+        assert_eq!(
+            platform.calls(),
+            [
+                PlatformCall::WaitForProcess { pid: 41 },
+                PlatformCall::WaitForProcess { pid: 42 },
+            ]
+        );
+        assert!(plan_path.exists(), "the finisher owns staging cleanup");
+        let result: UpdateResultDocument = serde_json::from_slice(
+            &fs::read(directory.path().join(UPDATE_RESULT_FILE_NAME)).expect("read result"),
+        )
+        .expect("parse result");
+        assert_eq!(
+            result.status,
+            UpdateResultStatus::Applied {
+                version: "0.7.0".to_string(),
+                components: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn update_apply_mode_installs_records_and_leaves_cleanup_for_the_finisher() {
+        let directory = TempDir::new().expect("update directory");
+        let install_root = directory.path().join("install");
+        fs::create_dir_all(install_root.join("content")).expect("create installed content");
+        fs::write(install_root.join("content/old.txt"), b"old").expect("write old content");
+
+        let archive_path = directory.path().join("content.zip");
+        let archive_file = File::create(&archive_path).expect("create archive");
+        let mut archive = ZipWriter::new(archive_file);
+        archive
+            .start_file("new.txt", FileOptions::default())
+            .expect("start archive entry");
+        archive.write_all(b"new").expect("write archive entry");
+        archive.finish().expect("finish archive");
+
+        let digest = sha256_file(&archive_path).expect("hash archive");
+        let plan = ApplyPlan {
+            version: "0.7.0".to_string(),
+            components: vec![StagedComponent {
+                name: "content".to_string(),
+                archive: archive_path.clone(),
+                sha256: digest.clone(),
+                size: fs::metadata(&archive_path).expect("archive metadata").len(),
+                destination: PathBuf::from("content"),
+            }],
+        };
+        let plan_path = directory.path().join("pending-plan.json");
+        fs::write(
+            &plan_path,
+            serde_json::to_vec(&plan).expect("serialize plan"),
+        )
+        .expect("write plan");
+
+        let outcome =
+            apply_update_plan(&plan_path, &install_root, &[], false, &FakePlatform::new())
+                .expect("apply content plan");
+
+        assert_eq!(outcome.applied, ["content"]);
+        assert_eq!(
+            fs::read(install_root.join("content/new.txt")).expect("read installed content"),
+            b"new"
+        );
+        let state = InstalledState::load(&install_root)
+            .expect("load installed state")
+            .expect("successful apply records installed state");
+        let content = state.component("content").expect("content state");
+        assert_eq!(content.version, "0.7.0");
+        assert_eq!(content.sha256, digest);
+        assert!(archive_path.exists(), "the finisher owns archive cleanup");
+        assert!(plan_path.exists(), "the finisher owns plan cleanup");
+    }
+
+    #[test]
+    fn update_apply_mode_dispatches_before_normal_install_discovery() {
+        let directory = TempDir::new().expect("update directory");
+        let install_root = directory.path().join("otherwise-undiscoverable-install");
+        fs::create_dir(&install_root).expect("create install root");
+        let plan_path = directory.path().join("pending-plan.json");
+        fs::write(&plan_path, b"{ not json").expect("write malformed plan");
+        let cli = Cli::try_parse_from([
+            OsString::from("clonk-game"),
+            OsString::from("--apply-update"),
+            plan_path.clone().into_os_string(),
+            OsString::from("--install-root"),
+            install_root.into_os_string(),
+            OsString::from("--relaunch"),
+        ])
+        .expect("parse apply command");
+
+        let error = run_cli(cli).expect_err("malformed plan must fail after early dispatch");
+
+        assert!(error.to_string().contains("parse update plan"));
+        assert!(plan_path.exists(), "finish mode owns staging cleanup");
+        assert!(directory.path().join(UPDATE_RESULT_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn updated_launcher_command_targets_the_applied_install_layout() {
+        let directory = TempDir::new().expect("install directory");
+        let pending = directory.path().join("pending-finish");
+        let result = pending.join(UPDATE_RESULT_FILE_NAME);
+        let plain = InstallLayout::plain(directory.path().join("plain"));
+        let plain_command = updated_launcher_command(&plain, &pending, &result, 73);
+        assert_eq!(
+            plain_command.get_program(),
+            plain
+                .binaries_dir()
+                .join(format!("clonk-game{}", env::consts::EXE_SUFFIX))
+        );
+        assert_eq!(plain_command.get_current_dir(), pending.parent());
+        assert_eq!(
+            plain_command.get_args().collect::<Vec<_>>(),
+            [
+                OsString::from("--finish-update"),
+                pending.as_os_str().to_os_string(),
+                OsString::from("--update-result"),
+                result.as_os_str().to_os_string(),
+                OsString::from("--update-helper-pid"),
+                OsString::from("73"),
+            ]
+        );
+        assert_eq!(
+            plain_command
+                .get_envs()
+                .find_map(|(name, value)| (name == LAUNCHER_PID_ENV).then_some(value)),
+            Some(None),
+            "the finisher must not inherit the old launcher's PID"
+        );
+        assert_eq!(
+            plain_command
+                .get_envs()
+                .find_map(|(name, value)| (name == UPDATE_NOTICE_ENV).then_some(value)),
+            Some(None),
+            "the finisher must not inherit an earlier update notice"
+        );
+
+        let bundle = InstallLayout::macos_bundle(directory.path().join("Clonk Rust.app"));
+        let bundle_command = updated_launcher_command(&bundle, &pending, &result, 73);
+        assert_eq!(
+            bundle_command.get_program(),
+            bundle
+                .binaries_dir()
+                .join(format!("clonk-game{}", env::consts::EXE_SUFFIX))
+        );
+        assert_eq!(
+            bundle_command.get_args().collect::<Vec<_>>(),
+            [
+                OsString::from("--finish-update"),
+                pending.as_os_str().to_os_string(),
+                OsString::from("--update-result"),
+                result.as_os_str().to_os_string(),
+                OsString::from("--update-helper-pid"),
+                OsString::from("73"),
+            ]
+        );
+    }
+
+    #[test]
+    fn requested_relaunch_happens_after_the_result_is_written_without_cleanup() {
+        let directory = TempDir::new().expect("update directory");
+        let install_root = directory.path().join("install");
+        fs::create_dir(&install_root).expect("create install root");
+        let plan_path = directory.path().join("pending-plan.json");
+        fs::write(&plan_path, br#"{"version":"0.7.0","components":[]}"#).expect("write plan");
+        let relaunched = Cell::new(false);
+
+        apply_update_plan_with_relauncher(
+            &plan_path,
+            &install_root,
+            &[],
+            true,
+            &FakePlatform::new(),
+            73,
+            |layout, pending, result_path, helper_pid| {
+                assert_eq!(layout, &InstallLayout::plain(&install_root));
+                assert_eq!(pending, directory.path());
+                assert_eq!(result_path, directory.path().join(UPDATE_RESULT_FILE_NAME));
+                assert_eq!(helper_pid, 73);
+                assert!(result_path.exists(), "result must precede relaunch");
+                assert!(plan_path.exists(), "the helper must not clean itself up");
+                relaunched.set(true);
+                Ok(())
+            },
+        )
+        .expect("apply and relaunch");
+
+        assert!(relaunched.get());
+    }
+
+    #[test]
+    fn launcher_recovers_a_missing_planet_before_validated_path_discovery() {
+        let install_dir = TempDir::new().expect("install root");
+        let user_dir = TempDir::new().expect("user data");
+        let nonce = "missing-planet";
+        let backup = install_dir.path().join(format!("planet.old-{nonce}"));
+        fs::create_dir_all(&backup).expect("create backed-up planet");
+        fs::write(backup.join("System.c4g"), b"stub").expect("write backed-up system group");
+        let mut step = JournalStep::new("planet", &"aa".repeat(32), "planet");
+        step.state = StepState::BackupMoved;
+        Journal::new(
+            "0.7.0",
+            nonce,
+            fs::canonicalize(install_dir.path()).expect("canonical install root"),
+            vec![step],
+        )
+        .save(install_dir.path())
+        .expect("save interrupted update journal");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        assert!(matches!(
+            AppPaths::discover(),
+            Err(clonk_platform::PathsError::SystemGroupMissing { .. })
+        ));
+        let outcome = recover_interrupted_update_before_path_discovery()
+            .expect("recover before validating the system group");
+        let paths = AppPaths::discover().expect("discover recovered paths");
+
+        assert_eq!(
+            outcome,
+            ResumeOutcome::RolledBack {
+                version: "0.7.0".to_string()
+            }
+        );
+        assert_eq!(
+            fs::read(paths.system_group_path()).expect("read restored system group"),
+            b"stub"
+        );
+    }
+
+    #[test]
+    fn normal_startup_logs_that_no_interrupted_update_needed_recovery() {
+        let install_dir = TempDir::new().expect("install root");
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).expect("create planet directory");
+        fs::write(planet_dir.join("System.c4g"), b"stub").expect("write system group");
+        let user_dir = TempDir::new().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover paths");
+        paths.ensure_user_dirs().expect("prepare user directories");
+        let logger = LauncherLogger::new(&paths).expect("launcher logger");
+
+        let outcome = recover_interrupted_update_before_path_discovery().expect("check recovery");
+        log_update_recovery(&outcome, &logger).expect("log update recovery");
+
+        let log = fs::read_to_string(logger.path()).expect("read launcher log");
+        assert!(
+            log.contains("no interrupted component update to recover"),
+            "missing recovery result in launcher log: {log}"
+        );
+    }
+
     #[test]
     fn ensure_runtime_assets_populates_group_files() {
         let install_dir = TempDir::new().unwrap();
@@ -2539,9 +4043,7 @@ mod tests {
         let binary_path = install_dir
             .path()
             .join("build")
-            .join("clonk-app.app")
-            .join("Contents")
-            .join("MacOS")
+            .join("bin")
             .join("clonk-app");
         fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
         fs::write(&binary_path, b"stub").unwrap();
@@ -2564,13 +4066,6 @@ mod tests {
         let binary_dir = binary_path.parent().unwrap();
         let binary_system = binary_dir.join("System.c4g");
         let binary_graphics = binary_dir.join("Graphics.c4g");
-        let bundle_root = binary_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .expect("bundle root should exist in test fixture");
-        let bundle_system = bundle_root.join("System.c4g");
-        let bundle_graphics = bundle_root.join("Graphics.c4g");
         assert!(system_target.exists(), "system group should exist");
         assert!(graphics_target.exists(), "graphics group should exist");
         assert!(
@@ -2581,27 +4076,6 @@ mod tests {
             binary_graphics.exists(),
             "graphics group should exist next to the binary"
         );
-        // Staging beside the `.app` is driven by a `#[cfg(target_os = "macos")]`
-        // arm in `ensure_runtime_assets`, so only macOS populates this root.
-        #[cfg(target_os = "macos")]
-        {
-            assert!(
-                bundle_system.exists(),
-                "system group should exist at mac bundle root"
-            );
-            assert!(
-                bundle_graphics.exists(),
-                "graphics group should exist at mac bundle root"
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert!(
-                !bundle_system.exists(),
-                "only macOS stages beside the bundle"
-            );
-            let _ = &bundle_graphics;
-        }
         assert_eq!(
             fs::read(&system_target).unwrap(),
             b"system payload",
@@ -2622,21 +4096,38 @@ mod tests {
             b"graphics payload",
             "graphics group adjacent to binary should match source"
         );
-        // Only macOS stages beside the `.app`, so only there is there anything
-        // at the bundle root to read back.
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(
-                fs::read(&bundle_system).unwrap(),
-                b"system payload",
-                "system group at bundle root should match source"
-            );
-            assert_eq!(
-                fs::read(&bundle_graphics).unwrap(),
-                b"graphics payload",
-                "graphics group at bundle root should match source"
-            );
-        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shipped_bundle_stages_runtime_groups_only_beside_the_signed_app() {
+        let directory = TempDir::new().expect("bundle parent");
+        let bundle = directory.path().join("Clonk Rust.app");
+        let resources = bundle.join("Contents/Resources");
+        let binaries = bundle.join("Contents/MacOS");
+        fs::create_dir_all(resources.join("planet")).expect("planet directory");
+        fs::create_dir_all(&binaries).expect("binary directory");
+        fs::write(resources.join("planet/System.c4g"), b"system").expect("system group");
+        fs::write(resources.join("planet/Graphics.c4g"), b"graphics").expect("graphics group");
+        let binary = binaries.join("clonk-app");
+        fs::write(&binary, b"runtime").expect("runtime");
+        let user = TempDir::new().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(resources.as_path())),
+            ("LC_USER_DATA_DIR", Some(user.path())),
+        ]);
+        let paths = AppPaths::discover().expect("bundle paths");
+        paths.ensure_user_dirs().expect("user directories");
+        let logger = LauncherLogger::new(&paths).expect("logger");
+
+        ensure_runtime_assets(&paths, &binary, &logger).expect("stage runtime groups");
+
+        assert!(directory.path().join("System.c4g").exists());
+        assert!(directory.path().join("Graphics.c4g").exists());
+        assert!(!resources.join("System.c4g").exists());
+        assert!(!resources.join("Graphics.c4g").exists());
+        assert!(!binaries.join("System.c4g").exists());
+        assert!(!binaries.join("Graphics.c4g").exists());
     }
 
     #[test]

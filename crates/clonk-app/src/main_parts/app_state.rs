@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::update_check::PendingUpdateCheck;
+use crate::update_download::PendingUpdateDownload;
 
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
@@ -607,6 +608,9 @@ pub(crate) struct GameApp {
     /// The update query in flight, if any (`C4UpdateDlg::CheckForUpdates`
     /// waiting on its `C4Network2VersionInfoClient`, cpp:280-300).
     pub(crate) update_check: Option<PendingUpdateCheck>,
+    /// A release whose components are being downloaded and verified after the
+    /// user accepted the update prompt.
+    pub(crate) update_download: Option<PendingUpdateDownload>,
     /// Whether showing the main menu may start the *automatic* check
     /// (`C4StartupMainDlg.cpp:270-275`).
     ///

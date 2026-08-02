@@ -20,6 +20,8 @@ pub enum TransportError {
     UnsafeReleaseTag(String),
     #[error("update URL {url:?} cannot be parsed")]
     InvalidUrl { url: String },
+    #[error("update origin {url} is not served over https")]
+    InsecureOrigin { url: String },
     #[error("the update HTTP client could not be built: {0}")]
     Client(#[source] reqwest::Error),
     #[error("no async runtime is available for the updater: {0}")]
