@@ -641,6 +641,8 @@ pub(crate) struct DefinitionMetadata {
     pub allow_picture_stack: i32,
     #[allow(dead_code)]
     pub mass: i32,
+    /// DefCore `Float`, the vertical liquid probe offset.
+    pub float_line: i32,
     /// DefCore NoComponentMass suppresses the contents contribution to the
     /// live cached C4Object::Mass.
     pub no_component_mass: bool,

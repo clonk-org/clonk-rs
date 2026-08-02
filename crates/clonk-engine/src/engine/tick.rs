@@ -1816,6 +1816,7 @@ impl Engine {
             picture_rect: update_picture_rect,
             position,
             velocity,
+            in_liquid,
             fixed_velocity,
             fixed_velocity_x,
             fixed_velocity_y,
@@ -1951,6 +1952,9 @@ impl Engine {
             }
             if let Some(velocity) = velocity {
                 object.set_velocity(velocity);
+            }
+            if let Some(in_liquid) = in_liquid {
+                object.state.in_liquid = in_liquid;
             }
             if let Some(fixed_velocity) = fixed_velocity {
                 object.fixed_velocity = fixed_velocity;

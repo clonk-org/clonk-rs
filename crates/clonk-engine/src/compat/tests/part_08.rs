@@ -2132,6 +2132,99 @@ func Probe(object other)
     }
 
     #[test]
+    fn set_position_refreshes_in_liquid_before_returning() {
+        // FnSetPosition calls UpdateInLiquid immediately after ForcePosition
+        // (C4Script.cpp:465-481); IsInLiquidCheck samples the Float/Con probe
+        // rather than the object centre (C4Object.cpp:5632-5635).
+        let mut landscape = Landscape::flat(8, 4);
+        landscape.set_liquid_column(1, vec![LiquidSegment::new(5, 9)]);
+        let object = HostObjectContext {
+            id: ObjectId::new(1),
+            definition_id: Some("CLNK".to_string()),
+            ..idle_object_context()
+        };
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::from([(
+                DefinitionId::from("CLNK"),
+                DefinitionMetadata {
+                    float_line: 4,
+                    ..DefinitionMetadata::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+
+        let (result, outcome) = with_effect_context(Some(object), &[], world, 1, || {
+            set_position(&[Value::Int(1), Value::Int(2)])?;
+            in_liquid(&[])
+        });
+
+        assert_eq!(
+            result.expect("SetPosition and InLiquid succeed"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            outcome
+                .object_update
+                .expect("SetPosition emits an object update")
+                .in_liquid,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn set_position_runs_cpp_entry_splash_for_heavy_fast_objects() {
+        // UpdateInLiquid enters through Splash when OCF_HitSpeed2 and Mass > 3
+        // (C4Object.cpp:6132-6149; C4Effect.cpp:801-835). The random draws
+        // and ExtractMaterial/PXS order are part of the lockstep result.
+        let materials = clonk_resources::MaterialLibrary::parse(
+            "[Material Water]\nName=Water\nDensity=30\nInstable=1\n",
+        )
+        .expect("water material parses");
+        let materials = MaterialSet::from_resource_library(&materials);
+        let water = materials.id_of("Water").expect("water material exists");
+        let mut landscape = Landscape::flat(16, 50);
+        landscape.set_liquid_column(1, vec![LiquidSegment::with_material(5, 30, Some(water))]);
+        let definitions = HashMap::from([
+            (
+                DefinitionId::from("CLNK"),
+                DefinitionMetadata {
+                    mass: 5,
+                    shape: Some(DefinitionRect::new(-5, -5, 10, 10)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (DefinitionId::from("FXU1"), DefinitionMetadata::default()),
+        ]);
+        let world = world_with(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            definitions,
+            HashMap::new(),
+        )
+        .with_materials(Some(Rc::new(materials)));
+        let object = HostObjectContext {
+            id: ObjectId::new(1),
+            definition_id: Some("CLNK".to_string()),
+            ..idle_object_context()
+        }
+        .with_ocf(ocf::HIT_SPEED2);
+        let random = enter_random_context(LcgRng::new(17));
+        let (result, outcome) = with_effect_context(Some(object), &[], world, 1, || {
+            set_position(&[Value::Int(1), Value::Int(6)])
+        });
+        let _next_random = random.finish();
+
+        assert_eq!(result.expect("SetPosition succeeds"), Value::Bool(true));
+        assert!(outcome
+            .landscape
+            .iter()
+            .any(|operation| matches!(operation, LandscapeOperation::CastPxs { .. })));
+    }
+
+    #[test]
     fn set_position_respects_target_filter() {
         let mut target = ValueMap::new();
         target.insert("id".into(), Value::Int(42));

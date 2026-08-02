@@ -2322,17 +2322,13 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   bit-exact over all 37 161 lines. This is independent of the FindObject
   ordering fix landed the same day — every `Find`-driven event (all `Bite`s)
   matches on both seeds.
-- Open gap (found 2026-07-29, not closed): script `SetPosition` stops after
-  `ForcePosition` and never runs C++'s trailing `pObj->UpdateInLiquid()`
-  (`C4Script.cpp:479`), so a force-positioned object keeps a stale `InLiquid`
-  flag and skips the entry `Splash` that `C4Object::UpdateInLiquid`
-  (`C4Object.cpp:6132-6149`) makes for an `OCF_HitSpeed2` object of `Mass > 3`.
-  `crates/clonk-engine/src/compat/` has no `update_in_liquid` at all — only
-  read-only `in_liquid` readers — so closing this means porting
-  `IsInLiquidCheck` (`C4Object.cpp:5669-5672`, which samples
-  `y + Float * Con / FullCon - 1`, not the object centre) along with the splash,
-  rather than flipping a flag. Found while replacing the same function's
-  invented landscape clamp with the real `BoundsCheck`.
+- Closed 2026-08-02: script `SetPosition` now runs the trailing
+  `UpdateInLiquid` path after `ForcePosition` (`C4Script.cpp:479`),
+  including the `Float * Con / FullCon - 1` probe and entry `Splash`
+  (`C4Object.cpp:5632-5635,6093-6110`). The cached flag is staged
+  synchronously so a same-callback `InLiquid()` observes it, while the
+  random bubble/PXS operations remain ordered. C++-cited regressions cover the
+  flag refresh and heavy fast-object entry splash (`compat/tests/part_08.rs`).
 - Open gap (found 2026-07-29, not closed): `Landscape::resolve_collision`
   (`crates/clonk-engine/src/landscape.rs:6312`) is an invented column-surface
   snap with no C++ counterpart — it lifts any object whose `y` is below

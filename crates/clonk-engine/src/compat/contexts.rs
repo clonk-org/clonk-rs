@@ -8834,6 +8834,11 @@ impl ObjectScopeContext {
         self.current_in_liquid
     }
 
+    pub(crate) fn set_in_liquid(&mut self, in_liquid: bool) {
+        self.current_in_liquid = in_liquid;
+        self.pending_update.in_liquid = Some(in_liquid);
+    }
+
     pub(crate) fn no_collect_delay(&self) -> i32 {
         self.current_no_collect_delay
     }

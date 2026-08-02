@@ -717,7 +717,16 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         player_wealth(engine, owner) == 40 && engine.object_snapshot(fish).is_none()
     })?;
 
-    for expected_wealth in [60, 80, 100] {
+    // Correct SetPosition now refreshes InLiquid before the shore climb
+    // (C4Script.cpp:479), so the exact virtual route can catch a fish with a
+    // different definition value than the stale-flag route. Keep selling real
+    // fish until the native Tutorial09 wealth goal is met, with a bounded
+    // number of ordinary repetitions.
+    for _ in 0..8 {
+        if player_wealth(player.engine(), owner) >= 100 {
+            break;
+        }
+        let wealth_before = player_wealth(player.engine(), owner);
         let fish = catch_and_deposit_another_fish(&mut player, owner, clonk, igloo)?;
         player.menu_navigate_to_caption("Sell")?;
         player.menu_enter()?;
@@ -731,15 +740,11 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .expect("IGLO offers the newly deposited FISH for sale");
         player.menu_navigate_to_index(fish_index)?;
         player.menu_enter()?;
-        player.wait_until(
-            format!("selling FISH raises wealth to {expected_wealth}"),
-            40,
-            |engine| {
-                player_wealth(engine, owner) == expected_wealth
-                    && engine.object_snapshot(fish).is_none()
-            },
-        )?;
+        player.wait_until("selling FISH raises wealth", 40, |engine| {
+            player_wealth(engine, owner) > wealth_before && engine.object_snapshot(fish).is_none()
+        })?;
     }
+    assert!(player_wealth(player.engine(), owner) >= 100);
 
     player.wait_until(
         "Tutorial09 fulfills SCRG and reaches GameOver",

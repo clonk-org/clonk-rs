@@ -40,6 +40,7 @@ impl Engine {
                             value: definition.value(),
                             allow_picture_stack: definition.allow_picture_stack(),
                             mass: definition.mass(),
+                            float_line: definition.float_line(),
                             no_component_mass: definition.no_component_mass(),
                             constructable: definition.is_constructable(),
                             shape: definition.shape_rect(),
