@@ -37,6 +37,28 @@ pub(crate) const fn engine_key_repeated(already_pressed: bool, backend_repeats: 
 }
 
 impl GameApp {
+    /// Keep platform text composition active only while the top input owner
+    /// accepts text. An always-on IME can consume physical gameplay keys;
+    /// disabling it everywhere loses dead-key and composed text on macOS.
+    pub(crate) fn platform_ime_allowed(&self) -> bool {
+        if !self.window_active
+            || self.startup_network_transition_blocks_input()
+            || (!self.message_dialogs.is_empty() && !self.running_chat_active())
+            || self.context_menu.is_some()
+        {
+            return false;
+        }
+        self.console_mode
+            || self.mode == AppMode::Menu
+            || (self.game_option_input_dialog.is_some()
+                && (self.running_chat_controller().is_none()
+                    || self.running_chat_keyboard_active()))
+            || self.league_signup_dialog.is_some()
+            || (self.external_irc_dialog_visible
+                && (self.mode != AppMode::Running
+                    || self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)))
+    }
+
     pub(crate) fn current_cursor_atlas(&self) -> Arc<CursorAtlas> {
         self.active_game_graphics
             .as_ref()
@@ -904,7 +926,7 @@ impl GameApp {
         }
 
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let edit_focused = self.input_network_dialog().is_some_and(|dialog| {
             matches!(
                 dialog.focused_control(),
@@ -914,7 +936,7 @@ impl GameApp {
         // Both StartupNetBack and the Edit cursor bindings use exact modifier
         // masks. Modified Back/Left outside the edit, and Alt-modified ones
         // inside it, must not fall through to the modifier-blind GUI mapping.
-        if matches!(key, VirtualKeyCode::Back | VirtualKeyCode::Left)
+        if matches!(key, VirtualKeyCode::Backspace | VirtualKeyCode::ArrowLeft)
             && !modifiers.is_empty()
             && (!edit_focused || modifiers.contains(ModifiersState::ALT))
         {
@@ -924,7 +946,7 @@ impl GameApp {
         if !edit_focused {
             return Ok(false);
         }
-        if key == VirtualKeyCode::Apps && modifiers.is_empty() {
+        if key == VirtualKeyCode::ContextMenu && modifiers.is_empty() {
             let outcome = self
                 .input_network_dialog_mut()
                 .map(|dialog| dialog.request_context_menu_from_key(clipboard_text_available()))
@@ -940,20 +962,20 @@ impl GameApp {
             return Ok(false);
         }
         let edit_key = match key {
-            VirtualKeyCode::Left => Some(NetDlgEditKey::Left),
-            VirtualKeyCode::Right => Some(NetDlgEditKey::Right),
+            VirtualKeyCode::ArrowLeft => Some(NetDlgEditKey::Left),
+            VirtualKeyCode::ArrowRight => Some(NetDlgEditKey::Right),
             VirtualKeyCode::Home => Some(NetDlgEditKey::Home),
             VirtualKeyCode::End => Some(NetDlgEditKey::End),
-            VirtualKeyCode::Back => Some(NetDlgEditKey::Backspace),
+            VirtualKeyCode::Backspace => Some(NetDlgEditKey::Backspace),
             VirtualKeyCode::Delete => Some(NetDlgEditKey::Delete),
             _ => None,
         };
-        let shortcut = if modifiers == ModifiersState::CTRL {
+        let shortcut = if modifiers == ModifiersState::CONTROL {
             match key {
-                VirtualKeyCode::C => Some(NetDlgEditClipboardShortcut::Copy),
-                VirtualKeyCode::X => Some(NetDlgEditClipboardShortcut::Cut),
-                VirtualKeyCode::V => Some(NetDlgEditClipboardShortcut::Paste),
-                VirtualKeyCode::A => Some(NetDlgEditClipboardShortcut::SelectAll),
+                VirtualKeyCode::KeyC => Some(NetDlgEditClipboardShortcut::Copy),
+                VirtualKeyCode::KeyX => Some(NetDlgEditClipboardShortcut::Cut),
+                VirtualKeyCode::KeyV => Some(NetDlgEditClipboardShortcut::Paste),
+                VirtualKeyCode::KeyA => Some(NetDlgEditClipboardShortcut::SelectAll),
                 _ => None,
             }
         } else {
@@ -985,7 +1007,7 @@ impl GameApp {
                         edit_key,
                         NetDlgEditModifiers {
                             shift: modifiers.contains(ModifiersState::SHIFT),
-                            control: modifiers.contains(ModifiersState::CTRL),
+                            control: modifiers.contains(ModifiersState::CONTROL),
                         },
                         &fonts.text,
                     )
@@ -1023,10 +1045,10 @@ impl GameApp {
         let layout = self.league_signup_layout();
         let fonts = self.assets.clonk_fonts.clone();
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let modifiers = LeagueSignupKeyModifiers {
-            shift: c4_modifiers.shift(),
-            control: c4_modifiers.ctrl(),
+            shift: c4_modifiers.shift_key(),
+            control: c4_modifiers.control_key(),
         };
         let hotkey_modifiers = c4_modifiers == ModifiersState::ALT
             || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
@@ -1039,20 +1061,20 @@ impl GameApp {
                 })
                 .unwrap_or_default(),
             ElementState::Pressed
-                if c4_modifiers == ModifiersState::CTRL
+                if c4_modifiers == ModifiersState::CONTROL
                     && matches!(
                         key,
-                        VirtualKeyCode::A
-                            | VirtualKeyCode::C
-                            | VirtualKeyCode::X
-                            | VirtualKeyCode::V
+                        VirtualKeyCode::KeyA
+                            | VirtualKeyCode::KeyC
+                            | VirtualKeyCode::KeyX
+                            | VirtualKeyCode::KeyV
                     ) =>
             {
                 let shortcut = match key {
-                    VirtualKeyCode::A => Some(LeagueSignupEditClipboardShortcut::SelectAll),
-                    VirtualKeyCode::C => Some(LeagueSignupEditClipboardShortcut::Copy),
-                    VirtualKeyCode::X => Some(LeagueSignupEditClipboardShortcut::Cut),
-                    VirtualKeyCode::V => Some(LeagueSignupEditClipboardShortcut::Paste),
+                    VirtualKeyCode::KeyA => Some(LeagueSignupEditClipboardShortcut::SelectAll),
+                    VirtualKeyCode::KeyC => Some(LeagueSignupEditClipboardShortcut::Copy),
+                    VirtualKeyCode::KeyX => Some(LeagueSignupEditClipboardShortcut::Cut),
+                    VirtualKeyCode::KeyV => Some(LeagueSignupEditClipboardShortcut::Paste),
                     _ => None,
                 };
                 let clipboard = (shortcut == Some(LeagueSignupEditClipboardShortcut::Paste))
@@ -1080,7 +1102,9 @@ impl GameApp {
                     })
                     .unwrap_or_default()
             }
-            ElementState::Pressed if c4_modifiers.is_empty() && key == VirtualKeyCode::Apps => {
+            ElementState::Pressed
+                if c4_modifiers.is_empty() && key == VirtualKeyCode::ContextMenu =>
+            {
                 layout
                     .as_ref()
                     .and_then(|layout| {
@@ -1092,14 +1116,14 @@ impl GameApp {
                     })
                     .unwrap_or_default()
             }
-            ElementState::Pressed if !c4_modifiers.alt() => {
+            ElementState::Pressed if !c4_modifiers.alt_key() => {
                 let edit_key = match key {
-                    VirtualKeyCode::Back => Some(LeagueSignupEditKey::Backspace),
+                    VirtualKeyCode::Backspace => Some(LeagueSignupEditKey::Backspace),
                     VirtualKeyCode::Delete => Some(LeagueSignupEditKey::Delete),
                     VirtualKeyCode::Home => Some(LeagueSignupEditKey::Home),
                     VirtualKeyCode::End => Some(LeagueSignupEditKey::End),
-                    VirtualKeyCode::Left => Some(LeagueSignupEditKey::Left),
-                    VirtualKeyCode::Right => Some(LeagueSignupEditKey::Right),
+                    VirtualKeyCode::ArrowLeft => Some(LeagueSignupEditKey::Left),
+                    VirtualKeyCode::ArrowRight => Some(LeagueSignupEditKey::Right),
                     _ => None,
                 };
                 if let Some(edit_key) = edit_key {
@@ -1151,7 +1175,7 @@ impl GameApp {
             return Ok(false);
         }
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if c4_modifiers.is_empty() && key == VirtualKeyCode::F5 {
             if state == ElementState::Pressed {
                 self.abort_scenario_rename();
@@ -1170,7 +1194,7 @@ impl GameApp {
                         .iter()
                         .any(|button| button.hotkey() == hotkey)
             });
-        let mission_access_hotkey = key == VirtualKeyCode::M
+        let mission_access_hotkey = key == VirtualKeyCode::KeyM
             && c4_modifiers == ModifiersState::ALT
             && self.menu_state.current_map().is_none();
         if state == ElementState::Pressed && (matched_option_hotkey || mission_access_hotkey) {
@@ -1180,7 +1204,7 @@ impl GameApp {
             return Ok(false);
         }
         let commits_on_focus_loss = state == ElementState::Pressed
-            && ((key == VirtualKeyCode::F && c4_modifiers == ModifiersState::CTRL)
+            && ((key == VirtualKeyCode::KeyF && c4_modifiers == ModifiersState::CONTROL)
                 || (key == VirtualKeyCode::Tab
                     && (c4_modifiers.is_empty() || c4_modifiers == ModifiersState::SHIFT)));
         if commits_on_focus_loss {
@@ -1192,18 +1216,18 @@ impl GameApp {
         if state == ElementState::Released {
             return Ok(true);
         }
-        let ctrl = c4_modifiers.ctrl();
-        let shift = c4_modifiers.shift();
-        let cursor_modifiers = !c4_modifiers.alt();
+        let ctrl = c4_modifiers.control_key();
+        let shift = c4_modifiers.shift_key();
+        let cursor_modifiers = !c4_modifiers.alt_key();
         match key {
             VirtualKeyCode::F2 if c4_modifiers.is_empty() => {}
             VirtualKeyCode::Escape if c4_modifiers.is_empty() => {
                 self.abort_scenario_rename();
             }
-            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter if c4_modifiers.is_empty() => {
+            VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter if c4_modifiers.is_empty() => {
                 self.commit_scenario_rename(false)?;
             }
-            VirtualKeyCode::Back if cursor_modifiers => {
+            VirtualKeyCode::Backspace if cursor_modifiers => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
                     rename.edit.backspace(ctrl, shift);
                 }
@@ -1213,14 +1237,14 @@ impl GameApp {
                     rename.edit.delete(ctrl, shift);
                 }
             }
-            VirtualKeyCode::Left if cursor_modifiers => {
+            VirtualKeyCode::ArrowLeft if cursor_modifiers => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
                     rename
                         .edit
                         .move_cursor(RenameEditCursorOperation::Left, ctrl, shift);
                 }
             }
-            VirtualKeyCode::Right if cursor_modifiers => {
+            VirtualKeyCode::ArrowRight if cursor_modifiers => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
                     rename
                         .edit
@@ -1241,12 +1265,12 @@ impl GameApp {
                         .move_cursor(RenameEditCursorOperation::End, ctrl, shift);
                 }
             }
-            VirtualKeyCode::A if c4_modifiers == ModifiersState::CTRL => {
+            VirtualKeyCode::KeyA if c4_modifiers == ModifiersState::CONTROL => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
                     rename.edit.select_all();
                 }
             }
-            VirtualKeyCode::C if c4_modifiers == ModifiersState::CTRL => {
+            VirtualKeyCode::KeyC if c4_modifiers == ModifiersState::CONTROL => {
                 let result = self.menu_state.rename_edit.as_mut().map(|rename| {
                     transfer_edit_selection(&mut rename.edit, false, |selected| {
                         arboard::Clipboard::new()
@@ -1257,7 +1281,7 @@ impl GameApp {
                     tracing::warn!(%error, "failed to copy scenario rename text");
                 }
             }
-            VirtualKeyCode::X if c4_modifiers == ModifiersState::CTRL => {
+            VirtualKeyCode::KeyX if c4_modifiers == ModifiersState::CONTROL => {
                 let result = self.menu_state.rename_edit.as_mut().map(|rename| {
                     transfer_edit_selection(&mut rename.edit, true, |selected| {
                         arboard::Clipboard::new()
@@ -1268,7 +1292,7 @@ impl GameApp {
                     tracing::warn!(%error, "failed to cut scenario rename text");
                 }
             }
-            VirtualKeyCode::V if c4_modifiers == ModifiersState::CTRL => {
+            VirtualKeyCode::KeyV if c4_modifiers == ModifiersState::CONTROL => {
                 match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
                     Ok(text) => {
                         if let Some(rename) = self.menu_state.rename_edit.as_mut() {
@@ -1351,7 +1375,7 @@ impl GameApp {
         if key != VirtualKeyCode::Escape
             || !self.network_chart_owns_stronger_escape()
             || !(self.keyboard_modifiers
-                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
+                & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT))
                 .is_empty()
         {
             return false;
@@ -1468,7 +1492,7 @@ impl GameApp {
     ) -> Vec<(usize, Option<ControlEvent>)> {
         let config = self.runtime_key_config().ok();
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let mut candidates = Vec::new();
         for control_set in 0..KeyboardBindings::SET_COUNT {
             for (control_index, id) in ControlBindingId::ALL.into_iter().enumerate() {
@@ -1584,8 +1608,8 @@ impl GameApp {
     /// `CompileFromBuf_LogWarn` and therefore never reach this boundary.
     fn guard_runtime_key_dispatch(&self, key: VirtualKeyCode) -> Result<(), EngineError> {
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if c4_modifiers == ModifiersState::CTRL
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
+        if c4_modifiers == ModifiersState::CONTROL
             && matches!(
                 key,
                 VirtualKeyCode::F5 | VirtualKeyCode::F6 | VirtualKeyCode::F7 | VirtualKeyCode::F8
@@ -2059,7 +2083,7 @@ impl GameApp {
 
     fn custom_scoreboard_key_has_higher_priority_route(&self, key: VirtualKeyCode) -> bool {
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if self.game_over_dialog_is_active() || self.definition_selector.is_some() {
             return true;
         }
@@ -2102,7 +2126,7 @@ impl GameApp {
             return Ok(false);
         }
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if key == VirtualKeyCode::F9 {
             // `Screenshot` is registered `KEYSCOPE_Fullscreen | KEYSCOPE_Gui`,
             // so bare F9 also captures the startup screens; `ScreenshotEx` is
@@ -2140,7 +2164,7 @@ impl GameApp {
             }
             return Ok(true);
         }
-        if c4_modifiers == ModifiersState::CTRL {
+        if c4_modifiers == ModifiersState::CONTROL {
             if state == ElementState::Pressed {
                 self.toggle_frontend_sound_option()?;
                 self.mark_menu_dirty();
@@ -2187,7 +2211,7 @@ impl GameApp {
             return Ok(false);
         }
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let custom_binding = self
             .runtime_key_config()
             .ok()
@@ -2350,7 +2374,7 @@ impl GameApp {
             }
             if !info_only {
                 let modifiers = self.keyboard_modifiers
-                    & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                    & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
                 if key != VirtualKeyCode::Escape || !modifiers.is_empty() {
                     return Ok(false);
                 }
@@ -2403,7 +2427,7 @@ impl GameApp {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let valid_modifiers = if key == VirtualKeyCode::Tab {
             modifiers.is_empty() || modifiers == ModifiersState::SHIFT
         } else {
@@ -2554,7 +2578,7 @@ impl GameApp {
             return Ok(RuntimeGlobalKeyOutcome::Unhandled);
         }
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let help_binding = self.runtime_keyboard_binding_matches(
             "ToggleShowHelp",
             key,
@@ -2598,7 +2622,7 @@ impl GameApp {
         let screenshot_ex = self.runtime_keyboard_binding_matches(
             "ScreenshotEx",
             key,
-            key == VirtualKeyCode::F9 && c4_modifiers == ModifiersState::CTRL,
+            key == VirtualKeyCode::F9 && c4_modifiers == ModifiersState::CONTROL,
         );
         if screenshot || screenshot_ex {
             if state == ElementState::Pressed {
@@ -2618,12 +2642,12 @@ impl GameApp {
         let scroll_up = self.runtime_keyboard_binding_matches(
             "MsgBoardScrollUp",
             key,
-            key == VirtualKeyCode::Up && c4_modifiers == ModifiersState::SHIFT,
+            key == VirtualKeyCode::ArrowUp && c4_modifiers == ModifiersState::SHIFT,
         );
         let scroll_down = self.runtime_keyboard_binding_matches(
             "MsgBoardScrollDown",
             key,
-            key == VirtualKeyCode::Down && c4_modifiers == ModifiersState::SHIFT,
+            key == VirtualKeyCode::ArrowDown && c4_modifiers == ModifiersState::SHIFT,
         );
         if !self.runtime_top_default_dialog_is_exclusive() && (scroll_up || scroll_down) {
             if state == ElementState::Pressed {
@@ -2634,7 +2658,7 @@ impl GameApp {
         let sound_binding = self.runtime_keyboard_binding_matches(
             "SoundToggle",
             key,
-            key == VirtualKeyCode::F3 && c4_modifiers == ModifiersState::CTRL,
+            key == VirtualKeyCode::F3 && c4_modifiers == ModifiersState::CONTROL,
         );
         if sound_binding {
             if state == ElementState::Pressed {
@@ -2717,22 +2741,22 @@ impl GameApp {
             (
                 "DbgModeToggle",
                 RuntimeDebugKey::Mode,
-                key == VirtualKeyCode::F5 && c4_modifiers == ModifiersState::CTRL,
+                key == VirtualKeyCode::F5 && c4_modifiers == ModifiersState::CONTROL,
             ),
             (
                 "DbgShowVtxToggle",
                 RuntimeDebugKey::Vertices,
-                key == VirtualKeyCode::F6 && c4_modifiers == ModifiersState::CTRL,
+                key == VirtualKeyCode::F6 && c4_modifiers == ModifiersState::CONTROL,
             ),
             (
                 "DbgShowActionToggle",
                 RuntimeDebugKey::ActionCycle,
-                key == VirtualKeyCode::F7 && c4_modifiers == ModifiersState::CTRL,
+                key == VirtualKeyCode::F7 && c4_modifiers == ModifiersState::CONTROL,
             ),
             (
                 "DbgShowSolidMaskToggle",
                 RuntimeDebugKey::SolidMask,
-                key == VirtualKeyCode::F8 && c4_modifiers == ModifiersState::CTRL,
+                key == VirtualKeyCode::F8 && c4_modifiers == ModifiersState::CONTROL,
             ),
         ]
         .into_iter()
@@ -2773,7 +2797,7 @@ impl GameApp {
             let earlier_toggle_chat = self.runtime_keyboard_binding_matches(
                 "ToggleChat",
                 key,
-                key == VirtualKeyCode::C && c4_modifiers == ModifiersState::ALT,
+                key == VirtualKeyCode::KeyC && c4_modifiers == ModifiersState::ALT,
             );
             if earlier_toggle_chat {
                 return Ok(RuntimeGlobalKeyOutcome::Unhandled);
@@ -2807,7 +2831,7 @@ impl GameApp {
             let earlier_toggle_chat = self.runtime_keyboard_binding_matches(
                 "ToggleChat",
                 key,
-                key == VirtualKeyCode::C && c4_modifiers == ModifiersState::ALT,
+                key == VirtualKeyCode::KeyC && c4_modifiers == ModifiersState::ALT,
             );
             if earlier_toggle_chat {
                 return Ok(RuntimeGlobalKeyOutcome::Unhandled);
@@ -2860,17 +2884,17 @@ impl GameApp {
             return false;
         }
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let unmodified_arrow = c4_modifiers.is_empty()
             && matches!(
                 key,
-                VirtualKeyCode::Left
-                    | VirtualKeyCode::Right
-                    | VirtualKeyCode::Up
-                    | VirtualKeyCode::Down
+                VirtualKeyCode::ArrowLeft
+                    | VirtualKeyCode::ArrowRight
+                    | VirtualKeyCode::ArrowUp
+                    | VirtualKeyCode::ArrowDown
             );
         let edit_cursor_key = !c4_modifiers.contains(ModifiersState::ALT)
-            && matches!(key, VirtualKeyCode::Left | VirtualKeyCode::Right);
+            && matches!(key, VirtualKeyCode::ArrowLeft | VirtualKeyCode::ArrowRight);
         let alt_hotkey_modifiers = c4_modifiers == ModifiersState::ALT
             || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
         let dialog_callbacks_active = self.context_menu.is_none();
@@ -2893,7 +2917,7 @@ impl GameApp {
             && alt_hotkey_modifiers;
         let active_game_over_list_key = dialog_callbacks_active
             && unmodified_arrow
-            && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down)
+            && matches!(key, VirtualKeyCode::ArrowUp | VirtualKeyCode::ArrowDown)
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
             && self.game_over_dialog.as_ref().is_some_and(|dialog| {
                 matches!(dialog.focused(), Some(GameOverFocus::PlayerList(_)))
@@ -2909,21 +2933,22 @@ impl GameApp {
         let external_irc_control_key = dialog_callbacks_active
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
             && self.external_irc_dialog.as_ref().is_some_and(|dialog| {
-                let edit_shortcut = c4_modifiers == ModifiersState::CTRL
+                let edit_shortcut = c4_modifiers == ModifiersState::CONTROL
                     && matches!(
                         key,
-                        VirtualKeyCode::A
-                            | VirtualKeyCode::C
-                            | VirtualKeyCode::V
-                            | VirtualKeyCode::X
+                        VirtualKeyCode::KeyA
+                            | VirtualKeyCode::KeyC
+                            | VirtualKeyCode::KeyV
+                            | VirtualKeyCode::KeyX
                     );
                 let chat_page =
                     dialog.chat_page() == clonk_frontend::startup_netdlg::NetDlgChatPage::Chats;
                 (dialog.chat_edit_is_focused() && (edit_cursor_key || edit_shortcut))
                     || (chat_page
                         && ((c4_modifiers.is_empty()
-                            && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down))
-                            || (c4_modifiers == ModifiersState::CTRL && key == VirtualKeyCode::F4)))
+                            && matches!(key, VirtualKeyCode::ArrowUp | VirtualKeyCode::ArrowDown))
+                            || (c4_modifiers == ModifiersState::CONTROL
+                                && key == VirtualKeyCode::F4)))
                     || (alt_hotkey_modifiers
                         && context_menu_hotkey(key)
                             .is_some_and(|hotkey| dialog.chat_dialog_has_hotkey(hotkey)))
@@ -2933,23 +2958,23 @@ impl GameApp {
         let toggle_chat_binding = self.runtime_keyboard_binding_matches(
             "ToggleChat",
             key,
-            key == VirtualKeyCode::C && c4_modifiers == ModifiersState::ALT,
+            key == VirtualKeyCode::KeyC && c4_modifiers == ModifiersState::ALT,
         );
         let film_next_player_binding = self.engine.film_replay()
             && self.viewport_cycle_scope_available()
             && self.runtime_keyboard_binding_matches(
                 "FilmNextPlayer",
                 key,
-                key == VirtualKeyCode::Right && c4_modifiers.is_empty(),
+                key == VirtualKeyCode::ArrowRight && c4_modifiers.is_empty(),
             );
         let free_view_scroll_binding = !self.engine.film_replay()
             && self.primary_physical_viewport_is_no_owner()
             && self.viewport_cycle_scope_available()
             && [
-                ("FreeViewScrollLeft", VirtualKeyCode::Left),
-                ("FreeViewScrollRight", VirtualKeyCode::Right),
-                ("FreeViewScrollUp", VirtualKeyCode::Up),
-                ("FreeViewScrollDown", VirtualKeyCode::Down),
+                ("FreeViewScrollLeft", VirtualKeyCode::ArrowLeft),
+                ("FreeViewScrollRight", VirtualKeyCode::ArrowRight),
+                ("FreeViewScrollUp", VirtualKeyCode::ArrowUp),
+                ("FreeViewScrollDown", VirtualKeyCode::ArrowDown),
             ]
             .into_iter()
             .any(|(name, default_key)| {
@@ -2966,12 +2991,12 @@ impl GameApp {
                 || (ownerless_fullscreen && self.ingame_menu.is_some())
             {
                 [
-                    ("FullscreenMenuLeft", VirtualKeyCode::Left),
-                    ("FullscreenMenuRight", VirtualKeyCode::Right),
-                    ("FullscreenMenuUp", VirtualKeyCode::Up),
-                    ("FullscreenMenuDown", VirtualKeyCode::Down),
+                    ("FullscreenMenuLeft", VirtualKeyCode::ArrowLeft),
+                    ("FullscreenMenuRight", VirtualKeyCode::ArrowRight),
+                    ("FullscreenMenuUp", VirtualKeyCode::ArrowUp),
+                    ("FullscreenMenuDown", VirtualKeyCode::ArrowDown),
                     ("FullscreenMenuOK", VirtualKeyCode::Space),
-                    ("FullscreenMenuOK", VirtualKeyCode::Return),
+                    ("FullscreenMenuOK", VirtualKeyCode::Enter),
                     ("FullscreenMenuCancel", VirtualKeyCode::Escape),
                 ]
                 .into_iter()
@@ -3006,12 +3031,14 @@ impl GameApp {
             || game_abort_binding
             || (dialog_callbacks_active
                 && self.running_chat_active()
-                && (c4_modifiers == ModifiersState::CTRL
+                && (c4_modifiers == ModifiersState::CONTROL
                     || edit_cursor_key
                     || (c4_modifiers.is_empty()
                         && matches!(
                             key,
-                            VirtualKeyCode::F2 | VirtualKeyCode::Up | VirtualKeyCode::Down
+                            VirtualKeyCode::F2
+                                | VirtualKeyCode::ArrowUp
+                                | VirtualKeyCode::ArrowDown
                         ))))
             || active_context_key
             || active_game_over_hotkey
@@ -3048,33 +3075,33 @@ impl GameApp {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if self.ingame_menu_belongs_to(OWNER_NONE) {
             let command = [
                 (
                     "FullscreenMenuLeft",
                     ControlCommand::MenuLeft,
-                    key == VirtualKeyCode::Left && modifiers.is_empty(),
+                    key == VirtualKeyCode::ArrowLeft && modifiers.is_empty(),
                 ),
                 (
                     "FullscreenMenuRight",
                     ControlCommand::MenuRight,
-                    key == VirtualKeyCode::Right && modifiers.is_empty(),
+                    key == VirtualKeyCode::ArrowRight && modifiers.is_empty(),
                 ),
                 (
                     "FullscreenMenuUp",
                     ControlCommand::MenuUp,
-                    key == VirtualKeyCode::Up && modifiers.is_empty(),
+                    key == VirtualKeyCode::ArrowUp && modifiers.is_empty(),
                 ),
                 (
                     "FullscreenMenuDown",
                     ControlCommand::MenuDown,
-                    key == VirtualKeyCode::Down && modifiers.is_empty(),
+                    key == VirtualKeyCode::ArrowDown && modifiers.is_empty(),
                 ),
                 (
                     "FullscreenMenuOK",
                     ControlCommand::MenuEnter,
-                    matches!(key, VirtualKeyCode::Space | VirtualKeyCode::Return)
+                    matches!(key, VirtualKeyCode::Space | VirtualKeyCode::Enter)
                         && modifiers.is_empty(),
                 ),
                 (
@@ -3275,7 +3302,7 @@ impl GameApp {
         }
         if self.running_chat_keyboard_active() && self.context_menu.is_none() {
             let modifiers = self.keyboard_modifiers
-                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             let replacement_mode = self
                 .runtime_running_chat_open_mode(key)
                 .filter(|mode| !matches!(mode, RunningChatMode::All))
@@ -3289,37 +3316,40 @@ impl GameApp {
                 }
                 return Ok(());
             }
-            let edit_priority_key = (modifiers == ModifiersState::CTRL
+            let edit_priority_key = (modifiers == ModifiersState::CONTROL
                 && matches!(
                     key,
-                    VirtualKeyCode::A | VirtualKeyCode::C | VirtualKeyCode::V | VirtualKeyCode::X
+                    VirtualKeyCode::KeyA
+                        | VirtualKeyCode::KeyC
+                        | VirtualKeyCode::KeyV
+                        | VirtualKeyCode::KeyX
                 ))
-                || (modifiers.ctrl()
-                    && !modifiers.alt()
+                || (modifiers.control_key()
+                    && !modifiers.alt_key()
                     && matches!(
                         key,
-                        VirtualKeyCode::Back
+                        VirtualKeyCode::Backspace
                             | VirtualKeyCode::Delete
                             | VirtualKeyCode::End
                             | VirtualKeyCode::Home
-                            | VirtualKeyCode::Left
-                            | VirtualKeyCode::Right
+                            | VirtualKeyCode::ArrowLeft
+                            | VirtualKeyCode::ArrowRight
                     ));
-            if modifiers == ModifiersState::CTRL
-                && !(key == VirtualKeyCode::F9 && modifiers == ModifiersState::CTRL)
+            if modifiers == ModifiersState::CONTROL
+                && !(key == VirtualKeyCode::F9 && modifiers == ModifiersState::CONTROL)
                 && !edit_priority_key
             {
                 self.handle_engine_key(key, state)?;
                 return Ok(());
             }
-            let empty_backspace =
-                key == VirtualKeyCode::Back && self.running_chat_text().is_none_or(str::is_empty);
+            let empty_backspace = key == VirtualKeyCode::Backspace
+                && self.running_chat_text().is_none_or(str::is_empty);
             if modifiers.is_empty()
                 && (matches!(
                     key,
                     VirtualKeyCode::Tab
-                        | VirtualKeyCode::Up
-                        | VirtualKeyCode::Down
+                        | VirtualKeyCode::ArrowUp
+                        | VirtualKeyCode::ArrowDown
                         | VirtualKeyCode::F2
                 ) || empty_backspace)
             {
@@ -3333,7 +3363,7 @@ impl GameApp {
         if self.network_chart_dialog.is_some()
             && key == VirtualKeyCode::Escape
             && (self.keyboard_modifiers
-                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
+                & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT))
                 .is_empty()
             && self.local_player_key_binding_in_scope(key)
         {
@@ -3380,7 +3410,7 @@ impl GameApp {
         if self.running_chat_keyboard_active() {
             let context_menu_was_open = self.context_menu.is_some();
             let modifiers = self.keyboard_modifiers
-                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             let context_menu_handled =
                 modifiers.is_empty() && self.handle_context_menu_key(key, state)?;
             if context_menu_handled || input_dialog_release_latched {
@@ -3426,7 +3456,7 @@ impl GameApp {
         }
         if self.league_signup_dialog.is_some() && self.context_menu.is_some() {
             let modifiers = self.keyboard_modifiers
-                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             if modifiers.is_empty() {
                 let _ = self.handle_context_menu_key(key, state)?;
             }
@@ -3451,7 +3481,7 @@ impl GameApp {
         }
         if self.external_irc_dialog_visible {
             let c4_modifiers = self.keyboard_modifiers
-                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             if c4_modifiers.is_empty() && self.handle_context_menu_key(key, state)? {
                 return Ok(());
             }
@@ -3474,7 +3504,7 @@ impl GameApp {
             && self.mode == AppMode::Menu
             && self.startup_view == StartupView::NetworkGame
             && key == VirtualKeyCode::F4
-            && self.keyboard_modifiers == ModifiersState::CTRL
+            && self.keyboard_modifiers == ModifiersState::CONTROL
             && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
                 dialog.mode() == clonk_frontend::startup_netdlg::NetDlgMode::Chat
                     && dialog.chat_page() == clonk_frontend::startup_netdlg::NetDlgChatPage::Chats
@@ -3496,10 +3526,10 @@ impl GameApp {
         }
         if self.startup_options_advanced_dialog.is_some() {
             let modifiers = self.keyboard_modifiers;
-            let ctrl = modifiers.ctrl();
-            let shift = modifiers.shift();
-            let edit_modifiers = !modifiers.intersects(ModifiersState::ALT | ModifiersState::LOGO);
-            let control_only = modifiers == ModifiersState::CTRL;
+            let ctrl = modifiers.control_key();
+            let shift = modifiers.shift_key();
+            let edit_modifiers = !modifiers.intersects(ModifiersState::ALT | ModifiersState::SUPER);
+            let control_only = modifiers == ModifiersState::CONTROL;
             let unmodified = modifiers.is_empty();
             let hotkey_modifiers = modifiers == ModifiersState::ALT
                 || modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
@@ -3537,7 +3567,7 @@ impl GameApp {
                 Vec::new()
             } else if edit_modifiers
                 && state == ElementState::Pressed
-                && key == VirtualKeyCode::Back
+                && key == VirtualKeyCode::Backspace
             {
                 if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
                     pending
@@ -3557,16 +3587,16 @@ impl GameApp {
                 && state == ElementState::Pressed
                 && matches!(
                     key,
-                    VirtualKeyCode::Left
-                        | VirtualKeyCode::Right
+                    VirtualKeyCode::ArrowLeft
+                        | VirtualKeyCode::ArrowRight
                         | VirtualKeyCode::Home
                         | VirtualKeyCode::End
                 )
             {
                 use clonk_frontend::rename_edit::RenameEditCursorOperation;
                 let operation = match key {
-                    VirtualKeyCode::Left => RenameEditCursorOperation::Left,
-                    VirtualKeyCode::Right => RenameEditCursorOperation::Right,
+                    VirtualKeyCode::ArrowLeft => RenameEditCursorOperation::Left,
+                    VirtualKeyCode::ArrowRight => RenameEditCursorOperation::Right,
                     VirtualKeyCode::Home => RenameEditCursorOperation::Home,
                     VirtualKeyCode::End => RenameEditCursorOperation::End,
                     _ => unreachable!(),
@@ -3575,14 +3605,15 @@ impl GameApp {
                     pending.controller.move_edit_cursor(operation, ctrl, shift);
                 }
                 Vec::new()
-            } else if state == ElementState::Pressed && control_only && key == VirtualKeyCode::A {
+            } else if state == ElementState::Pressed && control_only && key == VirtualKeyCode::KeyA
+            {
                 if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
                     pending.controller.select_all_edit_text();
                 }
                 Vec::new()
             } else if state == ElementState::Pressed
                 && control_only
-                && matches!(key, VirtualKeyCode::C | VirtualKeyCode::X)
+                && matches!(key, VirtualKeyCode::KeyC | VirtualKeyCode::KeyX)
             {
                 let selected = self
                     .startup_options_advanced_dialog
@@ -3593,7 +3624,7 @@ impl GameApp {
                     match arboard::Clipboard::new()
                         .and_then(|mut clipboard| clipboard.set_text(selected))
                     {
-                        Ok(()) if key == VirtualKeyCode::X => {
+                        Ok(()) if key == VirtualKeyCode::KeyX => {
                             if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
                                 pending.controller.delete_edit_selection();
                             }
@@ -3605,7 +3636,8 @@ impl GameApp {
                     }
                 }
                 Vec::new()
-            } else if state == ElementState::Pressed && control_only && key == VirtualKeyCode::V {
+            } else if state == ElementState::Pressed && control_only && key == VirtualKeyCode::KeyV
+            {
                 match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
                     Ok(text) => {
                         if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
@@ -3634,7 +3666,7 @@ impl GameApp {
         }
         if self.startup_player_properties_dialog.is_some() {
             let c4_modifiers = self.keyboard_modifiers
-                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             if state == ElementState::Pressed
                 && c4_modifiers.is_empty()
                 && key == VirtualKeyCode::F5
@@ -3662,7 +3694,7 @@ impl GameApp {
                 .then(|| map_key_code(key))
                 .flatten();
             let portrait_ok_hotkey = state == ElementState::Pressed
-                && key == VirtualKeyCode::O
+                && key == VirtualKeyCode::KeyO
                 && (c4_modifiers == ModifiersState::ALT
                     || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT))
                 && self
@@ -3694,7 +3726,7 @@ impl GameApp {
                 });
             let actions = if state == ElementState::Pressed
                 && c4_modifiers.is_empty()
-                && matches!(key, VirtualKeyCode::Back | VirtualKeyCode::Delete)
+                && matches!(key, VirtualKeyCode::Backspace | VirtualKeyCode::Delete)
             {
                 if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
                     pending.controller.delete_name_char();
@@ -3742,7 +3774,7 @@ impl GameApp {
         }
         let context_menu_was_open = self.context_menu.is_some();
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if c4_modifiers.is_empty() && self.handle_context_menu_key(key, state)? {
             return Ok(());
         }
@@ -3787,7 +3819,7 @@ impl GameApp {
             // C4GUI compares the exact Alt/Ctrl/Shift mask for these global
             // bindings. The platform Logo bit is not part of C4KeyCodeEx.
             let c4_modifiers = self.keyboard_modifiers
-                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             if c4_modifiers == ModifiersState::ALT
                 || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT)
             {
@@ -3822,7 +3854,7 @@ impl GameApp {
                 (VirtualKeyCode::F2, modifiers, event_state) if modifiers.is_empty() => {
                     self.handle_running_chat_open_key(key, event_state);
                 }
-                (VirtualKeyCode::Return, modifiers, event_state)
+                (VirtualKeyCode::Enter, modifiers, event_state)
                     if modifiers.is_empty()
                         && self.game_over_dialog.as_ref().is_some_and(|dialog| {
                             !matches!(
@@ -3833,10 +3865,10 @@ impl GameApp {
                 {
                     self.handle_game_over_enter_chat(event_state);
                 }
-                (VirtualKeyCode::Return, ModifiersState::SHIFT, event_state) => {
+                (VirtualKeyCode::Enter, ModifiersState::SHIFT, event_state) => {
                     self.handle_running_chat_open_key(key, event_state);
                 }
-                (VirtualKeyCode::Return, modifiers, ElementState::Pressed)
+                (VirtualKeyCode::Enter, modifiers, ElementState::Pressed)
                     if modifiers.is_empty() =>
                 {
                     let captured = self.game_over_dialog.as_mut().is_some_and(|dialog| {
@@ -3852,7 +3884,7 @@ impl GameApp {
                         self.handle_game_over_enter_chat(state);
                     }
                 }
-                (VirtualKeyCode::Return, modifiers, ElementState::Released)
+                (VirtualKeyCode::Enter, modifiers, ElementState::Released)
                     if modifiers.is_empty() =>
                 {
                     let action = self.game_over_dialog.as_mut().and_then(|dialog| {
@@ -3929,7 +3961,7 @@ impl GameApp {
         if self.mode == AppMode::Menu
             && self.startup_view == StartupView::NetworkLobby
             && self.network_lobby.is_some()
-            && key == VirtualKeyCode::Apps
+            && key == VirtualKeyCode::ContextMenu
             && self.keyboard_modifiers.is_empty()
         {
             if state == ElementState::Pressed {
@@ -3957,7 +3989,7 @@ impl GameApp {
                     if state == ElementState::Pressed
                         && matches!(
                             key,
-                            VirtualKeyCode::Return
+                            VirtualKeyCode::Enter
                                 | VirtualKeyCode::NumpadEnter
                                 | VirtualKeyCode::Space
                                 | VirtualKeyCode::Escape
@@ -3984,12 +4016,12 @@ impl GameApp {
                     }
                     let discovery_loading = self.scenario_selector_discovery.is_some();
                     let discovery_modifiers = self.keyboard_modifiers
-                        & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                        & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
                     if discovery_loading && !self.menu_state.search_focused() {
                         if state == ElementState::Pressed && discovery_modifiers.is_empty() {
                             match key {
                                 VirtualKeyCode::Escape => self.close_scenario_browser(),
-                                VirtualKeyCode::Left => self.scensel_do_back()?,
+                                VirtualKeyCode::ArrowLeft => self.scensel_do_back()?,
                                 _ => {}
                             }
                         }
@@ -4002,7 +4034,7 @@ impl GameApp {
                         && self.menu_state.dialog_focus() == ScenselDialogFocus::Back
                         && matches!(
                             key,
-                            VirtualKeyCode::Return
+                            VirtualKeyCode::Enter
                                 | VirtualKeyCode::NumpadEnter
                                 | VirtualKeyCode::Space
                         )
@@ -4013,14 +4045,14 @@ impl GameApp {
                         return Ok(());
                     }
                     if state == ElementState::Pressed
-                        && key == VirtualKeyCode::Apps
+                        && key == VirtualKeyCode::ContextMenu
                         && self.open_scenario_search_context_menu(true)?
                     {
                         return Ok(());
                     }
                     if self.context_menu.is_none()
-                        && key == VirtualKeyCode::D
-                        && self.keyboard_modifiers.alt()
+                        && key == VirtualKeyCode::KeyD
+                        && self.keyboard_modifiers.alt_key()
                     {
                         if state == ElementState::Pressed
                             && self.menu_state.toggle_definition_checkbox()
@@ -4046,13 +4078,13 @@ impl GameApp {
                             (
                                 _,
                                 VirtualKeyCode::Space
-                                | VirtualKeyCode::Up
-                                | VirtualKeyCode::Down
+                                | VirtualKeyCode::ArrowUp
+                                | VirtualKeyCode::ArrowDown
                                 | VirtualKeyCode::Home
                                 | VirtualKeyCode::End
                                 | VirtualKeyCode::PageUp
                                 | VirtualKeyCode::PageDown
-                                | VirtualKeyCode::Return
+                                | VirtualKeyCode::Enter
                                 | VirtualKeyCode::NumpadEnter,
                             ) => return Ok(()),
                             _ => {}
@@ -4066,11 +4098,11 @@ impl GameApp {
                         self.menu_state.set_definition_checkbox_focused(true);
                         return Ok(());
                     }
-                    let search_shortcut = self.keyboard_modifiers.ctrl()
+                    let search_shortcut = self.keyboard_modifiers.control_key()
                         || (cfg!(target_os = "macos")
-                            && self.keyboard_modifiers.intersects(ModifiersState::LOGO));
+                            && self.keyboard_modifiers.intersects(ModifiersState::SUPER));
                     if state == ElementState::Pressed
-                        && key == VirtualKeyCode::F
+                        && key == VirtualKeyCode::KeyF
                         && search_shortcut
                         && self.context_menu.is_none()
                         && self.menu_state.current_map().is_none()
@@ -4080,25 +4112,25 @@ impl GameApp {
                         return Ok(());
                     }
                     if self.menu_state.search_focused() && self.context_menu.is_none() {
-                        let ctrl = self.keyboard_modifiers.ctrl();
+                        let ctrl = self.keyboard_modifiers.control_key();
                         let edit_shortcut = search_shortcut;
-                        let shift = self.keyboard_modifiers.shift();
+                        let shift = self.keyboard_modifiers.shift_key();
                         let consumed = match (state, key) {
-                            (ElementState::Pressed, VirtualKeyCode::Back) => {
+                            (ElementState::Pressed, VirtualKeyCode::Backspace) => {
                                 if self.menu_state.search_edit.backspace(ctrl, shift) {
                                     self.submit_scenario_search()?;
                                 }
                                 true
                             }
                             (ElementState::Pressed, VirtualKeyCode::Delete)
-                                if !self.keyboard_modifiers.alt() =>
+                                if !self.keyboard_modifiers.alt_key() =>
                             {
                                 if self.menu_state.search_edit.delete(ctrl, shift) {
                                     self.submit_scenario_search()?;
                                 }
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::Left) => {
+                            (ElementState::Pressed, VirtualKeyCode::ArrowLeft) => {
                                 self.menu_state.search_edit.move_cursor(
                                     SearchCursorOperation::Left,
                                     ctrl,
@@ -4106,7 +4138,7 @@ impl GameApp {
                                 );
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::Right) => {
+                            (ElementState::Pressed, VirtualKeyCode::ArrowRight) => {
                                 self.menu_state.search_edit.move_cursor(
                                     SearchCursorOperation::Right,
                                     ctrl,
@@ -4130,27 +4162,27 @@ impl GameApp {
                                 );
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::A) if edit_shortcut => {
+                            (ElementState::Pressed, VirtualKeyCode::KeyA) if edit_shortcut => {
                                 self.menu_state.search_edit.select_all();
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::C) if edit_shortcut => {
+                            (ElementState::Pressed, VirtualKeyCode::KeyC) if edit_shortcut => {
                                 let _ = self.copy_search_edit_selection(false);
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::X) if edit_shortcut => {
+                            (ElementState::Pressed, VirtualKeyCode::KeyX) if edit_shortcut => {
                                 if self.copy_search_edit_selection(true) {
                                     self.submit_scenario_search()?;
                                 }
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::V) if edit_shortcut => {
+                            (ElementState::Pressed, VirtualKeyCode::KeyV) if edit_shortcut => {
                                 self.paste_search_edit_clipboard()?;
                                 true
                             }
                             (
                                 ElementState::Pressed,
-                                VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter,
+                                VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter,
                             ) => {
                                 self.submit_scenario_search()?;
                                 true
@@ -4170,25 +4202,27 @@ impl GameApp {
                             }
                             (
                                 _,
-                                VirtualKeyCode::Back
+                                VirtualKeyCode::Backspace
                                 | VirtualKeyCode::Home
                                 | VirtualKeyCode::End
                                 | VirtualKeyCode::PageUp
                                 | VirtualKeyCode::PageDown
-                                | VirtualKeyCode::Return
+                                | VirtualKeyCode::Enter
                                 | VirtualKeyCode::NumpadEnter
                                 | VirtualKeyCode::Escape
                                 | VirtualKeyCode::Tab
                                 | VirtualKeyCode::Space,
                             ) => true,
-                            (_, VirtualKeyCode::Delete) if !self.keyboard_modifiers.alt() => true,
-                            (_, VirtualKeyCode::Left | VirtualKeyCode::Right) => true,
+                            (_, VirtualKeyCode::Delete) if !self.keyboard_modifiers.alt_key() => {
+                                true
+                            }
+                            (_, VirtualKeyCode::ArrowLeft | VirtualKeyCode::ArrowRight) => true,
                             (
                                 _,
-                                VirtualKeyCode::A
-                                | VirtualKeyCode::C
-                                | VirtualKeyCode::X
-                                | VirtualKeyCode::V,
+                                VirtualKeyCode::KeyA
+                                | VirtualKeyCode::KeyC
+                                | VirtualKeyCode::KeyX
+                                | VirtualKeyCode::KeyV,
                             ) if edit_shortcut => true,
                             _ => false,
                         };
@@ -4199,7 +4233,7 @@ impl GameApp {
                     if discovery_loading {
                         if state == ElementState::Pressed
                             && discovery_modifiers.is_empty()
-                            && key == VirtualKeyCode::Left
+                            && key == VirtualKeyCode::ArrowLeft
                         {
                             self.scensel_do_back()?;
                         }
@@ -4211,7 +4245,7 @@ impl GameApp {
                 }
                 if state == ElementState::Pressed {
                     let no_shortcut_modifiers = (self.keyboard_modifiers
-                        & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
+                        & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT))
                         .is_empty();
                     if self.startup_view == StartupView::NetworkGame
                         && key == VirtualKeyCode::F5
@@ -4223,7 +4257,7 @@ impl GameApp {
                         return Ok(());
                     }
                     if self.startup_view == StartupView::PlayerSelection && no_shortcut_modifiers {
-                        if key == VirtualKeyCode::Apps
+                        if key == VirtualKeyCode::ContextMenu
                             && self.open_startup_player_context_menu(true)?
                         {
                             return Ok(());
@@ -4275,7 +4309,7 @@ impl GameApp {
                     && state == ElementState::Pressed
                     && key == VirtualKeyCode::F6
                     && (self.keyboard_modifiers
-                        & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
+                        & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT))
                         .is_empty()
                     && self.switch_to_editor()
                 {
@@ -4364,7 +4398,7 @@ impl GameApp {
             }
             AppMode::Running => {
                 let c4_modifiers = self.keyboard_modifiers
-                    & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                    & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
                 if self.handle_runtime_fullscreen_menu_key(key, state)? {
                     return Ok(());
                 }
@@ -4507,27 +4541,27 @@ impl GameApp {
             return false;
         }
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let requested = [
             (
                 "FreeViewScrollLeft",
                 Vector2::new(-5, 0),
-                key == VirtualKeyCode::Left && c4_modifiers.is_empty(),
+                key == VirtualKeyCode::ArrowLeft && c4_modifiers.is_empty(),
             ),
             (
                 "FreeViewScrollRight",
                 Vector2::new(5, 0),
-                key == VirtualKeyCode::Right && c4_modifiers.is_empty(),
+                key == VirtualKeyCode::ArrowRight && c4_modifiers.is_empty(),
             ),
             (
                 "FreeViewScrollUp",
                 Vector2::new(0, -5),
-                key == VirtualKeyCode::Up && c4_modifiers.is_empty(),
+                key == VirtualKeyCode::ArrowUp && c4_modifiers.is_empty(),
             ),
             (
                 "FreeViewScrollDown",
                 Vector2::new(0, 5),
-                key == VirtualKeyCode::Down && c4_modifiers.is_empty(),
+                key == VirtualKeyCode::ArrowDown && c4_modifiers.is_empty(),
             ),
         ]
         .into_iter()
@@ -4738,13 +4772,13 @@ impl GameApp {
             return false;
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if modifiers.is_empty() {
             return matches!(
                 key,
                 VirtualKeyCode::Tab
                     | VirtualKeyCode::Escape
-                    | VirtualKeyCode::Return
+                    | VirtualKeyCode::Enter
                     | VirtualKeyCode::Space
             );
         }
@@ -4768,7 +4802,7 @@ impl GameApp {
             return false;
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let Some(dialog) = self.game_over_dialog.as_ref() else {
             return false;
         };
@@ -4785,7 +4819,7 @@ impl GameApp {
             {
                 true
             }
-            (VirtualKeyCode::Return, modifiers) if modifiers.is_empty() => true,
+            (VirtualKeyCode::Enter, modifiers) if modifiers.is_empty() => true,
             (VirtualKeyCode::Space, modifiers) if modifiers.is_empty() => matches!(
                 dialog.focused(),
                 Some(GameOverFocus::Close | GameOverFocus::Button(_))
@@ -4793,7 +4827,9 @@ impl GameApp {
             (VirtualKeyCode::Escape, modifiers) if modifiers.is_empty() => {
                 dialog.allows_escape_close()
             }
-            (VirtualKeyCode::Up | VirtualKeyCode::Down, modifiers) if modifiers.is_empty() => {
+            (VirtualKeyCode::ArrowUp | VirtualKeyCode::ArrowDown, modifiers)
+                if modifiers.is_empty() =>
+            {
                 matches!(dialog.focused(), Some(GameOverFocus::PlayerList(_)))
             }
             _ => false,
@@ -7688,7 +7724,7 @@ impl GameApp {
         })?;
         let put_target = self
             .keyboard_modifiers
-            .ctrl()
+            .control_key()
             .then(|| {
                 self.graphics.object_at_point_with_ocf(
                     &self.snapshot,
@@ -8267,7 +8303,7 @@ impl GameApp {
             pointer.owner,
             target,
             point,
-            self.keyboard_modifiers.ctrl(),
+            self.keyboard_modifiers.control_key(),
         );
         if self.ingame_pointer_fog_blocked(pointer)
             && target.is_none()
@@ -9431,7 +9467,7 @@ impl GameApp {
         }
         if let Some(target) = context_target {
             self.show_startup_hint = false;
-            let add_mode = 2 | if self.keyboard_modifiers.shift() {
+            let add_mode = 2 | if self.keyboard_modifiers.shift_key() {
                 4
             } else {
                 0
@@ -9862,7 +9898,7 @@ impl GameApp {
         let fog_blocked = self.ingame_pointer_fog_blocked(pointer);
         // Move snapshots dwKeyFlags before dispatching LeftUp, and every
         // SendCommand in that event observes the same ShiftDown value.
-        let add_mode = 1 | if self.keyboard_modifiers.shift() {
+        let add_mode = 1 | if self.keyboard_modifiers.shift_key() {
             4
         } else {
             0
@@ -9945,8 +9981,8 @@ impl GameApp {
             pointer.owner,
             target,
             point,
-            self.keyboard_modifiers.ctrl(),
-            self.keyboard_modifiers.shift(),
+            self.keyboard_modifiers.control_key(),
+            self.keyboard_modifiers.shift_key(),
         ) else {
             return Ok(());
         };
@@ -12205,11 +12241,11 @@ impl GameApp {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let actions = if state == ElementState::Pressed
-            && modifiers.alt()
-            && !modifiers.ctrl()
-            && key == VirtualKeyCode::R
+            && modifiers.alt_key()
+            && !modifiers.control_key()
+            && key == VirtualKeyCode::KeyR
         {
             self.network_start_wait
                 .as_mut()
@@ -12221,7 +12257,7 @@ impl GameApp {
                 .map(|wait| match state {
                     ElementState::Pressed => wait.controller.handle_key_down_with_tab_direction(
                         gui_key,
-                        self.keyboard_modifiers.shift(),
+                        self.keyboard_modifiers.shift_key(),
                     ),
                     ElementState::Released => wait.controller.handle_key_up(gui_key),
                 })
@@ -12343,7 +12379,7 @@ impl GameApp {
             return Ok(false);
         };
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let chat_already_open = self.running_chat_controller().is_some();
         // Screen::HasKeyboardFocus asks whether the actual list-top dialog is
         // exclusive; keyboard input is then sent to pActiveDlg. Activation of
@@ -12358,18 +12394,18 @@ impl GameApp {
                     if modifiers.is_empty()
             ) || matches!(
                 (key, c4_modifiers),
-                (VirtualKeyCode::Return, ModifiersState::SHIFT)
+                (VirtualKeyCode::Enter, ModifiersState::SHIFT)
             ) || !chat_already_open
                 && !gui_scope
                 && matches!(
                     (key, c4_modifiers),
-                    (VirtualKeyCode::Return, modifiers) if modifiers.is_empty()
+                    (VirtualKeyCode::Enter, modifiers) if modifiers.is_empty()
                 )
                 || !chat_already_open
                     && !gui_scope
                     && matches!(
                         (key, c4_modifiers),
-                        (VirtualKeyCode::Return, ModifiersState::ALT)
+                        (VirtualKeyCode::Enter, ModifiersState::ALT)
                     ));
         if chat_open_fallthrough {
             return Ok(false);

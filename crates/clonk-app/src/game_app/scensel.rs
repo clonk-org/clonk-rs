@@ -731,8 +731,8 @@ impl GameApp {
             || self.startup_view != StartupView::ScenarioBrowser
             || !matches!(
                 key,
-                VirtualKeyCode::Up
-                    | VirtualKeyCode::Down
+                VirtualKeyCode::ArrowUp
+                    | VirtualKeyCode::ArrowDown
                     | VirtualKeyCode::Home
                     | VirtualKeyCode::End
                     | VirtualKeyCode::PageUp
@@ -761,8 +761,8 @@ impl GameApp {
         let item_height = clonk_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
         let viewport_height = layout.list.h - 6;
         self.handle_menu_input(|menu| match key {
-            VirtualKeyCode::Up => menu.move_list_selection_clamped(-1),
-            VirtualKeyCode::Down => menu.move_list_selection_clamped(1),
+            VirtualKeyCode::ArrowUp => menu.move_list_selection_clamped(-1),
+            VirtualKeyCode::ArrowDown => menu.move_list_selection_clamped(1),
             VirtualKeyCode::Home => menu.select_list_home(),
             VirtualKeyCode::End => menu.select_list_end(),
             VirtualKeyCode::PageUp => {
@@ -974,12 +974,12 @@ impl GameApp {
         // compares the complete modifier mask, so modified F2/F5/Delete and
         // Ctrl+Alt+M are different keys.
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let no_modifiers = c4_modifiers.is_empty();
         let blocked_while_loading = (no_modifiers
             && (matches!(key, VirtualKeyCode::F5 | VirtualKeyCode::F2)
                 || key == VirtualKeyCode::Delete && !self.menu_state.search_focused()))
-            || (c4_modifiers == ModifiersState::ALT && key == VirtualKeyCode::M);
+            || (c4_modifiers == ModifiersState::ALT && key == VirtualKeyCode::KeyM);
         if self.scenario_selector_discovery.is_some() {
             return Ok(blocked_while_loading);
         }
@@ -1008,7 +1008,7 @@ impl GameApp {
                 self.open_scenario_delete_dialog()?;
                 Ok(true)
             }
-            VirtualKeyCode::M
+            VirtualKeyCode::KeyM
                 if c4_modifiers == ModifiersState::ALT
                     && self.menu_state.current_map().is_none() =>
             {
@@ -1678,8 +1678,8 @@ impl GameApp {
                 self.definition_selector_consumed_keys.remove(&key);
             }
         }
-        let backwards = self.keyboard_modifiers.shift();
-        let alt = self.keyboard_modifiers.alt();
+        let backwards = self.keyboard_modifiers.shift_key();
+        let alt = self.keyboard_modifiers.alt_key();
         let layout = self.definition_selector_layout();
         let actions = self
             .definition_selector

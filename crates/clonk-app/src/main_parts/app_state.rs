@@ -2159,7 +2159,7 @@ impl RuntimeKeyChord {
 
     pub(crate) fn matches(self, key: VirtualKeyCode, modifiers: ModifiersState) -> bool {
         let c4_modifiers =
-            modifiers & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            modifiers & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if self.modifiers != c4_modifiers {
             return false;
         }
@@ -3400,7 +3400,8 @@ pub(crate) fn runtime_players_with_exactly_one_live_sf5b_crew(
 }
 
 pub(crate) fn finish_presentation_benchmark(
-    control_flow: &mut ControlFlow,
+    event_loop: &ActiveEventLoop,
+    exit_code: &AtomicI32,
     report: PresentationBenchmarkReport,
     assert_native_tick: bool,
     runtime_players: usize,
@@ -3433,13 +3434,14 @@ pub(crate) fn finish_presentation_benchmark(
     if assert_native_tick {
         if let Err(error) = validate_native_tick_presentation_budget(&report) {
             eprintln!("LC_APP_PRESENTATION_BENCHMARK result=fail error={error}");
-            control_flow.set_exit_with_code(2);
+            exit_code.store(2, AtomicOrdering::Relaxed);
+            event_loop.exit();
             return;
         }
         println!("LC_APP_PRESENTATION_BENCHMARK result=pass native_tick_budget_ms=28");
     }
     if !keep_running {
-        control_flow.set_exit();
+        event_loop.exit();
     }
 }
 

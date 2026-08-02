@@ -2834,9 +2834,9 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
     wait_for_menu(&mut app);
     app.open_network_game_dialog();
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("activate empty game list");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("release opening key into modal");
 
     assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -2883,14 +2883,14 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
     app.render(&mut frame)
         .expect("render exact classic modal resources");
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("press focused OK");
     assert_eq!(
         app.message_dialogs.len(),
         1,
         "Return must show the button-down frame before activation"
     );
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("release focused OK");
     assert!(app.message_dialogs.is_empty());
     assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -3012,11 +3012,11 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
         .expect("move edit caret home");
     app.handle_key(VirtualKeyCode::Home, ElementState::Released)
         .expect("release edit Home");
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("hold control");
-    app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
         .expect("jump to next word");
-    app.handle_key(VirtualKeyCode::Right, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Released)
         .expect("release word jump");
     assert_eq!(
         app.startup_network_dialog
@@ -3028,9 +3028,9 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
 
     app.handle_modifiers_changed(ModifiersState::SHIFT)
         .expect("hold shift");
-    app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
         .expect("extend selection");
-    app.handle_key(VirtualKeyCode::Right, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Released)
         .expect("release selection key");
     app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
         .expect("delete selection before shift-delete no-op");
@@ -3092,13 +3092,13 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
         .expect("release context opening button");
     app.close_context_menu_silently();
 
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open join-edit context from keyboard");
     assert!(app.context_menu.is_some());
     assert!(!app
         .netdlg_edit_consumed_keys
-        .contains(&VirtualKeyCode::Apps));
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+        .contains(&VirtualKeyCode::ContextMenu));
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("release context-menu key");
     app.close_context_menu_silently();
 
@@ -3115,10 +3115,10 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     app.handle_mouse_button(ElementState::Released)
         .expect("release non-double edit click");
 
-    app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
         .expect("focused Left stays inside the edit");
     assert_eq!(app.startup_view, StartupView::NetworkGame);
-    app.handle_key(VirtualKeyCode::Left, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Released)
         .expect("release focused edit Left");
 
     let list = PhysicalPosition::new(
@@ -3139,10 +3139,10 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
         clonk_frontend::startup_netdlg::NetDlgControl::GameList
     );
     for (modifiers, key) in [
-        (ModifiersState::CTRL, VirtualKeyCode::Left),
-        (ModifiersState::SHIFT, VirtualKeyCode::Left),
-        (ModifiersState::ALT, VirtualKeyCode::Left),
-        (ModifiersState::CTRL, VirtualKeyCode::Back),
+        (ModifiersState::CONTROL, VirtualKeyCode::ArrowLeft),
+        (ModifiersState::SHIFT, VirtualKeyCode::ArrowLeft),
+        (ModifiersState::ALT, VirtualKeyCode::ArrowLeft),
+        (ModifiersState::CONTROL, VirtualKeyCode::Backspace),
     ] {
         app.handle_modifiers_changed(modifiers)
             .expect("set modified Back binding mask");
@@ -3154,7 +3154,7 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     }
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("clear Back binding modifiers");
-    app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
         .expect("plain Left invokes StartupNetBack");
     assert_eq!(app.startup_view, StartupView::MainMenu);
 }
@@ -5087,13 +5087,13 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
     }
 
     for (binding, key, modifiers) in [
-        ("Left", VirtualKeyCode::Left, ModifiersState::empty()),
-        ("Shift+Right", VirtualKeyCode::Right, ModifiersState::SHIFT),
-        ("Ctrl+Left", VirtualKeyCode::Left, ModifiersState::CTRL),
+        ("Left", VirtualKeyCode::ArrowLeft, ModifiersState::empty()),
+        ("Shift+Right", VirtualKeyCode::ArrowRight, ModifiersState::SHIFT),
+        ("Ctrl+Left", VirtualKeyCode::ArrowLeft, ModifiersState::CONTROL),
         (
             "Ctrl+Shift+Right",
-            VirtualKeyCode::Right,
-            ModifiersState::CTRL | ModifiersState::SHIFT,
+            VirtualKeyCode::ArrowRight,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
         ),
     ] {
         let mut chat = configured(binding);
@@ -5124,7 +5124,7 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
     );
     assert!(observer_menu.primary_physical_viewport_is_no_owner());
     assert!(
-        !observer_menu.handle_runtime_chart_toggle_key(VirtualKeyCode::Left, ElementState::Pressed)
+        !observer_menu.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
     );
 
     let mut irc = configured("F8");
@@ -5142,7 +5142,7 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
         .expect("show standalone IRC dialog");
     irc_unclaimed.keyboard_modifiers = ModifiersState::ALT;
     irc_unclaimed
-        .handle_key(VirtualKeyCode::Z, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyZ, ElementState::Pressed)
         .expect("unowned IRC mnemonic falls through");
     assert!(irc_unclaimed.network_chart_dialog.is_some());
 
@@ -5155,15 +5155,15 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
         .as_mut()
         .expect("standalone IRC controller")
         .force_chat_mode_and_focus();
-    irc_edit.keyboard_modifiers = ModifiersState::CTRL | ModifiersState::SHIFT;
-    assert!(!irc_edit.handle_runtime_chart_toggle_key(VirtualKeyCode::Left, ElementState::Pressed));
+    irc_edit.keyboard_modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    assert!(!irc_edit.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed));
 
     let mut irc_connect = configured("Up");
     irc_connect
         .show_external_irc_dialog()
         .expect("show standalone IRC login");
     irc_connect
-        .handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
         .expect("Connect-focused login has no arrow callback");
     assert!(irc_connect.network_chart_dialog.is_some());
 
@@ -5176,7 +5176,7 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
         ))
         .expect("install game-over chart key");
     game_over.keyboard_modifiers = ModifiersState::ALT;
-    assert!(!game_over.handle_runtime_chart_toggle_key(VirtualKeyCode::E, ElementState::Pressed));
+    assert!(!game_over.handle_runtime_chart_toggle_key(VirtualKeyCode::KeyE, ElementState::Pressed));
 
     let mut game_over_list = new_game_over_keyboard_app();
     game_over_list.runtime_key_config_cache = OnceLock::new();
@@ -5202,7 +5202,7 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
         Some(GameOverFocus::PlayerList(_))
     ));
     assert!(
-        !game_over_list.handle_runtime_chart_toggle_key(VirtualKeyCode::Up, ElementState::Pressed)
+        !game_over_list.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
     );
 
     let mut vote = configured("Alt+Y");
@@ -5219,7 +5219,7 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
     )
     .expect("show exclusive vote");
     vote.keyboard_modifiers = ModifiersState::ALT;
-    assert!(!vote.handle_runtime_chart_toggle_key(VirtualKeyCode::Y, ElementState::Pressed));
+    assert!(!vote.handle_runtime_chart_toggle_key(VirtualKeyCode::KeyY, ElementState::Pressed));
 
     let mut player_escape = configured("F8");
     player_escape
@@ -11573,7 +11573,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_are_nonfatal() {
 fn l031_debug_key_gates_remaps_and_native_priority_body() {
     for key in [VirtualKeyCode::F6, VirtualKeyCode::F7, VirtualKeyCode::F8] {
         let mut app = new_running_sandbox_app();
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("set exact debug modifiers");
         app.handle_key(key, ElementState::Pressed)
             .expect("a denied overlay callback is not fatal");
@@ -11588,7 +11588,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
     let mut denied = new_running_sandbox_app();
     denied.engine.set_allow_debug(false);
     denied
-        .handle_modifiers_changed(ModifiersState::CTRL)
+        .handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set exact debug modifiers");
     denied
         .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
@@ -11608,7 +11608,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .set(Err("missing language table".to_string()))
         .expect("install missing debug resources");
     missing_resources
-        .handle_modifiers_changed(ModifiersState::CTRL)
+        .handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set exact debug modifiers");
     missing_resources
         .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
@@ -11629,7 +11629,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .expect("parse disabled debug binding")))
         .expect("install disabled debug binding");
     disabled_binding
-        .handle_modifiers_changed(ModifiersState::CTRL)
+        .handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set disabled default debug chord");
     disabled_binding
         .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
@@ -11648,7 +11648,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .expect("parse same-priority debug collision")))
         .expect("install same-priority debug collision");
     debug_collision
-        .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
         .expect("denied debug callbacks fall through in registration order");
     assert_eq!(runtime_flash_text(&debug_collision), Some("No debug mode!"));
 
@@ -11657,7 +11657,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F5);
     modified_player
-        .handle_modifiers_changed(ModifiersState::CTRL)
+        .handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set Ctrl for exact-modifier player priority");
     modified_player
         .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
@@ -11678,7 +11678,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         )
         .expect("open higher-priority context menu");
     context_priority
-        .handle_key(VirtualKeyCode::R, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
         .expect("context hotkey precedes remapped debug callback");
     assert!(!context_priority.engine.debug_mode());
     assert!(context_priority.runtime_flash_message.is_none());
@@ -11694,7 +11694,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .expect("install chat/debug collision");
     chat_priority.start_running_chat(RunningChatMode::All);
     chat_priority
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("focused chat Return precedes remapped debug callback");
     assert!(!chat_priority.engine.debug_mode());
     assert!(!chat_priority.running_chat_active());
@@ -11710,10 +11710,10 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .expect("install modified chat/debug collision");
     modified_chat_fallthrough.start_running_chat(RunningChatMode::All);
     modified_chat_fallthrough
-        .handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::ALT)
+        .handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::ALT)
         .expect("set Ctrl+Alt chat/debug modifiers");
     modified_chat_fallthrough
-        .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
         .expect("an unowned Ctrl+Alt chat chord reaches the debug callback");
     assert!(modified_chat_fallthrough.engine.debug_mode());
     assert!(modified_chat_fallthrough.running_chat_active());
@@ -11741,13 +11741,13 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         )
         .expect("show exclusive vote for debug priority");
     vote_priority
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("exclusive vote Return precedes remapped debug callback");
     assert!(!vote_priority.engine.debug_mode());
     assert!(vote_priority.runtime_flash_message.is_none());
     assert_eq!(vote_priority.message_dialogs.len(), 1);
     vote_priority
-        .handle_key(VirtualKeyCode::Return, ElementState::Released)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("exclusive vote owns the matching Return release");
     assert!(vote_priority.message_dialogs.is_empty());
     assert_eq!(vote_priority.mode, AppMode::Running);
@@ -11762,7 +11762,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .expect("parse game-over/debug collision")))
         .expect("install game-over/debug collision");
     game_over_priority
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("game-over Return precedes remapped debug callback");
     assert!(!game_over_priority.engine.debug_mode());
     assert!(game_over_priority.running_chat_active());
@@ -11782,7 +11782,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
             show_net_status: true,
         });
     disable
-        .handle_modifiers_changed(ModifiersState::CTRL)
+        .handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set exact debug modifiers");
     disable
         .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
@@ -11803,7 +11803,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .expect("parse denied-debug/later-global collision")))
         .expect("install denied-debug/later-global collision");
     later_collision
-        .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
         .expect("denied debug callback falls through to later speed callback");
     assert!(!later_collision.engine.debug_mode());
     assert_eq!(later_collision.frame_skip, 2);
@@ -11820,11 +11820,11 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .expect("parse rebound debug keys")))
         .expect("install rebound debug keys");
     rebound
-        .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
         .expect("rebound debug mode key");
     assert!(rebound.engine.debug_mode());
     rebound
-        .handle_key(VirtualKeyCode::H, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyH, ElementState::Pressed)
         .expect("rebound vertex key");
     assert!(rebound.graphics.debug_draw_flags().show_vertices);
 
@@ -11838,7 +11838,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .expect("parse player/debug collision")))
         .expect("install player/debug collision");
     player_collision
-        .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
         .expect("PRIO_PlrControl owns the debug collision");
     assert!(!player_collision.engine.debug_mode());
     assert!(player_collision.runtime_flash_message.is_none());
@@ -11859,7 +11859,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
         .options
         .sound_enabled;
     global_collision
-        .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
         .expect("earlier SoundToggle owns the collision");
     assert_eq!(
         global_collision
@@ -11876,7 +11876,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
     let mut game_over = new_game_over_keyboard_app();
     game_over.engine.set_debug_mode(true);
     game_over
-        .handle_modifiers_changed(ModifiersState::CTRL)
+        .handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set Ctrl+F8 under game over");
     game_over
         .handle_key(VirtualKeyCode::F8, ElementState::Pressed)

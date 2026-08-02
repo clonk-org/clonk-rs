@@ -51,7 +51,7 @@ clonk-resources = { path = "../clonk-resources" }
 clonk-script = { path = "../clonk-script" }
 clonk-update = { path = "../clonk-update" }
 clonk-update-net = { path = "../clonk-update-net" }
-pixels = "0.13"
+pixels = "0.17"
 rfd = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -59,8 +59,8 @@ sha1 = "0.10"
 strsim = "0.11"
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.32", features = ["rt-multi-thread", "sync", "time", "net"] }
-raw-window-handle = "0.5"
-winit = "0.28"
+raw-window-handle = "0.6"
+winit = "0.30"
 tracing = "0.1"
 parking_lot = "0.12"
 png = "0.17"
@@ -91,7 +91,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 zbus = { version = "4.4", default-features = false, features = ["async-io"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.54", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Globalization", "Win32_System_Console", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Shell"] }
+windows = { version = "0.54", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Globalization", "Win32_System_Console", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_TextServices"] }
 
 [dev-dependencies]
 # The app test suite drives NetworkManager and the object-menu parity mutator

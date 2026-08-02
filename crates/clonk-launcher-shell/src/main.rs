@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, LineWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use arboard::Clipboard;
@@ -30,62 +31,312 @@ use clonk_platform::AppPaths;
 use pixels::{Pixels, SurfaceTexture};
 use rfd::FileDialog;
 use serde::Serialize;
+use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{
-    ElementState, Event, KeyboardInput, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent,
-};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Window, WindowBuilder};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, TouchPhase, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::window::{Window, WindowId};
 
 fn main() -> Result<()> {
     clonk_logging::init();
     clonk_logging::install_panic_hook();
 
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Clonk Rust Launcher")
-        // The launcher is a product window like any other; without this it
-        // carried whatever default the platform hands an iconless window.
-        .with_window_icon(window_icon())
-        .with_inner_size(LogicalSize::new(960.0, 640.0))
-        .build(&event_loop)
-        .context("failed to create launcher window")?;
+    let event_loop = EventLoop::new().context("failed to create launcher event loop")?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+    let mut shell = LauncherShell::default();
+    event_loop
+        .run_app(&mut shell)
+        .context("launcher event loop failed")?;
+    shell.finish()
+}
 
-    let size = window.inner_size();
-    let (initial_width, initial_height) = enforce_min_size(size);
-    let surface_texture = SurfaceTexture::new(initial_width, initial_height, &window);
-    let mut pixels = Pixels::new(initial_width, initial_height, surface_texture)
-        .context("failed to create pixel framebuffer")?;
+#[derive(Default)]
+struct LauncherShell {
+    runtime: Option<LauncherRuntime>,
+    fatal_error: Option<anyhow::Error>,
+}
 
-    let mut app = LauncherApp::new(&window).context("failed to initialise launcher shell")?;
-    let window_id = window.id();
+impl LauncherShell {
+    fn initialize(event_loop: &ActiveEventLoop) -> Result<LauncherRuntime> {
+        let attributes = Window::default_attributes()
+            .with_title("Clonk Rust Launcher")
+            // The launcher is a product window like any other; without this it
+            // carried whatever default the platform hands an iconless window.
+            .with_window_icon(window_icon())
+            .with_inner_size(LogicalSize::new(960.0, 640.0));
+        let window = Arc::new(
+            event_loop
+                .create_window(attributes)
+                .context("failed to create launcher window")?,
+        );
 
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::NewEvents(_) => control_flow.set_wait(),
-        Event::WindowEvent {
-            window_id: id,
-            event,
-        } if id == window_id => {
-            if let Err(err) = app.handle_window_event(&mut pixels, event, control_flow) {
-                tracing::error!(error = ?err, "launcher shell encountered an error");
-                control_flow.set_exit();
+        let size = window.inner_size();
+        let (initial_width, initial_height) = enforce_min_size(size);
+        let surface_texture =
+            SurfaceTexture::new(initial_width, initial_height, Arc::clone(&window));
+        let pixels: Pixels<'static> = Pixels::new(initial_width, initial_height, surface_texture)
+            .context("failed to create pixel framebuffer")?;
+        let app = LauncherApp::new(&window).context("failed to initialise launcher shell")?;
+
+        let mut runtime = LauncherRuntime {
+            window_focused: window.has_focus(),
+            window,
+            pixels: Some(pixels),
+            app,
+            ime_allowed: false,
+            surface_rebuild: SurfaceRebuildState::default(),
+            surface_retry_at: None,
+        };
+        runtime.sync_report_search_ime();
+        Ok(runtime)
+    }
+
+    fn exit_after_initialization_error(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        error: anyhow::Error,
+    ) {
+        tracing::error!(error = ?error, "failed to initialize launcher shell");
+        self.fatal_error.get_or_insert(error);
+        event_loop.exit();
+    }
+
+    fn finish(self) -> Result<()> {
+        self.fatal_error.map_or(Ok(()), Err)
+    }
+}
+
+impl ApplicationHandler for LauncherShell {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.runtime.is_some() || self.fatal_error.is_some() {
+            return;
+        }
+        match Self::initialize(event_loop) {
+            Ok(runtime) => self.runtime = Some(runtime),
+            Err(error) => self.exit_after_initialization_error(event_loop, error),
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(runtime) = self
+            .runtime
+            .as_mut()
+            .filter(|runtime| runtime.window.id() == window_id)
+        else {
+            return;
+        };
+        if let Err(error) = runtime.handle_window_event(event_loop, event) {
+            tracing::error!(error = ?error, "launcher shell encountered an error");
+            self.fatal_error.get_or_insert(error);
+            event_loop.exit();
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            match launcher_redraw_action(Instant::now(), runtime.surface_retry_at) {
+                LauncherRedrawAction::Request => {
+                    runtime.surface_retry_at = None;
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                    runtime.window.request_redraw();
+                }
+                LauncherRedrawAction::WaitUntil(retry_at) => {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(retry_at));
+                }
             }
         }
-        Event::MainEventsCleared => window.request_redraw(),
-        Event::RedrawRequested(id) if id == window_id => {
-            if let Err(err) = app.render(pixels.frame_mut()) {
-                tracing::error!(error = ?err, "failed to render launcher UI");
-                control_flow.set_exit();
-                return;
-            }
-            if let Err(err) = pixels.render() {
-                tracing::error!(error = ?err, "failed to swap buffers");
-                control_flow.set_exit();
-            }
+    }
+}
+
+struct LauncherRuntime {
+    window: Arc<Window>,
+    pixels: Option<Pixels<'static>>,
+    app: LauncherApp,
+    window_focused: bool,
+    ime_allowed: bool,
+    surface_rebuild: SurfaceRebuildState,
+    surface_retry_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LauncherPresentRecovery {
+    RebuildFramebuffer,
+    Report,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LauncherPresentOutcome {
+    Presented,
+    Skipped,
+}
+
+const fn launcher_present_outcome(render_callback_invoked: bool) -> LauncherPresentOutcome {
+    if render_callback_invoked {
+        LauncherPresentOutcome::Presented
+    } else {
+        LauncherPresentOutcome::Skipped
+    }
+}
+
+fn present_launcher_frame(
+    pixels: &Pixels<'_>,
+) -> std::result::Result<LauncherPresentOutcome, pixels::Error> {
+    let mut render_callback_invoked = false;
+    pixels.render_with(|encoder, surface_view, context| {
+        render_callback_invoked = true;
+        context.scaling_renderer.render(encoder, surface_view);
+        Ok(())
+    })?;
+    Ok(launcher_present_outcome(render_callback_invoked))
+}
+
+fn launcher_present_recovery(error: &pixels::Error) -> LauncherPresentRecovery {
+    if matches!(error, pixels::Error::SurfaceLost) {
+        LauncherPresentRecovery::RebuildFramebuffer
+    } else {
+        LauncherPresentRecovery::Report
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceRebuildSchedule {
+    Immediate,
+    Cadenced,
+}
+
+#[derive(Default)]
+struct SurfaceRebuildState {
+    prompt_spent: bool,
+}
+
+impl SurfaceRebuildState {
+    fn note_loss(&mut self) -> SurfaceRebuildSchedule {
+        if self.prompt_spent {
+            SurfaceRebuildSchedule::Cadenced
+        } else {
+            self.prompt_spent = true;
+            SurfaceRebuildSchedule::Immediate
         }
-        Event::LoopDestroyed => {}
-        _ => {}
-    })
+    }
+
+    fn note_presented(&mut self) {
+        self.prompt_spent = false;
+    }
+}
+
+const LOST_SURFACE_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LauncherRedrawAction {
+    Request,
+    WaitUntil(Instant),
+}
+
+fn launcher_redraw_action(now: Instant, surface_retry_at: Option<Instant>) -> LauncherRedrawAction {
+    surface_retry_at.filter(|retry_at| *retry_at > now).map_or(
+        LauncherRedrawAction::Request,
+        LauncherRedrawAction::WaitUntil,
+    )
+}
+
+fn replace_after_drop<T, E>(
+    current: &mut Option<T>,
+    build_replacement: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<(), E> {
+    drop(current.take());
+    *current = Some(build_replacement()?);
+    Ok(())
+}
+
+impl LauncherRuntime {
+    fn handle_window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        event: WindowEvent,
+    ) -> Result<()> {
+        if event == WindowEvent::RedrawRequested {
+            let pixels = self
+                .pixels
+                .as_mut()
+                .context("launcher framebuffer is unavailable")?;
+            self.app
+                .render(pixels.frame_mut())
+                .context("failed to render launcher UI")?;
+            return match present_launcher_frame(pixels) {
+                Ok(LauncherPresentOutcome::Presented) => {
+                    self.surface_rebuild.note_presented();
+                    self.surface_retry_at = None;
+                    Ok(())
+                }
+                Ok(LauncherPresentOutcome::Skipped) => {
+                    self.surface_retry_at = Some(Instant::now() + LOST_SURFACE_RETRY_DELAY);
+                    Ok(())
+                }
+                Err(error)
+                    if launcher_present_recovery(&error)
+                        == LauncherPresentRecovery::RebuildFramebuffer =>
+                {
+                    let schedule = self.surface_rebuild.note_loss();
+                    tracing::warn!("launcher surface was lost; rebuilding its framebuffer");
+                    self.rebuild_framebuffer()?;
+                    match schedule {
+                        SurfaceRebuildSchedule::Immediate => self.window.request_redraw(),
+                        SurfaceRebuildSchedule::Cadenced => {
+                            self.surface_retry_at = Some(Instant::now() + LOST_SURFACE_RETRY_DELAY);
+                        }
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(error).context("failed to swap launcher buffers"),
+            };
+        }
+        if let WindowEvent::Focused(focused) = &event {
+            self.window_focused = *focused;
+        }
+        let result = self.pixels.as_mut().map_or_else(
+            || Err(anyhow!("launcher framebuffer is unavailable")),
+            |pixels| self.app.handle_window_event(pixels, event, event_loop),
+        );
+        self.sync_report_search_ime();
+        result
+    }
+
+    fn rebuild_framebuffer(&mut self) -> Result<()> {
+        let prior_frame = self
+            .pixels
+            .as_ref()
+            .context("launcher framebuffer is unavailable")?
+            .frame()
+            .to_vec();
+        let (surface_width, surface_height) = enforce_min_size(self.window.inner_size());
+        let buffer_width = self.app.surface.width().max(1);
+        let buffer_height = self.app.surface.height().max(1);
+        replace_after_drop(&mut self.pixels, || {
+            let surface_texture =
+                SurfaceTexture::new(surface_width, surface_height, Arc::clone(&self.window));
+            let mut replacement = Pixels::new(buffer_width, buffer_height, surface_texture)
+                .context("failed to rebuild launcher framebuffer")?;
+            if replacement.frame().len() == prior_frame.len() {
+                replacement.frame_mut().copy_from_slice(&prior_frame);
+            }
+            Ok(replacement)
+        })
+    }
+
+    fn sync_report_search_ime(&mut self) {
+        let allowed =
+            should_enable_report_search_ime(self.window_focused, self.app.report_search.editing());
+        if allowed != self.ime_allowed {
+            self.window.set_ime_allowed(allowed);
+            self.ime_allowed = allowed;
+        }
+    }
 }
 
 /// Side length of the launcher's window icon, matching the game window's
@@ -103,6 +354,18 @@ fn enforce_min_size(size: PhysicalSize<u32>) -> (u32, u32) {
     let width = size.width.max(1);
     let height = size.height.max(1);
     (width, height)
+}
+
+fn should_enable_report_search_ime(window_focused: bool, report_search_editing: bool) -> bool {
+    window_focused && report_search_editing
+}
+
+/// Accept composed text while excluding shortcut keystrokes. Alt is retained
+/// because Option and AltGr composition legitimately carry it; AltGr also
+/// carries Control. IME commits bypass this keyboard-only policy.
+fn report_search_key_text_allowed(modifiers: ModifiersState) -> bool {
+    !modifiers.contains(ModifiersState::SUPER)
+        && (!modifiers.contains(ModifiersState::CONTROL) || modifiers.contains(ModifiersState::ALT))
 }
 
 /// A scale factor that can safely divide layout geometry.
@@ -476,6 +739,7 @@ struct LauncherApp {
     providers: FirstPartyProviders,
     /// Pointer position in *logical* GUI coordinates.
     pointer_position: Option<GuiPoint>,
+    keyboard_modifiers: ModifiersState,
     report_search: ReportSearchController,
 }
 
@@ -524,6 +788,7 @@ impl LauncherApp {
             preferences,
             providers,
             pointer_position: None,
+            keyboard_modifiers: ModifiersState::empty(),
             report_search: ReportSearchController::default(),
         };
         app.refresh_state()
@@ -536,23 +801,18 @@ impl LauncherApp {
     fn handle_window_event(
         &mut self,
         pixels: &mut Pixels,
-        event: WindowEvent<'_>,
-        control_flow: &mut ControlFlow,
+        event: WindowEvent,
+        event_loop: &ActiveEventLoop,
     ) -> Result<()> {
         match event {
             WindowEvent::CloseRequested => {
-                control_flow.set_exit();
+                event_loop.exit();
             }
             WindowEvent::Resized(size) => {
                 self.handle_resize(size, pixels)?;
             }
-            WindowEvent::ScaleFactorChanged {
-                scale_factor,
-                new_inner_size,
-            } => {
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale_factor = scale_factor as f32;
-                let size = *new_inner_size;
-                self.handle_resize(size, pixels)?;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let logical = physical_to_logical_point(position.x, position.y, self.scale_factor);
@@ -574,21 +834,31 @@ impl LauncherApp {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { input, .. } => {
-                if self.handle_keyboard_input(&input)? {
+            WindowEvent::KeyboardInput { event, .. } => {
+                if self.handle_keyboard_input(&event)? {
                     return Ok(());
                 }
-                if let Some(key) = input.virtual_keycode.and_then(map_key_code) {
-                    let event = match input.state {
+                if let Some(key) = map_key_code(&event.logical_key) {
+                    let gui_event = match event.state {
                         ElementState::Pressed => GuiEvent::KeyDown { key },
                         ElementState::Released => GuiEvent::KeyUp { key },
                     };
-                    self.dispatch_gui_event(event)?;
+                    self.dispatch_gui_event(gui_event)?;
+                }
+                if event.state == ElementState::Pressed
+                    && report_search_key_text_allowed(self.keyboard_modifiers)
+                {
+                    for ch in event.text.as_deref().into_iter().flat_map(str::chars) {
+                        self.handle_received_character(ch)?;
+                    }
                 }
             }
-            WindowEvent::ReceivedCharacter(ch) => {
-                if self.handle_received_character(ch)? {
-                    return Ok(());
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.keyboard_modifiers = modifiers.state();
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                for ch in text.chars() {
+                    self.handle_received_character(ch)?;
                 }
             }
             WindowEvent::Touch(touch) => {
@@ -617,6 +887,7 @@ impl LauncherApp {
             }
             WindowEvent::Focused(false) => {
                 self.pointer_position = None;
+                self.keyboard_modifiers = ModifiersState::empty();
             }
             WindowEvent::Focused(true) => {
                 if let Err(err) = self.refresh_state() {
@@ -629,18 +900,7 @@ impl LauncherApp {
             WindowEvent::DroppedFile(_)
             | WindowEvent::HoveredFile(_)
             | WindowEvent::HoveredFileCancelled => {}
-            WindowEvent::ThemeChanged(_)
-            | WindowEvent::ModifiersChanged(_)
-            | WindowEvent::MouseWheel { .. }
-            | WindowEvent::Ime(_)
-            | WindowEvent::TouchpadPressure { .. }
-            | WindowEvent::AxisMotion { .. }
-            | WindowEvent::TouchpadMagnify { .. }
-            | WindowEvent::TouchpadRotate { .. }
-            | WindowEvent::SmartMagnify { .. }
-            | WindowEvent::Occluded(_)
-            | WindowEvent::Moved(_)
-            | WindowEvent::Destroyed => {}
+            _ => {}
         }
         Ok(())
     }
@@ -879,39 +1139,36 @@ impl LauncherApp {
         self.process_response(response)
     }
 
-    fn handle_keyboard_input(&mut self, input: &KeyboardInput) -> Result<bool> {
+    fn handle_keyboard_input(&mut self, input: &KeyEvent) -> Result<bool> {
         if input.state != ElementState::Pressed {
             return Ok(false);
         }
-        let Some(key) = input.virtual_keycode else {
-            return Ok(false);
-        };
-        match key {
-            VirtualKeyCode::Escape => {
+        match &input.logical_key {
+            Key::Named(NamedKey::Escape) => {
                 if self.report_search.editing() || self.report_search.is_active() {
                     self.clear_report_search()?;
                     return Ok(true);
                 }
             }
-            VirtualKeyCode::Return => {
+            Key::Named(NamedKey::Enter) => {
                 if self.report_search.editing() {
                     self.finish_report_search_editing()?;
                     return Ok(true);
                 }
             }
-            VirtualKeyCode::Back => {
+            Key::Named(NamedKey::Backspace) => {
                 if self.report_search.editing() {
                     self.backspace_report_search()?;
                     return Ok(true);
                 }
             }
-            VirtualKeyCode::Up => {
+            Key::Named(NamedKey::ArrowUp) => {
                 if self.report_search.has_matches() {
                     self.previous_report_search_match()?;
                     return Ok(true);
                 }
             }
-            VirtualKeyCode::Down if self.report_search.has_matches() => {
+            Key::Named(NamedKey::ArrowDown) if self.report_search.has_matches() => {
                 self.next_report_search_match()?;
                 return Ok(true);
             }
@@ -3457,16 +3714,16 @@ fn draw_text(
     font.draw_text(surface, origin_x, origin_y, text, font_size.max(1.0), color);
 }
 
-fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
+fn map_key_code(code: &Key) -> Option<KeyCode> {
     match code {
-        VirtualKeyCode::Return => Some(KeyCode::Enter),
-        VirtualKeyCode::Escape => Some(KeyCode::Escape),
-        VirtualKeyCode::Space => Some(KeyCode::Space),
-        VirtualKeyCode::Tab => Some(KeyCode::Tab),
-        VirtualKeyCode::Up => Some(KeyCode::Up),
-        VirtualKeyCode::Down => Some(KeyCode::Down),
-        VirtualKeyCode::Left => Some(KeyCode::Left),
-        VirtualKeyCode::Right => Some(KeyCode::Right),
+        Key::Named(NamedKey::Enter) => Some(KeyCode::Enter),
+        Key::Named(NamedKey::Escape) => Some(KeyCode::Escape),
+        Key::Named(NamedKey::Space) => Some(KeyCode::Space),
+        Key::Named(NamedKey::Tab) => Some(KeyCode::Tab),
+        Key::Named(NamedKey::ArrowUp) => Some(KeyCode::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(KeyCode::Down),
+        Key::Named(NamedKey::ArrowLeft) => Some(KeyCode::Left),
+        Key::Named(NamedKey::ArrowRight) => Some(KeyCode::Right),
         _ => None,
     }
 }
@@ -3574,6 +3831,157 @@ mod tests {
         assert!(
             window_icon().is_some(),
             "winit rejected the launcher's product icon"
+        );
+    }
+
+    #[test]
+    fn named_winit_keys_keep_the_launcher_gui_mapping() {
+        let mappings = [
+            (NamedKey::Enter, KeyCode::Enter),
+            (NamedKey::Escape, KeyCode::Escape),
+            (NamedKey::Space, KeyCode::Space),
+            (NamedKey::Tab, KeyCode::Tab),
+            (NamedKey::ArrowUp, KeyCode::Up),
+            (NamedKey::ArrowDown, KeyCode::Down),
+            (NamedKey::ArrowLeft, KeyCode::Left),
+            (NamedKey::ArrowRight, KeyCode::Right),
+        ];
+        for (winit_key, gui_key) in mappings {
+            assert_eq!(map_key_code(&Key::Named(winit_key)), Some(gui_key));
+        }
+        assert_eq!(map_key_code(&Key::Character("x".into())), None);
+    }
+
+    #[test]
+    fn ime_is_allowed_only_for_focused_report_search_editing() {
+        assert!(!should_enable_report_search_ime(false, false));
+        assert!(!should_enable_report_search_ime(false, true));
+        assert!(!should_enable_report_search_ime(true, false));
+        assert!(should_enable_report_search_ime(true, true));
+    }
+
+    #[test]
+    fn report_search_key_text_accepts_composition_but_rejects_shortcuts() {
+        for (modifiers, expected) in [
+            (ModifiersState::empty(), true),
+            (ModifiersState::SHIFT, true),
+            (ModifiersState::ALT, true),
+            (ModifiersState::ALT | ModifiersState::SHIFT, true),
+            (ModifiersState::CONTROL, false),
+            (ModifiersState::CONTROL | ModifiersState::SHIFT, false),
+            (ModifiersState::CONTROL | ModifiersState::ALT, true),
+            (
+                ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
+                true,
+            ),
+            (ModifiersState::SUPER, false),
+            (ModifiersState::SUPER | ModifiersState::ALT, false),
+            (
+                ModifiersState::SUPER | ModifiersState::CONTROL | ModifiersState::ALT,
+                false,
+            ),
+        ] {
+            assert_eq!(report_search_key_text_allowed(modifiers), expected);
+        }
+    }
+
+    #[test]
+    fn finish_returns_a_retained_runtime_error() {
+        let shell = LauncherShell {
+            fatal_error: Some(anyhow!("failed to swap launcher buffers")),
+            ..LauncherShell::default()
+        };
+
+        let error = shell
+            .finish()
+            .expect_err("the runtime error must survive event-loop shutdown");
+        assert_eq!(error.to_string(), "failed to swap launcher buffers");
+    }
+
+    #[test]
+    fn only_a_lost_launcher_surface_rebuilds_its_framebuffer() {
+        assert_eq!(
+            launcher_present_recovery(&pixels::Error::SurfaceLost),
+            LauncherPresentRecovery::RebuildFramebuffer
+        );
+        assert_eq!(
+            launcher_present_recovery(&pixels::Error::Validation),
+            LauncherPresentRecovery::Report
+        );
+    }
+
+    #[test]
+    fn launcher_builds_a_replacement_only_after_dropping_the_previous_surface() {
+        struct DropProbe<'a>(&'a std::cell::Cell<bool>);
+
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let previous_dropped = std::cell::Cell::new(false);
+        let replacement_dropped = std::cell::Cell::new(false);
+        let mut surface = Some(DropProbe(&previous_dropped));
+        replace_after_drop(&mut surface, || {
+            assert!(previous_dropped.get());
+            Ok::<_, std::convert::Infallible>(DropProbe(&replacement_dropped))
+        })
+        .expect("replace the launcher surface");
+
+        assert!(surface.is_some());
+        assert!(!replacement_dropped.get());
+
+        let failed_dropped = std::cell::Cell::new(false);
+        let mut failed_surface = Some(DropProbe(&failed_dropped));
+        let result = replace_after_drop(&mut failed_surface, || {
+            Err::<DropProbe<'_>, _>("replacement failed")
+        });
+        assert_eq!(result, Err("replacement failed"));
+        assert!(failed_dropped.get());
+        assert!(failed_surface.is_none());
+    }
+
+    #[test]
+    fn launcher_requires_a_presented_frame_before_another_surface_rebuild() {
+        let mut recovery = SurfaceRebuildState::default();
+        assert_eq!(recovery.note_loss(), SurfaceRebuildSchedule::Immediate);
+        assert_eq!(
+            recovery.note_loss(),
+            SurfaceRebuildSchedule::Cadenced,
+            "a skipped frame must not replenish the prompt redraw"
+        );
+        recovery.note_presented();
+        assert_eq!(recovery.note_loss(), SurfaceRebuildSchedule::Immediate);
+    }
+
+    #[test]
+    fn launcher_distinguishes_a_skipped_surface_acquisition_from_presentation() {
+        assert_eq!(
+            launcher_present_outcome(false),
+            LauncherPresentOutcome::Skipped
+        );
+        assert_eq!(
+            launcher_present_outcome(true),
+            LauncherPresentOutcome::Presented
+        );
+    }
+
+    #[test]
+    fn launcher_waits_before_a_cadenced_surface_retry() {
+        let now = Instant::now();
+        let retry_at = now + LOST_SURFACE_RETRY_DELAY;
+        assert_eq!(
+            launcher_redraw_action(now, Some(retry_at)),
+            LauncherRedrawAction::WaitUntil(retry_at)
+        );
+        assert_eq!(
+            launcher_redraw_action(retry_at, Some(retry_at)),
+            LauncherRedrawAction::Request
+        );
+        assert_eq!(
+            launcher_redraw_action(now, None),
+            LauncherRedrawAction::Request
         );
     }
 

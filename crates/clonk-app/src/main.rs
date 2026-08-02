@@ -40,7 +40,7 @@ mod gamepad;
 use clonk_app_menus::ingame_menu;
 use clonk_app_netplay::host_game_resource_sources;
 use clonk_app_render::gpu_renderer;
-use raw_window_handle::HasRawWindowHandle;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 mod input;
 mod local_control;
 use clonk_app_netplay::network;
@@ -128,7 +128,7 @@ use std::ops::ControlFlow as OpsControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+    atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering as AtomicOrdering},
     mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     Arc, Mutex, OnceLock,
 };
@@ -321,13 +321,111 @@ use startup_player_files::{
 use strsim::damerau_levenshtein;
 use time::{macros::format_description, OffsetDateTime};
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
+use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
-    ElementState, Event, KeyboardInput, ModifiersState, MouseButton, MouseScrollDelta, TouchPhase,
-    VirtualKeyCode, WindowEvent,
+    DeviceEvent, DeviceId, ElementState, Event, MouseButton, MouseScrollDelta, StartCause,
+    TouchPhase, WindowEvent,
 };
-use winit::event_loop::{ControlFlow, EventLoopBuilder};
-use winit::window::{Fullscreen, UserAttentionType, Window, WindowBuilder};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode as VirtualKeyCode, ModifiersState};
+use winit::window::{Fullscreen, UserAttentionType, Window, WindowId};
+
+type RuntimeEventHandler = Box<dyn FnMut(Event<NetworkEventWake>, &ActiveEventLoop)>;
+type RuntimeInitializer = Box<dyn FnOnce(&ActiveEventLoop) -> Result<RuntimeEventHandler>>;
+
+/// Bridges the legacy single-event callback onto winit's lifecycle API.
+///
+/// Window and surface creation deliberately happen in the first `resumed`
+/// callback. Besides being winit's portable lifecycle contract, that keeps the
+/// macOS fullscreen and Dock setup after AppKit has finished launching.
+struct RuntimeApplication {
+    initializer: Option<RuntimeInitializer>,
+    handler: Option<RuntimeEventHandler>,
+    startup_error: Option<anyhow::Error>,
+}
+
+impl RuntimeApplication {
+    fn new(initializer: RuntimeInitializer) -> Self {
+        Self {
+            initializer: Some(initializer),
+            handler: None,
+            startup_error: None,
+        }
+    }
+
+    fn initialize(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(initializer) = self.initializer.take() else {
+            return;
+        };
+        match initializer(event_loop) {
+            Ok(handler) => self.handler = Some(handler),
+            Err(error) => {
+                self.startup_error = Some(error);
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn dispatch(&mut self, event: Event<NetworkEventWake>, event_loop: &ActiveEventLoop) {
+        if let Some(handler) = self.handler.as_mut() {
+            handler(event, event_loop);
+        }
+    }
+
+    fn finish(self) -> Result<()> {
+        self.startup_error.map_or(Ok(()), Err)
+    }
+}
+
+impl ApplicationHandler<NetworkEventWake> for RuntimeApplication {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        self.dispatch(Event::NewEvents(cause), event_loop);
+    }
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.initialize(event_loop);
+        self.dispatch(Event::Resumed, event_loop);
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: NetworkEventWake) {
+        self.dispatch(Event::UserEvent(event), event_loop);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        self.dispatch(Event::WindowEvent { window_id, event }, event_loop);
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        self.dispatch(Event::DeviceEvent { device_id, event }, event_loop);
+    }
+
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        self.dispatch(Event::Suspended, event_loop);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.dispatch(Event::AboutToWait, event_loop);
+    }
+
+    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        self.dispatch(Event::LoopExiting, event_loop);
+    }
+
+    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+        self.dispatch(Event::MemoryWarning, event_loop);
+    }
+}
 
 fn main() -> Result<()> {
     let result = run();
@@ -601,609 +699,898 @@ fn run() -> Result<()> {
         })?;
     }
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
-    // Built before the window size is resolved: the event loop is what can be
-    // asked about the monitors the window will open on.
-    let event_loop = EventLoopBuilder::<NetworkEventWake>::with_user_event().build();
-    if let Some(scale_factor) = event_loop
-        .primary_monitor()
-        .or_else(|| event_loop.available_monitors().next())
-        .map(|monitor| monitor.scale_factor())
-    {
-        if display_options.apply_first_run_display_scale(scale_factor) {
-            tracing::info!(
-                scale_factor,
-                scale_percent = display_options.scale_percent(),
-                "seeded the first-run application scale from the display density"
-            );
-        }
-    }
-    let (initial_width, initial_height) = if classic.console {
-        // C4Console's GTK shell uses a 320x320 native-pixel default and never
-        // inherits the fullscreen game window configuration.
-        display_options.mode = DisplayMode::Window;
-        display_options.maximized = false;
-        // `C4Console::RestorePosition` applies the console's own `Console/Main`
-        // slot right after the window is created (C4Console.cpp:296-305). It
-        // carries a position only — the 320x320 default size stands, and the
-        // game window's geometry is neither read nor written.
-        display_options.position =
-            load_console_window_position(app_paths.as_deref()).and_then(|placement| {
-                use crate::console_window_position::ConsoleWindowPlacement;
-                if matches!(
-                    placement,
-                    ConsoleWindowPlacement::Maximized | ConsoleWindowPlacement::Minimized
-                ) {
-                    // C++ shows the window zoomed or iconic rather than moving
-                    // it (StdRegistry.cpp:310-313); the port has no console
-                    // equivalent, so it falls back to platform placement.
-                    tracing::debug!("ignoring a non-positional console window placement");
-                }
-                placement.position()
-            });
-        (320, 320)
-    } else {
-        display_options
-            .checked_loader_actual_size()
-            .map_err(|detail| {
-                anyhow::Error::new(report_classic_parity_boundary(
-                    ClassicParityBoundary::LoaderScreen {
-                        context: "startup loading",
-                        detail,
-                    },
-                ))
-            })?
-    };
-    let desktop_notifier = match DesktopNotifier::initialize() {
-        Ok(notifier) => notifier,
-        Err(error) => {
-            tracing::warn!(%error, "failed to initialize desktop notification system");
-            None
-        }
-    };
-    // The stored resolution is in output pixels (ResX*Scale), like the C++
-    // window setup (C4Application.cpp:183).
-    let window = startup_window_builder(
-        &display_options,
-        PhysicalSize::new(initial_width, initial_height),
-    )
-    .build(&event_loop)
-    .context("failed to create application window")?;
-    // Past this point a failure is no longer a startup failure, so it is
-    // reported by the running application rather than a native dialog.
-    clonk_platform::startup_dialog::note_window_created();
-    // `C4Application::DoInit` registers the file classes in the graphical
-    // Windows build only, best-effort — C++ notes it "will only work if we have
-    // administrator rights" and ignores the result (C4Application.cpp:219-223).
-    #[cfg(windows)]
-    if !classic.console {
-        let registered = std::env::current_exe()
-            .ok()
-            .map(|module| {
-                clonk_platform::file_classes::register_file_classes(&module.to_string_lossy())
-            })
-            .unwrap_or(false);
-        if !registered {
-            tracing::debug!("could not register the Clonk file classes");
-        }
-    }
-    if classic.console {
-        window.set_title(native_window_title(true));
-    }
-    let mut display_sleep_inhibitor = DisplaySleepInhibitor::acquire();
-    if display_options.maximized && matches!(display_options.mode, DisplayMode::Window) {
-        window.set_maximized(true);
-    }
-
-    let size = enforce_min_size(window.inner_size());
-    let pixels = build_framebuffer(&window, size)?;
-    let mut retained_gpu_renderer = gpu_renderer::RetainedGpuRenderer::new(
-        pixels.device(),
-        pixels.queue(),
-        pixels.surface_texture_format(),
-    );
-    let renderer_config = load_native_config_bytes(app_paths.as_deref());
-    retained_gpu_renderer.set_mipmaps(configured_mipmaps(&renderer_config));
-    retained_gpu_renderer.set_smooth_landscape(configured_smooth_landscape(&renderer_config));
-    retained_gpu_renderer.set_shader_landscape(configured_shader_landscape(&renderer_config));
-    retained_gpu_renderer.set_landscape_detail(configured_landscape_detail(&renderer_config));
-
-    // The app lays out and renders at the GUI resolution; the presenter
-    // scales the finished frame to the window like the C++ engine scales
-    // its GUI output (C4Gui.cpp:461).
-    let presenter = clonk_scaling::FramePresenter::new(
-        if classic.console {
-            1.0
-        } else {
-            display_options.scale
-        },
-        size.width,
-        size.height,
-    );
-    let (logical_width, logical_height) = presenter.logical_size();
-
-    let mut app = GameApp::new(
-        logical_width,
-        logical_height,
-        audio_options,
-        app_paths.as_deref(),
-        runtime,
-    )
-    .context("failed to initialise app state")?;
-    let update_failure_prefix = app.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.");
-    if let Some(message) = update_download::update_notice_message(
-        &update_failure_prefix,
-        update_notice_detail.as_deref(),
-    ) {
-        let caption = app.update_check_caption();
-        app.show_update_notice(message, caption)?;
-    }
-    app.console_mode = classic.console;
-    app.console_log_capture = console_log_capture;
-    app.game_log_capture = Some(game_log_capture);
-    if classic.console {
-        arm_configured_engine_debug_mode(&mut app.engine, app_paths.as_deref(), true);
-    }
-    app.window_active = initial_window_active();
-    // C++ only has an `ITaskbarList3` once `CStdWindow` owns a handle, so the
-    // real sink replaces the no-op one here rather than in `GameApp::new`
-    // (M10-P4-L079). Everything but Windows keeps the no-op, matching the SDL
-    // and X11 `CStdWindow` implementations, which are no-ops there too.
-    //
-    // The handle is extracted unconditionally so this compiles and is checked
-    // on every host: `RawWindowHandle::Win32` exists on all platforms, and only
-    // the sink construction is target-gated. `clonk-app` cannot be
-    // cross-checked for Windows (stacker's C build needs an MSVC toolchain), so
-    // keeping the untestable part to two lines is deliberate.
-    let taskbar_window = match window.raw_window_handle() {
-        raw_window_handle::RawWindowHandle::Win32(handle) => Some(handle.hwnd as isize),
-        _ => None,
-    };
-    #[cfg(windows)]
-    if let Some(handle) = taskbar_window {
-        // SAFETY: winit initialised COM on this thread and owns the window for
-        // the rest of the process.
-        if let Some(sink) =
-            unsafe { clonk_platform::taskbar_progress::Win32TaskbarProgress::new(handle) }
-        {
-            app.taskbar_progress.replace_sink(Box::new(sink));
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = taskbar_window;
-
-    // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
-    let render_inactive_mask = load_render_inactive_mask(app.app_paths.as_ref());
-    // `GameApp::new` resolves the refresh ceiling before any window exists, so
-    // the panel period can only be substituted here (opt-in; see
-    // `configured_smooth_presentation`).
-    app.display_refresh_period_ms = display_refresh_period_ms(&window);
-    app.startup_refresh_delay_ms = effective_max_refresh_delay_ms(
-        &load_native_config_bytes(app.app_paths.as_ref()),
-        app.display_refresh_period_ms,
-    );
-    app.set_display_mode(display_options.mode);
-    app.graphics
-        .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
-    app.configure_native_startup_fonts(presenter.scale(), display_options.point_filtering);
-    app.apply_classic_command_line(&classic)?;
-    app.auto_start_sandbox = cli.sandbox;
-    app.launch_classic_command_line_join()
-        .context("failed to start command-line network join")?;
-    app.launch_classic_command_line_scenario()
-        .context("failed to start command-line scenario")?;
+    let event_loop = EventLoop::<NetworkEventWake>::with_user_event()
+        .build()
+        .context("failed to create application event loop")?;
     // winit's macOS proxy is Send but not Sync. The network sender can be
     // cloned across worker tasks, so serialize proxy access behind a mutex.
     let network_event_proxy = Arc::new(Mutex::new(event_loop.create_proxy()));
-    app.install_network_event_waker(Arc::new(move |wake| {
-        if let Ok(proxy) = network_event_proxy.lock() {
-            let _ = proxy.send_event(wake);
-        }
-    }));
-    let mut console_commands = classic
-        .console
-        .then(spawn_console_stdin_reader)
-        .transpose()?;
-
-    let mut deferred_fullscreen_retry_at = None;
-    let mut previous_instant = Instant::now();
-    let mut accumulator = Duration::ZERO;
-    let mut game_clock_accumulator = Duration::ZERO;
-    let mut frame_schedule = frame_schedule_for_mode(
-        app.mode,
-        app.engine.game_tick_delay_ms(),
-        app.engine.game_tick_delay_revision(),
-        app.refresh_ceilings(),
-    );
-    let mut next_graphics_deadline = previous_instant + frame_schedule.refresh_interval;
-    let mut automatic_frame_skip = AutomaticFrameSkip::default();
-    let mut render_floor = RenderFloor::default();
-    let mut presentation_detail = PresentationDetailGovernor::default();
-    let mut presentation_benchmark = presentation_benchmark_from_env();
-    let presentation_benchmark_asserts_native_tick = presentation_benchmark_asserts_native_tick();
-    let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
-
-    // The shell is a registry record like every other developer window, so a
-    // WindowId arriving from winit resolves to a purpose before it is routed
-    // (M10-P4-L081). It is the only record until the console opens its own.
-    let mut developer_windows: developer_windows::DeveloperWindows<developer_host::DeveloperHost> =
-        developer_windows::DeveloperWindows::new();
-    developer_windows.insert(
-        developer_windows::SHELL_WINDOW,
-        developer_windows::HostPurpose::Shell,
-        developer_host::DeveloperHost::Shell(shell_window_host::ShellWindowHost::new(
-            window,
-            pixels,
-            presenter,
-            retained_gpu_renderer,
-        )),
-    );
-    // The next viewport window's key. `SHELL_WINDOW` is 0, so console windows
-    // start above it; the value is a registry key, not a viewport identity.
-    let mut next_developer_window_key = 1u64;
-    // Set when the shell takes a graphics pass; consumed on the next event
-    // loop entry, before the shell record is borrowed.
-    let mut viewport_redraw_pending = false;
-
-    let mut dock_tile_attached = false;
-    event_loop.run(move |event, event_target, control_flow| {
-        // Before the window borrow below, because the Dock tile belongs to the
-        // application rather than to any one window.
-        if dock_icon::should_attach_dock_tile(&event, dock_tile_attached) {
-            dock_icon::set_dock_icon();
-            dock_tile_attached = true;
-        }
-        // `C4GraphicsSystem` opens and closes a viewport's window inside
-        // Create/CloseViewport (`C4GraphicsSystem.cpp:229-240,205-224`). winit
-        // can only create a window from the event loop's target, so the same
-        // decisions are taken here instead, before the shell record is
-        // borrowed for the rest of the pass.
-        if app.console_mode && matches!(event, Event::MainEventsCleared) {
-            let scale = developer_windows
-                .shell_mut()
-                .and_then(developer_host::DeveloperHost::as_shell_mut)
-                .map_or(1.0, |shell| shell.presenter.scale());
-            console_viewport_windows::reconcile_console_viewport_windows(
-                &mut app,
-                &mut developer_windows,
-                &mut next_developer_window_key,
-                scale,
-                event_target,
-            );
-        }
-        // Every viewport window redraws with the shell and only with it, the
-        // way `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
-        // viewport inside one graphics pass (`:167-169`). Redrawing them per
-        // event-loop pass instead would ignore the frame schedule, the
-        // automatic frame skip and the repaint floor, and spin.
-        if std::mem::take(&mut viewport_redraw_pending) {
-            for key in developer_windows.keys().collect::<Vec<_>>() {
-                if developer_windows
-                    .host(key)
-                    .and_then(developer_host::DeveloperHost::viewport_identity)
-                    .is_some()
-                {
-                    developer_windows.request_redraw(key);
-                }
+    let benchmark_exit_code = Arc::new(AtomicI32::new(0));
+    let event_handler_exit_code = Arc::clone(&benchmark_exit_code);
+    let initializer: RuntimeInitializer = Box::new(move |event_target| {
+        // The active event loop is the first portable point at which monitors can
+        // be queried and a native window plus render surface can be created.
+        if let Some(scale_factor) = event_target
+            .primary_monitor()
+            .or_else(|| event_target.available_monitors().next())
+            .map(|monitor| monitor.scale_factor())
+        {
+            if display_options.apply_first_run_display_scale(scale_factor) {
+                tracing::info!(
+                    scale_factor,
+                    scale_percent = display_options.scale_percent(),
+                    "seeded the first-run application scale from the display density"
+                );
             }
         }
-        // An event naming a viewport window is that window's alone. Resolving
-        // it before the shell destructure keeps the shell arms — all of which
-        // already guard on `window.id()` — exactly as they were.
-        if let Some(os_window) = console_viewport_windows::event_window_id(&event) {
-            if let Some(key) = developer_windows
-                .find_key(|host| host.window().id() == os_window)
-                .filter(|key| *key != developer_windows::SHELL_WINDOW)
+        let (initial_width, initial_height) = if classic.console {
+            // C4Console's GTK shell uses a 320x320 native-pixel default and never
+            // inherits the fullscreen game window configuration.
+            display_options.mode = DisplayMode::Window;
+            display_options.maximized = false;
+            // `C4Console::RestorePosition` applies the console's own `Console/Main`
+            // slot right after the window is created (C4Console.cpp:296-305). It
+            // carries a position only — the 320x320 default size stands, and the
+            // game window's geometry is neither read nor written.
+            display_options.position =
+                load_console_window_position(app_paths.as_deref()).and_then(|placement| {
+                    use crate::console_window_position::ConsoleWindowPlacement;
+                    if matches!(
+                        placement,
+                        ConsoleWindowPlacement::Maximized | ConsoleWindowPlacement::Minimized
+                    ) {
+                        // C++ shows the window zoomed or iconic rather than moving
+                        // it (StdRegistry.cpp:310-313); the port has no console
+                        // equivalent, so it falls back to platform placement.
+                        tracing::debug!("ignoring a non-positional console window placement");
+                    }
+                    placement.position()
+                });
+            (320, 320)
+        } else {
+            display_options
+                .checked_loader_actual_size()
+                .map_err(|detail| {
+                    anyhow::Error::new(report_classic_parity_boundary(
+                        ClassicParityBoundary::LoaderScreen {
+                            context: "startup loading",
+                            detail,
+                        },
+                    ))
+                })?
+        };
+        let desktop_notifier = match DesktopNotifier::initialize() {
+            Ok(notifier) => notifier,
+            Err(error) => {
+                tracing::warn!(%error, "failed to initialize desktop notification system");
+                None
+            }
+        };
+        // The stored resolution is in output pixels (ResX*Scale), like the C++
+        // window setup (C4Application.cpp:183).
+        let window = Arc::new(
+            event_target
+                .create_window(startup_window_attributes(
+                    &display_options,
+                    PhysicalSize::new(initial_width, initial_height),
+                ))
+                .context("failed to create application window")?,
+        );
+        // Past this point a failure is no longer a startup failure, so it is
+        // reported by the running application rather than a native dialog.
+        clonk_platform::startup_dialog::note_window_created();
+        // `C4Application::DoInit` registers the file classes in the graphical
+        // Windows build only, best-effort — C++ notes it "will only work if we have
+        // administrator rights" and ignores the result (C4Application.cpp:219-223).
+        #[cfg(windows)]
+        if !classic.console {
+            let registered = std::env::current_exe()
+                .ok()
+                .map(|module| {
+                    clonk_platform::file_classes::register_file_classes(&module.to_string_lossy())
+                })
+                .unwrap_or(false);
+            if !registered {
+                tracing::debug!("could not register the Clonk file classes");
+            }
+        }
+        if classic.console {
+            window.set_title(native_window_title(true));
+        }
+        let mut display_sleep_inhibitor = DisplaySleepInhibitor::acquire();
+        if display_options.maximized && matches!(display_options.mode, DisplayMode::Window) {
+            window.set_maximized(true);
+        }
+
+        let size = enforce_min_size(window.inner_size());
+        let pixels = build_framebuffer(&window, size)?;
+        let mut retained_gpu_renderer = gpu_renderer::RetainedGpuRenderer::new(
+            pixels.device(),
+            pixels.queue(),
+            pixels.surface_texture_format(),
+        );
+        let renderer_config = load_native_config_bytes(app_paths.as_deref());
+        retained_gpu_renderer.set_mipmaps(configured_mipmaps(&renderer_config));
+        retained_gpu_renderer.set_smooth_landscape(configured_smooth_landscape(&renderer_config));
+        retained_gpu_renderer.set_shader_landscape(configured_shader_landscape(&renderer_config));
+        retained_gpu_renderer.set_landscape_detail(configured_landscape_detail(&renderer_config));
+
+        // The app lays out and renders at the GUI resolution; the presenter
+        // scales the finished frame to the window like the C++ engine scales
+        // its GUI output (C4Gui.cpp:461).
+        let presenter = clonk_scaling::FramePresenter::new(
+            if classic.console {
+                1.0
+            } else {
+                display_options.scale
+            },
+            size.width,
+            size.height,
+        );
+        let (logical_width, logical_height) = presenter.logical_size();
+
+        let mut app = GameApp::new(
+            logical_width,
+            logical_height,
+            audio_options,
+            app_paths.as_deref(),
+            runtime,
+        )
+        .context("failed to initialise app state")?;
+        let update_failure_prefix =
+            app.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.");
+        if let Some(message) = update_download::update_notice_message(
+            &update_failure_prefix,
+            update_notice_detail.as_deref(),
+        ) {
+            let caption = app.update_check_caption();
+            app.show_update_notice(message, caption)?;
+        }
+        app.console_mode = classic.console;
+        app.console_log_capture = console_log_capture;
+        app.game_log_capture = Some(game_log_capture);
+        if classic.console {
+            arm_configured_engine_debug_mode(&mut app.engine, app_paths.as_deref(), true);
+        }
+        app.window_active = initial_window_active();
+        // C++ only has an `ITaskbarList3` once `CStdWindow` owns a handle, so the
+        // real sink replaces the no-op one here rather than in `GameApp::new`
+        // (M10-P4-L079). Everything but Windows keeps the no-op, matching the SDL
+        // and X11 `CStdWindow` implementations, which are no-ops there too.
+        //
+        // The handle is extracted unconditionally so this compiles and is checked
+        // on every host: `RawWindowHandle::Win32` exists on all platforms, and only
+        // the sink construction is target-gated. `clonk-app` cannot be
+        // cross-checked for Windows (stacker's C build needs an MSVC toolchain), so
+        // keeping the untestable part to two lines is deliberate.
+        let taskbar_window = window
+            .window_handle()
+            .ok()
+            .and_then(|handle| match handle.as_raw() {
+                RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                _ => None,
+            });
+        #[cfg(windows)]
+        if let Some(handle) = taskbar_window {
+            // SAFETY: winit initialised COM on this thread and owns the window for
+            // the rest of the process.
+            if let Some(sink) =
+                unsafe { clonk_platform::taskbar_progress::Win32TaskbarProgress::new(handle) }
             {
-                console_viewport_windows::handle_console_viewport_event(
-                    key,
-                    &event,
+                app.taskbar_progress.replace_sink(Box::new(sink));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = taskbar_window;
+
+        // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
+        let render_inactive_mask = load_render_inactive_mask(app.app_paths.as_ref());
+        // `GameApp::new` resolves the refresh ceiling before any window exists, so
+        // the panel period can only be substituted here (opt-in; see
+        // `configured_smooth_presentation`).
+        app.display_refresh_period_ms = display_refresh_period_ms(&window);
+        app.startup_refresh_delay_ms = effective_max_refresh_delay_ms(
+            &load_native_config_bytes(app.app_paths.as_ref()),
+            app.display_refresh_period_ms,
+        );
+        app.set_display_mode(display_options.mode);
+        app.graphics
+            .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
+        app.configure_native_startup_fonts(presenter.scale(), display_options.point_filtering);
+        app.apply_classic_command_line(&classic)?;
+        app.auto_start_sandbox = cli.sandbox;
+        app.launch_classic_command_line_join()
+            .context("failed to start command-line network join")?;
+        app.launch_classic_command_line_scenario()
+            .context("failed to start command-line scenario")?;
+        app.install_network_event_waker(Arc::new(move |wake| {
+            if let Ok(proxy) = network_event_proxy.lock() {
+                let _ = proxy.send_event(wake);
+            }
+        }));
+        let mut console_commands = classic
+            .console
+            .then(spawn_console_stdin_reader)
+            .transpose()?;
+
+        let mut deferred_fullscreen_retry_at = None;
+        let mut previous_instant = Instant::now();
+        let mut accumulator = Duration::ZERO;
+        let mut game_clock_accumulator = Duration::ZERO;
+        let mut frame_schedule = frame_schedule_for_mode(
+            app.mode,
+            app.engine.game_tick_delay_ms(),
+            app.engine.game_tick_delay_revision(),
+            app.refresh_ceilings(),
+        );
+        let mut next_graphics_deadline = previous_instant + frame_schedule.refresh_interval;
+        let mut automatic_frame_skip = AutomaticFrameSkip::default();
+        let mut render_floor = RenderFloor::default();
+        let mut presentation_detail = PresentationDetailGovernor::default();
+        let mut presentation_benchmark = presentation_benchmark_from_env();
+        let presentation_benchmark_asserts_native_tick =
+            presentation_benchmark_asserts_native_tick();
+        let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
+
+        // The shell is a registry record like every other developer window, so a
+        // WindowId arriving from winit resolves to a purpose before it is routed
+        // (M10-P4-L081). It is the only record until the console opens its own.
+        let mut developer_windows: developer_windows::DeveloperWindows<
+            developer_host::DeveloperHost,
+        > = developer_windows::DeveloperWindows::new();
+        developer_windows.insert(
+            developer_windows::SHELL_WINDOW,
+            developer_windows::HostPurpose::Shell,
+            developer_host::DeveloperHost::Shell(shell_window_host::ShellWindowHost::new(
+                window,
+                pixels,
+                presenter,
+                retained_gpu_renderer,
+            )),
+        );
+        // The next viewport window's key. `SHELL_WINDOW` is 0, so console windows
+        // start above it; the value is a registry key, not a viewport identity.
+        let mut next_developer_window_key = 1u64;
+        // Set when the shell takes a graphics pass; consumed on the next event
+        // loop entry, before the shell record is borrowed.
+        let mut viewport_redraw_pending = false;
+
+        let mut dock_tile_attached = false;
+        Ok(Box::new(move |event, event_target| {
+            // Before the window borrow below, because the Dock tile belongs to the
+            // application rather than to any one window.
+            if dock_icon::should_attach_dock_tile(&event, dock_tile_attached) {
+                dock_icon::set_dock_icon();
+                dock_tile_attached = true;
+            }
+            // `C4GraphicsSystem` opens and closes a viewport's window inside
+            // Create/CloseViewport (`C4GraphicsSystem.cpp:229-240,205-224`). winit
+            // can only create a window from the event loop's target, so the same
+            // decisions are taken here instead, before the shell record is
+            // borrowed for the rest of the pass.
+            if app.console_mode && matches!(event, Event::AboutToWait) {
+                let scale = developer_windows
+                    .shell_mut()
+                    .and_then(developer_host::DeveloperHost::as_shell_mut)
+                    .map_or(1.0, |shell| shell.presenter.scale());
+                console_viewport_windows::reconcile_console_viewport_windows(
                     &mut app,
                     &mut developer_windows,
+                    &mut next_developer_window_key,
+                    scale,
+                    event_target,
                 );
-                return;
             }
-        }
-        let shell_window_host::ShellWindowHost {
-            window,
-            pixels,
-            presenter,
-            renderer: retained_gpu_renderer,
-            ..
-        } = developer_windows
-            .shell_mut()
-            .expect("the console shell record lives for the whole process")
-            .as_shell_mut()
-            .expect("the reserved shell key holds the shell host");
-        match event {
-            Event::Resumed => {
-                if reconcile_deferred_fullscreen(window, display_options.mode) {
-                    deferred_fullscreen_retry_at =
-                        Some(Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
+            // Every viewport window redraws with the shell and only with it, the
+            // way `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
+            // viewport inside one graphics pass (`:167-169`). Redrawing them per
+            // event-loop pass instead would ignore the frame schedule, the
+            // automatic frame skip and the repaint floor, and spin.
+            if std::mem::take(&mut viewport_redraw_pending) {
+                for key in developer_windows.keys().collect::<Vec<_>>() {
+                    if developer_windows
+                        .host(key)
+                        .and_then(developer_host::DeveloperHost::viewport_identity)
+                        .is_some()
+                    {
+                        developer_windows.request_redraw(key);
+                    }
                 }
             }
-            Event::WindowEvent { window_id, event } if window_id == window.id() => {
-                if let Err(err) = handle_window_event(
-                    window,
-                    &mut app,
-                    pixels,
-                    presenter,
-                    &mut display_options,
-                    event,
-                    control_flow,
-                ) {
-                    tracing::error!(error = ?err, "window event handling failed");
-                    control_flow.set_exit();
+            // An event naming a viewport window is that window's alone. Resolving
+            // it before the shell destructure keeps the shell arms — all of which
+            // already guard on `window.id()` — exactly as they were.
+            if let Some(os_window) = console_viewport_windows::event_window_id(&event) {
+                if let Some(key) = developer_windows
+                    .find_key(|host| host.window().id() == os_window)
+                    .filter(|key| *key != developer_windows::SHELL_WINDOW)
+                {
+                    console_viewport_windows::handle_console_viewport_event(
+                        key,
+                        &event,
+                        &mut app,
+                        &mut developer_windows,
+                    );
+                    return;
                 }
             }
-            Event::UserEvent(wake) => app.note_network_event_wake(wake),
-            Event::MainEventsCleared => {
-                // Network managers may be replaced by asynchronous menu/lobby
-                // transitions. Carry the process event-loop wake handle onto
-                // the currently live manager before this pass can block.
-                app.refresh_network_event_waker();
-                let mut close_console_commands = false;
-                if let Some(commands) = console_commands.as_ref() {
-                    loop {
-                        match commands.try_recv() {
-                            Ok(ConsoleInputEvent::Command(command)) => {
-                                if let Err(error) = app.process_console_command(&command) {
-                                    tracing::error!(%error, command, "console command failed");
+            let shell_window_host::ShellWindowHost {
+                window,
+                pixels: pixels_slot,
+                presenter,
+                renderer: retained_gpu_renderer,
+                surface_rebuild,
+                ..
+            } = developer_windows
+                .shell_mut()
+                .expect("the console shell record lives for the whole process")
+                .as_shell_mut()
+                .expect("the reserved shell key holds the shell host");
+            match event {
+                Event::Resumed => {
+                    if reconcile_deferred_fullscreen(window, display_options.mode) {
+                        deferred_fullscreen_retry_at =
+                            Some(Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
+                    }
+                }
+                Event::WindowEvent { window_id, event }
+                    if window_id == window.id()
+                        && !matches!(event, WindowEvent::RedrawRequested) =>
+                {
+                    let Some(pixels) = pixels_slot.as_mut() else {
+                        return;
+                    };
+                    if let Err(err) = handle_window_event(
+                        window,
+                        &mut app,
+                        pixels,
+                        presenter,
+                        &mut display_options,
+                        event,
+                        event_target,
+                    ) {
+                        tracing::error!(error = ?err, "window event handling failed");
+                        event_target.exit();
+                    }
+                }
+                Event::UserEvent(wake) => app.note_network_event_wake(wake),
+                Event::AboutToWait => {
+                    // Network managers may be replaced by asynchronous menu/lobby
+                    // transitions. Carry the process event-loop wake handle onto
+                    // the currently live manager before this pass can block.
+                    app.refresh_network_event_waker();
+                    let mut close_console_commands = false;
+                    if let Some(commands) = console_commands.as_ref() {
+                        loop {
+                            match commands.try_recv() {
+                                Ok(ConsoleInputEvent::Command(command)) => {
+                                    if let Err(error) = app.process_console_command(&command) {
+                                        tracing::error!(%error, command, "console command failed");
+                                    }
+                                }
+                                Ok(ConsoleInputEvent::Eof) => {
+                                    // The native developer window remains usable
+                                    // when its optional terminal input closes.
+                                    close_console_commands = true;
+                                    break;
+                                }
+                                Ok(ConsoleInputEvent::Error(error)) => {
+                                    tracing::warn!(%error, "console stdin reader stopped");
+                                    close_console_commands = true;
+                                    break;
+                                }
+                                Err(TryRecvError::Empty) => break,
+                                Err(TryRecvError::Disconnected) => {
+                                    close_console_commands = true;
+                                    break;
                                 }
                             }
-                            Ok(ConsoleInputEvent::Eof) => {
-                                // The native developer window remains usable
-                                // when its optional terminal input closes.
-                                close_console_commands = true;
-                                break;
-                            }
-                            Ok(ConsoleInputEvent::Error(error)) => {
-                                tracing::warn!(%error, "console stdin reader stopped");
-                                close_console_commands = true;
-                                break;
-                            }
-                            Err(TryRecvError::Empty) => break,
-                            Err(TryRecvError::Disconnected) => {
-                                close_console_commands = true;
-                                break;
-                            }
                         }
                     }
-                }
-                if close_console_commands {
-                    console_commands = None;
-                }
-                app.console_edit_cursor_tick();
-                app.poll_developer_file_monitor();
-                app.drain_console_log_capture();
-                app.drain_game_log_capture();
-                // Ahead of every path that can leave this arm early, so a
-                // password the last frame's script earned is already on disk
-                // whichever way the process ends.
-                app.persist_mission_access_if_changed();
-                if app.sync_developer_console_view() {
-                    window.set_title(&app.developer_console.view_model().caption);
-                    window.request_redraw();
-                }
-                if let Err(err) = app.process_gamepad_events() {
-                    tracing::error!(error = ?err, "gamepad input failed");
-                    control_flow.set_exit();
-                    return;
-                }
-                if let Err(err) = apply_options_display_requests(
-                    window,
-                    &mut app,
-                    presenter,
-                    &mut display_options,
-                    app_paths.as_deref(),
-                ) {
-                    tracing::error!(error = ?err, "options display change failed");
-                    control_flow.set_exit();
-                    return;
-                }
-                // A post-launch native fullscreen transition can still fail
-                // during another macOS Space animation. winit restores its
-                // state to windowed on failure, so retry the configured mode.
-                if deferred_fullscreen_retry_at.is_some_and(|retry_at| Instant::now() >= retry_at) {
-                    deferred_fullscreen_retry_at =
-                        reconcile_deferred_fullscreen(window, display_options.mode)
-                            .then(|| Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
-                }
-                if app.take_exit_request() {
-                    control_flow.set_exit();
-                    return;
-                }
-                let now = Instant::now();
-                let frame_time = now.saturating_duration_since(previous_instant);
-                previous_instant = now;
-                if let Err(err) = advance_game_clock_from_elapsed(
-                    &mut app,
-                    &mut game_clock_accumulator,
-                    frame_time,
-                ) {
-                    tracing::error!(error = ?err, "one-second timer failed");
-                    control_flow.set_exit();
-                    return;
-                }
-                let previous_frame_schedule = frame_schedule;
-                // SetGameTickDelay installs a new timer when C++ enters or
-                // leaves the running game. Do not carry a fractional tick
-                // from the old cadence across that boundary
-                // (C4Application.cpp:510-531; C4Game.cpp:443).
-                accumulate_frame_time_for_mode(
-                    app.mode,
-                    app.engine.game_tick_delay_ms(),
-                    app.engine.game_tick_delay_revision(),
-                    app.refresh_ceilings(),
-                    &mut frame_schedule,
-                    &mut accumulator,
-                    frame_time,
-                );
-                if app.mode == AppMode::Running && app.full_speed {
-                    // C4Application::NextTick(false) drives one unpaced game
-                    // iteration. Do not let wall-clock debt create a second
-                    // source of fast-forward ticks.
-                    accumulator = Duration::ZERO;
-                }
-
-                let burst_budget =
-                    render_floor.simulation_burst_budget(frame_schedule.simulation_interval);
-                let simulation_pass = match advance_simulation_pass_within(
-                    &mut app,
-                    &mut frame_schedule,
-                    &mut accumulator,
-                    burst_budget,
-                ) {
-                    Ok(outcome) => outcome,
-                    Err(err) => {
-                        tracing::error!(error = ?err, "tick failed");
-                        control_flow.set_exit();
+                    if close_console_commands {
+                        console_commands = None;
+                    }
+                    app.console_edit_cursor_tick();
+                    app.poll_developer_file_monitor();
+                    app.drain_console_log_capture();
+                    app.drain_game_log_capture();
+                    // Ahead of every path that can leave this arm early, so a
+                    // password the last frame's script earned is already on disk
+                    // whichever way the process ends.
+                    app.persist_mission_access_if_changed();
+                    if app.sync_developer_console_view() {
+                        window.set_title(&app.developer_console.view_model().caption);
+                        window.request_redraw();
+                    }
+                    if let Err(err) = app.process_gamepad_events() {
+                        tracing::error!(error = ?err, "gamepad input failed");
+                        event_target.exit();
                         return;
                     }
-                };
-                if simulation_pass.skipped_render_frames > 0 {
-                    tracing::trace!(
-                        frames = simulation_pass.executed_frames,
-                        skipped_renders = simulation_pass.skipped_render_frames,
-                        "simulation pacing skipped intermediate renders"
+                    if let Err(err) = apply_options_display_requests(
+                        window,
+                        &mut app,
+                        presenter,
+                        &mut display_options,
+                        app_paths.as_deref(),
+                    ) {
+                        tracing::error!(error = ?err, "options display change failed");
+                        event_target.exit();
+                        return;
+                    }
+                    // A post-launch native fullscreen transition can still fail
+                    // during another macOS Space animation. winit restores its
+                    // state to windowed on failure, so retry the configured mode.
+                    if deferred_fullscreen_retry_at
+                        .is_some_and(|retry_at| Instant::now() >= retry_at)
+                    {
+                        deferred_fullscreen_retry_at =
+                            reconcile_deferred_fullscreen(window, display_options.mode)
+                                .then(|| Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
+                    }
+                    if app.take_exit_request() {
+                        event_target.exit();
+                        return;
+                    }
+                    let now = Instant::now();
+                    let frame_time = now.saturating_duration_since(previous_instant);
+                    previous_instant = now;
+                    if let Err(err) = advance_game_clock_from_elapsed(
+                        &mut app,
+                        &mut game_clock_accumulator,
+                        frame_time,
+                    ) {
+                        tracing::error!(error = ?err, "one-second timer failed");
+                        event_target.exit();
+                        return;
+                    }
+                    let previous_frame_schedule = frame_schedule;
+                    // SetGameTickDelay installs a new timer when C++ enters or
+                    // leaves the running game. Do not carry a fractional tick
+                    // from the old cadence across that boundary
+                    // (C4Application.cpp:510-531; C4Game.cpp:443).
+                    accumulate_frame_time_for_mode(
+                        app.mode,
+                        app.engine.game_tick_delay_ms(),
+                        app.engine.game_tick_delay_revision(),
+                        app.refresh_ceilings(),
+                        &mut frame_schedule,
+                        &mut accumulator,
+                        frame_time,
                     );
-                }
+                    if app.mode == AppMode::Running && app.full_speed {
+                        // C4Application::NextTick(false) drives one unpaced game
+                        // iteration. Do not let wall-clock debt create a second
+                        // source of fast-forward ticks.
+                        accumulator = Duration::ZERO;
+                    }
 
-                if app.take_user_attention_request() {
-                    window.request_user_attention(Some(UserAttentionType::Informational));
-                }
-                deliver_desktop_notifications(&mut app, |notification| {
-                    desktop_notifier
-                        .as_ref()
-                        .map_or(Ok(()), |notifier| notifier.show(notification))
-                });
-                let graphics_now = Instant::now();
-                if frame_schedule != previous_frame_schedule {
-                    // SetGameTickDelay replaces the application timer. Anchor
-                    // the first graphics opportunity to the new interval so
-                    // an old partial period cannot leak across game modes.
-                    next_graphics_deadline = graphics_now + frame_schedule.refresh_interval;
-                }
-
-                // Window/input/network events may wake Winit early. Native
-                // graphics still run only on the application timer, so keep
-                // an absolute deadline instead of treating every wake as a
-                // decoupled graphics opportunity.
-                // The repaint floor outranks every skip decision: `/fast N`,
-                // the network catch-up divisor and a long burst can each
-                // suppress graphics indefinitely, and a frozen window is worse
-                // than a late one.
-                let repaint_overdue = render_floor.must_present(graphics_now);
-                let graphics_due = simulation_pass.immediate_network_retry
-                    || repaint_overdue
-                    || graphics_now >= next_graphics_deadline;
-                if graphics_due {
-                    next_graphics_deadline = if simulation_pass.immediate_network_retry {
-                        graphics_now + frame_schedule.refresh_interval
-                    } else {
-                        advance_graphics_deadline(
-                            next_graphics_deadline,
-                            graphics_now,
-                            frame_schedule.refresh_interval,
-                        )
-                    };
-                    if simulation_pass.skip_redraw && !repaint_overdue {
-                        // Native's manual/network DoSkipFrame takes this same
-                        // graphics opportunity and clears the shared latch.
-                        automatic_frame_skip.consume_suppressed_graphics_pass();
-                    } else {
-                        if repaint_overdue {
-                            // An overdue repaint must also outrank the
-                            // automatic latch, or a slow graphics pass keeps
-                            // re-arming the very skip the floor exists to stop.
-                            automatic_frame_skip.consume_suppressed_graphics_pass();
-                            // `apply_render_floor` counts frames since the last
-                            // redraw and has already run for this pass. Drawing
-                            // on the wall-clock floor instead would otherwise
-                            // leave its counter climbing against a screen that
-                            // did update, firing it a second time for nothing.
-                            app.frames_since_redraw = 0;
+                    let burst_budget =
+                        render_floor.simulation_burst_budget(frame_schedule.simulation_interval);
+                    let simulation_pass = match advance_simulation_pass_within(
+                        &mut app,
+                        &mut frame_schedule,
+                        &mut accumulator,
+                        burst_budget,
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(err) => {
+                            tracing::error!(error = ?err, "tick failed");
+                            event_target.exit();
+                            return;
                         }
-                        window.request_redraw();
-                        viewport_redraw_pending = true;
+                    };
+                    if simulation_pass.skipped_render_frames > 0 {
+                        tracing::trace!(
+                            frames = simulation_pass.executed_frames,
+                            skipped_renders = simulation_pass.skipped_render_frames,
+                            "simulation pacing skipped intermediate renders"
+                        );
+                    }
+
+                    if app.take_user_attention_request() {
+                        window.request_user_attention(Some(UserAttentionType::Informational));
+                    }
+                    deliver_desktop_notifications(&mut app, |notification| {
+                        desktop_notifier
+                            .as_ref()
+                            .map_or(Ok(()), |notifier| notifier.show(notification))
+                    });
+                    let graphics_now = Instant::now();
+                    if frame_schedule != previous_frame_schedule {
+                        // SetGameTickDelay replaces the application timer. Anchor
+                        // the first graphics opportunity to the new interval so
+                        // an old partial period cannot leak across game modes.
+                        next_graphics_deadline = graphics_now + frame_schedule.refresh_interval;
+                    }
+
+                    // Window/input/network events may wake Winit early. Native
+                    // graphics still run only on the application timer, so keep
+                    // an absolute deadline instead of treating every wake as a
+                    // decoupled graphics opportunity.
+                    // The repaint floor outranks every skip decision: `/fast N`,
+                    // the network catch-up divisor and a long burst can each
+                    // suppress graphics indefinitely, and a frozen window is worse
+                    // than a late one.
+                    let repaint_overdue = render_floor.must_present(graphics_now);
+                    let graphics_due = simulation_pass.immediate_network_retry
+                        || repaint_overdue
+                        || graphics_now >= next_graphics_deadline;
+                    if graphics_due {
+                        next_graphics_deadline = if simulation_pass.immediate_network_retry {
+                            graphics_now + frame_schedule.refresh_interval
+                        } else {
+                            advance_graphics_deadline(
+                                next_graphics_deadline,
+                                graphics_now,
+                                frame_schedule.refresh_interval,
+                            )
+                        };
+                        if simulation_pass.skip_redraw && !repaint_overdue {
+                            // Native's manual/network DoSkipFrame takes this same
+                            // graphics opportunity and clears the shared latch.
+                            automatic_frame_skip.consume_suppressed_graphics_pass();
+                        } else {
+                            if repaint_overdue {
+                                // An overdue repaint must also outrank the
+                                // automatic latch, or a slow graphics pass keeps
+                                // re-arming the very skip the floor exists to stop.
+                                automatic_frame_skip.consume_suppressed_graphics_pass();
+                                // `apply_render_floor` counts frames since the last
+                                // redraw and has already run for this pass. Drawing
+                                // on the wall-clock floor instead would otherwise
+                                // leave its counter climbing against a screen that
+                                // did update, firing it a second time for nothing.
+                                app.frames_since_redraw = 0;
+                            }
+                            window.request_redraw();
+                            viewport_redraw_pending = true;
+                        }
+                    }
+                    if app.mode != AppMode::Running {
+                        automatic_frame_skip.consume_suppressed_graphics_pass();
+                    }
+
+                    if app.mode == AppMode::Running && app.full_speed {
+                        event_target.set_control_flow(ControlFlow::Poll);
+                    } else {
+                        let simulation_deadline = now
+                            + frame_schedule
+                                .simulation_interval
+                                .saturating_sub(accumulator);
+                        event_target.set_control_flow(ControlFlow::WaitUntil(
+                            next_graphics_deadline.min(simulation_deadline),
+                        ));
                     }
                 }
-                if app.mode != AppMode::Running {
-                    automatic_frame_skip.consume_suppressed_graphics_pass();
-                }
-
-                if app.mode == AppMode::Running && app.full_speed {
-                    *control_flow = ControlFlow::Poll;
-                } else {
-                    let simulation_deadline = now
-                        + frame_schedule
-                            .simulation_interval
-                            .saturating_sub(accumulator);
-                    *control_flow =
-                        ControlFlow::WaitUntil(next_graphics_deadline.min(simulation_deadline));
-                }
-            }
-            // `C4GraphicsSystem::StartDrawing` refuses to draw while the
-            // application is inactive unless `Graphics.RenderInactive` carries
-            // the active shell's bit (C4GraphicsSystem.cpp:96-106). Placed
-            // ahead of the frame-skip arm so a suppressed frame costs nothing.
-            Event::RedrawRequested(id)
-                if id == window.id()
+                // `C4GraphicsSystem::StartDrawing` refuses to draw while the
+                // application is inactive unless `Graphics.RenderInactive` carries
+                // the active shell's bit (C4GraphicsSystem.cpp:96-106). Placed
+                // ahead of the frame-skip arm so a suppressed frame costs nothing.
+                Event::WindowEvent {
+                    window_id,
+                    event: WindowEvent::RedrawRequested,
+                } if window_id == window.id()
                     && !render_inactive_allows_drawing(
                         render_inactive_mask,
                         app.window_active,
                         app.console_mode,
                         render_floor.has_presented(),
                     ) =>
-            {
-                // The opportunity was still consumed. Leaving the repaint floor
-                // armed would make every later event-loop pass take one, which
-                // both spins and banks graphics-deadline debt.
-                render_floor.note_refused_presentation(Instant::now());
-            }
-            Event::RedrawRequested(id)
-                if id == window.id()
+                {
+                    // The opportunity was still consumed. Leaving the repaint floor
+                    // armed would make every later event-loop pass take one, which
+                    // both spins and banks graphics-deadline debt.
+                    render_floor.note_refused_presentation(Instant::now());
+                }
+                Event::WindowEvent {
+                    window_id,
+                    event: WindowEvent::RedrawRequested,
+                } if window_id == window.id()
                     && automatic_frame_skip.begin_graphics_pass(
                         app.mode == AppMode::Running && app.auto_frame_skip,
                     ) =>
-            {
-                tracing::trace!("automatic frame skip consumed one graphics pass");
-                if let Some(benchmark) = presentation_benchmark.as_mut() {
-                    benchmark.record_automatic_graphics_skip();
-                }
-            }
-            Event::RedrawRequested(id) if id == window.id() => {
-                let graphics_started = Instant::now();
-                app.graphics.set_presentation_scale(presenter.scale());
-                if matches!(
-                    app.mode,
-                    AppMode::Menu | AppMode::Loading | AppMode::Running
-                ) && should_attempt_retained_gpu_presentation(
-                    retained_gpu_renderer.requires_cpu_presentation(),
-                )
                 {
-                    app.retained_gpu_presentation_active = true;
-                    if pixels.context().texture_extent.width != 1
-                        || pixels.context().texture_extent.height != 1
-                    {
-                        if let Err(error) = pixels.resize_buffer(1, 1) {
-                            tracing::error!(%error, "failed to enter retained GPU presentation");
-                            control_flow.set_exit();
+                    tracing::trace!("automatic frame skip consumed one graphics pass");
+                    if let Some(benchmark) = presentation_benchmark.as_mut() {
+                        benchmark.record_automatic_graphics_skip();
+                    }
+                }
+                Event::WindowEvent {
+                    window_id,
+                    event: WindowEvent::RedrawRequested,
+                } if window_id == window.id() => {
+                    let graphics_started = Instant::now();
+                    app.graphics.set_presentation_scale(presenter.scale());
+                    if matches!(
+                        app.mode,
+                        AppMode::Menu | AppMode::Loading | AppMode::Running
+                    ) && should_attempt_retained_gpu_presentation(
+                        retained_gpu_renderer.requires_cpu_presentation(),
+                    ) {
+                        app.retained_gpu_presentation_active = true;
+                        let Some(pixels) = pixels_slot.as_mut() else {
+                            return;
+                        };
+                        if pixels.context().texture_extent.width != 1
+                            || pixels.context().texture_extent.height != 1
+                        {
+                            if let Err(error) = pixels.resize_buffer(1, 1) {
+                                tracing::error!(%error, "failed to enter retained GPU presentation");
+                                event_target.exit();
+                                return;
+                            }
+                        }
+                        let fallback_to_cpu = match present_retained_gpu_frame(
+                            &mut app,
+                            pixels,
+                            presenter,
+                            retained_gpu_renderer,
+                        ) {
+                            Ok(RetainedGpuPresentOutcome::Presented) => {
+                                surface_rebuild.note_presented();
+                                if app.mode == AppMode::Running && !app.console_mode {
+                                    app.finish_rendered_object_audibility_pass();
+                                }
+                                let graphics_duration = graphics_started.elapsed();
+                                automatic_frame_skip.finish_graphics_pass(
+                                    app.auto_frame_skip,
+                                    graphics_duration,
+                                    frame_schedule.simulation_interval,
+                                );
+                                render_floor
+                                    .record_presentation(graphics_started, graphics_duration);
+                                presentation_detail.record_graphics_pass(
+                                    app.mode == AppMode::Running && app.auto_frame_skip,
+                                    graphics_duration,
+                                    frame_schedule.simulation_interval,
+                                );
+                                app.presentation_detail = presentation_detail.detail();
+                                if let Some(benchmark) = presentation_benchmark.as_mut() {
+                                    let completed_at = Instant::now();
+                                    benchmark.record_successful_presentation(
+                                        completed_at,
+                                        graphics_duration,
+                                        true,
+                                    );
+                                    if let Some(report) = benchmark.poll(
+                                        app.mode == AppMode::Running,
+                                        completed_at,
+                                        app.engine.frame(),
+                                    ) {
+                                        let network_evidence =
+                                            inspect_presentation_benchmark_network(&app);
+                                        finish_presentation_benchmark(
+                                            event_target,
+                                            &event_handler_exit_code,
+                                            report,
+                                            presentation_benchmark_asserts_native_tick,
+                                            app.engine.players().count(),
+                                            app.control_player_infos.nonremoved_player_count(),
+                                            app.control_clients
+                                                .activated_client_ids()
+                                                .into_iter()
+                                                .filter(|client_id| *client_id != 0)
+                                                .count(),
+                                            runtime_crew_object_count(&app.snapshot),
+                                            runtime_players_with_exactly_one_live_sf5b_crew(
+                                                &app.snapshot,
+                                            ),
+                                            network_evidence,
+                                            presentation_benchmark_keeps_running,
+                                        );
+                                    }
+                                }
+                                false
+                            }
+                            Ok(RetainedGpuPresentOutcome::Skipped) => {
+                                // Pixels could not acquire a visible surface frame.
+                                // The attempt consumed this graphics opportunity;
+                                // retry on the normal refresh schedule without
+                                // treating it as a presentation or spinning while
+                                // the surface remains occluded.
+                                render_floor.note_refused_presentation(Instant::now());
+                                false
+                            }
+                            Err(error) => match retained_gpu_present_recovery(&error) {
+                                RetainedGpuPresentRecovery::RebuildDevice => {
+                                    let rebuild_schedule = surface_rebuild.note_loss();
+                                    tracing::warn!(
+                                        ?error,
+                                        "retained GPU device requires recreation"
+                                    );
+                                    match rebuild_retained_gpu_device(
+                                        window,
+                                        pixels_slot,
+                                        retained_gpu_renderer,
+                                    ) {
+                                        Ok(()) => {
+                                            render_floor.note_refused_presentation(Instant::now());
+                                            if rebuild_schedule == SurfaceRebuildSchedule::Immediate
+                                            {
+                                                window.request_redraw();
+                                            }
+                                        }
+                                        Err(rebuild_error) => {
+                                            tracing::error!(
+                                                ?rebuild_error,
+                                                "retained GPU recovery failed"
+                                            );
+                                            event_target.exit();
+                                        }
+                                    }
+                                    false
+                                }
+                                RetainedGpuPresentRecovery::CpuFallback => {
+                                    // `render_layers` validated the composition
+                                    // extent against this device before returning
+                                    // this source/shader limit error. The ordinary
+                                    // CPU presenter below therefore has a valid
+                                    // physical target and is the exact reference
+                                    // fallback for this device.
+                                    tracing::warn!(
+                                        ?error,
+                                        "retained GPU texture exceeds device limit; using CPU presentation"
+                                    );
+                                    true
+                                }
+                                RetainedGpuPresentRecovery::Fatal => {
+                                    tracing::error!(?error, "retained GPU render failed");
+                                    event_target.exit();
+                                    false
+                                }
+                            },
+                        };
+                        if !fallback_to_cpu {
+                            window.set_cursor_visible(app.platform_cursor_visible());
                             return;
                         }
                     }
-                    let fallback_to_cpu = match present_retained_gpu_frame(
-                        &mut app,
-                        pixels,
-                        presenter,
-                        retained_gpu_renderer,
-                    ) {
-                        Ok(()) => {
-                            if app.mode == AppMode::Running && !app.console_mode {
+                    let Some(pixels) = pixels_slot.as_mut() else {
+                        return;
+                    };
+                    app.retained_gpu_presentation_active = false;
+                    let (physical_width, physical_height) = presenter.physical_size();
+                    let max_texture_dimension_2d =
+                        pixels.device().limits().max_texture_dimension_2d;
+                    if physical_width > max_texture_dimension_2d
+                        || physical_height > max_texture_dimension_2d
+                    {
+                        tracing::error!(
+                            physical_width,
+                            physical_height,
+                            max_texture_dimension_2d,
+                            "CPU presentation extent exceeds the device texture limit"
+                        );
+                        event_target.exit();
+                        return;
+                    }
+                    if pixels.context().texture_extent.width != physical_width
+                        || pixels.context().texture_extent.height != physical_height
+                    {
+                        if let Err(error) = pixels.resize_buffer(physical_width, physical_height) {
+                            tracing::error!(%error, "failed to restore CPU presentation buffer");
+                            event_target.exit();
+                            return;
+                        }
+                    }
+                    let ordered_native_text =
+                        !app.console_mode && app.can_present_ordered_native_text(presenter.scale());
+                    let defer_native_main_text = !ordered_native_text
+                        && app.can_defer_native_main_menu_text(presenter.scale());
+                    let defer_native_loader_text =
+                        !ordered_native_text && app.can_defer_native_loader_text(presenter.scale());
+                    let defer_native_game_messages = !ordered_native_text
+                        && app.can_defer_native_game_messages(presenter.scale());
+                    let presentation_monitor_gamma = if ordered_native_text {
+                        None
+                    } else {
+                        match app.mode {
+                            AppMode::Menu | AppMode::Loading => app.startup_monitor_gamma(),
+                            AppMode::Running => app.graphics.monitor_gamma_enabled().then(|| {
+                                app.graphics
+                                    .active_gamma_ramp(&app.snapshot.environment.gamma)
+                            }),
+                        }
+                    };
+                    let native_game_message_gamma = if defer_native_game_messages {
+                        let active = app
+                            .graphics
+                            .active_gamma_ramp(&app.snapshot.environment.gamma);
+                        Some(if app.graphics.fragment_gamma_enabled() {
+                            active
+                        } else {
+                            clonk_graphics::GammaRamp::identity()
+                        })
+                    } else {
+                        None
+                    };
+                    let refreshed = match presenter.present(pixels.frame_mut(), |frame| {
+                        if ordered_native_text {
+                            app.render_ordered_native_base(frame)
+                        } else {
+                            app.render_for_presentation_with_monitor_defer(
+                                frame,
+                                defer_native_main_text,
+                                defer_native_loader_text,
+                                defer_native_game_messages,
+                                true,
+                            )
+                        }
+                    }) {
+                        Ok(refreshed) => refreshed,
+                        Err(err) => {
+                            tracing::error!(error = ?err, "render failed");
+                            event_target.exit();
+                            return;
+                        }
+                    };
+                    if refreshed && ordered_native_text {
+                        let mut composer = presenter.ordered_composer(pixels.frame_mut());
+                        if let Err(err) = app.replay_pending_native_presentation(&mut composer) {
+                            tracing::error!(error = ?err, "ordered native text render failed");
+                            event_target.exit();
+                            return;
+                        }
+                    } else if refreshed && defer_native_loader_text {
+                        let (width, height) = presenter.physical_size();
+                        if let Err(err) =
+                            app.render_native_loader_text(pixels.frame_mut(), width, height)
+                        {
+                            tracing::error!(error = ?err, "native loader text render failed");
+                            event_target.exit();
+                            return;
+                        }
+                    } else if refreshed && defer_native_main_text {
+                        let (width, height) = presenter.physical_size();
+                        if let Err(err) =
+                            app.render_native_main_menu_text(pixels.frame_mut(), width, height)
+                        {
+                            tracing::error!(error = ?err, "native main-menu text render failed");
+                            event_target.exit();
+                            return;
+                        }
+                    } else if refreshed && defer_native_game_messages {
+                        let geometry = presenter.presentation_geometry();
+                        let Some(gamma) = native_game_message_gamma.as_ref() else {
+                            tracing::error!("deferred game-message gamma was not captured");
+                            event_target.exit();
+                            return;
+                        };
+                        if let Err(err) =
+                            app.render_native_game_messages(pixels.frame_mut(), geometry, gamma)
+                        {
+                            tracing::error!(error = ?err, "native game-message render failed");
+                            event_target.exit();
+                            return;
+                        }
+                    }
+                    if refreshed {
+                        if let Some(gamma) = presentation_monitor_gamma.as_ref() {
+                            gamma.apply_to_rgba_bytes(pixels.frame_mut());
+                        }
+                    }
+                    match present_pixels_frame(pixels) {
+                        Ok(RetainedGpuPresentOutcome::Presented) => {
+                            surface_rebuild.note_presented();
+                            while !app.pending_screenshots.is_empty() {
+                                let (width, height) = presenter.physical_size();
+                                let result = app.save_next_screenshot(
+                                    Some(pixels.frame_mut()),
+                                    width,
+                                    height,
+                                    presenter.scale(),
+                                );
+                                app.report_screenshot_result(result);
+                            }
+                            // Console presentation returns before render_running
+                            // and leaves the prior world call list untouched.
+                            if refreshed && app.mode == AppMode::Running && !app.console_mode {
                                 app.finish_rendered_object_audibility_pass();
                             }
                             let graphics_duration = graphics_started.elapsed();
                             automatic_frame_skip.finish_graphics_pass(
-                                app.auto_frame_skip,
+                                app.mode == AppMode::Running && app.auto_frame_skip,
                                 graphics_duration,
                                 frame_schedule.simulation_interval,
                             );
@@ -1219,7 +1606,7 @@ fn run() -> Result<()> {
                                 benchmark.record_successful_presentation(
                                     completed_at,
                                     graphics_duration,
-                                    true,
+                                    refreshed,
                                 );
                                 if let Some(report) = benchmark.poll(
                                     app.mode == AppMode::Running,
@@ -1229,7 +1616,8 @@ fn run() -> Result<()> {
                                     let network_evidence =
                                         inspect_presentation_benchmark_network(&app);
                                     finish_presentation_benchmark(
-                                        control_flow,
+                                        event_target,
+                                        &event_handler_exit_code,
                                         report,
                                         presentation_benchmark_asserts_native_tick,
                                         app.engine.players().count(),
@@ -1248,344 +1636,146 @@ fn run() -> Result<()> {
                                     );
                                 }
                             }
-                            false
                         }
-                        Err(error) => match retained_gpu_present_recovery(&error) {
-                            RetainedGpuPresentRecovery::RebuildDevice => {
+                        Ok(RetainedGpuPresentOutcome::Skipped) => {
+                            // Do not advance presentation-dependent governors or
+                            // spin while Pixels reports an occluded surface. The
+                            // normal refresh deadline will schedule the retry.
+                            render_floor.note_refused_presentation(Instant::now());
+                        }
+                        Err(err) => {
+                            let error = anyhow::Error::new(err)
+                                .context("failed to submit CPU presentation frame");
+                            if retained_gpu_present_recovery(&error)
+                                == RetainedGpuPresentRecovery::RebuildDevice
+                            {
+                                let rebuild_schedule = surface_rebuild.note_loss();
                                 tracing::warn!(
                                     ?error,
-                                    "retained GPU device or surface requires recreation"
+                                    "CPU presentation surface requires recreation"
                                 );
                                 match rebuild_retained_gpu_device(
                                     window,
-                                    pixels,
+                                    pixels_slot,
                                     retained_gpu_renderer,
                                 ) {
-                                    Ok(()) => window.request_redraw(),
+                                    Ok(()) => {
+                                        render_floor.note_refused_presentation(Instant::now());
+                                        if rebuild_schedule == SurfaceRebuildSchedule::Immediate {
+                                            window.request_redraw();
+                                        }
+                                    }
                                     Err(rebuild_error) => {
                                         tracing::error!(
                                             ?rebuild_error,
-                                            "retained GPU recovery failed"
+                                            "CPU presentation recovery failed"
                                         );
-                                        control_flow.set_exit();
+                                        event_target.exit();
                                     }
                                 }
-                                false
-                            }
-                            RetainedGpuPresentRecovery::Retry => {
-                                tracing::warn!(
-                                    ?error,
-                                    "retained GPU surface timed out; retrying presentation"
-                                );
-                                window.request_redraw();
-                                false
-                            }
-                            RetainedGpuPresentRecovery::CpuFallback => {
-                                // `render_layers` validated the composition
-                                // extent against this device before returning
-                                // this source/shader limit error. The ordinary
-                                // CPU presenter below therefore has a valid
-                                // physical target and is the exact reference
-                                // fallback for this device.
-                                tracing::warn!(
-                                    ?error,
-                                    "retained GPU texture exceeds device limit; using CPU presentation"
-                                );
-                                true
-                            }
-                            RetainedGpuPresentRecovery::Fatal => {
-                                tracing::error!(?error, "retained GPU render failed");
-                                control_flow.set_exit();
-                                false
-                            }
-                        },
-                    };
-                    if !fallback_to_cpu {
-                        window.set_cursor_visible(app.platform_cursor_visible());
-                        return;
-                    }
-                }
-                app.retained_gpu_presentation_active = false;
-                let (physical_width, physical_height) = presenter.physical_size();
-                let max_texture_dimension_2d = pixels.device().limits().max_texture_dimension_2d;
-                if physical_width > max_texture_dimension_2d
-                    || physical_height > max_texture_dimension_2d
-                {
-                    tracing::error!(
-                        physical_width,
-                        physical_height,
-                        max_texture_dimension_2d,
-                        "CPU presentation extent exceeds the device texture limit"
-                    );
-                    control_flow.set_exit();
-                    return;
-                }
-                if pixels.context().texture_extent.width != physical_width
-                    || pixels.context().texture_extent.height != physical_height
-                {
-                    if let Err(error) = pixels.resize_buffer(physical_width, physical_height) {
-                        tracing::error!(%error, "failed to restore CPU presentation buffer");
-                        control_flow.set_exit();
-                        return;
-                    }
-                }
-                let ordered_native_text =
-                    !app.console_mode && app.can_present_ordered_native_text(presenter.scale());
-                let defer_native_main_text =
-                    !ordered_native_text && app.can_defer_native_main_menu_text(presenter.scale());
-                let defer_native_loader_text =
-                    !ordered_native_text && app.can_defer_native_loader_text(presenter.scale());
-                let defer_native_game_messages =
-                    !ordered_native_text && app.can_defer_native_game_messages(presenter.scale());
-                let presentation_monitor_gamma = if ordered_native_text {
-                    None
-                } else {
-                    match app.mode {
-                        AppMode::Menu | AppMode::Loading => app.startup_monitor_gamma(),
-                        AppMode::Running => app.graphics.monitor_gamma_enabled().then(|| {
-                            app.graphics
-                                .active_gamma_ramp(&app.snapshot.environment.gamma)
-                        }),
-                    }
-                };
-                let native_game_message_gamma = if defer_native_game_messages {
-                    let active = app
-                        .graphics
-                        .active_gamma_ramp(&app.snapshot.environment.gamma);
-                    Some(if app.graphics.fragment_gamma_enabled() {
-                        active
-                    } else {
-                        clonk_graphics::GammaRamp::identity()
-                    })
-                } else {
-                    None
-                };
-                let refreshed = match presenter.present(pixels.frame_mut(), |frame| {
-                    if ordered_native_text {
-                        app.render_ordered_native_base(frame)
-                    } else {
-                        app.render_for_presentation_with_monitor_defer(
-                            frame,
-                            defer_native_main_text,
-                            defer_native_loader_text,
-                            defer_native_game_messages,
-                            true,
-                        )
-                    }
-                }) {
-                    Ok(refreshed) => refreshed,
-                    Err(err) => {
-                        tracing::error!(error = ?err, "render failed");
-                        control_flow.set_exit();
-                        return;
-                    }
-                };
-                if refreshed && ordered_native_text {
-                    let mut composer = presenter.ordered_composer(pixels.frame_mut());
-                    if let Err(err) = app.replay_pending_native_presentation(&mut composer) {
-                        tracing::error!(error = ?err, "ordered native text render failed");
-                        control_flow.set_exit();
-                        return;
-                    }
-                } else if refreshed && defer_native_loader_text {
-                    let (width, height) = presenter.physical_size();
-                    if let Err(err) =
-                        app.render_native_loader_text(pixels.frame_mut(), width, height)
-                    {
-                        tracing::error!(error = ?err, "native loader text render failed");
-                        control_flow.set_exit();
-                        return;
-                    }
-                } else if refreshed && defer_native_main_text {
-                    let (width, height) = presenter.physical_size();
-                    if let Err(err) =
-                        app.render_native_main_menu_text(pixels.frame_mut(), width, height)
-                    {
-                        tracing::error!(error = ?err, "native main-menu text render failed");
-                        control_flow.set_exit();
-                        return;
-                    }
-                } else if refreshed && defer_native_game_messages {
-                    let geometry = presenter.presentation_geometry();
-                    let Some(gamma) = native_game_message_gamma.as_ref() else {
-                        tracing::error!("deferred game-message gamma was not captured");
-                        control_flow.set_exit();
-                        return;
-                    };
-                    if let Err(err) =
-                        app.render_native_game_messages(pixels.frame_mut(), geometry, gamma)
-                    {
-                        tracing::error!(error = ?err, "native game-message render failed");
-                        control_flow.set_exit();
-                        return;
-                    }
-                }
-                if refreshed {
-                    if let Some(gamma) = presentation_monitor_gamma.as_ref() {
-                        gamma.apply_to_rgba_bytes(pixels.frame_mut());
-                    }
-                }
-                while !app.pending_screenshots.is_empty() {
-                    let (width, height) = presenter.physical_size();
-                    let result = app.save_next_screenshot(
-                        Some(pixels.frame_mut()),
-                        width,
-                        height,
-                        presenter.scale(),
-                    );
-                    app.report_screenshot_result(result);
-                }
-                match pixels.render() {
-                    Ok(()) => {
-                        // Console presentation returns before render_running
-                        // and leaves the prior world call list untouched.
-                        if refreshed && app.mode == AppMode::Running && !app.console_mode {
-                            app.finish_rendered_object_audibility_pass();
-                        }
-                        let graphics_duration = graphics_started.elapsed();
-                        automatic_frame_skip.finish_graphics_pass(
-                            app.mode == AppMode::Running && app.auto_frame_skip,
-                            graphics_duration,
-                            frame_schedule.simulation_interval,
-                        );
-                        render_floor.record_presentation(graphics_started, graphics_duration);
-                        presentation_detail.record_graphics_pass(
-                            app.mode == AppMode::Running && app.auto_frame_skip,
-                            graphics_duration,
-                            frame_schedule.simulation_interval,
-                        );
-                        app.presentation_detail = presentation_detail.detail();
-                        if let Some(benchmark) = presentation_benchmark.as_mut() {
-                            let completed_at = Instant::now();
-                            benchmark.record_successful_presentation(
-                                completed_at,
-                                graphics_duration,
-                                refreshed,
-                            );
-                            if let Some(report) = benchmark.poll(
-                                app.mode == AppMode::Running,
-                                completed_at,
-                                app.engine.frame(),
-                            ) {
-                                let network_evidence = inspect_presentation_benchmark_network(&app);
-                                finish_presentation_benchmark(
-                                    control_flow,
-                                    report,
-                                    presentation_benchmark_asserts_native_tick,
-                                    app.engine.players().count(),
-                                    app.control_player_infos.nonremoved_player_count(),
-                                    app.control_clients
-                                        .activated_client_ids()
-                                        .into_iter()
-                                        .filter(|client_id| *client_id != 0)
-                                        .count(),
-                                    runtime_crew_object_count(&app.snapshot),
-                                    runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
-                                    network_evidence,
-                                    presentation_benchmark_keeps_running,
-                                );
+                            } else {
+                                tracing::error!(?error, "present failed");
+                                event_target.exit();
                             }
                         }
                     }
-                    Err(err) => {
-                        tracing::error!(error = ?err, "present failed");
-                        control_flow.set_exit();
+                }
+                Event::LoopExiting => {
+                    if app.console_mode {
+                        app.finish_console_shutdown();
                     }
-                }
-            }
-            Event::LoopDestroyed => {
-                if app.console_mode {
-                    app.finish_console_shutdown();
-                }
-                // `~C4Application` spawns the editor only after subsystem
-                // cleanup (C4Application.cpp:58-74).
-                if let Some(editor) = app.pending_editor_launch.take() {
-                    if let Err(error) = std::process::Command::new(&editor).spawn() {
-                        tracing::warn!(
-                            %error,
-                            path = %editor.display(),
-                            "failed to launch the classic editor"
-                        );
-                    }
-                }
-                if let Some(inhibitor) = display_sleep_inhibitor.take() {
-                    inhibitor.release();
-                }
-                if !app.configuration_reset_requested {
-                    if let Some(paths) = app_paths.as_ref() {
-                        if let Err(error) = persist_dirty_gamepad_axis_calibration(
-                            paths.as_ref(),
-                            &mut app.gamepad_bindings,
-                        ) {
+                    // `~C4Application` spawns the editor only after subsystem
+                    // cleanup (C4Application.cpp:58-74).
+                    if let Some(editor) = app.pending_editor_launch.take() {
+                        if let Err(error) = std::process::Command::new(&editor).spawn() {
                             tracing::warn!(
                                 %error,
-                                path = %paths.config_file().display(),
-                                "failed to persist gamepad axis calibration"
+                                path = %editor.display(),
+                                "failed to launch the classic editor"
                             );
+                        }
+                    }
+                    if let Some(inhibitor) = display_sleep_inhibitor.take() {
+                        inhibitor.release();
+                    }
+                    if !app.configuration_reset_requested {
+                        if let Some(paths) = app_paths.as_ref() {
+                            if let Err(error) = persist_dirty_gamepad_axis_calibration(
+                                paths.as_ref(),
+                                &mut app.gamepad_bindings,
+                            ) {
+                                tracing::warn!(
+                                    %error,
+                                    path = %paths.config_file().display(),
+                                    "failed to persist gamepad axis calibration"
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            window.set_ime_allowed(app.platform_ime_allowed());
+            // SDL hides the platform pointer throughout the game client area;
+            // C4MouseControl/C4GUI draw the selected themed cell themselves.
+            window.set_cursor_visible(app.platform_cursor_visible());
+            if let Some(paths) = app_paths.as_ref().filter(|_| {
+                event_target.exiting() && !app.configuration_reset_requested && !app.console_mode
+            }) {
+                display_options.persist_if_dirty(paths.as_ref());
+            }
+            // `C4Console::StorePosition` on window destruction (C4Console.cpp:154-159)
+            // writes the console's own slot and nothing else, so this is deliberately
+            // separate from the game window's `persist_if_dirty` above.
+            // `C4Application::Clear` writes the accumulated config once on a clean
+            // quit; an aborted run discards it (C4Application.cpp:351-367).
+            // Mission access deliberately does not wait for this — see
+            // `persist_mission_access_if_changed`.
+            if event_target.exiting() && !app.configuration_reset_requested {
+                if let Some(paths) = app_paths.as_ref() {
+                    for (section, entries) in app.deferred_config.take_by_section() {
+                        let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> =
+                            entries
+                                .iter()
+                                .map(|(key, value)| {
+                                    (
+                                        key.as_str(),
+                                        clonk_app_netplay::NativeConfigValue::RawAscii(
+                                            value.as_str(),
+                                        ),
+                                    )
+                                })
+                                .collect();
+                        if let Err(error) =
+                            persist_native_config_values(paths.as_ref(), &section, &updates)
+                        {
+                            tracing::warn!(%error, section, "could not save deferred config values");
                         }
                     }
                 }
             }
-            _ => {}
-        }
-        // SDL hides the platform pointer throughout the game client area;
-        // C4MouseControl/C4GUI draw the selected themed cell themselves.
-        window.set_cursor_visible(app.platform_cursor_visible());
-        if let Some(paths) = app_paths.as_ref().filter(|_| {
-            matches!(
-                *control_flow,
-                ControlFlow::Exit | ControlFlow::ExitWithCode(_)
-            ) && !app.configuration_reset_requested
-                && !app.console_mode
-        }) {
-            display_options.persist_if_dirty(paths.as_ref());
-        }
-        // `C4Console::StorePosition` on window destruction (C4Console.cpp:154-159)
-        // writes the console's own slot and nothing else, so this is deliberately
-        // separate from the game window's `persist_if_dirty` above.
-        // `C4Application::Clear` writes the accumulated config once on a clean
-        // quit; an aborted run discards it (C4Application.cpp:351-367).
-        // Mission access deliberately does not wait for this — see
-        // `persist_mission_access_if_changed`.
-        if matches!(
-            *control_flow,
-            ControlFlow::Exit | ControlFlow::ExitWithCode(_)
-        ) && !app.configuration_reset_requested
-        {
-            if let Some(paths) = app_paths.as_ref() {
-                for (section, entries) in app.deferred_config.take_by_section() {
-                    let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> = entries
-                        .iter()
-                        .map(|(key, value)| {
-                            (
-                                key.as_str(),
-                                clonk_app_netplay::NativeConfigValue::RawAscii(value.as_str()),
-                            )
-                        })
-                        .collect();
-                    if let Err(error) =
-                        persist_native_config_values(paths.as_ref(), &section, &updates)
-                    {
-                        tracing::warn!(%error, section, "could not save deferred config values");
-                    }
+            let console_shutdown =
+                event_target.exiting() && app.console_mode && !app.configuration_reset_requested;
+            if let (true, Some(paths), Some((x, y))) = (
+                console_shutdown,
+                app_paths.as_ref(),
+                display_options.position,
+            ) {
+                if let Err(error) = store_console_window_position(paths.as_ref(), x, y) {
+                    tracing::warn!(%error, "could not store the console window position");
                 }
             }
-        }
-        let console_shutdown = matches!(
-            *control_flow,
-            ControlFlow::Exit | ControlFlow::ExitWithCode(_)
-        ) && app.console_mode
-            && !app.configuration_reset_requested;
-        if let (true, Some(paths), Some((x, y))) = (
-            console_shutdown,
-            app_paths.as_ref(),
-            display_options.position,
-        ) {
-            if let Err(error) = store_console_window_position(paths.as_ref(), x, y) {
-                tracing::warn!(%error, "could not store the console window position");
-            }
-        }
+        }))
     });
+    let mut application = RuntimeApplication::new(initializer);
+    event_loop
+        .run_app(&mut application)
+        .context("application event loop failed")?;
+    application.finish()?;
+    match benchmark_exit_code.load(AtomicOrdering::Relaxed) {
+        0 => Ok(()),
+        code => std::process::exit(code),
+    }
 }
 
 impl GameApp {
@@ -5005,7 +5195,7 @@ impl GameApp {
         }
         let target = self
             .keyboard_modifiers
-            .ctrl()
+            .control_key()
             .then(|| {
                 self.graphics.object_at_point_with_ocf(
                     &self.snapshot,
@@ -5194,7 +5384,7 @@ impl GameApp {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(motion.last);
-        let shift_append = self.keyboard_modifiers.shift();
+        let shift_append = self.keyboard_modifiers.shift_key();
         let mut add_mode = 1;
         for _ in 0..selected {
             self.submit_or_execute_player_command(PlayerCommandControlData {
@@ -5230,7 +5420,7 @@ impl GameApp {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(motion.last);
-        let shift_append = self.keyboard_modifiers.shift();
+        let shift_append = self.keyboard_modifiers.shift_key();
         let mut add_mode = 1;
         for object in selected {
             let (command, x, y, target, target2) = match cursor {
@@ -5320,7 +5510,7 @@ impl GameApp {
         let position = ingame_pointer_world_pixel(drag.motion.last);
         let put_target = self
             .keyboard_modifiers
-            .ctrl()
+            .control_key()
             .then(|| {
                 self.graphics.object_at_point_with_ocf(
                     &self.snapshot,
@@ -5341,7 +5531,7 @@ impl GameApp {
         }
         self.show_startup_hint = false;
         let mut add_mode = 1;
-        let shift_append = self.keyboard_modifiers.shift();
+        let shift_append = self.keyboard_modifiers.shift_key();
         for object in selected {
             let (command, x, y, target, target2) = if let Some(container) = put_target {
                 (
@@ -5392,7 +5582,7 @@ impl GameApp {
         let position = ingame_pointer_world_pixel(drag.motion.last);
         let put_target = self
             .keyboard_modifiers
-            .ctrl()
+            .control_key()
             .then(|| {
                 self.graphics.object_at_point_with_ocf(
                     &self.snapshot,
@@ -5404,7 +5594,7 @@ impl GameApp {
             .flatten();
         self.show_startup_hint = false;
         let mut add_mode = 1;
-        let shift_append = self.keyboard_modifiers.shift();
+        let shift_append = self.keyboard_modifiers.shift_key();
         for vehicle in selected {
             self.submit_or_execute_player_command(PlayerCommandControlData {
                 player: self.local_owner,

@@ -91,10 +91,11 @@ mod tests {
         assert_eq!(window_icon_image(), Some(image));
     }
 
-    // `with_window_icon` sets `ICON_SMALL` only (winit-0.28.7/src/window.rs:987),
-    // which is the title-bar slot. The taskbar button reads `ICON_BIG`, so
-    // without a second image Windows stretches the 64px one across a button
-    // drawn at up to 256.
+    // `with_window_icon` sets `ICON_SMALL` only
+    // (winit-0.30.13/src/platform_impl/windows/window.rs:887-908), which is
+    // the title-bar slot. The taskbar button reads `ICON_BIG`, so without a
+    // second image Windows stretches the 64px one across a button drawn at up
+    // to 256.
     #[test]
     fn the_windows_taskbar_gets_its_own_larger_image() {
         let small = window_icon_image_at(WINDOW_ICON_SIDE).expect("the product logo decodes");

@@ -1035,8 +1035,7 @@ fn configured_fullscreen_reaches_platform_startup_path() {
     assert!(!defer_startup_fullscreen_until_resumed(windowed.mode));
     assert!(!should_reconcile_deferred_fullscreen(windowed.mode, false));
     assert!(
-        startup_window_builder(&windowed, PhysicalSize::new(800, 600))
-            .window_attributes()
+        startup_window_attributes(&windowed, PhysicalSize::new(800, 600))
             .fullscreen
             .is_none()
     );
@@ -1051,13 +1050,13 @@ fn configured_fullscreen_reaches_platform_startup_path() {
     );
     assert!(!should_reconcile_deferred_fullscreen(display.mode, true));
 
-    let builder = startup_window_builder(&display, PhysicalSize::new(800, 600));
+    let attributes = startup_window_attributes(&display, PhysicalSize::new(800, 600));
 
     if defer_startup_fullscreen_until_resumed(display.mode) {
-        assert!(builder.window_attributes().fullscreen.is_none());
+        assert!(attributes.fullscreen.is_none());
     } else {
         assert!(matches!(
-            builder.window_attributes().fullscreen.as_ref(),
+            attributes.fullscreen.as_ref(),
             Some(Fullscreen::Borderless(None))
         ));
     }
@@ -2456,7 +2455,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
         message.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
-    message.pressed_engine_keys.insert(VirtualKeyCode::A);
+    message.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
     remove_global_gui_sheet(&mut message, "GUISpinBoxArrow.png");
     let before = runtime_global_ui_snapshot(&message);
     let error = message
@@ -2477,7 +2476,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
     game_over.scoreboard_initial_reconcile_pending = true;
-    game_over.pressed_engine_keys.insert(VirtualKeyCode::A);
+    game_over.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
     remove_global_gui_sheet(&mut game_over, "GUISpinBoxArrow.png");
     let before = runtime_global_ui_snapshot(&game_over);
     let error = game_over
@@ -2567,27 +2566,34 @@ fn m06_l033_startup_fade_modulates_retained_draws_and_text_like_cpp() {
 }
 
 #[test]
-fn m06_l033_surface_error_policy_rebuilds_or_retries_only_recoverable_errors() {
-    let classify = |surface| {
+fn m06_l033_pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
+    // The local Pixels patch bounds outdated/suboptimal retries, returns a
+    // successful skipped outcome for timeout/occlusion, and surfaces Lost so
+    // the app can rebuild Pixels. Other escaping errors remain fatal.
+    assert_eq!(
         retained_gpu_present_recovery(
-            &anyhow::Error::new(pixels::Error::Surface(surface)).context("retained presentation"),
-        )
-    };
-    assert_eq!(
-        classify(pixels::wgpu::SurfaceError::Lost),
-        RetainedGpuPresentRecovery::RebuildDevice
-    );
-    assert_eq!(
-        classify(pixels::wgpu::SurfaceError::Outdated),
-        RetainedGpuPresentRecovery::RebuildDevice
-    );
-    assert_eq!(
-        classify(pixels::wgpu::SurfaceError::Timeout),
-        RetainedGpuPresentRecovery::Retry
-    );
-    assert_eq!(
-        classify(pixels::wgpu::SurfaceError::OutOfMemory),
+            &anyhow::Error::new(pixels::Error::Validation).context("retained presentation")
+        ),
         RetainedGpuPresentRecovery::Fatal
+    );
+    let masked_device_loss = retained_gpu_presentation_error(
+        anyhow::Error::new(pixels::Error::Validation).context("retained presentation"),
+        Err(gpu_renderer::GpuRendererError::DeviceRecreationRequired {
+            reason: gpu_renderer::RetainedGpuRecreateReason::DeviceLost,
+            detail: "Destroyed".to_owned(),
+        }),
+    );
+    assert_eq!(
+        retained_gpu_present_recovery(&masked_device_loss),
+        RetainedGpuPresentRecovery::RebuildDevice,
+        "recorded renderer health must override the Pixels error that escaped first"
+    );
+    let surface_loss = anyhow::Error::new(pixels::Error::SurfaceLost)
+        .context("retained presentation surface was lost");
+    assert_eq!(
+        retained_gpu_present_recovery(&surface_loss),
+        RetainedGpuPresentRecovery::RebuildDevice,
+        "a surface-only loss must rebuild Pixels even while renderer health is clean"
     );
     let observed_device_loss =
         anyhow::Error::new(gpu_renderer::GpuRendererError::DeviceRecreationRequired {
@@ -2602,19 +2608,19 @@ fn m06_l033_surface_error_policy_rebuilds_or_retries_only_recoverable_errors() {
     let queue_submit_loss =
         "Error in Queue::submit: Validation Error: Parent device is lost".to_owned();
     let detail = wgpu_device_loss_panic_detail(&queue_submit_loss)
-        .expect("wgpu 0.16 fatal submit loss remains recoverable");
+        .expect("wgpu fatal submit loss remains recoverable");
     assert_eq!(
         retained_gpu_present_recovery(&retained_gpu_device_loss_error(detail)),
         RetainedGpuPresentRecovery::RebuildDevice
     );
     let unrelated_panic = "index out of bounds".to_owned();
     assert_eq!(wgpu_device_loss_panic_detail(&unrelated_panic), None);
-    let validation = anyhow::Error::new(gpu_renderer::GpuRendererError::DeviceFatal {
+    let renderer_validation = anyhow::Error::new(gpu_renderer::GpuRendererError::DeviceFatal {
         reason: gpu_renderer::RetainedGpuFatalReason::Validation,
         detail: "invalid bind group".to_owned(),
     });
     assert_eq!(
-        retained_gpu_present_recovery(&validation),
+        retained_gpu_present_recovery(&renderer_validation),
         RetainedGpuPresentRecovery::Fatal
     );
 
@@ -3862,7 +3868,7 @@ fn l072_options_scale_enter_submit_times_out_reverts_and_yes_commits() {
         .expect("scale spinbox editor")
         .controller
         .set_input_text("225");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("submit scale spinbox editor with Enter");
     assert!(app.game_option_input_dialog.is_none());
     assert_eq!(
@@ -3894,7 +3900,7 @@ fn l072_options_scale_enter_submit_times_out_reverts_and_yes_commits() {
             remaining_seconds: 12,
         })
     ));
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("release scale editor Enter");
     assert_eq!(app.message_dialogs.len(), 1);
     for _ in 0..12 {
@@ -5301,7 +5307,7 @@ fn l031_debug_keys_toggle_render_flags_and_exact_flashes() {
     assert_eq!(names.into_iter().collect::<HashSet<_>>().len(), 5);
 
     let mut app = new_running_sandbox_app();
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set exact debug modifiers");
     app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
         .expect("enable debug mode");
@@ -5512,7 +5518,7 @@ fn liquid_animation_requires_both_legacy_graphics_switches() {
 
 #[test]
 fn runtime_f1_help_toggles_on_each_down_renders_and_release_falls_through() {
-    for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
+    for modifiers in [ModifiersState::empty(), ModifiersState::SUPER] {
         let mut app = new_classic_running_sandbox_app();
         app.status_text.clear();
         app.snapshot.hud.messages.clear();

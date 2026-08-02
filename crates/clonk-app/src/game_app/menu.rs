@@ -2103,7 +2103,7 @@ impl GameApp {
                     target: 0,
                     target2: 0,
                     data: definition_c4id,
-                    add_mode: 1 | if self.keyboard_modifiers.shift() {
+                    add_mode: 1 | if self.keyboard_modifiers.shift_key() {
                         4
                     } else {
                         0

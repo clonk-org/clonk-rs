@@ -20,9 +20,481 @@ pub(crate) fn retained_gpu_gamma_mode(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RetainedGpuPresentRecovery {
     RebuildDevice,
-    Retry,
     CpuFallback,
     Fatal,
+}
+
+/// Whether Pixels actually acquired a drawable and invoked the render callback.
+///
+/// Pixels 0.17 treats an occluded or timed-out surface as a successful no-op,
+/// so `Ok(())` alone no longer proves that a frame reached the compositor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RetainedGpuPresentOutcome {
+    Presented,
+    Skipped,
+}
+
+pub(crate) const fn retained_gpu_present_outcome(
+    render_callback_invoked: bool,
+) -> RetainedGpuPresentOutcome {
+    if render_callback_invoked {
+        RetainedGpuPresentOutcome::Presented
+    } else {
+        RetainedGpuPresentOutcome::Skipped
+    }
+}
+
+/// Present Pixels' ordinary CPU buffer while retaining whether a surface frame
+/// was actually available.
+pub(crate) fn present_pixels_frame(
+    pixels: &Pixels<'_>,
+) -> std::result::Result<RetainedGpuPresentOutcome, pixels::Error> {
+    let mut render_callback_invoked = false;
+    pixels.render_with(|encoder, surface_view, context| {
+        render_callback_invoked = true;
+        context.scaling_renderer.render(encoder, surface_view);
+        Ok(())
+    })?;
+    Ok(retained_gpu_present_outcome(render_callback_invoked))
+}
+
+pub(crate) fn replace_after_drop<T, E>(
+    current: &mut Option<T>,
+    build_replacement: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<(), E> {
+    drop(current.take());
+    *current = Some(build_replacement()?);
+    Ok(())
+}
+
+fn restore_framebuffer_contents(
+    previous: &[u8],
+    replacement: &mut [u8],
+) -> std::result::Result<(), &'static str> {
+    if previous.len() != replacement.len() {
+        return Err("replacement framebuffer length does not match the previous frame");
+    }
+    replacement.copy_from_slice(previous);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SurfaceRebuildSchedule {
+    Immediate,
+    Cadenced,
+}
+
+#[derive(Default)]
+pub(crate) struct SurfaceRebuildState {
+    prompt_spent: bool,
+}
+
+impl SurfaceRebuildState {
+    pub(crate) fn note_loss(&mut self) -> SurfaceRebuildSchedule {
+        if self.prompt_spent {
+            SurfaceRebuildSchedule::Cadenced
+        } else {
+            self.prompt_spent = true;
+            SurfaceRebuildSchedule::Immediate
+        }
+    }
+
+    pub(crate) fn note_presented(&mut self) {
+        self.prompt_spent = false;
+    }
+}
+
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
+mod window_api_tests {
+    use super::*;
+    use winit::keyboard::{Key, KeyLocation, NamedKey, PhysicalKey};
+
+    // pixels-0.17.2/src/lib.rs:547-573 returns Ok without calling the render
+    // callback for an occluded or timed-out surface.
+    #[test]
+    fn a_successful_noop_is_not_counted_as_a_presented_frame() {
+        assert_eq!(
+            retained_gpu_present_outcome(false),
+            RetainedGpuPresentOutcome::Skipped
+        );
+        assert_eq!(
+            retained_gpu_present_outcome(true),
+            RetainedGpuPresentOutcome::Presented
+        );
+    }
+
+    #[test]
+    fn a_replacement_surface_is_built_only_after_the_previous_one_is_dropped() {
+        struct DropProbe<'a>(&'a std::cell::Cell<bool>);
+
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let previous_dropped = std::cell::Cell::new(false);
+        let replacement_dropped = std::cell::Cell::new(false);
+        let mut surface = Some(DropProbe(&previous_dropped));
+        replace_after_drop(&mut surface, || {
+            assert!(
+                previous_dropped.get(),
+                "the old native surface must be unconfigured before a replacement swapchain is created"
+            );
+            Ok::<_, std::convert::Infallible>(DropProbe(&replacement_dropped))
+        })
+        .expect("replace the surface");
+
+        assert!(surface.is_some());
+        assert!(!replacement_dropped.get());
+
+        let failed_dropped = std::cell::Cell::new(false);
+        let mut failed_surface = Some(DropProbe(&failed_dropped));
+        let result = replace_after_drop(&mut failed_surface, || {
+            Err::<DropProbe<'_>, _>("replacement failed")
+        });
+        assert_eq!(result, Err("replacement failed"));
+        assert!(failed_dropped.get());
+        assert!(failed_surface.is_none());
+    }
+
+    #[test]
+    fn only_the_first_surface_rebuild_before_presentation_is_prompted() {
+        let mut recovery = SurfaceRebuildState::default();
+        assert_eq!(recovery.note_loss(), SurfaceRebuildSchedule::Immediate);
+        assert_eq!(
+            recovery.note_loss(),
+            SurfaceRebuildSchedule::Cadenced,
+            "a skipped frame must not replenish the prompt redraw"
+        );
+        recovery.note_presented();
+        assert_eq!(recovery.note_loss(), SurfaceRebuildSchedule::Immediate);
+    }
+
+    #[test]
+    fn framebuffer_recovery_preserves_unchanged_cpu_output() {
+        let previous = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut replacement = [0; 8];
+        restore_framebuffer_contents(&previous, &mut replacement)
+            .expect("restore the cached CPU frame");
+        assert_eq!(replacement, previous);
+
+        assert!(restore_framebuffer_contents(&previous, &mut replacement[..4]).is_err());
+    }
+
+    // C4FullScreen.cpp:54-65,227-238,387-400 — Win32 dispatches virtual
+    // keys, X11 resolves group/level zero KeySyms, and SDL dispatches scancodes.
+    #[test]
+    fn legacy_virtual_keys_keep_each_oracle_frontend_semantics() {
+        #[cfg(not(target_os = "windows"))]
+        let layout_a = legacy_virtual_key(
+            &Key::Character("a".into()),
+            KeyLocation::Standard,
+            PhysicalKey::Code(VirtualKeyCode::KeyQ),
+            false,
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(layout_a, Some(VirtualKeyCode::KeyQ));
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        assert_eq!(layout_a, Some(VirtualKeyCode::KeyA));
+
+        let keypad_enter = legacy_virtual_key(
+            &Key::Named(NamedKey::Enter),
+            KeyLocation::Numpad,
+            PhysicalKey::Code(VirtualKeyCode::NumpadEnter),
+            false,
+        );
+        #[cfg(target_os = "windows")]
+        assert_eq!(keypad_enter, Some(VirtualKeyCode::Enter));
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(keypad_enter, Some(VirtualKeyCode::NumpadEnter));
+    }
+
+    #[test]
+    fn game_shell_key_text_accepts_composition_but_rejects_shortcuts() {
+        let altgr = ModifiersState::CONTROL | ModifiersState::ALT;
+        assert!(
+            !game_shell_text_input_allowed(ModifiersState::CONTROL),
+            "Ctrl shortcut text must not reach the game shell"
+        );
+        assert!(
+            !game_shell_text_input_allowed(ModifiersState::SUPER),
+            "Command shortcut text must not reach the game shell"
+        );
+        assert!(
+            game_shell_text_input_allowed(altgr),
+            "AltGr-composed KeyEvent::text must reach the game shell"
+        );
+        assert!(
+            game_shell_text_input_allowed(ModifiersState::ALT),
+            "Option-composed KeyEvent::text must reach the game shell"
+        );
+
+        assert!(
+            !text_input_allowed(altgr),
+            "developer-console shortcut filtering remains intentional"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unmappable_layout_characters_do_not_fall_back_to_physical_letters() {
+        assert_eq!(
+            legacy_virtual_key(
+                &Key::Character("é".into()),
+                KeyLocation::Standard,
+                PhysicalKey::Code(VirtualKeyCode::KeyQ),
+                false,
+            ),
+            None
+        );
+    }
+
+    // C4FullScreen.cpp:227-238 resolves X11 group/level zero KeySyms; the
+    // German layout values are canonicalized by input.rs under those exact
+    // legacy keys.
+    // C4Config.cpp:643 binds Kbd2Key7 through XK_KP_End, which input.rs
+    // normalizes back to the physical keypad digit.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_group_zero_german_keysyms_keep_their_legacy_bindings() {
+        for (character, expected) in [
+            ("<", VirtualKeyCode::IntlBackslash),
+            ("ä", VirtualKeyCode::Quote),
+            ("ö", VirtualKeyCode::Semicolon),
+            ("ü", VirtualKeyCode::BracketLeft),
+        ] {
+            assert_eq!(
+                semantic_legacy_virtual_key(
+                    &Key::Character(character.into()),
+                    KeyLocation::Standard,
+                ),
+                Some(expected),
+                "{character}"
+            );
+        }
+
+        assert_eq!(
+            legacy_virtual_key(
+                &Key::Named(NamedKey::End),
+                KeyLocation::Numpad,
+                PhysicalKey::Code(VirtualKeyCode::Numpad7),
+                false,
+            ),
+            Some(VirtualKeyCode::Numpad1),
+            "X11 KP_End identity wins even when a custom map moves its physical key"
+        );
+        assert_eq!(
+            legacy_virtual_key(
+                &Key::Character(",".into()),
+                KeyLocation::Numpad,
+                PhysicalKey::Code(VirtualKeyCode::NumpadDecimal),
+                false,
+            ),
+            Some(VirtualKeyCode::NumpadComma),
+            "XK_KP_Separator must not collapse into XK_KP_Decimal (input.rs:1340-1342)"
+        );
+        assert_eq!(
+            legacy_virtual_key(
+                &Key::Unidentified(winit::keyboard::NativeKey::Xkb(0xff9d)),
+                KeyLocation::Numpad,
+                PhysicalKey::Code(VirtualKeyCode::Numpad5),
+                false,
+            ),
+            Some(VirtualKeyCode::Numpad5),
+            "XK_KP_Begin remains the legacy numeric-keypad center control"
+        );
+        assert_eq!(
+            legacy_virtual_key(
+                &Key::Named(NamedKey::Clear),
+                KeyLocation::Numpad,
+                PhysicalKey::Code(VirtualKeyCode::Numpad5),
+                false,
+            ),
+            None,
+            "unsupported XK_Clear must not masquerade as XK_KP_Begin"
+        );
+        for named in [NamedKey::Tab, NamedKey::F1] {
+            assert_eq!(
+                legacy_virtual_key(
+                    &Key::Named(named),
+                    KeyLocation::Numpad,
+                    PhysicalKey::Code(VirtualKeyCode::Numpad1),
+                    false,
+                ),
+                None,
+                "unsupported keypad keysym {named:?}"
+            );
+        }
+        assert_eq!(
+            legacy_virtual_key(
+                &Key::Character(" ".into()),
+                KeyLocation::Numpad,
+                PhysicalKey::Code(VirtualKeyCode::Space),
+                false,
+            ),
+            None,
+            "unsupported XK_KP_Space must not become ordinary Space"
+        );
+    }
+
+    // C4FullScreen.cpp:54-65 forwards Win32 wParam unchanged and
+    // C4KeyboardInput.cpp:82 registers VK_CLEAR in the pinned KeyCodeMap.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_numlock_off_keypad_clear_keeps_its_raw_virtual_key() {
+        assert_eq!(
+            legacy_virtual_key(
+                &Key::Named(NamedKey::Clear),
+                KeyLocation::Numpad,
+                PhysicalKey::Code(VirtualKeyCode::Numpad5),
+                false,
+            ),
+            Some(VirtualKeyCode::NumpadClear)
+        );
+    }
+
+    // C4FullScreen.cpp:54-65 forwards Win32 wParam rather than fabricating a
+    // key from the physical position when winit exposes an unsupported name.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_process_key_does_not_fall_back_to_the_physical_letter() {
+        assert_eq!(
+            legacy_virtual_key(
+                &Key::Named(NamedKey::Process),
+                KeyLocation::Standard,
+                PhysicalKey::Code(VirtualKeyCode::KeyW),
+                false,
+            ),
+            None
+        );
+    }
+
+    // C4FullScreen.cpp:54-65 forwards the native wParam and
+    // C4KeyboardInput.cpp:254 registers VK_OEM_102 (226).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_unidentified_native_virtual_key_wins_over_physical_position() {
+        assert_eq!(
+            legacy_virtual_key(
+                &Key::Unidentified(winit::keyboard::NativeKey::Windows(226)),
+                KeyLocation::Standard,
+                PhysicalKey::Code(VirtualKeyCode::KeyW),
+                false,
+            ),
+            Some(VirtualKeyCode::IntlBackslash)
+        );
+    }
+
+    // C4FullScreen.cpp:54-65 forwards Win32 wParam unchanged;
+    // C4KeyboardInput.cpp:241-254 assigns the OEM virtual-key identities.
+    #[test]
+    fn windows_raw_oem_virtual_keys_keep_the_active_layout_identity() {
+        for (raw_virtual_key, expected) in [
+            (187, VirtualKeyCode::Equal),
+            (191, VirtualKeyCode::Slash),
+            (219, VirtualKeyCode::BracketLeft),
+            (220, VirtualKeyCode::Backslash),
+            (221, VirtualKeyCode::BracketRight),
+            (222, VirtualKeyCode::Quote),
+        ] {
+            assert_eq!(
+                legacy_virtual_key_from_windows_raw(None, raw_virtual_key, false),
+                Some(expected),
+                "raw VK {raw_virtual_key}"
+            );
+        }
+    }
+
+    // C4FullScreen.cpp:54-65 forwards the raw Win32 wParam. Winit preserves
+    // the physical key instead for the platform's Ctrl+NumLock/Pause swap, so
+    // the boundary restores those two wParam values before decoding.
+    #[test]
+    fn windows_ctrl_numlock_and_pause_keep_raw_wparam_semantics() {
+        assert_eq!(
+            legacy_virtual_key_from_windows_raw(Some(VirtualKeyCode::NumLock), 144, true,),
+            Some(VirtualKeyCode::Pause)
+        );
+        assert_eq!(
+            legacy_virtual_key_from_windows_raw(Some(VirtualKeyCode::Pause), 19, true),
+            Some(VirtualKeyCode::NumLock)
+        );
+    }
+
+    // C4FullScreen.cpp:54-65 makes raw wParam authoritative, while the pinned
+    // KeyCodeMap supports Win/Super (C4KeyboardInput.cpp:161-163), conversion
+    // keys (:100-103), and browser/media/volume keys (:221-239).
+    #[test]
+    fn windows_supported_named_events_fall_back_only_when_raw_vk_is_unmapped() {
+        for (named, location, expected) in [
+            (
+                NamedKey::Super,
+                KeyLocation::Left,
+                VirtualKeyCode::SuperLeft,
+            ),
+            (
+                NamedKey::Convert,
+                KeyLocation::Standard,
+                VirtualKeyCode::Convert,
+            ),
+            (
+                NamedKey::NonConvert,
+                KeyLocation::Standard,
+                VirtualKeyCode::NonConvert,
+            ),
+            (
+                NamedKey::BrowserBack,
+                KeyLocation::Standard,
+                VirtualKeyCode::BrowserBack,
+            ),
+            (
+                NamedKey::MediaPlayPause,
+                KeyLocation::Standard,
+                VirtualKeyCode::MediaPlayPause,
+            ),
+            (
+                NamedKey::AudioVolumeUp,
+                KeyLocation::Standard,
+                VirtualKeyCode::AudioVolumeUp,
+            ),
+        ] {
+            assert_eq!(
+                legacy_virtual_key_from_windows_named(&Key::Named(named), location, || None),
+                Some(expected),
+                "{named:?}"
+            );
+        }
+
+        assert_eq!(
+            legacy_virtual_key_from_windows_named(
+                &Key::Named(NamedKey::AudioVolumeUp),
+                KeyLocation::Standard,
+                || Some(VirtualKeyCode::F1),
+            ),
+            Some(VirtualKeyCode::F1),
+            "a supported raw VK remains authoritative"
+        );
+
+        let raw_lookup_called = std::cell::Cell::new(false);
+        assert_eq!(
+            legacy_virtual_key_from_windows_named(
+                &Key::Named(NamedKey::Process),
+                KeyLocation::Standard,
+                || {
+                    raw_lookup_called.set(true);
+                    Some(VirtualKeyCode::KeyW)
+                },
+            ),
+            None
+        );
+        assert!(
+            !raw_lookup_called.get(),
+            "unsupported IME names reject before physical VK recovery"
+        );
+    }
 }
 
 /// Whether the current frame may enter retained GPU capture.
@@ -59,11 +531,35 @@ pub(crate) fn retained_gpu_device_loss_error(detail: String) -> anyhow::Error {
     .into()
 }
 
+/// Prefer the renderer's device-health diagnosis when presentation fails.
+///
+/// Pixels can reject surface acquisition before invoking our render callback.
+/// If wgpu dispatched the device-loss callback first, that recorded diagnosis
+/// is more specific than Pixels' generic presentation error and must remain in
+/// the error chain so the event loop rebuilds the device.
+pub(crate) fn retained_gpu_presentation_error(
+    presentation_error: anyhow::Error,
+    renderer_health: std::result::Result<(), gpu_renderer::GpuRendererError>,
+) -> anyhow::Error {
+    match renderer_health {
+        Ok(()) => presentation_error,
+        Err(health_error) => anyhow::Error::new(health_error).context(presentation_error),
+    }
+}
+
 pub(crate) fn retained_gpu_present_recovery(error: &anyhow::Error) -> RetainedGpuPresentRecovery {
     if error.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<gpu_renderer::GpuRendererError>(),
             Some(gpu_renderer::GpuRendererError::DeviceRecreationRequired { .. })
+        )
+    }) {
+        return RetainedGpuPresentRecovery::RebuildDevice;
+    }
+    if error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<pixels::Error>(),
+            Some(pixels::Error::SurfaceLost)
         )
     }) {
         return RetainedGpuPresentRecovery::RebuildDevice;
@@ -77,18 +573,10 @@ pub(crate) fn retained_gpu_present_recovery(error: &anyhow::Error) -> RetainedGp
     }) {
         return RetainedGpuPresentRecovery::CpuFallback;
     }
-    match error.downcast_ref::<pixels::Error>() {
-        Some(pixels::Error::Surface(
-            pixels::wgpu::SurfaceError::Lost | pixels::wgpu::SurfaceError::Outdated,
-        )) => RetainedGpuPresentRecovery::RebuildDevice,
-        Some(pixels::Error::Surface(pixels::wgpu::SurfaceError::Timeout)) => {
-            RetainedGpuPresentRecovery::Retry
-        }
-        Some(pixels::Error::Surface(pixels::wgpu::SurfaceError::OutOfMemory)) | None => {
-            RetainedGpuPresentRecovery::Fatal
-        }
-        Some(_) => RetainedGpuPresentRecovery::Fatal,
-    }
+    // The local Pixels patch surfaces Lost above, bounds Outdated/Suboptimal
+    // recovery, and turns timeout/occlusion into a successful skipped frame.
+    // Any other Pixels error that escapes is not surface-recoverable.
+    RetainedGpuPresentRecovery::Fatal
 }
 
 /// Backend sets to try, in order, when creating the framebuffer device.
@@ -120,15 +608,18 @@ pub(crate) fn framebuffer_backend_attempts(
 /// Create the framebuffer, widening the backend set rather than aborting.
 ///
 /// Note what this cannot fix: wgpu-hal's GLES backend rejects any context
-/// below GLES 3.0 (wgpu-hal-0.16.2 src/gles/adapter.rs:218-225), so VideoCore
+/// below GLES 3.0 (wgpu-hal-29.0.4 src/gles/egl.rs:473-474), so VideoCore
 /// IV boards (Pi 0-3) still produce no adapter on any backend. There is no CPU
 /// presentation fallback either — `pixels` needs a wgpu device even to blit a
 /// CPU buffer — so those boards fail here with the diagnostic below.
-pub(crate) fn build_framebuffer(window: &Window, size: PhysicalSize<u32>) -> Result<Pixels> {
-    let attempts = framebuffer_backend_attempts(pixels::wgpu::util::backend_bits_from_env());
+pub(crate) fn build_framebuffer(
+    window: &Arc<Window>,
+    size: PhysicalSize<u32>,
+) -> Result<Pixels<'static>> {
+    let attempts = framebuffer_backend_attempts(pixels::wgpu::Backends::from_env());
     let mut last_error = None;
     for backends in attempts {
-        let surface = SurfaceTexture::new(size.width, size.height, window);
+        let surface = SurfaceTexture::new(size.width, size.height, Arc::clone(window));
         match PixelsBuilder::new(size.width, size.height, surface)
             .wgpu_backend(backends)
             // StdGLCtx::PageFlip calls SDL_GL_SwapWindow without ever selecting
@@ -157,34 +648,47 @@ pub(crate) fn build_framebuffer(window: &Window, size: PhysicalSize<u32>) -> Res
 }
 
 pub(crate) fn rebuild_retained_gpu_device(
-    window: &Window,
-    pixels: &mut Pixels,
+    window: &Arc<Window>,
+    pixels: &mut Option<Pixels<'static>>,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
 ) -> Result<()> {
     let size = enforce_min_size(window.inner_size());
-    let mut replacement =
-        build_framebuffer(window, size).context("failed to rebuild retained GPU surface")?;
-    replacement
-        .resize_buffer(1, 1)
-        .context("failed to restore retained GPU presentation buffer")?;
-    renderer.recreate(
-        replacement.device(),
-        replacement.queue(),
-        replacement.surface_texture_format(),
-    );
-    renderer
-        .check_health()
-        .context("replacement retained GPU device failed initialization")?;
-    *pixels = replacement;
-    Ok(())
+    let previous = pixels
+        .as_ref()
+        .context("presentation framebuffer is unavailable")?;
+    let previous_width = previous.context().texture_extent.width;
+    let previous_height = previous.context().texture_extent.height;
+    let previous_frame = previous.frame().to_vec();
+    replace_after_drop(pixels, || {
+        let mut replacement =
+            build_framebuffer(window, size).context("failed to rebuild retained GPU surface")?;
+        replacement
+            .resize_buffer(previous_width, previous_height)
+            .context("failed to restore retained GPU presentation buffer")?;
+        restore_framebuffer_contents(&previous_frame, replacement.frame_mut())
+            .map_err(anyhow::Error::msg)
+            .context("failed to restore retained GPU presentation contents")?;
+        renderer.recreate(
+            replacement.device(),
+            replacement.queue(),
+            replacement.surface_texture_format(),
+        );
+        renderer
+            .check_health()
+            .context("replacement retained GPU device failed initialization")?;
+        Ok(replacement)
+    })
 }
 
 pub(crate) fn present_retained_gpu_frame(
     app: &mut GameApp,
-    pixels: &Pixels,
+    pixels: &Pixels<'_>,
     presenter: &clonk_scaling::FramePresenter,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
-) -> Result<()> {
+) -> Result<RetainedGpuPresentOutcome> {
+    renderer
+        .check_health()
+        .context("retained GPU device was unavailable before presentation")?;
     let geometry = presenter.presentation_geometry();
     let (physical_width, physical_height) = geometry.physical_size();
     let presentation = clonk_graphics::GpuPresentation {
@@ -208,8 +712,10 @@ pub(crate) fn present_retained_gpu_frame(
         !app.pending_screenshots.is_empty() || !app.pending_gpu_thumbnail_paths.is_empty();
     let mut previous_native_readback = None;
     let mut readback = None;
+    let mut render_callback_invoked = false;
     let submission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pixels.render_with(|encoder, surface_view, context| {
+            render_callback_invoked = true;
             if request_native_save_readback {
                 previous_native_readback =
                     renderer.readback_last_presentation(&context.device, encoder)?;
@@ -227,13 +733,38 @@ pub(crate) fn present_retained_gpu_frame(
         })
     }));
     match submission {
-        Ok(result) => result.context("failed to submit retained GPU frame")?,
+        Ok(Ok(())) => renderer
+            .check_health()
+            .context("retained GPU device failed while submitting a frame")?,
+        Ok(Err(error)) => {
+            return Err(retained_gpu_presentation_error(
+                anyhow::Error::new(error).context("failed to submit retained GPU frame"),
+                renderer.check_health(),
+            ));
+        }
         Err(payload) => {
+            let renderer_health = renderer.check_health();
             if let Some(detail) = wgpu_device_loss_panic_detail(payload.as_ref()) {
-                return Err(retained_gpu_device_loss_error(detail));
+                return Err(retained_gpu_presentation_error(
+                    retained_gpu_device_loss_error(detail),
+                    renderer_health,
+                ));
+            }
+            if renderer_health.is_err() {
+                return Err(retained_gpu_presentation_error(
+                    anyhow::anyhow!("retained GPU presentation panicked after a device failure"),
+                    renderer_health,
+                ));
             }
             std::panic::resume_unwind(payload);
         }
+    }
+
+    let outcome = retained_gpu_present_outcome(render_callback_invoked);
+    if outcome == RetainedGpuPresentOutcome::Skipped {
+        // Pixels acquired no drawable. Keep screenshot/save requests queued so
+        // the next real presentation can fulfill them from an actual frame.
+        return Ok(outcome);
     }
 
     let had_gpu_readback = previous_native_readback.is_some() || readback.is_some();
@@ -373,7 +904,7 @@ pub(crate) fn present_retained_gpu_frame(
             app.report_screenshot_result(result);
         }
     }
-    Ok(())
+    Ok(outcome)
 }
 
 pub(crate) fn deliver_desktop_notifications<F>(app: &mut GameApp, mut show: F)
@@ -483,18 +1014,497 @@ pub(crate) fn advance_game_clock_from_elapsed(
     Ok(changed)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
+fn semantic_legacy_virtual_key(
+    key: &winit::keyboard::Key,
+    location: winit::keyboard::KeyLocation,
+) -> Option<VirtualKeyCode> {
+    use winit::keyboard::{Key, KeyLocation, NamedKey};
+
+    let character = |text: &str| {
+        Some(match (location, text) {
+            (KeyLocation::Numpad, "0") => VirtualKeyCode::Numpad0,
+            (KeyLocation::Numpad, "1") => VirtualKeyCode::Numpad1,
+            (KeyLocation::Numpad, "2") => VirtualKeyCode::Numpad2,
+            (KeyLocation::Numpad, "3") => VirtualKeyCode::Numpad3,
+            (KeyLocation::Numpad, "4") => VirtualKeyCode::Numpad4,
+            (KeyLocation::Numpad, "5") => VirtualKeyCode::Numpad5,
+            (KeyLocation::Numpad, "6") => VirtualKeyCode::Numpad6,
+            (KeyLocation::Numpad, "7") => VirtualKeyCode::Numpad7,
+            (KeyLocation::Numpad, "8") => VirtualKeyCode::Numpad8,
+            (KeyLocation::Numpad, "9") => VirtualKeyCode::Numpad9,
+            (KeyLocation::Numpad, "+") => VirtualKeyCode::NumpadAdd,
+            (KeyLocation::Numpad, ",") => VirtualKeyCode::NumpadComma,
+            (KeyLocation::Numpad, ".") => VirtualKeyCode::NumpadDecimal,
+            (KeyLocation::Numpad, "/") => VirtualKeyCode::NumpadDivide,
+            (KeyLocation::Numpad, "=") => VirtualKeyCode::NumpadEqual,
+            (KeyLocation::Numpad, "*") => VirtualKeyCode::NumpadMultiply,
+            (KeyLocation::Numpad, "-") => VirtualKeyCode::NumpadSubtract,
+            (_, "a" | "A") => VirtualKeyCode::KeyA,
+            (_, "b" | "B") => VirtualKeyCode::KeyB,
+            (_, "c" | "C") => VirtualKeyCode::KeyC,
+            (_, "d" | "D") => VirtualKeyCode::KeyD,
+            (_, "e" | "E") => VirtualKeyCode::KeyE,
+            (_, "f" | "F") => VirtualKeyCode::KeyF,
+            (_, "g" | "G") => VirtualKeyCode::KeyG,
+            (_, "h" | "H") => VirtualKeyCode::KeyH,
+            (_, "i" | "I") => VirtualKeyCode::KeyI,
+            (_, "j" | "J") => VirtualKeyCode::KeyJ,
+            (_, "k" | "K") => VirtualKeyCode::KeyK,
+            (_, "l" | "L") => VirtualKeyCode::KeyL,
+            (_, "m" | "M") => VirtualKeyCode::KeyM,
+            (_, "n" | "N") => VirtualKeyCode::KeyN,
+            (_, "o" | "O") => VirtualKeyCode::KeyO,
+            (_, "p" | "P") => VirtualKeyCode::KeyP,
+            (_, "q" | "Q") => VirtualKeyCode::KeyQ,
+            (_, "r" | "R") => VirtualKeyCode::KeyR,
+            (_, "s" | "S") => VirtualKeyCode::KeyS,
+            (_, "t" | "T") => VirtualKeyCode::KeyT,
+            (_, "u" | "U") => VirtualKeyCode::KeyU,
+            (_, "v" | "V") => VirtualKeyCode::KeyV,
+            (_, "w" | "W") => VirtualKeyCode::KeyW,
+            (_, "x" | "X") => VirtualKeyCode::KeyX,
+            (_, "y" | "Y") => VirtualKeyCode::KeyY,
+            (_, "z" | "Z") => VirtualKeyCode::KeyZ,
+            (_, "0") => VirtualKeyCode::Digit0,
+            (_, "1") => VirtualKeyCode::Digit1,
+            (_, "2") => VirtualKeyCode::Digit2,
+            (_, "3") => VirtualKeyCode::Digit3,
+            (_, "4") => VirtualKeyCode::Digit4,
+            (_, "5") => VirtualKeyCode::Digit5,
+            (_, "6") => VirtualKeyCode::Digit6,
+            (_, "7") => VirtualKeyCode::Digit7,
+            (_, "8") => VirtualKeyCode::Digit8,
+            (_, "9") => VirtualKeyCode::Digit9,
+            (_, "`") => VirtualKeyCode::Backquote,
+            (_, "\\") => VirtualKeyCode::Backslash,
+            (_, "[") => VirtualKeyCode::BracketLeft,
+            (_, "]") => VirtualKeyCode::BracketRight,
+            (_, ",") => VirtualKeyCode::Comma,
+            (_, "=") => VirtualKeyCode::Equal,
+            (_, "-") => VirtualKeyCode::Minus,
+            (_, ".") => VirtualKeyCode::Period,
+            (_, "'") => VirtualKeyCode::Quote,
+            (_, ";") => VirtualKeyCode::Semicolon,
+            (_, "/") => VirtualKeyCode::Slash,
+            (_, " ") => VirtualKeyCode::Space,
+            #[cfg(target_os = "linux")]
+            (_, "<") => VirtualKeyCode::IntlBackslash,
+            #[cfg(target_os = "linux")]
+            (_, "ä") => VirtualKeyCode::Quote,
+            #[cfg(target_os = "linux")]
+            (_, "ö") => VirtualKeyCode::Semicolon,
+            #[cfg(target_os = "linux")]
+            (_, "ü") => VirtualKeyCode::BracketLeft,
+            _ => return None,
+        })
+    };
+    let sided = |left, right| match location {
+        KeyLocation::Right => Some(right),
+        KeyLocation::Left => Some(left),
+        KeyLocation::Standard | KeyLocation::Numpad => None,
+    };
+
+    match key {
+        Key::Character(text) => character(text.as_str()),
+        Key::Named(named) => Some(match named {
+            NamedKey::Alt => sided(VirtualKeyCode::AltLeft, VirtualKeyCode::AltRight)?,
+            NamedKey::AltGraph => VirtualKeyCode::AltRight,
+            NamedKey::CapsLock => VirtualKeyCode::CapsLock,
+            NamedKey::Control => sided(VirtualKeyCode::ControlLeft, VirtualKeyCode::ControlRight)?,
+            NamedKey::NumLock => VirtualKeyCode::NumLock,
+            NamedKey::ScrollLock => VirtualKeyCode::ScrollLock,
+            NamedKey::Shift => sided(VirtualKeyCode::ShiftLeft, VirtualKeyCode::ShiftRight)?,
+            NamedKey::Super | NamedKey::Meta => {
+                sided(VirtualKeyCode::SuperLeft, VirtualKeyCode::SuperRight)?
+            }
+            #[cfg(target_os = "windows")]
+            NamedKey::Clear if location == KeyLocation::Numpad => VirtualKeyCode::NumpadClear,
+            NamedKey::Enter if location == KeyLocation::Numpad => VirtualKeyCode::NumpadEnter,
+            NamedKey::Enter => VirtualKeyCode::Enter,
+            NamedKey::Tab => VirtualKeyCode::Tab,
+            NamedKey::Space => VirtualKeyCode::Space,
+            NamedKey::ArrowDown => VirtualKeyCode::ArrowDown,
+            NamedKey::ArrowLeft => VirtualKeyCode::ArrowLeft,
+            NamedKey::ArrowRight => VirtualKeyCode::ArrowRight,
+            NamedKey::ArrowUp => VirtualKeyCode::ArrowUp,
+            NamedKey::End => VirtualKeyCode::End,
+            NamedKey::Home => VirtualKeyCode::Home,
+            NamedKey::PageDown => VirtualKeyCode::PageDown,
+            NamedKey::PageUp => VirtualKeyCode::PageUp,
+            NamedKey::Backspace => VirtualKeyCode::Backspace,
+            NamedKey::Delete => VirtualKeyCode::Delete,
+            NamedKey::Insert => VirtualKeyCode::Insert,
+            NamedKey::ContextMenu => VirtualKeyCode::ContextMenu,
+            NamedKey::Escape => VirtualKeyCode::Escape,
+            NamedKey::Help => VirtualKeyCode::Help,
+            NamedKey::Pause => VirtualKeyCode::Pause,
+            NamedKey::Power => VirtualKeyCode::Power,
+            NamedKey::PrintScreen => VirtualKeyCode::PrintScreen,
+            NamedKey::Standby => VirtualKeyCode::Sleep,
+            NamedKey::WakeUp => VirtualKeyCode::WakeUp,
+            NamedKey::Convert => VirtualKeyCode::Convert,
+            NamedKey::KanaMode => VirtualKeyCode::KanaMode,
+            NamedKey::NonConvert => VirtualKeyCode::NonConvert,
+            NamedKey::HangulMode => VirtualKeyCode::Lang1,
+            NamedKey::HanjaMode => VirtualKeyCode::Lang2,
+            NamedKey::Copy => VirtualKeyCode::Copy,
+            NamedKey::Cut => VirtualKeyCode::Cut,
+            NamedKey::Paste => VirtualKeyCode::Paste,
+            NamedKey::BrowserBack => VirtualKeyCode::BrowserBack,
+            NamedKey::BrowserFavorites => VirtualKeyCode::BrowserFavorites,
+            NamedKey::BrowserForward => VirtualKeyCode::BrowserForward,
+            NamedKey::BrowserHome => VirtualKeyCode::BrowserHome,
+            NamedKey::BrowserRefresh => VirtualKeyCode::BrowserRefresh,
+            NamedKey::BrowserSearch => VirtualKeyCode::BrowserSearch,
+            NamedKey::BrowserStop => VirtualKeyCode::BrowserStop,
+            NamedKey::LaunchApplication1 => VirtualKeyCode::LaunchApp1,
+            NamedKey::LaunchApplication2 => VirtualKeyCode::LaunchApp2,
+            NamedKey::LaunchMail => VirtualKeyCode::LaunchMail,
+            NamedKey::LaunchMediaPlayer => VirtualKeyCode::MediaSelect,
+            NamedKey::MediaPlayPause => VirtualKeyCode::MediaPlayPause,
+            NamedKey::MediaStop => VirtualKeyCode::MediaStop,
+            NamedKey::MediaTrackNext => VirtualKeyCode::MediaTrackNext,
+            NamedKey::MediaTrackPrevious => VirtualKeyCode::MediaTrackPrevious,
+            NamedKey::AudioVolumeDown => VirtualKeyCode::AudioVolumeDown,
+            NamedKey::AudioVolumeMute => VirtualKeyCode::AudioVolumeMute,
+            NamedKey::AudioVolumeUp => VirtualKeyCode::AudioVolumeUp,
+            NamedKey::F1 => VirtualKeyCode::F1,
+            NamedKey::F2 => VirtualKeyCode::F2,
+            NamedKey::F3 => VirtualKeyCode::F3,
+            NamedKey::F4 => VirtualKeyCode::F4,
+            NamedKey::F5 => VirtualKeyCode::F5,
+            NamedKey::F6 => VirtualKeyCode::F6,
+            NamedKey::F7 => VirtualKeyCode::F7,
+            NamedKey::F8 => VirtualKeyCode::F8,
+            NamedKey::F9 => VirtualKeyCode::F9,
+            NamedKey::F10 => VirtualKeyCode::F10,
+            NamedKey::F11 => VirtualKeyCode::F11,
+            NamedKey::F12 => VirtualKeyCode::F12,
+            NamedKey::F13 => VirtualKeyCode::F13,
+            NamedKey::F14 => VirtualKeyCode::F14,
+            NamedKey::F15 => VirtualKeyCode::F15,
+            NamedKey::F16 => VirtualKeyCode::F16,
+            NamedKey::F17 => VirtualKeyCode::F17,
+            NamedKey::F18 => VirtualKeyCode::F18,
+            NamedKey::F19 => VirtualKeyCode::F19,
+            NamedKey::F20 => VirtualKeyCode::F20,
+            NamedKey::F21 => VirtualKeyCode::F21,
+            NamedKey::F22 => VirtualKeyCode::F22,
+            NamedKey::F23 => VirtualKeyCode::F23,
+            NamedKey::F24 => VirtualKeyCode::F24,
+            _ => return None,
+        }),
+        Key::Unidentified(_) | Key::Dead(_) => None,
+    }
+}
+
+fn normalize_platform_virtual_key(key: VirtualKeyCode) -> VirtualKeyCode {
+    #[cfg(target_os = "windows")]
+    if key == VirtualKeyCode::NumpadEnter {
+        // The Win32 oracle reports keypad Enter as VK_RETURN.
+        return VirtualKeyCode::Enter;
+    }
+    key
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn layout_independent_physical_key(key: VirtualKeyCode) -> Option<VirtualKeyCode> {
+    Some(match key {
+        VirtualKeyCode::AltLeft
+        | VirtualKeyCode::AltRight
+        | VirtualKeyCode::CapsLock
+        | VirtualKeyCode::ContextMenu
+        | VirtualKeyCode::ControlLeft
+        | VirtualKeyCode::ControlRight
+        | VirtualKeyCode::Enter
+        | VirtualKeyCode::SuperLeft
+        | VirtualKeyCode::SuperRight
+        | VirtualKeyCode::ShiftLeft
+        | VirtualKeyCode::ShiftRight
+        | VirtualKeyCode::Space
+        | VirtualKeyCode::Tab
+        | VirtualKeyCode::Convert
+        | VirtualKeyCode::KanaMode
+        | VirtualKeyCode::Lang1
+        | VirtualKeyCode::Lang2
+        | VirtualKeyCode::NonConvert
+        | VirtualKeyCode::Delete
+        | VirtualKeyCode::End
+        | VirtualKeyCode::Help
+        | VirtualKeyCode::Home
+        | VirtualKeyCode::Insert
+        | VirtualKeyCode::PageDown
+        | VirtualKeyCode::PageUp
+        | VirtualKeyCode::ArrowDown
+        | VirtualKeyCode::ArrowLeft
+        | VirtualKeyCode::ArrowRight
+        | VirtualKeyCode::ArrowUp
+        | VirtualKeyCode::NumLock
+        | VirtualKeyCode::Numpad0
+        | VirtualKeyCode::Numpad1
+        | VirtualKeyCode::Numpad2
+        | VirtualKeyCode::Numpad3
+        | VirtualKeyCode::Numpad4
+        | VirtualKeyCode::Numpad5
+        | VirtualKeyCode::Numpad6
+        | VirtualKeyCode::Numpad7
+        | VirtualKeyCode::Numpad8
+        | VirtualKeyCode::Numpad9
+        | VirtualKeyCode::NumpadAdd
+        | VirtualKeyCode::NumpadComma
+        | VirtualKeyCode::NumpadDecimal
+        | VirtualKeyCode::NumpadDivide
+        | VirtualKeyCode::NumpadEnter
+        | VirtualKeyCode::NumpadEqual
+        | VirtualKeyCode::NumpadMultiply
+        | VirtualKeyCode::NumpadSubtract
+        | VirtualKeyCode::Escape
+        | VirtualKeyCode::PrintScreen
+        | VirtualKeyCode::ScrollLock
+        | VirtualKeyCode::Pause
+        | VirtualKeyCode::BrowserBack
+        | VirtualKeyCode::BrowserFavorites
+        | VirtualKeyCode::BrowserForward
+        | VirtualKeyCode::BrowserHome
+        | VirtualKeyCode::BrowserRefresh
+        | VirtualKeyCode::BrowserSearch
+        | VirtualKeyCode::BrowserStop
+        | VirtualKeyCode::LaunchApp1
+        | VirtualKeyCode::LaunchApp2
+        | VirtualKeyCode::LaunchMail
+        | VirtualKeyCode::MediaPlayPause
+        | VirtualKeyCode::MediaSelect
+        | VirtualKeyCode::MediaStop
+        | VirtualKeyCode::MediaTrackNext
+        | VirtualKeyCode::MediaTrackPrevious
+        | VirtualKeyCode::Power
+        | VirtualKeyCode::Sleep
+        | VirtualKeyCode::AudioVolumeDown
+        | VirtualKeyCode::AudioVolumeMute
+        | VirtualKeyCode::AudioVolumeUp
+        | VirtualKeyCode::WakeUp
+        | VirtualKeyCode::Abort
+        | VirtualKeyCode::Copy
+        | VirtualKeyCode::Cut
+        | VirtualKeyCode::Paste
+        | VirtualKeyCode::F1
+        | VirtualKeyCode::F2
+        | VirtualKeyCode::F3
+        | VirtualKeyCode::F4
+        | VirtualKeyCode::F5
+        | VirtualKeyCode::F6
+        | VirtualKeyCode::F7
+        | VirtualKeyCode::F8
+        | VirtualKeyCode::F9
+        | VirtualKeyCode::F10
+        | VirtualKeyCode::F11
+        | VirtualKeyCode::F12
+        | VirtualKeyCode::F13
+        | VirtualKeyCode::F14
+        | VirtualKeyCode::F15
+        | VirtualKeyCode::F16
+        | VirtualKeyCode::F17
+        | VirtualKeyCode::F18
+        | VirtualKeyCode::F19
+        | VirtualKeyCode::F20
+        | VirtualKeyCode::F21
+        | VirtualKeyCode::F22
+        | VirtualKeyCode::F23
+        | VirtualKeyCode::F24 => key,
+        _ => return None,
+    })
+}
+
+/// Decode the Win32 `wParam` identity after winit has exposed the physical key.
+///
+/// C4FullScreen.cpp:54-65 forwards `wParam` unchanged. Winit deliberately
+/// normalizes the two Ctrl keypad aliases back to their physical keys, so undo
+/// that normalization here before using the shared legacy config codec.
+#[cfg(any(target_os = "windows", test))]
+fn legacy_virtual_key_from_windows_raw(
+    physical: Option<VirtualKeyCode>,
+    raw_virtual_key: u32,
+    control_down: bool,
+) -> Option<VirtualKeyCode> {
+    let raw_virtual_key = match (control_down, physical) {
+        (true, Some(VirtualKeyCode::NumLock)) => 19,
+        (true, Some(VirtualKeyCode::Pause)) => 144,
+        _ => raw_virtual_key,
+    };
+    i32::try_from(raw_virtual_key)
+        .ok()
+        .and_then(crate::input::decode_windows_platform_key_code)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn legacy_virtual_key_from_windows_named(
+    logical_key: &winit::keyboard::Key,
+    location: winit::keyboard::KeyLocation,
+    raw_virtual_key: impl FnOnce() -> Option<VirtualKeyCode>,
+) -> Option<VirtualKeyCode> {
+    let semantic = semantic_legacy_virtual_key(logical_key, location)?;
+    Some(raw_virtual_key().unwrap_or(semantic))
+}
+
+#[cfg(target_os = "windows")]
+fn legacy_virtual_key_from_windows_physical(
+    physical_key: winit::keyboard::PhysicalKey,
+    physical: Option<VirtualKeyCode>,
+    control_down: bool,
+) -> Option<VirtualKeyCode> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyboardLayout, MapVirtualKeyExW, MAPVK_VSC_TO_VK_EX,
+    };
+    use winit::platform::scancode::PhysicalKeyExtScancode;
+
+    let scancode = physical_key.to_scancode()?;
+    let keyboard_layout = unsafe { GetKeyboardLayout(0) };
+    let raw_virtual_key =
+        unsafe { MapVirtualKeyExW(scancode, MAPVK_VSC_TO_VK_EX, keyboard_layout) };
+    (raw_virtual_key != 0)
+        .then(|| legacy_virtual_key_from_windows_raw(physical, raw_virtual_key, control_down))
+        .flatten()
+}
+
+fn legacy_virtual_key(
+    logical_key: &winit::keyboard::Key,
+    location: winit::keyboard::KeyLocation,
+    physical_key: winit::keyboard::PhysicalKey,
+    control_down: bool,
+) -> Option<VirtualKeyCode> {
+    let physical = match physical_key {
+        winit::keyboard::PhysicalKey::Code(key) => Some(key),
+        winit::keyboard::PhysicalKey::Unidentified(_) => None,
+    };
+    #[cfg(not(target_os = "windows"))]
+    let _ = control_down;
+
+    #[cfg(target_os = "macos")]
+    let selected = {
+        let _ = (logical_key, location);
+        physical
+    };
+    #[cfg(target_os = "windows")]
+    let selected = {
+        use winit::keyboard::{Key, KeyLocation, NativeKey};
+
+        // Win32 reports NumLock through wParam itself. Characters and keypad
+        // operators retain their physical Numpad identity; named navigation
+        // values (including VK_CLEAR) remain semantic.
+        if location == KeyLocation::Numpad {
+            return match logical_key {
+                Key::Character(_) => physical.and_then(layout_independent_physical_key),
+                Key::Named(_) => semantic_legacy_virtual_key(logical_key, location),
+                Key::Unidentified(_) | Key::Dead(_) => None,
+            }
+            .map(normalize_platform_virtual_key);
+        }
+        match logical_key {
+            Key::Character(_) => {
+                legacy_virtual_key_from_windows_physical(physical_key, physical, control_down)
+            }
+            Key::Named(_) => legacy_virtual_key_from_windows_named(logical_key, location, || {
+                legacy_virtual_key_from_windows_physical(physical_key, physical, control_down)
+            }),
+            Key::Unidentified(NativeKey::Windows(raw_virtual_key)) => {
+                legacy_virtual_key_from_windows_raw(None, u32::from(*raw_virtual_key), false)
+            }
+            Key::Unidentified(_) | Key::Dead(_) => None,
+        }
+    };
+    #[cfg(target_os = "linux")]
+    let selected = {
+        use winit::keyboard::{Key, KeyLocation, NamedKey, NativeKey};
+
+        // The X11 oracle asks for group/level zero, so KP1 arrives as KP_End;
+        // its platform-key decoder still normalizes that keysym to Numpad1
+        // (C4Config.cpp:643 and input.rs). Canonicalize the navigation KeySym
+        // itself so a custom physical layout cannot change the result, without
+        // collapsing locale separators or unsupported keypad KeySyms.
+        if location == KeyLocation::Numpad {
+            let navigation = match logical_key {
+                Key::Named(NamedKey::Home) => Some(VirtualKeyCode::Numpad7),
+                Key::Named(NamedKey::ArrowUp) => Some(VirtualKeyCode::Numpad8),
+                Key::Named(NamedKey::PageUp) => Some(VirtualKeyCode::Numpad9),
+                Key::Named(NamedKey::ArrowLeft) => Some(VirtualKeyCode::Numpad4),
+                Key::Named(NamedKey::ArrowRight) => Some(VirtualKeyCode::Numpad6),
+                Key::Named(NamedKey::End) => Some(VirtualKeyCode::Numpad1),
+                Key::Named(NamedKey::ArrowDown) => Some(VirtualKeyCode::Numpad2),
+                Key::Named(NamedKey::PageDown) => Some(VirtualKeyCode::Numpad3),
+                Key::Named(NamedKey::Insert) => Some(VirtualKeyCode::Numpad0),
+                Key::Named(NamedKey::Delete) => Some(VirtualKeyCode::NumpadDecimal),
+                _ => None,
+            };
+            if let Some(navigation) = navigation {
+                return Some(navigation);
+            }
+            if matches!(logical_key, Key::Unidentified(NativeKey::Xkb(0xff9d))) {
+                return Some(VirtualKeyCode::Numpad5);
+            }
+            let supported_character = matches!(
+                logical_key,
+                Key::Character(text)
+                    if matches!(
+                        text.as_str(),
+                        "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+                            | "+" | "," | "." | "/" | "=" | "*" | "-"
+                    )
+            );
+            return if supported_character || matches!(logical_key, Key::Named(NamedKey::Enter)) {
+                semantic_legacy_virtual_key(logical_key, location)
+            } else {
+                None
+            }
+            .map(normalize_platform_virtual_key);
+        }
+        let _ = physical;
+        semantic_legacy_virtual_key(logical_key, location)
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    let selected = semantic_legacy_virtual_key(logical_key, location)
+        .or_else(|| physical.and_then(layout_independent_physical_key));
+
+    selected.map(normalize_platform_virtual_key)
+}
+
+fn legacy_virtual_key_from_event(
+    event: &winit::event::KeyEvent,
+    modifiers: ModifiersState,
+) -> Option<VirtualKeyCode> {
+    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+
+    // Win32's wParam observes NumLock on the keypad, while X11 explicitly asks
+    // for group/level zero and ignores it. Ordinary keys use the modifier-free
+    // logical value so Shift/Caps/Control do not change bindings.
+    #[cfg(target_os = "windows")]
+    let logical_key = if event.location == winit::keyboard::KeyLocation::Numpad {
+        event.logical_key.clone()
+    } else {
+        event.key_without_modifiers()
+    };
+    #[cfg(not(target_os = "windows"))]
+    let logical_key = event.key_without_modifiers();
+    legacy_virtual_key(
+        &logical_key,
+        event.location,
+        event.physical_key,
+        modifiers.control_key(),
+    )
+}
+
 fn map_developer_console_key(key: VirtualKeyCode) -> Option<DeveloperConsoleKey> {
     Some(match key {
-        VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => DeveloperConsoleKey::Enter,
+        VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter => DeveloperConsoleKey::Enter,
         VirtualKeyCode::Escape => DeveloperConsoleKey::Escape,
-        VirtualKeyCode::Back => DeveloperConsoleKey::Backspace,
+        VirtualKeyCode::Backspace => DeveloperConsoleKey::Backspace,
         VirtualKeyCode::Delete => DeveloperConsoleKey::Delete,
-        VirtualKeyCode::Left => DeveloperConsoleKey::Left,
-        VirtualKeyCode::Right => DeveloperConsoleKey::Right,
+        VirtualKeyCode::ArrowLeft => DeveloperConsoleKey::Left,
+        VirtualKeyCode::ArrowRight => DeveloperConsoleKey::Right,
         VirtualKeyCode::Home => DeveloperConsoleKey::Home,
         VirtualKeyCode::End => DeveloperConsoleKey::End,
-        VirtualKeyCode::Up => DeveloperConsoleKey::Up,
-        VirtualKeyCode::Down => DeveloperConsoleKey::Down,
+        VirtualKeyCode::ArrowUp => DeveloperConsoleKey::Up,
+        VirtualKeyCode::ArrowDown => DeveloperConsoleKey::Down,
         VirtualKeyCode::PageUp => DeveloperConsoleKey::PageUp,
         VirtualKeyCode::PageDown => DeveloperConsoleKey::PageDown,
         VirtualKeyCode::Tab => DeveloperConsoleKey::Tab,
@@ -505,23 +1515,59 @@ fn map_developer_console_key(key: VirtualKeyCode) -> Option<DeveloperConsoleKey>
 
 fn developer_console_menu_mnemonic(key: VirtualKeyCode) -> Option<char> {
     Some(match key {
-        VirtualKeyCode::F => 'f',
-        VirtualKeyCode::C => 'c',
-        VirtualKeyCode::P => 'p',
-        VirtualKeyCode::V => 'v',
-        VirtualKeyCode::N => 'n',
-        VirtualKeyCode::H => 'h',
+        VirtualKeyCode::KeyF => 'f',
+        VirtualKeyCode::KeyC => 'c',
+        VirtualKeyCode::KeyP => 'p',
+        VirtualKeyCode::KeyV => 'v',
+        VirtualKeyCode::KeyN => 'n',
+        VirtualKeyCode::KeyH => 'h',
         _ => return None,
     })
+}
+
+fn text_input_allowed(modifiers: ModifiersState) -> bool {
+    !modifiers.intersects(ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SUPER)
+}
+
+/// Accept composed keyboard text while excluding shortcut keystrokes. Alt is
+/// retained because Option and AltGr composition legitimately carry it; AltGr
+/// additionally carries Control. IME commits bypass this keyboard-only policy.
+fn game_shell_text_input_allowed(modifiers: ModifiersState) -> bool {
+    !modifiers.contains(ModifiersState::SUPER)
+        && (!modifiers.contains(ModifiersState::CONTROL) || modifiers.contains(ModifiersState::ALT))
+}
+
+fn handle_app_text(app: &mut GameApp, text: &str) -> Result<()> {
+    for character in text.chars() {
+        app.handle_text_input(character)?;
+    }
+    Ok(())
+}
+
+fn handle_developer_console_text(
+    app: &mut GameApp,
+    text: &str,
+    message_dialog_active: bool,
+) -> Result<bool> {
+    let mut changed = false;
+    for character in text.chars() {
+        if message_dialog_active {
+            app.handle_text_input(character)?;
+            changed = true;
+        } else {
+            changed |= app.developer_console.handle_character(character);
+        }
+    }
+    Ok(changed)
 }
 
 fn handle_developer_console_window_event(
     window: &Window,
     app: &mut GameApp,
-    pixels: &mut Pixels,
+    pixels: &mut Pixels<'static>,
     presenter: &mut clonk_scaling::FramePresenter,
     event: WindowEvent,
-    control_flow: &mut ControlFlow,
+    event_loop: &winit::event_loop::ActiveEventLoop,
 ) -> Result<()> {
     let message_dialog_active = !app.message_dialogs.is_empty();
     match event {
@@ -531,11 +1577,7 @@ fn handle_developer_console_window_event(
                 app.request_exit();
             }
         }
-        WindowEvent::Resized(size)
-        | WindowEvent::ScaleFactorChanged {
-            new_inner_size: &mut size,
-            ..
-        } => {
+        WindowEvent::Resized(size) => {
             let clamped = enforce_min_size(size);
             pixels
                 .resize_surface(clamped.width, clamped.height)
@@ -614,49 +1656,50 @@ fn handle_developer_console_window_event(
         }
         WindowEvent::ModifiersChanged(modifiers) => {
             if message_dialog_active {
-                app.handle_modifiers_changed(modifiers)?;
+                app.handle_modifiers_changed(modifiers.state())?;
             } else {
-                app.keyboard_modifiers = modifiers;
+                app.keyboard_modifiers = modifiers.state();
             }
         }
-        WindowEvent::KeyboardInput {
-            input:
-                KeyboardInput {
-                    state,
-                    virtual_keycode: Some(key),
-                    ..
-                },
-            ..
-        } => {
-            if message_dialog_active {
-                app.handle_key(key, state)?;
-                window.request_redraw();
-                return Ok(());
+        WindowEvent::KeyboardInput { event, .. } => {
+            let state = event.state;
+            if let Some(key) = legacy_virtual_key_from_event(&event, app.keyboard_modifiers) {
+                if message_dialog_active {
+                    app.handle_key(key, state)?;
+                    window.request_redraw();
+                } else {
+                    let pressed = state == ElementState::Pressed;
+                    let alt_only = app.keyboard_modifiers == ModifiersState::ALT
+                        || app.keyboard_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+                    if pressed
+                        && alt_only
+                        && developer_console_menu_mnemonic(key).is_some_and(|mnemonic| {
+                            app.developer_console.handle_menu_mnemonic(mnemonic)
+                        })
+                    {
+                        window.request_redraw();
+                    } else if let Some(key) = map_developer_console_key(key) {
+                        let actions = app.developer_console.handle_key(key, pressed);
+                        app.dispatch_developer_console_actions(actions)?;
+                        window.request_redraw();
+                    }
+                }
             }
-            let pressed = state == ElementState::Pressed;
-            let alt_only = app.keyboard_modifiers == ModifiersState::ALT
-                || app.keyboard_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
-            if pressed
-                && alt_only
-                && developer_console_menu_mnemonic(key)
-                    .is_some_and(|mnemonic| app.developer_console.handle_menu_mnemonic(mnemonic))
-            {
-                window.request_redraw();
-            } else if let Some(key) = map_developer_console_key(key) {
-                let actions = app.developer_console.handle_key(key, pressed);
-                app.dispatch_developer_console_actions(actions)?;
-                window.request_redraw();
+            // `KeyEvent::text` replaces `ReceivedCharacter` for ordinary
+            // keyboard input. Do not also route `logical_key`: that would
+            // duplicate composed and dead-key text on several platforms.
+            if state == ElementState::Pressed && text_input_allowed(app.keyboard_modifiers) {
+                if let Some(text) = event.text.as_deref() {
+                    if handle_developer_console_text(app, text, message_dialog_active)? {
+                        window.request_redraw();
+                    }
+                }
             }
         }
-        WindowEvent::ReceivedCharacter(character)
-            if !app
-                .keyboard_modifiers
-                .intersects(ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::LOGO) =>
+        WindowEvent::Ime(winit::event::Ime::Commit(text))
+            if text_input_allowed(app.keyboard_modifiers) =>
         {
-            if message_dialog_active {
-                app.handle_text_input(character)?;
-                window.request_redraw();
-            } else if app.developer_console.handle_character(character) {
+            if handle_developer_console_text(app, &text, message_dialog_active)? {
                 window.request_redraw();
             }
         }
@@ -676,7 +1719,7 @@ fn handle_developer_console_window_event(
         _ => {}
     }
     if app.take_exit_request() {
-        control_flow.set_exit();
+        event_loop.exit();
     }
     Ok(())
 }
@@ -684,29 +1727,20 @@ fn handle_developer_console_window_event(
 pub(crate) fn handle_window_event(
     window: &Window,
     app: &mut GameApp,
-    pixels: &mut Pixels,
+    pixels: &mut Pixels<'static>,
     presenter: &mut clonk_scaling::FramePresenter,
     display_options: &mut DisplayOptions,
     event: WindowEvent,
-    control_flow: &mut ControlFlow,
+    event_loop: &winit::event_loop::ActiveEventLoop,
 ) -> Result<()> {
     if app.console_mode {
         return handle_developer_console_window_event(
-            window,
-            app,
-            pixels,
-            presenter,
-            event,
-            control_flow,
+            window, app, pixels, presenter, event, event_loop,
         );
     }
     match event {
         WindowEvent::CloseRequested => app.handle_window_close_requested(),
-        WindowEvent::Resized(size)
-        | WindowEvent::ScaleFactorChanged {
-            new_inner_size: &mut size,
-            ..
-        } => {
+        WindowEvent::Resized(size) => {
             app.reject_classic_global_gui_bootstrap()?;
             let clamped = enforce_min_size(size);
             pixels
@@ -762,32 +1796,32 @@ pub(crate) fn handle_window_event(
                 .context("failed to process mouse wheel")?;
         }
         WindowEvent::ModifiersChanged(modifiers) => {
-            app.handle_modifiers_changed(modifiers)
+            app.handle_modifiers_changed(modifiers.state())
                 .context("failed to process keyboard modifiers")?;
         }
-        WindowEvent::KeyboardInput {
-            input:
-                KeyboardInput {
-                    state,
-                    virtual_keycode: Some(keycode),
-                    ..
-                },
-            ..
-        } => {
-            // F11 is an ordinary physical key in C++: `C4KeyboardInput` maps
-            // its name (C4KeyboardInput.cpp:185-197) and `C4Game::InitKeyboard`
-            // registers no fullscreen action for it (C4Game.cpp:3371-3448), so
-            // it reaches classic dispatch like every other key. Display mode is
-            // changed only through the Options combo.
-            app.handle_key(keycode, state)
-                .context("failed to process key input")?;
+        WindowEvent::KeyboardInput { event, .. } => {
+            if let Some(keycode) = legacy_virtual_key_from_event(&event, app.keyboard_modifiers) {
+                // F11 is an ordinary physical key in C++: `C4KeyboardInput`
+                // maps its name (C4KeyboardInput.cpp:185-197) and
+                // `C4Game::InitKeyboard` registers no fullscreen action for it
+                // (C4Game.cpp:3371-3448), so it reaches classic dispatch like
+                // every other key. Display mode changes only through Options.
+                app.handle_key(keycode, event.state)
+                    .context("failed to process key input")?;
+            }
+            if event.state == ElementState::Pressed
+                && game_shell_text_input_allowed(app.keyboard_modifiers)
+            {
+                if let Some(text) = event.text.as_deref() {
+                    handle_app_text(app, text).context("failed to process text input")?;
+                }
+            }
             if !app.pending_screenshots.is_empty() {
                 window.request_redraw();
             }
         }
-        WindowEvent::ReceivedCharacter(character) => {
-            app.handle_text_input(character)
-                .context("failed to process text input")?;
+        WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+            handle_app_text(app, &text).context("failed to process IME text input")?;
         }
         WindowEvent::Moved(position) => {
             if display_options.mode == DisplayMode::Window && !window.is_maximized() {
@@ -812,7 +1846,7 @@ pub(crate) fn handle_window_event(
         window.request_redraw();
     }
     if app.take_exit_request() {
-        control_flow.set_exit();
+        event_loop.exit();
     }
     Ok(())
 }

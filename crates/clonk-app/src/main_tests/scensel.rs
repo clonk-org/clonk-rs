@@ -289,7 +289,7 @@
         let native_password = clonk_script::c4_string_from_bytes(b"Secr\x80t");
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("set Alt for Mission Access");
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("open Mission Access dialog");
         assert_eq!(
             app.game_option_input_dialog
@@ -671,9 +671,9 @@
         for character in "inner touch".chars() {
             app.handle_text_input(character).expect("type touch search");
         }
-        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
             .expect("submit touch search");
-        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
             .expect("release touch search");
         assert_eq!(
             app.menu_state
@@ -1523,7 +1523,7 @@
             .selected_scenario()
             .map(|entry| entry.identifier.clone());
 
-        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
             .expect("move search caret left");
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
         assert_eq!(app.menu_state.stack.len(), 1);
@@ -1535,7 +1535,7 @@
             selected
         );
 
-        app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
             .expect("move search caret right");
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
         assert_eq!(app.menu_state.stack.len(), 1);
@@ -1564,10 +1564,10 @@
             false,
         );
         assert!(app.menu_state.search_edit.selection_range().is_none());
-        app.handle_modifiers_changed(ModifiersState::LOGO)
+        app.handle_modifiers_changed(ModifiersState::SUPER)
             .expect("set Command modifier");
 
-        app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyF, ElementState::Pressed)
             .expect("focus scenario search with Command+F");
 
         assert!(app.menu_state.search_focused());
@@ -1589,10 +1589,10 @@
             false,
             false,
         );
-        app.handle_modifiers_changed(ModifiersState::LOGO)
+        app.handle_modifiers_changed(ModifiersState::SUPER)
             .expect("set Command modifier");
 
-        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
             .expect("select scenario query with Command+A");
 
         assert_eq!(app.menu_state.search_edit.selected_text(), Some("crystal"));
@@ -1749,7 +1749,7 @@
         }
         assert!(app.menu_state.visible_entries().is_empty());
 
-        app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Backspace, ElementState::Pressed)
             .expect("delete bad query suffix");
 
         assert_eq!(app.menu_state.search_text(), "Alphz");
@@ -1961,9 +1961,9 @@
         query.make_ascii_lowercase();
 
         app.menu_state.set_search_text("replace this");
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyF, ElementState::Pressed)
             .expect("focus search");
         assert_eq!(
             app.menu_state.search_edit.selected_text(),
@@ -1987,7 +1987,7 @@
         selected_title.make_ascii_lowercase();
         assert_eq!(selected_title, query);
 
-        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
             .expect("submit query");
         assert_eq!(app.mode, AppMode::Menu, "Enter must not start a scenario");
         assert!(!app.menu_state.visible_entries().is_empty());
@@ -2078,7 +2078,7 @@
         app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("Alt+M opens Mission Access before Comment");
         assert_eq!(
             app.game_option_input_dialog
@@ -2095,15 +2095,15 @@
             .expect("cancel Mission Access");
         assert!(app.game_option_input_dialog.is_none());
 
-        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CONTROL)
             .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("Ctrl+Alt+M matches neither exact selector nor option mnemonic");
         assert!(app.game_option_input_dialog.is_none());
 
         app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
             .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("Alt+Shift+M reaches the Comment mnemonic");
         assert_eq!(
             app.game_option_input_dialog
@@ -2116,9 +2116,9 @@
         app.game_option_input_consumed_keys.clear();
         app.game_option_consumed_keys.clear();
 
-        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::LOGO)
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SUPER)
             .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("C4KeyCodeEx ignores the OS Logo modifier");
         assert_eq!(
             app.game_option_input_dialog
@@ -2134,12 +2134,12 @@
             .expect("set keyboard modifiers");
         app.menu_state.set_search_text("context");
         app.menu_state.set_search_focused(true);
-        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
             .expect("open the search edit context menu");
         assert!(app.context_menu.is_some());
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("an open context menu suppresses the underlying selector dialog");
         assert!(app.context_menu.is_some());
         assert!(app.game_option_input_dialog.is_none());
@@ -2173,7 +2173,7 @@
 
         app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
             .expect("F5 refreshes the selector in place");
-        app.handle_modifiers_changed(ModifiersState::LOGO)
+        app.handle_modifiers_changed(ModifiersState::SUPER)
             .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
             .expect("C4 ignores Logo when matching unmodified F5");
@@ -2194,7 +2194,7 @@
 
         // The selector binds only unmodified Delete. Ctrl+Delete remains an
         // edit operation, matching Edit::RegisterCursorOp's modifier list.
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
             .expect("Ctrl+Delete reaches the focused search edit");
@@ -2274,10 +2274,10 @@
                 .text(),
             original_title
         );
-        app.handle_key(VirtualKeyCode::Z, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyZ, ElementState::Pressed)
             .expect("unmatched Alt hotkey has no rename binding");
         assert!(app.menu_state.rename_edit.is_some());
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("Alt+M opens Mission Access without moving rename focus");
         assert!(app.menu_state.rename_edit.is_some());
         assert_eq!(
@@ -2290,7 +2290,7 @@
         app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
             .expect("cancel Mission Access while rename remains active");
         assert!(app.menu_state.rename_edit.is_some());
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("set Control modifier");
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("Control+Escape has no rename binding");
@@ -2299,7 +2299,7 @@
         assert!(app.menu_state.rename_edit.is_some());
         app.handle_modifiers_changed(ModifiersState::SHIFT)
             .expect("set Shift modifier");
-        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
             .expect("Shift+Enter has no rename binding");
         assert!(app.menu_state.rename_edit.is_some());
         app.handle_modifiers_changed(ModifiersState::empty())
@@ -2311,9 +2311,9 @@
         app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
         app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
             .expect("start same-title rename before Control+F");
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("set Control modifier");
-        app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyF, ElementState::Pressed)
             .expect("Control+F causes rename focus loss");
         assert!(app.menu_state.rename_edit.is_none());
         assert_eq!(
@@ -2342,7 +2342,7 @@
             .expect("start rename before accepted Mission Access");
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("set Alt modifier");
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("open Mission Access over active rename");
         app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
             "MissionPass".to_string(),
@@ -2578,7 +2578,7 @@
             .expect("start empty rename");
         app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
             .expect("clear title for empty submission");
-        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
             .expect("empty Enter is an abort");
         assert!(app.menu_state.rename_edit.is_none());
         assert!(old_path.exists());
@@ -2817,7 +2817,7 @@
         for character in "New Name".chars() {
             app.handle_text_input(character).expect("type new title");
         }
-        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
             .expect("commit inline rename");
         wait_for_scenario_selector_discovery(&mut app);
 
@@ -2939,7 +2939,7 @@
             app.handle_text_input(character)
                 .expect("type colliding title");
         }
-        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
             .expect("collision is handled by modal");
 
         assert!(paths.scenario_dir().join("Source.c4s").exists());
@@ -3119,7 +3119,7 @@
         app.open_network_host_scenario_browser();
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("set Alt modifier");
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("open Mission Access dialog");
         let dialog = app
             .game_option_input_dialog
@@ -3144,7 +3144,7 @@
             "Secret;Second"
         );
 
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("reopen Mission Access dialog");
         app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
             "-secret".to_string(),
@@ -3359,7 +3359,7 @@
         app.menu_state.set_search_focused(true);
         app.menu_state.search_edit.anchor = app.menu_state.search_edit.caret;
         let before = app.menu_state.search_text().to_string();
-        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
             .expect("open context from Apps key");
         let expected_center = GuiPoint::new(
             (layout.search_edit.x + layout.search_edit.w / 2) as f32,
@@ -3374,9 +3374,9 @@
         );
         app.handle_text_input('Z')
             .expect("text is suppressed by context");
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
             .expect("Ctrl+A is suppressed by context");
         assert_eq!(app.menu_state.search_text(), before);
         assert!(app.menu_state.search_edit.selection_range().is_none());
@@ -3389,7 +3389,7 @@
         assert!(app.context_menu.is_none());
         assert!(app.menu_state.search_focused(), "logical focus is retained");
 
-        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
             .expect("reopen Apps context for lost-release regression");
         let select_all = app
             .context_menu
@@ -3429,7 +3429,7 @@
         );
 
         app.menu_state.set_search_focused(false);
-        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
             .expect("ignore Apps without edit focus");
         assert!(app.context_menu.is_none());
 
@@ -4098,7 +4098,7 @@
         assert!(app.message_dialogs.is_empty());
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("set map shortcut modifier");
-        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyM, ElementState::Pressed)
             .expect("map view has no Mission Access shortcut");
         assert!(app.game_option_input_dialog.is_none());
         app.handle_modifiers_changed(ModifiersState::empty())

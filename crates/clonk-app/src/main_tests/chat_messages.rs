@@ -1069,7 +1069,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         .unwrap()
         .force_chat_mode_and_focus();
     let original_nick = app.external_irc_dialog.as_ref().unwrap().chat_login().nick;
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open the standalone login edit context");
     assert!(app.context_menu.is_some());
     app.handle_text_input('x')
@@ -1257,12 +1257,12 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
 
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(network);
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("open running chat");
     for character in "hello".chars() {
         app.handle_text_input(character).expect("type running chat");
     }
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("submit running chat");
     assert!(app.running_chat.is_none());
     assert_eq!(
@@ -1277,7 +1277,7 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
         }]
     );
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("reopen running chat");
     for character in "Sen".chars() {
         app.handle_text_input(character).expect("type nick prefix");
@@ -1291,7 +1291,7 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
         .expect("sandbox audio context")
         .options
         .sound_enabled;
-    app.keyboard_modifiers = ModifiersState::CTRL;
+    app.keyboard_modifiers = ModifiersState::CONTROL;
     app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
         .expect("control-modified chat key forwards to player controls");
     assert_eq!(
@@ -1472,7 +1472,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
     app.snapshot = app.engine.snapshot();
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(network);
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("open running chat");
 
     let layout = app.game_option_input_layout().expect("chat layout");
@@ -1505,7 +1505,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
         Some("first")
     );
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("submit retained final line");
     assert!(app.running_chat.is_none());
     assert_eq!(
@@ -1536,7 +1536,7 @@ fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() 
         .horizontal_scroll();
     assert!(long_scroll > 0);
 
-    app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
         .expect("replace chat with older history");
     assert_eq!(app.running_chat_text(), Some("history"));
     let history_scroll = app
@@ -1551,7 +1551,7 @@ fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() 
         Some((0, "history".len()))
     );
 
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("clear chat past newest history");
     assert_eq!(app.running_chat_text(), Some(""));
     assert_eq!(
@@ -1566,15 +1566,15 @@ fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() 
 fn running_chat_close_forgets_releases_swallowed_by_the_modal() {
     let mut app = new_running_sandbox_app();
     app.start_running_chat(RunningChatMode::All);
-    app.pressed_engine_keys.insert(VirtualKeyCode::A);
+    app.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
     app.pressed_engine_keys.insert(VirtualKeyCode::Tab);
     app.scoreboard_tab_raw_pressed = true;
 
-    app.handle_key(VirtualKeyCode::A, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyA, ElementState::Released)
         .expect("chat owns held gameplay-key release");
     app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
         .expect("chat owns held scoreboard-key release");
-    assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::A));
+    assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
     assert!(app.scoreboard_tab_raw_pressed);
 
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
@@ -1582,9 +1582,9 @@ fn running_chat_close_forgets_releases_swallowed_by_the_modal() {
     assert!(app.pressed_engine_keys.is_empty());
     assert!(!app.scoreboard_tab_raw_pressed);
 
-    app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("first gameplay down after chat is not a stale repeat");
-    assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::A));
+    assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
 }
 
 #[test]
@@ -1596,9 +1596,9 @@ fn running_chat_exclusive_scope_blocks_rebound_tab_player_control() {
 
     for context_open in [false, true] {
         if context_open {
-            app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
                 .expect("open chat edit context");
-            app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
                 .expect("release context key");
             assert!(app.context_menu.is_some());
         }
@@ -1652,15 +1652,15 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     assert!(!app
         .handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Released)
         .expect("non-character Alt release is also down-only fallthrough"));
-    app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("compact chat yields to the global Alt+C dialog toggle");
     assert!(app.external_irc_dialog_visible);
     assert!(app.running_chat.is_none());
-    app.handle_key(VirtualKeyCode::C, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Released)
         .expect("global Alt+C release passes compact chat");
-    app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("second Alt+C closes the standalone dialog");
-    app.handle_key(VirtualKeyCode::C, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Released)
         .expect("release the closing Alt+C chord");
     assert!(!app.external_irc_dialog_visible);
     app.handle_modifiers_changed(ModifiersState::empty())
@@ -1696,9 +1696,9 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         .expect("release chat activation");
     app.handle_cursor_moved(message_point)
         .expect("hover lower message while chat keeps keyboard focus");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open chat context above hovered lower message");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("release chat context key");
     let context_row = app
         .context_menu
@@ -1731,9 +1731,9 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         .running_chat_controller()
         .expect("chat controller before context drag")
         .caret();
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open context during retained chat drag");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("release context key during retained chat drag");
     let context_panel = app
         .context_menu
@@ -1891,9 +1891,9 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         .expect("regular input dialog")
         .controller
         .has_positional_pointer_drag());
-    menu.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    menu.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open regular input context during drag");
-    menu.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+    menu.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("release regular input context key");
     let input_context = menu
         .context_menu
@@ -1963,7 +1963,7 @@ fn message_board_history_keeps_append_time_width_across_upper_board_modes() {
 #[test]
 fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     let mut app = new_classic_running_sandbox_app();
-    app.handle_modifiers_changed(ModifiersState::LOGO)
+    app.handle_modifiers_changed(ModifiersState::SUPER)
         .expect("set keyboard modifiers");
     let frame_before_pause = app.engine.frame();
     app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)

@@ -2407,14 +2407,14 @@ pub(crate) fn control_script_error_to_status(err: EngineError) -> Result<String,
 
 pub(crate) fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
     match code {
-        VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => Some(KeyCode::Enter),
+        VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter => Some(KeyCode::Enter),
         VirtualKeyCode::Escape => Some(KeyCode::Escape),
         VirtualKeyCode::Space => Some(KeyCode::Space),
         VirtualKeyCode::Tab => Some(KeyCode::Tab),
-        VirtualKeyCode::Up => Some(KeyCode::Up),
-        VirtualKeyCode::Down => Some(KeyCode::Down),
-        VirtualKeyCode::Left | VirtualKeyCode::Back => Some(KeyCode::Left),
-        VirtualKeyCode::Right => Some(KeyCode::Right),
+        VirtualKeyCode::ArrowUp => Some(KeyCode::Up),
+        VirtualKeyCode::ArrowDown => Some(KeyCode::Down),
+        VirtualKeyCode::ArrowLeft | VirtualKeyCode::Backspace => Some(KeyCode::Left),
+        VirtualKeyCode::ArrowRight => Some(KeyCode::Right),
         VirtualKeyCode::Home => Some(KeyCode::Home),
         VirtualKeyCode::End => Some(KeyCode::End),
         VirtualKeyCode::PageUp => Some(KeyCode::PageUp),
@@ -2428,7 +2428,7 @@ pub(crate) fn league_signup_dialog_key_code(
     modifiers: ModifiersState,
 ) -> Option<KeyCode> {
     match code {
-        VirtualKeyCode::Return
+        VirtualKeyCode::Enter
         | VirtualKeyCode::NumpadEnter
         | VirtualKeyCode::Escape
         | VirtualKeyCode::Space
@@ -2439,8 +2439,8 @@ pub(crate) fn league_signup_dialog_key_code(
         VirtualKeyCode::Tab if modifiers.is_empty() || modifiers == ModifiersState::SHIFT => {
             Some(KeyCode::Tab)
         }
-        VirtualKeyCode::Up
-        | VirtualKeyCode::Down
+        VirtualKeyCode::ArrowUp
+        | VirtualKeyCode::ArrowDown
         | VirtualKeyCode::PageUp
         | VirtualKeyCode::PageDown
             if modifiers.is_empty() =>
@@ -2456,14 +2456,14 @@ pub(crate) fn definition_selector_key_code(
 ) -> Option<clonk_frontend::definition_sel::DefinitionSelKey> {
     use clonk_frontend::definition_sel::DefinitionSelKey;
     match code {
-        VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => Some(DefinitionSelKey::Enter),
+        VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter => Some(DefinitionSelKey::Enter),
         VirtualKeyCode::Escape => Some(DefinitionSelKey::Escape),
         VirtualKeyCode::Space => Some(DefinitionSelKey::Space),
         VirtualKeyCode::Tab => Some(DefinitionSelKey::Tab),
-        VirtualKeyCode::Up => Some(DefinitionSelKey::Up),
-        VirtualKeyCode::Down => Some(DefinitionSelKey::Down),
-        VirtualKeyCode::Left => Some(DefinitionSelKey::Left),
-        VirtualKeyCode::Right => Some(DefinitionSelKey::Right),
+        VirtualKeyCode::ArrowUp => Some(DefinitionSelKey::Up),
+        VirtualKeyCode::ArrowDown => Some(DefinitionSelKey::Down),
+        VirtualKeyCode::ArrowLeft => Some(DefinitionSelKey::Left),
+        VirtualKeyCode::ArrowRight => Some(DefinitionSelKey::Right),
         VirtualKeyCode::PageUp => Some(DefinitionSelKey::PageUp),
         VirtualKeyCode::PageDown => Some(DefinitionSelKey::PageDown),
         VirtualKeyCode::Home => Some(DefinitionSelKey::Home),
@@ -2493,56 +2493,56 @@ pub(crate) fn definition_selector_label_row_at(
 
 pub(crate) fn context_menu_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
     match code {
-        VirtualKeyCode::Return => Some(KeyCode::Enter),
+        VirtualKeyCode::Enter => Some(KeyCode::Enter),
         VirtualKeyCode::Escape => Some(KeyCode::Escape),
         VirtualKeyCode::Space => Some(KeyCode::Space),
         VirtualKeyCode::Tab => Some(KeyCode::Tab),
-        VirtualKeyCode::Up => Some(KeyCode::Up),
-        VirtualKeyCode::Down => Some(KeyCode::Down),
-        VirtualKeyCode::Left => Some(KeyCode::Left),
-        VirtualKeyCode::Right => Some(KeyCode::Right),
+        VirtualKeyCode::ArrowUp => Some(KeyCode::Up),
+        VirtualKeyCode::ArrowDown => Some(KeyCode::Down),
+        VirtualKeyCode::ArrowLeft => Some(KeyCode::Left),
+        VirtualKeyCode::ArrowRight => Some(KeyCode::Right),
         _ => None,
     }
 }
 
 pub(crate) fn context_menu_hotkey(code: VirtualKeyCode) -> Option<char> {
     match code {
-        VirtualKeyCode::A => Some('A'),
-        VirtualKeyCode::B => Some('B'),
-        VirtualKeyCode::C => Some('C'),
-        VirtualKeyCode::D => Some('D'),
-        VirtualKeyCode::E => Some('E'),
-        VirtualKeyCode::F => Some('F'),
-        VirtualKeyCode::G => Some('G'),
-        VirtualKeyCode::H => Some('H'),
-        VirtualKeyCode::I => Some('I'),
-        VirtualKeyCode::J => Some('J'),
-        VirtualKeyCode::K => Some('K'),
-        VirtualKeyCode::L => Some('L'),
-        VirtualKeyCode::M => Some('M'),
-        VirtualKeyCode::N => Some('N'),
-        VirtualKeyCode::O => Some('O'),
-        VirtualKeyCode::P => Some('P'),
-        VirtualKeyCode::Q => Some('Q'),
-        VirtualKeyCode::R => Some('R'),
-        VirtualKeyCode::S => Some('S'),
-        VirtualKeyCode::T => Some('T'),
-        VirtualKeyCode::U => Some('U'),
-        VirtualKeyCode::V => Some('V'),
-        VirtualKeyCode::W => Some('W'),
-        VirtualKeyCode::X => Some('X'),
-        VirtualKeyCode::Y => Some('Y'),
-        VirtualKeyCode::Z => Some('Z'),
-        VirtualKeyCode::Key0 => Some('0'),
-        VirtualKeyCode::Key1 => Some('1'),
-        VirtualKeyCode::Key2 => Some('2'),
-        VirtualKeyCode::Key3 => Some('3'),
-        VirtualKeyCode::Key4 => Some('4'),
-        VirtualKeyCode::Key5 => Some('5'),
-        VirtualKeyCode::Key6 => Some('6'),
-        VirtualKeyCode::Key7 => Some('7'),
-        VirtualKeyCode::Key8 => Some('8'),
-        VirtualKeyCode::Key9 => Some('9'),
+        VirtualKeyCode::KeyA => Some('A'),
+        VirtualKeyCode::KeyB => Some('B'),
+        VirtualKeyCode::KeyC => Some('C'),
+        VirtualKeyCode::KeyD => Some('D'),
+        VirtualKeyCode::KeyE => Some('E'),
+        VirtualKeyCode::KeyF => Some('F'),
+        VirtualKeyCode::KeyG => Some('G'),
+        VirtualKeyCode::KeyH => Some('H'),
+        VirtualKeyCode::KeyI => Some('I'),
+        VirtualKeyCode::KeyJ => Some('J'),
+        VirtualKeyCode::KeyK => Some('K'),
+        VirtualKeyCode::KeyL => Some('L'),
+        VirtualKeyCode::KeyM => Some('M'),
+        VirtualKeyCode::KeyN => Some('N'),
+        VirtualKeyCode::KeyO => Some('O'),
+        VirtualKeyCode::KeyP => Some('P'),
+        VirtualKeyCode::KeyQ => Some('Q'),
+        VirtualKeyCode::KeyR => Some('R'),
+        VirtualKeyCode::KeyS => Some('S'),
+        VirtualKeyCode::KeyT => Some('T'),
+        VirtualKeyCode::KeyU => Some('U'),
+        VirtualKeyCode::KeyV => Some('V'),
+        VirtualKeyCode::KeyW => Some('W'),
+        VirtualKeyCode::KeyX => Some('X'),
+        VirtualKeyCode::KeyY => Some('Y'),
+        VirtualKeyCode::KeyZ => Some('Z'),
+        VirtualKeyCode::Digit0 => Some('0'),
+        VirtualKeyCode::Digit1 => Some('1'),
+        VirtualKeyCode::Digit2 => Some('2'),
+        VirtualKeyCode::Digit3 => Some('3'),
+        VirtualKeyCode::Digit4 => Some('4'),
+        VirtualKeyCode::Digit5 => Some('5'),
+        VirtualKeyCode::Digit6 => Some('6'),
+        VirtualKeyCode::Digit7 => Some('7'),
+        VirtualKeyCode::Digit8 => Some('8'),
+        VirtualKeyCode::Digit9 => Some('9'),
         _ => None,
     }
 }
@@ -2556,28 +2556,26 @@ pub(crate) fn startup_dialog_hotkey(code: VirtualKeyCode) -> Option<char> {
     context_menu_hotkey(code).or_else(|| {
         Some(match code {
             // SDL names these Application, Audio*, or AC *.
-            VirtualKeyCode::Apps
+            VirtualKeyCode::ContextMenu
             | VirtualKeyCode::MediaStop
-            | VirtualKeyCode::Mute
-            | VirtualKeyCode::NavigateBackward
-            | VirtualKeyCode::NavigateForward
-            | VirtualKeyCode::NextTrack
-            | VirtualKeyCode::PlayPause
-            | VirtualKeyCode::PrevTrack
-            | VirtualKeyCode::WebBack
-            | VirtualKeyCode::WebFavorites
-            | VirtualKeyCode::WebForward
-            | VirtualKeyCode::WebHome
-            | VirtualKeyCode::WebRefresh
-            | VirtualKeyCode::WebSearch
-            | VirtualKeyCode::WebStop => 'A',
-            VirtualKeyCode::Back => 'B',
-            VirtualKeyCode::Calculator
-            | VirtualKeyCode::Capital
+            | VirtualKeyCode::AudioVolumeMute
+            | VirtualKeyCode::BrowserBack
+            | VirtualKeyCode::BrowserForward
+            | VirtualKeyCode::MediaTrackNext
+            | VirtualKeyCode::MediaPlayPause
+            | VirtualKeyCode::MediaTrackPrevious
+            | VirtualKeyCode::BrowserFavorites
+            | VirtualKeyCode::BrowserHome
+            | VirtualKeyCode::BrowserRefresh
+            | VirtualKeyCode::BrowserSearch
+            | VirtualKeyCode::BrowserStop => 'A',
+            VirtualKeyCode::Backspace => 'B',
+            VirtualKeyCode::LaunchApp2
+            | VirtualKeyCode::CapsLock
             | VirtualKeyCode::Copy
             | VirtualKeyCode::Cut
-            | VirtualKeyCode::MyComputer => 'C',
-            VirtualKeyCode::Delete | VirtualKeyCode::Down => 'D',
+            | VirtualKeyCode::LaunchApp1 => 'C',
+            VirtualKeyCode::Delete | VirtualKeyCode::ArrowDown => 'D',
             VirtualKeyCode::End | VirtualKeyCode::Escape => 'E',
             VirtualKeyCode::F1
             | VirtualKeyCode::F2
@@ -2621,37 +2619,36 @@ pub(crate) fn startup_dialog_hotkey(code: VirtualKeyCode) -> Option<char> {
             | VirtualKeyCode::NumpadDecimal
             | VirtualKeyCode::NumpadDivide
             | VirtualKeyCode::NumpadEnter
-            | VirtualKeyCode::NumpadEquals
+            | VirtualKeyCode::NumpadEqual
             | VirtualKeyCode::NumpadMultiply
             | VirtualKeyCode::NumpadSubtract => 'K',
-            VirtualKeyCode::LAlt
-            | VirtualKeyCode::LControl
-            | VirtualKeyCode::Left
-            | VirtualKeyCode::LShift
-            | VirtualKeyCode::LWin => 'L',
-            VirtualKeyCode::Mail | VirtualKeyCode::MediaSelect => 'M',
-            VirtualKeyCode::Numlock => 'N',
+            VirtualKeyCode::AltLeft
+            | VirtualKeyCode::ControlLeft
+            | VirtualKeyCode::ArrowLeft
+            | VirtualKeyCode::ShiftLeft
+            | VirtualKeyCode::SuperLeft => 'L',
+            VirtualKeyCode::LaunchMail | VirtualKeyCode::MediaSelect => 'M',
+            VirtualKeyCode::NumLock => 'N',
             VirtualKeyCode::PageDown
             | VirtualKeyCode::PageUp
             | VirtualKeyCode::Paste
             | VirtualKeyCode::Pause
             | VirtualKeyCode::Power
-            | VirtualKeyCode::Snapshot => 'P',
-            VirtualKeyCode::RAlt
-            | VirtualKeyCode::RControl
-            | VirtualKeyCode::Return
-            | VirtualKeyCode::Right
-            | VirtualKeyCode::RShift
-            | VirtualKeyCode::RWin => 'R',
-            VirtualKeyCode::Scroll
+            | VirtualKeyCode::PrintScreen => 'P',
+            VirtualKeyCode::AltRight
+            | VirtualKeyCode::ControlRight
+            | VirtualKeyCode::Enter
+            | VirtualKeyCode::ArrowRight
+            | VirtualKeyCode::ShiftRight
+            | VirtualKeyCode::SuperRight => 'R',
+            VirtualKeyCode::ScrollLock
             | VirtualKeyCode::Sleep
             | VirtualKeyCode::Space
-            | VirtualKeyCode::Stop
-            | VirtualKeyCode::Sysrq => 'S',
+            | VirtualKeyCode::Abort => 'S',
             VirtualKeyCode::Tab => 'T',
-            VirtualKeyCode::Up => 'U',
-            VirtualKeyCode::VolumeDown | VirtualKeyCode::VolumeUp => 'V',
-            VirtualKeyCode::Wake => 'W',
+            VirtualKeyCode::ArrowUp => 'U',
+            VirtualKeyCode::AudioVolumeDown | VirtualKeyCode::AudioVolumeUp => 'V',
+            VirtualKeyCode::WakeUp => 'W',
             // SDL_GetKeyName returns punctuation or an empty name for these.
             _ => return None,
         })
@@ -2660,42 +2657,42 @@ pub(crate) fn startup_dialog_hotkey(code: VirtualKeyCode) -> Option<char> {
 
 pub(crate) fn message_dialog_hotkey(code: VirtualKeyCode) -> Option<char> {
     match code {
-        VirtualKeyCode::A => Some('A'),
-        VirtualKeyCode::B => Some('B'),
-        VirtualKeyCode::C => Some('C'),
-        VirtualKeyCode::D => Some('D'),
-        VirtualKeyCode::E => Some('E'),
-        VirtualKeyCode::F => Some('F'),
-        VirtualKeyCode::G => Some('G'),
-        VirtualKeyCode::H => Some('H'),
-        VirtualKeyCode::I => Some('I'),
-        VirtualKeyCode::J => Some('J'),
-        VirtualKeyCode::K => Some('K'),
-        VirtualKeyCode::L => Some('L'),
-        VirtualKeyCode::M => Some('M'),
-        VirtualKeyCode::N => Some('N'),
-        VirtualKeyCode::O => Some('O'),
-        VirtualKeyCode::P => Some('P'),
-        VirtualKeyCode::Q => Some('Q'),
-        VirtualKeyCode::R => Some('R'),
-        VirtualKeyCode::S => Some('S'),
-        VirtualKeyCode::T => Some('T'),
-        VirtualKeyCode::U => Some('U'),
-        VirtualKeyCode::V => Some('V'),
-        VirtualKeyCode::W => Some('W'),
-        VirtualKeyCode::X => Some('X'),
-        VirtualKeyCode::Y => Some('Y'),
-        VirtualKeyCode::Z => Some('Z'),
-        VirtualKeyCode::Key0 | VirtualKeyCode::Numpad0 => Some('0'),
-        VirtualKeyCode::Key1 | VirtualKeyCode::Numpad1 => Some('1'),
-        VirtualKeyCode::Key2 | VirtualKeyCode::Numpad2 => Some('2'),
-        VirtualKeyCode::Key3 | VirtualKeyCode::Numpad3 => Some('3'),
-        VirtualKeyCode::Key4 | VirtualKeyCode::Numpad4 => Some('4'),
-        VirtualKeyCode::Key5 | VirtualKeyCode::Numpad5 => Some('5'),
-        VirtualKeyCode::Key6 | VirtualKeyCode::Numpad6 => Some('6'),
-        VirtualKeyCode::Key7 | VirtualKeyCode::Numpad7 => Some('7'),
-        VirtualKeyCode::Key8 | VirtualKeyCode::Numpad8 => Some('8'),
-        VirtualKeyCode::Key9 | VirtualKeyCode::Numpad9 => Some('9'),
+        VirtualKeyCode::KeyA => Some('A'),
+        VirtualKeyCode::KeyB => Some('B'),
+        VirtualKeyCode::KeyC => Some('C'),
+        VirtualKeyCode::KeyD => Some('D'),
+        VirtualKeyCode::KeyE => Some('E'),
+        VirtualKeyCode::KeyF => Some('F'),
+        VirtualKeyCode::KeyG => Some('G'),
+        VirtualKeyCode::KeyH => Some('H'),
+        VirtualKeyCode::KeyI => Some('I'),
+        VirtualKeyCode::KeyJ => Some('J'),
+        VirtualKeyCode::KeyK => Some('K'),
+        VirtualKeyCode::KeyL => Some('L'),
+        VirtualKeyCode::KeyM => Some('M'),
+        VirtualKeyCode::KeyN => Some('N'),
+        VirtualKeyCode::KeyO => Some('O'),
+        VirtualKeyCode::KeyP => Some('P'),
+        VirtualKeyCode::KeyQ => Some('Q'),
+        VirtualKeyCode::KeyR => Some('R'),
+        VirtualKeyCode::KeyS => Some('S'),
+        VirtualKeyCode::KeyT => Some('T'),
+        VirtualKeyCode::KeyU => Some('U'),
+        VirtualKeyCode::KeyV => Some('V'),
+        VirtualKeyCode::KeyW => Some('W'),
+        VirtualKeyCode::KeyX => Some('X'),
+        VirtualKeyCode::KeyY => Some('Y'),
+        VirtualKeyCode::KeyZ => Some('Z'),
+        VirtualKeyCode::Digit0 | VirtualKeyCode::Numpad0 => Some('0'),
+        VirtualKeyCode::Digit1 | VirtualKeyCode::Numpad1 => Some('1'),
+        VirtualKeyCode::Digit2 | VirtualKeyCode::Numpad2 => Some('2'),
+        VirtualKeyCode::Digit3 | VirtualKeyCode::Numpad3 => Some('3'),
+        VirtualKeyCode::Digit4 | VirtualKeyCode::Numpad4 => Some('4'),
+        VirtualKeyCode::Digit5 | VirtualKeyCode::Numpad5 => Some('5'),
+        VirtualKeyCode::Digit6 | VirtualKeyCode::Numpad6 => Some('6'),
+        VirtualKeyCode::Digit7 | VirtualKeyCode::Numpad7 => Some('7'),
+        VirtualKeyCode::Digit8 | VirtualKeyCode::Numpad8 => Some('8'),
+        VirtualKeyCode::Digit9 | VirtualKeyCode::Numpad9 => Some('9'),
         _ => None,
     }
 }

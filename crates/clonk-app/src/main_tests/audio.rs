@@ -336,7 +336,7 @@
         });
 
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::X)
+            .press(VirtualKeyCode::KeyX)
             .expect("press physical Down");
         assert!(!app.pressed_engine_keys.is_empty());
         assert_ne!(
@@ -4725,7 +4725,7 @@
             "modifier-blind fallback must not invent a plain Tab"
         );
         keyboard
-            .handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::SHIFT)
+            .handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::SHIFT)
             .expect("hold Ctrl+Shift");
         keyboard
             .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
@@ -5176,7 +5176,7 @@
             .expect("actual pending playback toggles off");
         assert!(!scripted.runtime_music_enabled);
 
-        for modifiers in [ModifiersState::empty(), ModifiersState::CTRL] {
+        for modifiers in [ModifiersState::empty(), ModifiersState::CONTROL] {
             let mut missing = new_running_sandbox_app();
             missing.audio = None;
             missing

@@ -1618,7 +1618,7 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
     ];
 
     // Ctrl+F9 is Fullscreen-only, so it queues nothing in GUI scope.
-    app.keyboard_modifiers = ModifiersState::CTRL;
+    app.keyboard_modifiers = ModifiersState::CONTROL;
     app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
         .expect("Ctrl+F9 stays inert on the startup screens");
     app.handle_key(VirtualKeyCode::F9, ElementState::Released)
@@ -1773,7 +1773,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
         .set_ramp(0, [0x102030, 0x405060, 0x708090]);
 
     app.start_running_chat(RunningChatMode::All);
-    app.keyboard_modifiers = ModifiersState::CTRL;
+    app.keyboard_modifiers = ModifiersState::CONTROL;
     app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
         .expect("running Ctrl+F9 is implemented");
     assert_eq!(
@@ -1873,7 +1873,7 @@ fn l141_screenshot_failures_keep_localized_path_for_both_capture_kinds() {
 
     for (modifiers, kind) in [
         (ModifiersState::empty(), ScreenshotKind::PresentedFrame),
-        (ModifiersState::CTRL, ScreenshotKind::FullLandscape),
+        (ModifiersState::CONTROL, ScreenshotKind::FullLandscape),
     ] {
         app.keyboard_modifiers = modifiers;
         app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
@@ -2112,12 +2112,12 @@ fn l048_advanced_options_click_save_and_cancel_round_trip_typed_config() {
 
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt for Advanced hotkey");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("ignore Alt+Enter");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("release ignored Alt+Enter");
     assert!(app.startup_options_advanced_dialog.is_some());
-    app.handle_key(VirtualKeyCode::S, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyS, ElementState::Pressed)
         .expect("invoke localized Advanced Save hotkey");
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("release Alt");
@@ -2681,7 +2681,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
         "C++ defers Config.Save until DoBack"
     );
 
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("hold Ctrl");
     app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
         .expect("global frontend-sound toggle");
@@ -2720,7 +2720,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
         dialog.network_mut().hide_no_official_league_notice = true;
     }
     app.bindings
-        .rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::Z);
+        .rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::KeyZ);
     app.gamepad_bindings
         .rebind_button(1, ControlBindingId::Up, 1, 4);
     app.gamepad_gui_control = true;
@@ -3952,7 +3952,7 @@ fn l066_film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         .register_player(PlayerConfig::new(next_owner, "Second film player"))
         .expect("register second film player");
     assert!(app.set_physical_film_view(owner));
-    app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
         .expect("production film-view key dispatch remains active");
     assert_eq!(app.film_view_player, Some(next_owner));
 }
@@ -3968,20 +3968,20 @@ fn l051_bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     assert!(app.set_physical_film_view(first));
 
     assert!(!app.handle_film_view_key_for_mode(
-        VirtualKeyCode::Right,
+        VirtualKeyCode::ArrowRight,
         ElementState::Pressed,
         false,
     ));
     assert_eq!(app.film_view_player, Some(first));
 
-    assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::Right, ElementState::Pressed, true,));
+    assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
     assert_eq!(
         app.film_view_player,
         Some(second),
         "ViewportCheck assigns Players.First before the first film key"
     );
     assert!(!app.handle_film_view_key_for_mode(
-        VirtualKeyCode::Right,
+        VirtualKeyCode::ArrowRight,
         ElementState::Released,
         true,
     ));
@@ -3992,12 +3992,12 @@ fn l051_bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     );
 
     app.keyboard_modifiers = ModifiersState::SHIFT;
-    assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::Right, ElementState::Pressed, true,));
+    assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
     assert_eq!(app.film_view_player, Some(second));
     app.keyboard_modifiers = ModifiersState::empty();
 
     app.scoreboard_dialog = Some(app.scoreboard_request());
-    assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::Right, ElementState::Pressed, true,));
+    assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
     assert_eq!(
         app.film_view_player,
         Some(first),
@@ -4005,7 +4005,7 @@ fn l051_bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     );
 
     app.start_running_chat(RunningChatMode::All);
-    assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::Right, ElementState::Pressed, true,));
+    assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
     assert_eq!(
         app.film_view_player,
         Some(first),

@@ -2285,8 +2285,8 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   that makes script name resolution cheaper (interning definition/function
   names instead of hashing and comparing `String` keys) pays here twice.
 - Open gap (found 2026-07-27, not closed): **Raspberry Pi 0-3 cannot start.**
-  wgpu-hal's GLES backend rejects any context below GLES 3.0
-  (wgpu-hal-0.16.2 src/gles/adapter.rs:218-225), and VideoCore IV is GLES 2.0,
+  wgpu-hal's GLES backend requests GLES 3.0 or higher
+  (wgpu-hal-29.0.4 src/gles/egl.rs:463-474), and VideoCore IV is GLES 2.0,
   so no adapter is produced on any backend — `build_framebuffer`
   (`crates/clonk-app/src/main_parts/audio.rs`) now widens to `Backends::all()`
   and reports this explicitly instead of failing opaquely, but it cannot
@@ -2760,6 +2760,27 @@ an ordered-map model gap.
   one. Pinned by `sdl_repeated_keydown_remains_fresh_like_cpp`,
   `autostop_ignores_repeated_physical_keydown_until_release` and
   `app_virtual_keyboard_flings_tutorial05_wood_to_the_right_hill`.
+
+- Open gap (found 2026-08-02, not closed): **keyboard identity and delivery
+  still differ at platform boundaries.** On X11, C++ explicitly asks XKB for
+  group 0, level 0 on both press and release, ignoring the active layout group
+  (`C4FullScreen.cpp:227-238`); winit instead derives its modifier-free key from
+  the active XKB group. This already happened in winit 0.28's
+  `lookup_keysym` path. On macOS, C++ forwards SDL's platform scancode directly
+  (`C4FullScreen.cpp:387-400`), whose Cocoa table is not identical to winit's
+  physical `KeyCode`: examples include F13/F14/F15 versus
+  PrintScreen/ScrollLock/Pause, unidentified JIS/keypad keys, and the ISO grave
+  swap. Those differences also predate this migration.
+
+  On Windows, winit 0.30 newly consumes Alt+F4 before application key dispatch;
+  winit 0.28 delivered it, while C++ offers `WM_SYSKEYDOWN`/`VK_F4` to
+  `DoKeyboardInput` first (`C4FullScreen.cpp:62-71`). Recovering that event
+  requires upstream support or native interception and is an accepted migration
+  gap. The 0.30 port preserves the existing supported mappings and restores
+  raw-VK identity for delivered supported Windows keys; it does not make
+  Windows fully exact or close the Linux/macOS gaps. Releases target Windows,
+  Linux, and macOS; the pre-existing BSD target/codec inconsistency remains out
+  of scope.
 
 - **A catch-up burst reserves wall-clock for drawing, and a repaint floor
   outranks every frame skip** (`RenderFloor`,

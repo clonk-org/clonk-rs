@@ -19,7 +19,7 @@ impl GameApp {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if key == VirtualKeyCode::Escape && modifiers.is_empty() {
             if state == ElementState::Pressed {
                 self.hide_external_irc_dialog();
@@ -31,7 +31,7 @@ impl GameApp {
         }
         let actions = if state == ElementState::Pressed
             && key == VirtualKeyCode::F4
-            && modifiers == ModifiersState::CTRL
+            && modifiers == ModifiersState::CONTROL
         {
             self.external_irc_dialog
                 .as_mut()
@@ -39,8 +39,8 @@ impl GameApp {
                 .unwrap_or_default()
         } else if state == ElementState::Pressed
             && key == VirtualKeyCode::Tab
-            && (modifiers == ModifiersState::CTRL
-                || modifiers == (ModifiersState::CTRL | ModifiersState::SHIFT))
+            && (modifiers == ModifiersState::CONTROL
+                || modifiers == (ModifiersState::CONTROL | ModifiersState::SHIFT))
         {
             self.external_irc_dialog
                 .as_mut()
@@ -79,11 +79,11 @@ impl GameApp {
             return Ok(false);
         }
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if !self.runtime_keyboard_binding_matches(
             "ToggleChat",
             key,
-            key == VirtualKeyCode::C && c4_modifiers == ModifiersState::ALT,
+            key == VirtualKeyCode::KeyC && c4_modifiers == ModifiersState::ALT,
         ) {
             return Ok(false);
         }
@@ -787,22 +787,22 @@ impl GameApp {
         key: VirtualKeyCode,
     ) -> Option<RunningChatMode> {
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         [
             (
                 "ChatOpen",
                 RunningChatMode::All,
-                modifiers.is_empty() && matches!(key, VirtualKeyCode::Return | VirtualKeyCode::F2),
+                modifiers.is_empty() && matches!(key, VirtualKeyCode::Enter | VirtualKeyCode::F2),
             ),
             (
                 "ChatOpen2Allies",
                 RunningChatMode::Allies,
-                key == VirtualKeyCode::Return && modifiers == ModifiersState::SHIFT,
+                key == VirtualKeyCode::Enter && modifiers == ModifiersState::SHIFT,
             ),
             (
                 "ChatOpen2Say",
                 RunningChatMode::Say,
-                key == VirtualKeyCode::Return && modifiers == ModifiersState::ALT,
+                key == VirtualKeyCode::Enter && modifiers == ModifiersState::ALT,
             ),
         ]
         .into_iter()
@@ -817,24 +817,24 @@ impl GameApp {
             return false;
         };
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if modifiers.contains(ModifiersState::ALT) {
             return false;
         }
-        if modifiers == ModifiersState::CTRL {
+        if modifiers == ModifiersState::CONTROL {
             return true;
         }
         let edit_focused = controller.focused_control() == InputDialogControl::Edit;
         let edit_key = matches!(
             key,
-            VirtualKeyCode::Back
+            VirtualKeyCode::Backspace
                 | VirtualKeyCode::Delete
-                | VirtualKeyCode::Left
-                | VirtualKeyCode::Right
+                | VirtualKeyCode::ArrowLeft
+                | VirtualKeyCode::ArrowRight
                 | VirtualKeyCode::Home
                 | VirtualKeyCode::End
         );
-        if modifiers == (ModifiersState::CTRL | ModifiersState::SHIFT) {
+        if modifiers == (ModifiersState::CONTROL | ModifiersState::SHIFT) {
             return edit_focused && edit_key;
         }
         if modifiers == ModifiersState::SHIFT {
@@ -844,23 +844,24 @@ impl GameApp {
             return false;
         }
         if edit_key {
-            return edit_focused || (key == VirtualKeyCode::Back && controller.text().is_empty());
+            return edit_focused
+                || (key == VirtualKeyCode::Backspace && controller.text().is_empty());
         }
         if key == VirtualKeyCode::Space {
             return !edit_focused;
         }
-        if key == VirtualKeyCode::Apps {
+        if key == VirtualKeyCode::ContextMenu {
             return edit_focused;
         }
         matches!(
             key,
             VirtualKeyCode::Escape
                 | VirtualKeyCode::F2
-                | VirtualKeyCode::Return
+                | VirtualKeyCode::Enter
                 | VirtualKeyCode::NumpadEnter
                 | VirtualKeyCode::Tab
-                | VirtualKeyCode::Up
-                | VirtualKeyCode::Down
+                | VirtualKeyCode::ArrowUp
+                | VirtualKeyCode::ArrowDown
         )
     }
 
@@ -919,7 +920,7 @@ impl GameApp {
         if !self.running_shared_gui_has_keyboard_focus() {
             return Ok(false);
         }
-        if self.keyboard_modifiers.alt() {
+        if self.keyboard_modifiers.alt_key() {
             return Ok(false);
         }
         if state == ElementState::Released {
@@ -927,11 +928,11 @@ impl GameApp {
         }
         match key {
             VirtualKeyCode::Escape | VirtualKeyCode::F2 => self.close_running_chat()?,
-            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => self.submit_running_chat()?,
+            VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter => self.submit_running_chat()?,
             VirtualKeyCode::Tab => self.complete_running_chat_nick(),
-            VirtualKeyCode::Up => self.browse_running_chat_history(true),
-            VirtualKeyCode::Down => self.browse_running_chat_history(false),
-            VirtualKeyCode::Back => {
+            VirtualKeyCode::ArrowUp => self.browse_running_chat_history(true),
+            VirtualKeyCode::ArrowDown => self.browse_running_chat_history(false),
+            VirtualKeyCode::Backspace => {
                 let empty = self.running_chat_text().is_none_or(str::is_empty);
                 if empty {
                     self.close_running_chat()?;
@@ -940,8 +941,8 @@ impl GameApp {
                     self.assets.clonk_fonts.clone(),
                 ) {
                     let modifiers = InputDialogKeyModifiers {
-                        shift: self.keyboard_modifiers.shift(),
-                        control: self.keyboard_modifiers.ctrl(),
+                        shift: self.keyboard_modifiers.shift_key(),
+                        control: self.keyboard_modifiers.control_key(),
                     };
                     if let Some(controller) = self.running_chat_controller_mut() {
                         controller.handle_edit_key_down(
@@ -956,8 +957,8 @@ impl GameApp {
             key => {
                 let operation = match key {
                     VirtualKeyCode::Delete => Some(InputDialogEditKey::Delete),
-                    VirtualKeyCode::Left => Some(InputDialogEditKey::Left),
-                    VirtualKeyCode::Right => Some(InputDialogEditKey::Right),
+                    VirtualKeyCode::ArrowLeft => Some(InputDialogEditKey::Left),
+                    VirtualKeyCode::ArrowRight => Some(InputDialogEditKey::Right),
                     VirtualKeyCode::Home => Some(InputDialogEditKey::Home),
                     VirtualKeyCode::End => Some(InputDialogEditKey::End),
                     _ => None,
@@ -968,8 +969,8 @@ impl GameApp {
                     self.assets.clonk_fonts.clone(),
                 ) {
                     let modifiers = InputDialogKeyModifiers {
-                        shift: self.keyboard_modifiers.shift(),
-                        control: self.keyboard_modifiers.ctrl(),
+                        shift: self.keyboard_modifiers.shift_key(),
+                        control: self.keyboard_modifiers.control_key(),
                     };
                     if let Some(controller) = self.running_chat_controller_mut() {
                         controller.handle_edit_key_down(operation, modifiers, &layout, &fonts.text);

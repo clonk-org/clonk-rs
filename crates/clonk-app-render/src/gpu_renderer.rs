@@ -1,6 +1,6 @@
 //! Retained wgpu scene composition for normal windowed gameplay.
 //!
-//! `pixels` 0.13 always uploads its logical CPU pixel buffer before invoking
+//! `pixels` 0.17 always uploads its logical CPU pixel buffer before invoking
 //! `Pixels::render_with`.  The application therefore constructs `Pixels` with
 //! a 1x1 logical buffer and leaves that buffer at 1x1; this renderer records the
 //! real game scene into the surface view supplied to the closure.  Source
@@ -402,15 +402,11 @@ fn fs_monitor_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Recovery decision published by the wgpu 0.16 uncaptured-error hook.
+/// Recovery decision published by wgpu's device-loss and uncaptured-error hooks.
 ///
-/// That wgpu release has no public `Device::lost` future or callback. Native
-/// `DeviceError::Lost` values which reach ordinary resource operations are
-/// instead formatted as validation errors, so this monitor recognizes that
-/// specific diagnostic. Loss reported directly by `Queue::submit` or
-/// `Device::poll` is converted to an upstream panic; the application catches
-/// that one documented loss diagnostic at the presentation boundary and
-/// routes it through the same full-device recreation path.
+/// Device loss has a dedicated callback. The validation-message check remains
+/// as a compatibility fallback for backends which surface a lost parent device
+/// through an ordinary resource operation before dispatching that callback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RetainedGpuRendererHealth {
     Healthy,
@@ -433,6 +429,7 @@ pub enum RetainedGpuRecreateReason {
 pub enum RetainedGpuFatalReason {
     OutOfMemory,
     Validation,
+    Internal,
 }
 
 #[derive(Clone, Debug)]
@@ -444,11 +441,27 @@ impl RetainedGpuHealthMonitor {
     fn install(device: &wgpu::Device) -> Self {
         let state = Arc::new(Mutex::new(RetainedGpuRendererHealth::Healthy));
         let callback_state = Arc::clone(&state);
-        device.on_uncaptured_error(Box::new(move |error| {
+        device.on_uncaptured_error(Arc::new(move |error| {
             let health = classify_uncaptured_wgpu_error(&error);
             tracing::error!(%error, ?health, "uncaptured retained GPU device error");
             record_renderer_health(&callback_state, health);
         }));
+        let lost_state = Arc::clone(&state);
+        device.set_device_lost_callback(move |reason, message| {
+            let detail = if message.is_empty() {
+                format!("{reason:?}")
+            } else {
+                format!("{reason:?}: {message}")
+            };
+            tracing::error!(?reason, %detail, "retained GPU device lost");
+            record_renderer_health(
+                &lost_state,
+                RetainedGpuRendererHealth::RecreateRequired {
+                    reason: RetainedGpuRecreateReason::DeviceLost,
+                    detail,
+                },
+            );
+        });
         Self { state }
     }
 
@@ -469,6 +482,10 @@ fn classify_uncaptured_wgpu_error(error: &wgpu::Error) -> RetainedGpuRendererHea
         wgpu::Error::Validation { description, .. } => {
             classify_wgpu_validation_description(description)
         }
+        wgpu::Error::Internal { description, .. } => RetainedGpuRendererHealth::Fatal {
+            reason: RetainedGpuFatalReason::Internal,
+            detail: description.to_owned(),
+        },
     }
 }
 
@@ -582,6 +599,8 @@ pub enum GpuRendererError {
     ReadbackCallbackDropped,
     #[error("GPU readback mapping failed: {0}")]
     ReadbackMap(String),
+    #[error("GPU readback polling failed: {0}")]
+    ReadbackPoll(String),
     #[error("retained GPU device recreation required after {reason:?}: {detail}")]
     DeviceRecreationRequired {
         reason: RetainedGpuRecreateReason,
@@ -743,7 +762,9 @@ impl GpuReadbackTicket {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| GpuRendererError::ReadbackPoll(error.to_string()))?;
         let result = receiver
             .recv()
             .map_err(|_| GpuRendererError::ReadbackCallbackDropped)?;
@@ -927,32 +948,41 @@ impl RetainedGpuRenderer {
 
         let quad_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lc_gpu_quad_pipeline_layout"),
-            bind_group_layouts: &[&gamma_bind_group_layout, &quad_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[
+                Some(&gamma_bind_group_layout),
+                Some(&quad_bind_group_layout),
+            ],
+            immediate_size: 0,
         });
         let landscape_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("lc_gpu_landscape_pipeline_layout"),
-                bind_group_layouts: &[&gamma_bind_group_layout, &landscape_bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[
+                    Some(&gamma_bind_group_layout),
+                    Some(&landscape_bind_group_layout),
+                ],
+                immediate_size: 0,
             });
         let solid_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("lc_gpu_solid_pipeline_layout"),
-                bind_group_layouts: &[&gamma_bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&gamma_bind_group_layout)],
+                immediate_size: 0,
             });
         let present_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("lc_gpu_present_pipeline_layout"),
-                bind_group_layouts: &[&present_bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&present_bind_group_layout)],
+                immediate_size: 0,
             });
         let monitor_gamma_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("lc_gpu_monitor_gamma_pipeline_layout"),
-                bind_group_layouts: &[&present_bind_group_layout, &gamma_bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[
+                    Some(&present_bind_group_layout),
+                    Some(&gamma_bind_group_layout),
+                ],
+                immediate_size: 0,
             });
 
         let quad_replace_pipeline = scene_pipeline(
@@ -1051,7 +1081,7 @@ impl RetainedGpuRenderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1061,7 +1091,7 @@ impl RetainedGpuRenderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
         let linear_mip_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1071,7 +1101,7 @@ impl RetainedGpuRenderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             anisotropy_clamp: 16,
             ..Default::default()
         });
@@ -1082,7 +1112,7 @@ impl RetainedGpuRenderer {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
         let present_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1092,7 +1122,7 @@ impl RetainedGpuRenderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -1171,11 +1201,11 @@ impl RetainedGpuRenderer {
     /// Rebuild every device-owned object after the application has replaced
     /// the `Pixels` device and queue.
     ///
-    /// `pixels` already reconfigures and retries an acquired surface once, so
-    /// an ordinary `SurfaceError::Lost`/`Outdated` does not require this. Call
-    /// this only after constructing a replacement `Pixels`; the next validated
-    /// scene carries complete CPU backing for every referenced texture and
-    /// therefore repopulates this empty cache without a CPU-frame fallback.
+    /// The local `pixels` patch returns Lost to the application and bounds
+    /// Outdated/Suboptimal retries. Call this after constructing replacement
+    /// `Pixels` for a lost surface or device; the next validated scene carries
+    /// complete CPU backing for every referenced texture and therefore
+    /// repopulates this empty cache without a CPU-frame fallback.
     pub fn recreate(
         &mut self,
         device: &wgpu::Device,
@@ -1211,9 +1241,9 @@ impl RetainedGpuRenderer {
         self.health.current()
     }
 
-    /// Refuse further work after an observed device fault. A recognized native
-    /// device-loss diagnostic is recoverable by rebuilding `Pixels` and calling
-    /// [`Self::recreate`]; validation and OOM failures remain fatal.
+    /// Refuse further work after an observed device fault. Device loss is
+    /// recoverable by rebuilding `Pixels` and calling [`Self::recreate`];
+    /// validation, internal, and OOM failures remain fatal.
     pub fn check_health(&self) -> Result<(), GpuRendererError> {
         match self.health() {
             RetainedGpuRendererHealth::Healthy => Ok(()),
@@ -1377,6 +1407,7 @@ impl RetainedGpuRenderer {
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &composition.view,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1385,13 +1416,16 @@ impl RetainedGpuRenderer {
                         b: f64::from(clear.b) / 255.0,
                         a: f64::from(clear.a) / 255.0,
                     }),
-                    store: true,
+                    store: wgpu::StoreOp::Store,
                 },
             })];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("lc_gpu_scene_pass"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
             });
             if !calls.is_empty() {
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -1403,16 +1437,20 @@ impl RetainedGpuRenderer {
         if scene.gamma_mode.monitor_postpass() {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &composition.gamma_resolved_view,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: true,
+                    store: wgpu::StoreOp::Store,
                 },
             })];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("lc_gpu_monitor_gamma_pass"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.monitor_gamma_pipeline);
             pass.set_bind_group(0, &composition.present_bind_group, &[]);
@@ -1436,16 +1474,20 @@ impl RetainedGpuRenderer {
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: surface_view,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: true,
+                    store: wgpu::StoreOp::Store,
                 },
             })];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("lc_gpu_present_pass"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.present_pipeline);
             pass.set_bind_group(0, presented_bind_group, &[]);
@@ -1469,14 +1511,14 @@ impl RetainedGpuRenderer {
             }
         }
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &self.gamma_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &bytes,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(256 * 2),
                 rows_per_image: Some(3),
@@ -3483,14 +3525,14 @@ fn texture_format(format: GpuTextureFormat) -> wgpu::TextureFormat {
 fn upload_full(queue: &wgpu::Queue, texture: &wgpu::Texture, resource: &GpuTextureResource) {
     let bytes_per_row = resource.extent[0] * resource.format.bytes_per_pixel() as u32;
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &resource.pixels,
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(bytes_per_row),
             rows_per_image: Some(resource.extent[1]),
@@ -3514,14 +3556,14 @@ fn upload_mip_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, resource: &Gpu
             .enumerate()
     {
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: level as u32 + 1,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &pixels,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(extent[0] * bytes),
                 rows_per_image: Some(extent[1]),
@@ -3545,7 +3587,7 @@ fn upload_dirty(
     let bytes_per_row = resource.extent[0] as usize * bytes_per_pixel;
     let offset = rect.y as usize * bytes_per_row + rect.x as usize * bytes_per_pixel;
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture,
             mip_level: 0,
             origin: wgpu::Origin3d {
@@ -3556,7 +3598,7 @@ fn upload_dirty(
             aspect: wgpu::TextureAspect::All,
         },
         &resource.pixels,
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: offset as u64,
             bytes_per_row: Some(bytes_per_row as u32),
             rows_per_image: Some(resource.extent[1]),
@@ -3595,15 +3637,15 @@ fn encode_readback(
         mapped_at_creation: false,
     });
     encoder.copy_texture_to_buffer(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        wgpu::ImageCopyBuffer {
+        wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
-            layout: wgpu::ImageDataLayout {
+            layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(padded as u32),
                 rows_per_image: Some(extent[1]),
@@ -3645,14 +3687,14 @@ fn fallback_texture(
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         bytes,
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(bytes.len() as u32),
             rows_per_image: Some(1),
@@ -3727,7 +3769,8 @@ fn scene_pipeline(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &vertex_layouts,
         },
         primitive: wgpu::PrimitiveState {
@@ -3739,10 +3782,12 @@ fn scene_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &targets,
         }),
-        multiview: None,
+        multiview_mask: None,
+        cache: None,
     })
 }
 
@@ -3767,7 +3812,8 @@ fn present_pipeline(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[],
         },
         primitive: wgpu::PrimitiveState::default(),
@@ -3775,15 +3821,17 @@ fn present_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: match (monitor_gamma, surface_format.is_srgb()) {
+            entry_point: Some(match (monitor_gamma, surface_format.is_srgb()) {
                 (false, false) => "fs_linear",
                 (false, true) => "fs_srgb",
                 (true, false) => "fs_monitor_linear",
                 (true, true) => "fs_monitor_srgb",
-            },
+            }),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &targets,
         }),
-        multiview: None,
+        multiview_mask: None,
+        cache: None,
     })
 }
 
@@ -4185,8 +4233,8 @@ impl ShaderLandscapeComposer {
         );
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lc_gpu_shader_landscape_pipeline_layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
         let targets = [Some(wgpu::ColorTargetState {
             format: wgpu::TextureFormat::Rgba8Unorm,
@@ -4198,7 +4246,8 @@ impl ShaderLandscapeComposer {
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &module,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[],
             },
             primitive: wgpu::PrimitiveState::default(),
@@ -4206,10 +4255,12 @@ impl ShaderLandscapeComposer {
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &targets,
             }),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
         Self {
             pipeline,
@@ -4316,13 +4367,17 @@ impl ShaderLandscapeComposer {
             label: Some("lc_gpu_shader_landscape_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: true,
+                    store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
@@ -4355,14 +4410,14 @@ fn uint_plane(
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         bytes,
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(extent[0] * bytes_per_texel),
             rows_per_image: Some(extent[1]),
@@ -4516,7 +4571,7 @@ mod tests {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("lc_gpu_texture_limit_test_encoder"),
         });
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         assert!(matches!(
             renderer.render(
@@ -4537,7 +4592,7 @@ mod tests {
         ));
         assert!(renderer.requires_cpu_presentation());
         assert_eq!(renderer.health(), RetainedGpuRendererHealth::Healthy);
-        let validation = runtime.block_on(device.pop_error_scope());
+        let validation = runtime.block_on(validation_scope.pop());
         assert!(
             validation.is_none(),
             "source-limit preflight must not poison the device: {validation:?}"
@@ -4621,7 +4676,7 @@ mod tests {
     }
 
     #[test]
-    fn device_health_distinguishes_recoverable_loss_from_fatal_validation() {
+    fn device_health_distinguishes_recoverable_loss_from_fatal_errors() {
         let lost = classify_wgpu_validation_description(
             "Queue::submit failed because the Parent device is lost",
         );
@@ -4640,6 +4695,40 @@ mod tests {
                 reason: RetainedGpuFatalReason::Validation,
                 ..
             }
+        ));
+
+        let internal = classify_uncaptured_wgpu_error(&wgpu::Error::Internal {
+            source: Box::new(std::io::Error::other("internal error source")),
+            description: "unexpected backend failure".to_owned(),
+        });
+        assert!(matches!(
+            internal,
+            RetainedGpuRendererHealth::Fatal {
+                reason: RetainedGpuFatalReason::Internal,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn destroying_the_device_marks_the_renderer_for_recreation() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping retained device-loss callback check");
+            return;
+        };
+        let renderer = RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        device.destroy();
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll destroyed retained renderer device");
+
+        assert!(matches!(
+            renderer.health(),
+            RetainedGpuRendererHealth::RecreateRequired {
+                reason: RetainedGpuRecreateReason::DeviceLost,
+                ref detail,
+            } if detail == "Destroyed"
         ));
     }
 
@@ -5173,7 +5262,14 @@ mod tests {
             .expect("build Tokio runtime for layered renderer test");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+            backend_options: wgpu::BackendOptions {
+                dx12: wgpu::Dx12BackendOptions {
+                    shader_compiler: wgpu::Dx12Compiler::Fxc,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = runtime
             .block_on(async {
@@ -5184,7 +5280,7 @@ mod tests {
                         force_fallback_adapter: false,
                     })
                     .await;
-                if primary.is_some() {
+                if primary.is_ok() {
                     primary
                 } else {
                     instance
@@ -5199,13 +5295,14 @@ mod tests {
             .expect("layered renderer test requires a working wgpu adapter");
         let descriptor = wgpu::DeviceDescriptor {
             label: Some("lc_gpu_layered_test_device"),
-            features: wgpu::Features::empty(),
-            limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
         };
         let (device, queue) = runtime
-            .block_on(adapter.request_device(&descriptor, None))
+            .block_on(adapter.request_device(&descriptor))
             .expect("request layered renderer test device");
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let gamma = GpuGammaLut::from_ramp(&GammaRamp::standard());
         let base = GpuScene {
@@ -5269,7 +5366,7 @@ mod tests {
             "the later identity-space layer paints one native pixel over it"
         );
         assert_eq!(readback_pixel(&frame, 6, 2), [10, 20, 30, 255]);
-        let validation = runtime.block_on(device.pop_error_scope());
+        let validation = runtime.block_on(validation_scope.pop());
         assert!(
             validation.is_none(),
             "layered renderer reported wgpu validation error: {validation:?}"
@@ -5551,22 +5648,30 @@ mod tests {
             .expect("build Tokio runtime for wgpu adapter discovery");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            dx12_shader_compiler: wgpu::Dx12Compiler::default(),
-        });
-        let adapter = runtime.block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))?;
-        let (device, queue) = runtime
-            .block_on(adapter.request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("lc_gpu_shader_landscape_test_device"),
-                    features: wgpu::Features::empty(),
-                    limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            backend_options: wgpu::BackendOptions {
+                dx12: wgpu::Dx12BackendOptions {
+                    shader_compiler: wgpu::Dx12Compiler::Fxc,
+                    ..Default::default()
                 },
-                None,
-            ))
+                ..Default::default()
+            },
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = runtime
+            .block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }))
+            .ok()?;
+        let (device, queue) = runtime
+            .block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("lc_gpu_shader_landscape_test_device"),
+                required_features: wgpu::Features::empty(),
+                required_limits:
+                    wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+                ..Default::default()
+            }))
             .expect("request shader landscape test device");
         Some((runtime, device, queue))
     }
@@ -5607,15 +5712,15 @@ mod tests {
             mapped_at_creation: false,
         });
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &target,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded as u32),
                     rows_per_image: Some(extent[1]),
@@ -5633,7 +5738,9 @@ mod tests {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll shader landscape readback");
         receiver
             .recv()
             .expect("shader landscape readback callback")
@@ -6006,9 +6113,16 @@ mod tests {
             .expect("build Tokio runtime for wgpu adapter discovery");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+            backend_options: wgpu::BackendOptions {
+                dx12: wgpu::Dx12BackendOptions {
+                    shader_compiler: wgpu::Dx12Compiler::Fxc,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let Some(adapter) =
+        let Ok(adapter) =
             runtime.block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
@@ -6019,14 +6133,13 @@ mod tests {
             return;
         };
         let (device, queue) = runtime
-            .block_on(adapter.request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("lc_gpu_landscape_smooth_test_device"),
-                    features: wgpu::Features::empty(),
-                    limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-                },
-                None,
-            ))
+            .block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("lc_gpu_landscape_smooth_test_device"),
+                required_features: wgpu::Features::empty(),
+                required_limits:
+                    wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+                ..Default::default()
+            }))
             .expect("request landscape magnification test device");
 
         // Two texels: opaque red material on the left, sky on the right.
@@ -6130,7 +6243,14 @@ mod tests {
             .expect("build Tokio runtime for wgpu adapter discovery");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+            backend_options: wgpu::BackendOptions {
+                dx12: wgpu::Dx12BackendOptions {
+                    shader_compiler: wgpu::Dx12Compiler::Fxc,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = runtime
             .block_on(async {
@@ -6141,7 +6261,7 @@ mod tests {
                         force_fallback_adapter: false,
                     })
                     .await;
-                if primary.is_some() {
+                if primary.is_ok() {
                     primary
                 } else {
                     instance
@@ -6153,7 +6273,7 @@ mod tests {
                         .await
                 }
             })
-            .unwrap_or_else(|| {
+            .unwrap_or_else(|_| {
                 panic!(
                     "gpu_renderer_matches_cpu_reference_frame requires a working wgpu adapter; \
                      no hardware or fallback adapter was available for Backends::all()"
@@ -6166,13 +6286,14 @@ mod tests {
         );
         let descriptor = wgpu::DeviceDescriptor {
             label: Some("lc_gpu_parity_test_device"),
-            features: wgpu::Features::empty(),
-            limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
         };
         let (device, queue) = runtime
-            .block_on(adapter.request_device(&descriptor, None))
+            .block_on(adapter.request_device(&descriptor))
             .expect("request wgpu device for retained renderer parity test");
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let ids = SceneTextureIds {
             mutable: GpuTextureId::fresh(),
@@ -6198,12 +6319,12 @@ mod tests {
             &scene,
             &GpuPresentation::identity(LOGICAL[0], LOGICAL[1]),
         );
-        let validation = runtime.block_on(device.pop_error_scope());
+        let validation = runtime.block_on(validation_scope.pop());
         assert!(
             validation.is_none(),
             "initial device frame reported wgpu validation error: {validation:?}"
         );
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         assert_eq!(
             initial.rgba,
             expected_frame(LOGICAL, initial_mutable, &scene.gamma),
@@ -6818,16 +6939,46 @@ mod tests {
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 4);
         assert!(!renderer.last_stats().composition_recreated);
 
-        let validation = runtime.block_on(device.pop_error_scope());
+        let validation = runtime.block_on(validation_scope.pop());
         assert!(
             validation.is_none(),
             "first device reported wgpu validation error: {validation:?}"
         );
 
+        let replacement_adapter = runtime
+            .block_on(async {
+                let primary = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                    })
+                    .await;
+                if primary.is_ok() {
+                    primary
+                } else {
+                    instance
+                        .request_adapter(&wgpu::RequestAdapterOptions {
+                            power_preference: wgpu::PowerPreference::LowPower,
+                            compatible_surface: None,
+                            force_fallback_adapter: true,
+                        })
+                        .await
+                }
+            })
+            .expect("request a fresh adapter for replacement wgpu device");
+        let replacement_descriptor = wgpu::DeviceDescriptor {
+            label: Some("lc_gpu_replacement_test_device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults()
+                .using_resolution(replacement_adapter.limits()),
+            ..Default::default()
+        };
         let (replacement_device, replacement_queue) = runtime
-            .block_on(adapter.request_device(&descriptor, None))
+            .block_on(replacement_adapter.request_device(&replacement_descriptor))
             .expect("request replacement wgpu device");
-        replacement_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let replacement_validation_scope =
+            replacement_device.push_error_scope(wgpu::ErrorFilter::Validation);
         let previous_generation = renderer.generation();
         let replacement_generation = renderer.recreate(
             &replacement_device,
@@ -6853,7 +7004,7 @@ mod tests {
         assert_eq!(renderer.last_stats().full_upload_bytes, 46);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
         assert!(renderer.last_stats().composition_recreated);
-        let validation = runtime.block_on(replacement_device.pop_error_scope());
+        let validation = runtime.block_on(replacement_validation_scope.pop());
         assert!(
             validation.is_none(),
             "replacement device reported wgpu validation error: {validation:?}"

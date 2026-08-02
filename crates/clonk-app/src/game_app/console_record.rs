@@ -608,12 +608,12 @@ impl GameApp {
         film_replay: bool,
     ) -> bool {
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if !film_replay
             || !self.runtime_keyboard_binding_matches(
                 "FilmNextPlayer",
                 key,
-                key == VirtualKeyCode::Right && c4_modifiers.is_empty(),
+                key == VirtualKeyCode::ArrowRight && c4_modifiers.is_empty(),
             )
             || state != ElementState::Pressed
             || !self.viewport_cycle_scope_available()

@@ -240,7 +240,7 @@ not a robust five-minute latency bound on four-vCPU hosted runners.
 The replacement queue graph uses 18 Linux rows and one Windows smoke row. It turns
 the two netplay runtime hash partitions into independent compile-time modules,
 splits and rebalances the other application tests across ten selectors, splits
-engine integration across its two feature selectors, and partitions all 26
+engine integration across its two feature selectors, and partitions all 27
 remaining workspace packages exactly once across two rows. The ordinary
 unsharded suite remains the coverage reference.
 

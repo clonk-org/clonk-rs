@@ -4051,39 +4051,39 @@ fn parse_runtime_help_language_table_with_charset(
 /// binding, which is the same dead-binding outcome as `SDL_SCANCODE_UNKNOWN`.
 const EXTENDED_SDL_SCANCODE_NAMES: &[(&str, VirtualKeyCode)] = &[
     // Modifiers (SDL_SCANCODE_LCTRL..RGUI).
-    ("Left Ctrl", VirtualKeyCode::LControl),
-    ("Right Ctrl", VirtualKeyCode::RControl),
-    ("Left Shift", VirtualKeyCode::LShift),
-    ("Right Shift", VirtualKeyCode::RShift),
-    ("Left Alt", VirtualKeyCode::LAlt),
-    ("Right Alt", VirtualKeyCode::RAlt),
-    ("Left GUI", VirtualKeyCode::LWin),
-    ("Right GUI", VirtualKeyCode::RWin),
+    ("Left Ctrl", VirtualKeyCode::ControlLeft),
+    ("Right Ctrl", VirtualKeyCode::ControlRight),
+    ("Left Shift", VirtualKeyCode::ShiftLeft),
+    ("Right Shift", VirtualKeyCode::ShiftRight),
+    ("Left Alt", VirtualKeyCode::AltLeft),
+    ("Right Alt", VirtualKeyCode::AltRight),
+    ("Left GUI", VirtualKeyCode::SuperLeft),
+    ("Right GUI", VirtualKeyCode::SuperRight),
     // Media and volume keys.
-    ("Mute", VirtualKeyCode::Mute),
-    ("AudioMute", VirtualKeyCode::Mute),
-    ("VolumeUp", VirtualKeyCode::VolumeUp),
-    ("VolumeDown", VirtualKeyCode::VolumeDown),
-    ("AudioNext", VirtualKeyCode::NextTrack),
-    ("AudioPrev", VirtualKeyCode::PrevTrack),
+    ("Mute", VirtualKeyCode::AudioVolumeMute),
+    ("AudioMute", VirtualKeyCode::AudioVolumeMute),
+    ("VolumeUp", VirtualKeyCode::AudioVolumeUp),
+    ("VolumeDown", VirtualKeyCode::AudioVolumeDown),
+    ("AudioNext", VirtualKeyCode::MediaTrackNext),
+    ("AudioPrev", VirtualKeyCode::MediaTrackPrevious),
     ("AudioStop", VirtualKeyCode::MediaStop),
-    ("AudioPlay", VirtualKeyCode::PlayPause),
+    ("AudioPlay", VirtualKeyCode::MediaPlayPause),
     ("MediaSelect", VirtualKeyCode::MediaSelect),
     // Application launch keys.
-    ("Mail", VirtualKeyCode::Mail),
-    ("Computer", VirtualKeyCode::MyComputer),
-    ("Calculator", VirtualKeyCode::Calculator),
+    ("Mail", VirtualKeyCode::LaunchMail),
+    ("Computer", VirtualKeyCode::LaunchApp1),
+    ("Calculator", VirtualKeyCode::LaunchApp2),
     ("Sleep", VirtualKeyCode::Sleep),
     ("Power", VirtualKeyCode::Power),
-    ("Stop", VirtualKeyCode::Stop),
+    ("Stop", VirtualKeyCode::Abort),
     // Application-control (browser) keys.
-    ("AC Search", VirtualKeyCode::WebSearch),
-    ("AC Home", VirtualKeyCode::WebHome),
-    ("AC Back", VirtualKeyCode::WebBack),
-    ("AC Forward", VirtualKeyCode::WebForward),
-    ("AC Stop", VirtualKeyCode::WebStop),
-    ("AC Refresh", VirtualKeyCode::WebRefresh),
-    ("AC Bookmarks", VirtualKeyCode::WebFavorites),
+    ("AC Search", VirtualKeyCode::BrowserSearch),
+    ("AC Home", VirtualKeyCode::BrowserHome),
+    ("AC Back", VirtualKeyCode::BrowserBack),
+    ("AC Forward", VirtualKeyCode::BrowserForward),
+    ("AC Stop", VirtualKeyCode::BrowserStop),
+    ("AC Refresh", VirtualKeyCode::BrowserRefresh),
+    ("AC Bookmarks", VirtualKeyCode::BrowserFavorites),
     // Editing keys SDL names separately from the Ctrl chords.
     ("Cut", VirtualKeyCode::Cut),
     ("Copy", VirtualKeyCode::Copy),
@@ -4091,17 +4091,17 @@ const EXTENDED_SDL_SCANCODE_NAMES: &[(&str, VirtualKeyCode)] = &[
     // International and non-US keys. SDL names the extra ISO key next to the
     // left Shift `NonUSBackslash`; winit reports it as OEM102. The JIS keys
     // carry SDL's positional `International*`/`Lang*` names.
-    ("NonUSBackslash", VirtualKeyCode::OEM102),
-    ("International1", VirtualKeyCode::AbntC1),
-    ("International2", VirtualKeyCode::Kana),
-    ("International3", VirtualKeyCode::Yen),
+    ("NonUSBackslash", VirtualKeyCode::IntlBackslash),
+    ("International1", VirtualKeyCode::IntlRo),
+    ("International2", VirtualKeyCode::KanaMode),
+    ("International3", VirtualKeyCode::IntlYen),
     ("International4", VirtualKeyCode::Convert),
-    ("International5", VirtualKeyCode::NoConvert),
-    ("Lang1", VirtualKeyCode::Kana),
-    ("Lang2", VirtualKeyCode::Kanji),
+    ("International5", VirtualKeyCode::NonConvert),
+    ("Lang1", VirtualKeyCode::Lang1),
+    ("Lang2", VirtualKeyCode::Lang2),
     // Keypad names outside the arithmetic set handled above.
     ("Keypad 00", VirtualKeyCode::Numpad0),
-    ("Keypad Equals", VirtualKeyCode::NumpadEquals),
+    ("Keypad Equals", VirtualKeyCode::NumpadEqual),
 ];
 
 fn extended_sdl_scancode_name(name: &str) -> Option<VirtualKeyCode> {
@@ -4115,50 +4115,50 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     let name = name.trim();
     if name.len() == 1 {
         return match name.as_bytes()[0].to_ascii_uppercase() {
-            b'0' => Some(VirtualKeyCode::Key0),
-            b'1' => Some(VirtualKeyCode::Key1),
-            b'2' => Some(VirtualKeyCode::Key2),
-            b'3' => Some(VirtualKeyCode::Key3),
-            b'4' => Some(VirtualKeyCode::Key4),
-            b'5' => Some(VirtualKeyCode::Key5),
-            b'6' => Some(VirtualKeyCode::Key6),
-            b'7' => Some(VirtualKeyCode::Key7),
-            b'8' => Some(VirtualKeyCode::Key8),
-            b'9' => Some(VirtualKeyCode::Key9),
-            b'A' => Some(VirtualKeyCode::A),
-            b'B' => Some(VirtualKeyCode::B),
-            b'C' => Some(VirtualKeyCode::C),
-            b'D' => Some(VirtualKeyCode::D),
-            b'E' => Some(VirtualKeyCode::E),
-            b'F' => Some(VirtualKeyCode::F),
-            b'G' => Some(VirtualKeyCode::G),
-            b'H' => Some(VirtualKeyCode::H),
-            b'I' => Some(VirtualKeyCode::I),
-            b'J' => Some(VirtualKeyCode::J),
-            b'K' => Some(VirtualKeyCode::K),
-            b'L' => Some(VirtualKeyCode::L),
-            b'M' => Some(VirtualKeyCode::M),
-            b'N' => Some(VirtualKeyCode::N),
-            b'O' => Some(VirtualKeyCode::O),
-            b'P' => Some(VirtualKeyCode::P),
-            b'Q' => Some(VirtualKeyCode::Q),
-            b'R' => Some(VirtualKeyCode::R),
-            b'S' => Some(VirtualKeyCode::S),
-            b'T' => Some(VirtualKeyCode::T),
-            b'U' => Some(VirtualKeyCode::U),
-            b'V' => Some(VirtualKeyCode::V),
-            b'W' => Some(VirtualKeyCode::W),
-            b'X' => Some(VirtualKeyCode::X),
-            b'Y' => Some(VirtualKeyCode::Y),
-            b'Z' => Some(VirtualKeyCode::Z),
+            b'0' => Some(VirtualKeyCode::Digit0),
+            b'1' => Some(VirtualKeyCode::Digit1),
+            b'2' => Some(VirtualKeyCode::Digit2),
+            b'3' => Some(VirtualKeyCode::Digit3),
+            b'4' => Some(VirtualKeyCode::Digit4),
+            b'5' => Some(VirtualKeyCode::Digit5),
+            b'6' => Some(VirtualKeyCode::Digit6),
+            b'7' => Some(VirtualKeyCode::Digit7),
+            b'8' => Some(VirtualKeyCode::Digit8),
+            b'9' => Some(VirtualKeyCode::Digit9),
+            b'A' => Some(VirtualKeyCode::KeyA),
+            b'B' => Some(VirtualKeyCode::KeyB),
+            b'C' => Some(VirtualKeyCode::KeyC),
+            b'D' => Some(VirtualKeyCode::KeyD),
+            b'E' => Some(VirtualKeyCode::KeyE),
+            b'F' => Some(VirtualKeyCode::KeyF),
+            b'G' => Some(VirtualKeyCode::KeyG),
+            b'H' => Some(VirtualKeyCode::KeyH),
+            b'I' => Some(VirtualKeyCode::KeyI),
+            b'J' => Some(VirtualKeyCode::KeyJ),
+            b'K' => Some(VirtualKeyCode::KeyK),
+            b'L' => Some(VirtualKeyCode::KeyL),
+            b'M' => Some(VirtualKeyCode::KeyM),
+            b'N' => Some(VirtualKeyCode::KeyN),
+            b'O' => Some(VirtualKeyCode::KeyO),
+            b'P' => Some(VirtualKeyCode::KeyP),
+            b'Q' => Some(VirtualKeyCode::KeyQ),
+            b'R' => Some(VirtualKeyCode::KeyR),
+            b'S' => Some(VirtualKeyCode::KeyS),
+            b'T' => Some(VirtualKeyCode::KeyT),
+            b'U' => Some(VirtualKeyCode::KeyU),
+            b'V' => Some(VirtualKeyCode::KeyV),
+            b'W' => Some(VirtualKeyCode::KeyW),
+            b'X' => Some(VirtualKeyCode::KeyX),
+            b'Y' => Some(VirtualKeyCode::KeyY),
+            b'Z' => Some(VirtualKeyCode::KeyZ),
             b'-' => Some(VirtualKeyCode::Minus),
-            b'=' => Some(VirtualKeyCode::Equals),
-            b'[' => Some(VirtualKeyCode::LBracket),
-            b']' => Some(VirtualKeyCode::RBracket),
+            b'=' => Some(VirtualKeyCode::Equal),
+            b'[' => Some(VirtualKeyCode::BracketLeft),
+            b']' => Some(VirtualKeyCode::BracketRight),
             b'\\' => Some(VirtualKeyCode::Backslash),
             b';' => Some(VirtualKeyCode::Semicolon),
-            b'\'' => Some(VirtualKeyCode::Apostrophe),
-            b'`' => Some(VirtualKeyCode::Grave),
+            b'\'' => Some(VirtualKeyCode::Quote),
+            b'`' => Some(VirtualKeyCode::Backquote),
             b',' => Some(VirtualKeyCode::Comma),
             b'.' => Some(VirtualKeyCode::Period),
             b'/' => Some(VirtualKeyCode::Slash),
@@ -4167,13 +4167,13 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     }
 
     let directional_key = if name.eq_ignore_ascii_case("Left") {
-        Some(VirtualKeyCode::Left)
+        Some(VirtualKeyCode::ArrowLeft)
     } else if name.eq_ignore_ascii_case("Right") {
-        Some(VirtualKeyCode::Right)
+        Some(VirtualKeyCode::ArrowRight)
     } else if name.eq_ignore_ascii_case("Up") {
-        Some(VirtualKeyCode::Up)
+        Some(VirtualKeyCode::ArrowUp)
     } else if name.eq_ignore_ascii_case("Down") {
-        Some(VirtualKeyCode::Down)
+        Some(VirtualKeyCode::ArrowDown)
     } else {
         None
     };
@@ -4183,11 +4183,11 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
 
     let lower_name = name.to_ascii_lowercase();
     let named_key = if name.eq_ignore_ascii_case("Return") {
-        Some(VirtualKeyCode::Return)
+        Some(VirtualKeyCode::Enter)
     } else if name.eq_ignore_ascii_case("Escape") {
         Some(VirtualKeyCode::Escape)
     } else if name.eq_ignore_ascii_case("Backspace") {
-        Some(VirtualKeyCode::Back)
+        Some(VirtualKeyCode::Backspace)
     } else if name.eq_ignore_ascii_case("Tab") {
         Some(VirtualKeyCode::Tab)
     } else if name.eq_ignore_ascii_case("Space") {
@@ -4209,19 +4209,19 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     } else if name.eq_ignore_ascii_case("Minus") {
         Some(VirtualKeyCode::Minus)
     } else if name.eq_ignore_ascii_case("Equals") {
-        Some(VirtualKeyCode::Equals)
+        Some(VirtualKeyCode::Equal)
     } else if name.eq_ignore_ascii_case("Left Bracket") {
-        Some(VirtualKeyCode::LBracket)
+        Some(VirtualKeyCode::BracketLeft)
     } else if name.eq_ignore_ascii_case("Right Bracket") {
-        Some(VirtualKeyCode::RBracket)
+        Some(VirtualKeyCode::BracketRight)
     } else if name.eq_ignore_ascii_case("Backslash") {
         Some(VirtualKeyCode::Backslash)
     } else if name.eq_ignore_ascii_case("Semicolon") {
         Some(VirtualKeyCode::Semicolon)
     } else if name.eq_ignore_ascii_case("Apostrophe") {
-        Some(VirtualKeyCode::Apostrophe)
+        Some(VirtualKeyCode::Quote)
     } else if name.eq_ignore_ascii_case("Grave") {
-        Some(VirtualKeyCode::Grave)
+        Some(VirtualKeyCode::Backquote)
     } else if name.eq_ignore_ascii_case("Comma") {
         Some(VirtualKeyCode::Comma)
     } else if name.eq_ignore_ascii_case("Period") {
@@ -4229,15 +4229,15 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     } else if name.eq_ignore_ascii_case("Slash") {
         Some(VirtualKeyCode::Slash)
     } else if name.eq_ignore_ascii_case("CapsLock") {
-        Some(VirtualKeyCode::Capital)
+        Some(VirtualKeyCode::CapsLock)
     } else if name.eq_ignore_ascii_case("PrintScreen") {
-        Some(VirtualKeyCode::Snapshot)
+        Some(VirtualKeyCode::PrintScreen)
     } else if name.eq_ignore_ascii_case("ScrollLock") {
-        Some(VirtualKeyCode::Scroll)
+        Some(VirtualKeyCode::ScrollLock)
     } else if name.eq_ignore_ascii_case("NumLockClear") {
-        Some(VirtualKeyCode::Numlock)
+        Some(VirtualKeyCode::NumLock)
     } else if name.eq_ignore_ascii_case("Application") {
-        Some(VirtualKeyCode::Apps)
+        Some(VirtualKeyCode::ContextMenu)
     } else if name.eq_ignore_ascii_case("Keypad /")
         || name.eq_ignore_ascii_case("Keypad Divide")
         || name.eq_ignore_ascii_case("KP_Divide")
@@ -4269,7 +4269,7 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
         || name.eq_ignore_ascii_case("Keypad Equals")
         || name.eq_ignore_ascii_case("KP_Equal")
     {
-        Some(VirtualKeyCode::NumpadEquals)
+        Some(VirtualKeyCode::NumpadEqual)
     } else if name.eq_ignore_ascii_case("Keypad ,")
         || name.eq_ignore_ascii_case("Keypad Comma")
         || name.eq_ignore_ascii_case("KP_Separator")
@@ -4428,7 +4428,7 @@ fn parse_runtime_key_chord(raw: &str) -> Result<Option<RuntimeKeyChord>> {
             let modifier = if section.eq_ignore_ascii_case("Alt") {
                 ModifiersState::ALT
             } else if section.eq_ignore_ascii_case("Ctrl") {
-                ModifiersState::CTRL
+                ModifiersState::CONTROL
             } else if section.eq_ignore_ascii_case("Shift") {
                 ModifiersState::SHIFT
             } else {
@@ -5028,9 +5028,9 @@ pub(crate) fn runtime_help_key_name(
     };
     let mut label = String::new();
     for (active, modifier) in [
-        (chord.modifiers.shift(), "Shift"),
-        (chord.modifiers.ctrl(), "Ctrl"),
-        (chord.modifiers.alt(), "Alt"),
+        (chord.modifiers.shift_key(), "Shift"),
+        (chord.modifiers.control_key(), "Ctrl"),
+        (chord.modifiers.alt_key(), "Alt"),
     ] {
         if active {
             label.push_str(modifier);
@@ -8929,11 +8929,11 @@ pub(crate) fn native_window_title(console: bool) -> &'static str {
     }
 }
 
-pub(crate) fn startup_window_builder(
+pub(crate) fn startup_window_attributes(
     display_options: &DisplayOptions,
     initial_size: PhysicalSize<u32>,
-) -> WindowBuilder {
-    let mut window_builder = WindowBuilder::new()
+) -> winit::window::WindowAttributes {
+    let mut attributes = Window::default_attributes()
         .with_title(native_window_title(false))
         // Both shells share this builder, matching C++ assigning one icon
         // resource to the fullscreen and console window classes alike
@@ -8943,29 +8943,31 @@ pub(crate) fn startup_window_builder(
         .with_window_icon(crate::window_icon::window_icon())
         .with_inner_size(initial_size);
     // `with_window_icon` fills `ICON_SMALL` only, so the taskbar button would
-    // otherwise stretch the title-bar image (winit-0.28.7/src/window.rs:987).
+    // otherwise stretch the title-bar image
+    // (winit-0.30.13/src/platform_impl/windows/window.rs:887-908).
     #[cfg(windows)]
     {
-        use winit::platform::windows::WindowBuilderExtWindows;
-        window_builder = window_builder.with_taskbar_icon(crate::window_icon::taskbar_icon());
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attributes = attributes.with_taskbar_icon(crate::window_icon::taskbar_icon());
     }
     if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
         if let Some((x, y)) = display_options.position {
-            window_builder = window_builder.with_position(PhysicalPosition::new(x, y));
+            attributes = attributes.with_position(PhysicalPosition::new(x, y));
         }
     }
     if matches!(display_options.mode, DisplayMode::Fullscreen)
         && !defer_startup_fullscreen_until_resumed(display_options.mode)
     {
-        window_builder = window_builder.with_fullscreen(Some(Fullscreen::Borderless(None)));
+        attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(None)));
     }
-    window_builder
+    attributes
 }
 
 pub(crate) fn defer_startup_fullscreen_until_resumed(mode: DisplayMode) -> bool {
-    // winit creates macOS windows before applicationDidFinishLaunching. AppKit
-    // silently ignores toggleFullScreen at that point, so request the same
-    // native desktop fullscreen as C++/SDL once the event loop is resumed.
+    // AppKit only honors the native fullscreen transition after the
+    // application has entered its resumed foreground state. Create the first
+    // macOS window without fullscreen attributes, then reconcile it from the
+    // resumed event to match C++/SDL's desktop fullscreen.
     cfg!(target_os = "macos") && matches!(mode, DisplayMode::Fullscreen)
 }
 
@@ -9010,7 +9012,7 @@ fn configured_startup_monitor_handle(window: &Window) -> Option<winit::monitor::
 }
 
 pub(crate) fn reconcile_deferred_fullscreen(window: &Window, mode: DisplayMode) -> bool {
-    // `startup_window_builder` runs before an event loop exists, so this is
+    // `startup_window_attributes` runs before a window exists, so this is
     // the first point at which the monitor list is knowable at all.
     let monitor = configured_startup_monitor_handle(window);
     if should_reconcile_deferred_fullscreen(mode, window.fullscreen().is_some()) {
