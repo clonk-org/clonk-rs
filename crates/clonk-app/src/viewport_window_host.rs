@@ -15,11 +15,27 @@
 use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter};
 use crate::GameApp;
 use pixels::Pixels;
+use std::sync::Arc;
+use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewportPresentRecovery {
+    RebuildFramebuffer,
+    Report,
+}
+
+fn viewport_present_recovery(error: &pixels::Error) -> ViewportPresentRecovery {
+    if matches!(error, pixels::Error::SurfaceLost) {
+        ViewportPresentRecovery::RebuildFramebuffer
+    } else {
+        ViewportPresentRecovery::Report
+    }
+}
+
 pub struct ViewportWindowHost {
-    pub window: Window,
-    pub pixels: Pixels,
+    pub window: Arc<Window>,
+    pub pixels: Pixels<'static>,
     /// The physical `C4Viewport` identity this window draws.
     pub identity: u64,
     /// `Application.GetScale()` — `Config.Graphics.Scale / 100`
@@ -55,7 +71,7 @@ pub(crate) fn logical_view_extent(width: u32, height: u32, scale: f32) -> (u32, 
 /// no owner/child relationship to build. The window is resizable and high-DPI
 /// aware there, so it is here.
 pub(crate) fn build_viewport_window(
-    target: &winit::event_loop::EventLoopWindowTarget<crate::NetworkEventWake>,
+    target: &ActiveEventLoop,
     title: &str,
     width: u32,
     height: u32,
@@ -63,19 +79,27 @@ pub(crate) fn build_viewport_window(
     scale: f32,
 ) -> anyhow::Result<ViewportWindowHost> {
     use anyhow::Context;
-    let window = winit::window::WindowBuilder::new()
+    let attributes = Window::default_attributes()
         .with_title(title)
         .with_inner_size(winit::dpi::PhysicalSize::new(width, height))
-        .with_resizable(true)
-        .build(target)
-        .context("failed to create a console viewport window")?;
+        .with_resizable(true);
+    let window = Arc::new(
+        target
+            .create_window(attributes)
+            .context("failed to create a console viewport window")?,
+    );
     let pixels = crate::main_audio::build_framebuffer(&window, window.inner_size())
         .context("failed to create a console viewport framebuffer")?;
     Ok(ViewportWindowHost::new(window, pixels, identity, scale))
 }
 
 impl ViewportWindowHost {
-    pub fn new(window: Window, mut pixels: Pixels, identity: u64, scale: f32) -> Self {
+    pub fn new(
+        window: Arc<Window>,
+        mut pixels: Pixels<'static>,
+        identity: u64,
+        scale: f32,
+    ) -> Self {
         let size = window.inner_size();
         let (buffer_width, buffer_height) = logical_view_extent(size.width, size.height, scale);
         let _ = pixels.resize_buffer(buffer_width, buffer_height);
@@ -89,6 +113,24 @@ impl ViewportWindowHost {
             last_pointer: (0, 0),
             visible: true,
         }
+    }
+
+    fn rebuild_framebuffer(&mut self) -> anyhow::Result<()> {
+        use anyhow::Context;
+
+        let prior_frame = self.pixels.frame().to_vec();
+        let size = self.window.inner_size();
+        let size = winit::dpi::PhysicalSize::new(size.width.max(1), size.height.max(1));
+        let mut replacement = crate::main_audio::build_framebuffer(&self.window, size)
+            .context("failed to rebuild a console viewport framebuffer")?;
+        replacement
+            .resize_buffer(self.buffer_width, self.buffer_height)
+            .context("failed to restore a console viewport framebuffer extent")?;
+        if replacement.frame().len() == prior_frame.len() {
+            replacement.frame_mut().copy_from_slice(&prior_frame);
+        }
+        self.pixels = replacement;
+        Ok(())
     }
 }
 
@@ -139,7 +181,19 @@ impl DeveloperWindowPresenter<GameApp> for ViewportWindowHost {
             // another viewport's view; the close pass destroys it next.
             None => self.pixels.frame_mut().fill(0),
         }
-        self.pixels.render().map_err(|error| error.to_string())
+        match crate::main_audio::present_pixels_frame(&self.pixels) {
+            Ok(_) => Ok(()),
+            Err(error)
+                if viewport_present_recovery(&error)
+                    == ViewportPresentRecovery::RebuildFramebuffer =>
+            {
+                self.rebuild_framebuffer()
+                    .map_err(|error| error.to_string())?;
+                self.window.request_redraw();
+                Ok(())
+            }
+            Err(error) => Err(error.to_string()),
+        }
     }
 }
 
@@ -168,5 +222,17 @@ mod tests {
         for scale in [0.0, -1.0, f32::NAN] {
             assert_eq!(logical_view_extent(320, 200, scale), (320, 200));
         }
+    }
+
+    #[test]
+    fn only_a_lost_viewport_surface_rebuilds_its_framebuffer() {
+        assert_eq!(
+            viewport_present_recovery(&pixels::Error::SurfaceLost),
+            ViewportPresentRecovery::RebuildFramebuffer
+        );
+        assert_eq!(
+            viewport_present_recovery(&pixels::Error::Validation),
+            ViewportPresentRecovery::Report
+        );
     }
 }

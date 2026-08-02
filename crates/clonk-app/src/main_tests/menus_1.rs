@@ -1523,11 +1523,11 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     app.finish_game_option_input(actions)
         .expect("open password modal");
 
-    app.handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::ALT)
+    app.handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::ALT)
         .expect("hold combined mnemonic modifiers");
-    app.handle_key(VirtualKeyCode::O, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyO, ElementState::Pressed)
         .expect("combined modifiers do not activate the exact Alt mnemonic");
-    app.handle_key(VirtualKeyCode::O, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyO, ElementState::Released)
         .expect("release combined mnemonic probe");
     assert!(app.game_option_input_dialog.is_some());
     app.handle_modifiers_changed(ModifiersState::SHIFT)
@@ -1541,9 +1541,9 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
         .expect("release modal modifiers");
 
     for key in [
-        VirtualKeyCode::Up,
-        VirtualKeyCode::Down,
-        VirtualKeyCode::Left,
+        VirtualKeyCode::ArrowUp,
+        VirtualKeyCode::ArrowDown,
+        VirtualKeyCode::ArrowLeft,
     ] {
         app.handle_key(key, ElementState::Pressed)
             .expect("modal key down");
@@ -1555,14 +1555,14 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     assert_eq!(app.menu_state.search_text(), "underlying search");
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open modal edit context");
     assert!(app.context_menu.is_some());
     assert!(
         GameApp::startup_base_context_menu(app.context_menu.as_ref(), true,).is_none(),
         "modal owns the one context-menu render pass"
     );
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("consume Apps release inside modal");
     app.close_context_menu_silently();
 
@@ -1669,7 +1669,7 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
         .expect("focus password OK button");
     app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
         .expect("release password focus traversal");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("hold password OK button");
     assert_eq!(
         app.game_option_input_pointer_capture,
@@ -1684,7 +1684,7 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
     assert!(app.game_option_input_pointer_position.is_none());
     assert!(app.game_option_input_last_click.is_none());
     assert!(!app.game_option_pointer_capture);
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("release cancelled modal OK button");
     app.handle_mouse_button(ElementState::Released)
         .expect("release cancelled modal drag");
@@ -2212,14 +2212,14 @@ fn takeover_submenu_fills_live_at_open() {
 
     // Closing the child and re-selecting the parent re-runs the fill
     // callback, so a candidate that issued its join meanwhile drops out.
-    app.handle_context_menu_key(VirtualKeyCode::Left, ElementState::Pressed)
+    app.handle_context_menu_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
         .expect("close the takeover child panel");
     assert_eq!(app.context_menu.as_ref().unwrap().layout().panels.len(), 1);
     let mut issued_first = first.clone();
     issued_first.flags |= clonk_engine::PLAYER_INFO_FLAG_JOIN_ISSUED;
     app.control_player_infos
         .replace_snapshot(101, [local_packet(vec![issued_first, second.clone()])]);
-    app.handle_context_menu_key(VirtualKeyCode::Right, ElementState::Pressed)
+    app.handle_context_menu_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
         .expect("reopen the takeover child panel");
     let layout = app.context_menu.as_ref().unwrap().layout();
     assert_eq!(layout.panels.len(), 2);
@@ -3007,12 +3007,12 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
 
     for modifiers in [
         ModifiersState::ALT,
-        ModifiersState::ALT | ModifiersState::LOGO,
+        ModifiersState::ALT | ModifiersState::SUPER,
     ] {
         let mut runtime_app = new_classic_running_sandbox_app();
         runtime_app
             .bindings
-            .rebind(ControlBindingId::Left, VirtualKeyCode::C);
+            .rebind(ControlBindingId::Left, VirtualKeyCode::KeyC);
         runtime_app
             .handle_modifiers_changed(modifiers)
             .expect("set the exact legacy IRC chord");
@@ -3022,7 +3022,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             start_location: (40, 50),
         });
         runtime_app
-            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
             .expect("runtime Alt+C opens the standalone IRC dialog");
         assert!(runtime_app.external_irc_dialog_visible);
         assert!(
@@ -3044,7 +3044,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             .control
             .pressed_coms = 1 << clonk_engine::COM_LEFT;
         runtime_app
-            .handle_key(VirtualKeyCode::C, ElementState::Released)
+            .handle_key(VirtualKeyCode::KeyC, ElementState::Released)
             .expect("runtime IRC chord release must be consumed");
         assert_ne!(
             runtime_app
@@ -3058,7 +3058,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             "runtime IRC release must not leak to modifier-blind player control"
         );
         runtime_app
-            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
             .expect("a second runtime Alt+C closes only the IRC UI");
         assert!(!runtime_app.external_irc_dialog_visible);
     }
@@ -3066,18 +3066,18 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
     let mut ignored_runtime = new_running_sandbox_app();
     for modifiers in [
         ModifiersState::empty(),
-        ModifiersState::CTRL,
+        ModifiersState::CONTROL,
         ModifiersState::SHIFT,
-        ModifiersState::LOGO,
-        ModifiersState::ALT | ModifiersState::CTRL,
+        ModifiersState::SUPER,
+        ModifiersState::ALT | ModifiersState::CONTROL,
         ModifiersState::ALT | ModifiersState::SHIFT,
-        ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
     ] {
         ignored_runtime
             .handle_modifiers_changed(modifiers)
             .expect("set non-IRC modifiers");
         assert!(!ignored_runtime
-            .handle_runtime_irc_toggle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .handle_runtime_irc_toggle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
             .expect("non-IRC chord is unhandled"));
         assert!(!ignored_runtime.external_irc_dialog_visible);
     }
@@ -3086,21 +3086,21 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
 #[test]
 fn l046_dialog_hotkeys_use_the_first_sdl_key_name_character() {
     for (key, expected) in [
-        (VirtualKeyCode::A, Some('A')),
-        (VirtualKeyCode::Key7, Some('7')),
+        (VirtualKeyCode::KeyA, Some('A')),
+        (VirtualKeyCode::Digit7, Some('7')),
         (VirtualKeyCode::Space, Some('S')),
-        (VirtualKeyCode::Up, Some('U')),
-        (VirtualKeyCode::Left, Some('L')),
-        (VirtualKeyCode::Return, Some('R')),
+        (VirtualKeyCode::ArrowUp, Some('U')),
+        (VirtualKeyCode::ArrowLeft, Some('L')),
+        (VirtualKeyCode::Enter, Some('R')),
         (VirtualKeyCode::Escape, Some('E')),
         (VirtualKeyCode::PageUp, Some('P')),
-        (VirtualKeyCode::Snapshot, Some('P')),
+        (VirtualKeyCode::PrintScreen, Some('P')),
         (VirtualKeyCode::Numpad1, Some('K')),
-        (VirtualKeyCode::Apps, Some('A')),
-        (VirtualKeyCode::WebBack, Some('A')),
+        (VirtualKeyCode::ContextMenu, Some('A')),
+        (VirtualKeyCode::BrowserBack, Some('A')),
         (VirtualKeyCode::Minus, None),
-        (VirtualKeyCode::Apostrophe, None),
-        (VirtualKeyCode::OEM102, None),
+        (VirtualKeyCode::Quote, None),
+        (VirtualKeyCode::IntlBackslash, None),
     ] {
         assert_eq!(startup_dialog_hotkey(key), expected, "{key:?}");
     }
@@ -3124,7 +3124,7 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
     // Alt+I toggles Internet; Alt+Shift+R toggles Record.
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::I, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyI, ElementState::Pressed)
         .expect("dispatch the Internet mnemonic");
     assert_eq!(
         app.startup_network_dialog
@@ -3135,7 +3135,7 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
     );
     app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
         .expect("hold Alt+Shift");
-    app.handle_key(VirtualKeyCode::I, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyI, ElementState::Pressed)
         .expect("the shifted Alt form dispatches the same mnemonic");
     assert_eq!(
         app.startup_network_dialog
@@ -3149,19 +3149,19 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
     // their mnemonics are inert while New game still activates.
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("dispatch the Chat mnemonic");
     assert!(app
         .startup_network_dialog
         .as_ref()
         .expect("network dialog")
         .is_chat_mode());
-    app.handle_key(VirtualKeyCode::D, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyD, ElementState::Pressed)
         .expect("a hidden Reload button does not activate");
-    app.handle_key(VirtualKeyCode::J, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyJ, ElementState::Pressed)
         .expect("a hidden Join button does not activate");
     assert_eq!(app.startup_view, StartupView::NetworkGame);
-    app.handle_key(VirtualKeyCode::G, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
         .expect("dispatch the Games mnemonic");
     assert!(!app
         .startup_network_dialog
@@ -3172,7 +3172,7 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
     // A covering modal owns the keyboard, so the dialog beneath is inert.
     app.handle_game_over()
         .expect("forge a covering evaluation dialog");
-    app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
         .expect("the exclusive owner swallows the mnemonic");
     assert_eq!(app.startup_view, StartupView::NetworkGame);
 }
@@ -3181,11 +3181,11 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
 fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     let mut app = new_real_classic_menu_app(640, 480);
 
-    app.handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::ALT)
+    app.handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::ALT)
         .expect("hold unsupported Ctrl+Alt mask");
     for key in [
-        VirtualKeyCode::Down,
-        VirtualKeyCode::Return,
+        VirtualKeyCode::ArrowDown,
+        VirtualKeyCode::Enter,
         VirtualKeyCode::Space,
         VirtualKeyCode::Escape,
     ] {
@@ -3194,14 +3194,14 @@ fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
         app.handle_key(key, ElementState::Released)
             .expect("Ctrl+Alt GUI key up is inert");
     }
-    app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("Ctrl+Alt does not dispatch a mnemonic");
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert!(!app.exit_requested);
 
     app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
         .expect("hold Alt+Shift");
-    app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("dispatch shifted About mnemonic");
     assert_eq!(app.startup_view, StartupView::About);
     assert!(app.ui_sound_log.is_empty());
@@ -3210,8 +3210,8 @@ fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt");
     for key in [
-        VirtualKeyCode::Down,
-        VirtualKeyCode::Return,
+        VirtualKeyCode::ArrowDown,
+        VirtualKeyCode::Enter,
         VirtualKeyCode::Escape,
     ] {
         app.handle_key(key, ElementState::Pressed)
@@ -3224,18 +3224,18 @@ fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
 
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("release Alt");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("arm retained Start focus");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("activate retained Start focus");
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert!(app.ui_sound_log.iter().any(|sound| sound == "Click"));
     app.ui_sound_log.clear();
     app.show_main_menu();
 
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("focus Network");
-    app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
         .expect("release focus key");
     app.ui_sound_log.clear();
     app.handle_modifiers_changed(ModifiersState::ALT)
@@ -3252,7 +3252,7 @@ fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.show_main_menu();
     app.open_about_dialog();
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
         .expect("SDL Left mnemonic opens Licenses");
     assert_eq!(
         app.startup_about_dialog
@@ -3262,7 +3262,7 @@ fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
         clonk_frontend::startup_about_dlg::AboutPage::Licenses
     );
     assert!(app.ui_sound_log.is_empty());
-    app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
         .expect("SDL Up mnemonic requests updates");
     assert_eq!(app.message_dialogs.len(), 1);
     assert_eq!(app.message_dialogs[0].state.caption(), "Check for Updates");
@@ -3273,7 +3273,7 @@ fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.show_main_menu();
     app.handle_game_over()
         .expect("forge stale menu evaluation state");
-    app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("exclusive game-over owner swallows unmatched startup mnemonics");
     assert!(app.game_over_dialog.is_some());
     assert_eq!(app.startup_view, StartupView::MainMenu);
@@ -3338,7 +3338,7 @@ fn l047_player_typeahead_stays_behind_rename_and_modal_dialogs() {
     .expect("open modal dialog");
     app.handle_text_input('T')
         .expect("text is swallowed by modal");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("Apps is swallowed by modal");
     assert_eq!(
         app.startup_player_dialog
@@ -3601,7 +3601,7 @@ fn l071_crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         app.handle_text_input(character)
             .expect("type colliding name");
     }
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("submit colliding name");
     let rename = app
         .startup_crew_rename
@@ -3621,7 +3621,7 @@ fn l071_crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     for character in "Renamed".chars() {
         app.handle_text_input(character).expect("type unique name");
     }
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("commit inline crew rename");
     assert!(app.startup_crew_rename.is_none());
     assert!(!player_path.join("Alpha.c4i").exists());
@@ -4325,7 +4325,7 @@ fn global_gui_guard_is_first_at_every_external_ui_ingress() {
     };
     expect_engine(app.handle_modifiers_changed(ModifiersState::SHIFT));
     expect_engine(app.handle_text_input('x'));
-    expect_engine(app.handle_key(VirtualKeyCode::A, ElementState::Pressed));
+    expect_engine(app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed));
     expect_engine(app.handle_key(VirtualKeyCode::F11, ElementState::Pressed));
     expect_engine(app.handle_focus_lost());
     expect_engine(app.process_gamepad_event_batch([GamepadEvent::Clear {
@@ -4516,13 +4516,13 @@ fn options_sound_sheet_fails_typed_before_pixels_without_audio_context() {
     app.render(&mut program_frame)
         .expect("Program remains available without audio");
 
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("Graphics remains available without audio");
-    app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
         .expect("release Graphics navigation");
 
     let sound_error = app
-        .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect_err("Sound requires the live audio context");
     assert_engine_parity_boundary(
         sound_error,
@@ -4710,9 +4710,9 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     click_main_button(&mut app, 3);
     assert_eq!(app.startup_view, StartupView::Options);
     settle_startup_fade(&mut app);
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("select Graphics sheet");
-    app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
         .expect("release Graphics navigation");
     assert_eq!(
         app.startup_options_dialog
@@ -4721,9 +4721,9 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
             .active_sheet(),
         clonk_frontend::startup_options_dlg::OptionsSheet::Graphics
     );
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("advance to the implemented Sound sheet");
-    app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
         .expect("release Sound navigation");
     assert_eq!(
         app.startup_options_dialog
@@ -4733,9 +4733,9 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
         clonk_frontend::startup_options_dlg::OptionsSheet::Sound
     );
 
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("advance to the Keyboard sheet");
-    app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
         .expect("release Keyboard navigation");
     assert_eq!(
         app.startup_options_dialog
@@ -4744,10 +4744,10 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
             .active_sheet(),
         clonk_frontend::startup_options_dlg::OptionsSheet::Keyboard
     );
-    app.handle_key(VirtualKeyCode::R, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
         .expect("generic keyboard control pane is disconnected");
     assert!(app.status_text.is_empty());
-    app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Backspace, ElementState::Pressed)
         .expect("Back leaves options");
     assert_eq!(app.startup_view, StartupView::MainMenu);
     settle_startup_fade(&mut app);
@@ -5437,10 +5437,10 @@ fn message_dialog_focus_loss_cancels_held_input_and_stale_release_guards() {
         MessageDialogContinuation::None,
     )
     .expect("push modal");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("press modal button");
     app.handle_focus_lost().expect("lose focus");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("release after refocus");
     assert_eq!(
         app.message_dialogs.len(),
@@ -5636,7 +5636,7 @@ fn menu_input_invalidates_cached_frame() {
         .as_ref()
         .expect("cache populated")
         .version;
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("key input");
     assert_ne!(
         app.menu_render_version, cached_version,

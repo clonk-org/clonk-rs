@@ -5,9 +5,8 @@
 //! directly — has no bundle to read it from, and the window icon cannot stand
 //! in: winit accepts one and discards it on macOS. Its platform impl is an
 //! empty body explaining the refusal
-//! (`winit-0.28.7/src/platform_impl/macos/window.rs:1152-1162`), and the macOS
-//! window builder never reads the attribute at all, so
-//! `WindowBuilder::with_window_icon` is silently dropped. AppKit's
+//! (`winit-0.30.13/src/platform_impl/macos/window_delegate.rs:1541-1549`), so
+//! `WindowAttributes::with_window_icon` is silently dropped. AppKit's
 //! `-[NSApplication setApplicationIconImage:]` is the only route.
 //!
 //! This has no C++ counterpart to match: `C4FullScreen.cpp:196-211` sets
@@ -19,15 +18,14 @@
 /// The image only sticks once the process *has* a Dock tile, and it does not
 /// have one until AppKit raises it to a foreground application. winit defers
 /// that to `applicationDidFinishLaunching`
-/// (`winit-0.28.7/src/platform_impl/macos/app_state.rs:275-287`), which runs
-/// inside `[NSApp run]` — after the window is built and after everything else
-/// startup does. An image handed over before then has no tile to land on, and
-/// the tile the Dock subsequently creates is drawn from the bundle; an
-/// unbundled binary has none, so the generic executable icon stands. `Resumed`
-/// is emitted immediately after that transition (`app_state.rs:302`) and is the
-/// first moment the icon survives.
-pub(crate) fn should_attach_dock_tile<T>(
-    event: &winit::event::Event<'_, T>,
+/// (`winit-0.30.13/src/platform_impl/macos/app_state.rs:107-125`), which runs
+/// inside `[NSApp run]`. An image handed over before then has no tile to land
+/// on, and the tile the Dock subsequently creates is drawn from the bundle;
+/// an unbundled binary has none, so the generic executable icon stands.
+/// `Resumed` is emitted immediately after that transition
+/// (`app_state.rs:327-333`) and is the first moment the icon survives.
+pub(crate) fn should_attach_dock_tile<T: 'static>(
+    event: &winit::event::Event<T>,
     attached: bool,
 ) -> bool {
     !attached && matches!(event, winit::event::Event::Resumed)
@@ -44,7 +42,7 @@ pub(crate) fn set_dock_icon() {
 }
 
 /// Every other platform draws the icon the window itself carries, which
-/// `startup_window_builder` already attaches.
+/// `startup_window_attributes` already attaches.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn set_dock_icon() {}
 
@@ -58,7 +56,7 @@ mod tests {
 
     // A tile attached before `[NSApp run]` is discarded by the foreground
     // transition that creates the real one
-    // (winit-0.28.7/src/platform_impl/macos/app_state.rs:275-287), leaving an
+    // (winit-0.30.13/src/platform_impl/macos/app_state.rs:107-125), leaving an
     // unbundled run with the generic executable icon.
     #[test]
     fn the_dock_tile_is_attached_on_the_first_resume_only() {
@@ -71,7 +69,7 @@ mod tests {
             "re-cutting a 512px tile on every resume is pure waste"
         );
         assert!(
-            !should_attach_dock_tile(&Event::<()>::MainEventsCleared, false),
+            !should_attach_dock_tile(&Event::<()>::AboutToWait, false),
             "the tile is not re-attached on every pass through the loop"
         );
     }

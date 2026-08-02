@@ -1,6 +1,6 @@
 # Rendering parity
 
-> Current architecture and verification snapshot, 2026-07-21. The C++ oracle
+> Current architecture and verification snapshot, 2026-08-02. The C++ oracle
 > is `src/StdDDraw2.*`, `src/StdGL.cpp`, `src/C4Surface.cpp`, and the draw sites
 > in `C4GraphicsSystem`, `C4Viewport`, `C4Landscape`, and `C4GUI`.
 
@@ -135,17 +135,31 @@ bytes, bounded to 16,384 entries/128 MiB, so repeatedly derived carets, game-ove
 facets, refresh phases, inventory chrome, glyphs, and inline images retain one
 GPU identity instead of forcing uploads every frame.
 
-`pixels` already reconfigures the surface and retries acquisition once. A
-`Lost` or `Outdated` error returned after that retry causes `clonk-app` to rebuild
-`Pixels`, then call `RetainedGpuRenderer::recreate` with the replacement device,
-queue, and surface format. The renderer also records uncaptured wgpu validation
-and allocation failures. Pinned wgpu 0.16 reports some native device-loss paths
-by panicking in queue submission or polling; the presentation/readback boundary
-catches only those recognized diagnostics and converts them to the same typed
-recreation request, while unrelated panics resume unwinding. The next
-self-contained scene repopulates every device resource. `Timeout` schedules
-another presentation; `OutOfMemory` and unrelated validation/parity errors
-remain fatal. There is no CPU-frame recovery fallback.
+The locally patched `pixels` 0.17.2 owns bounded transient surface recovery
+(`third_party/pixels/src/lib.rs`). `Lost` returns a typed `SurfaceLost` error so
+each window owner can reconstruct `Pixels`; `Outdated` reconfigures and retries
+once before skipping the frame; and `Suboptimal` reconfigures once before using
+the still-valid acquired frame if it remains suboptimal. `Timeout` and
+`Occluded` also return success without invoking the render callback. This bounds
+the upstream retry loop tracked by pixels issue #460. `clonk-app` records
+whether the callback ran, reports a skipped presentation when it did not, and
+leaves screenshots and save-thumbnail requests queued for the next drawable
+frame.
+
+wgpu 29 reports device loss through the device-loss callback. The retained
+renderer converts that notification into a typed recreation request. The app
+checks renderer health before presentation, after a successful return, and
+when an error or panic escapes (`present_retained_gpu_frame`,
+`crates/clonk-app/src/main_parts/audio.rs`). Device loss recorded at any of
+those checkpoints takes precedence over a generic `pixels::Error::Validation`
+or panic; `clonk-app` rebuilds `Pixels`, then calls
+`RetainedGpuRenderer::recreate` with the replacement device, queue, and surface
+format. A narrowly recognized device-loss panic from submission or readback
+remains a compatibility fallback for backends that fail before dispatching the
+callback, while unrelated panics with healthy renderer state resume unwinding.
+The next self-contained scene repopulates every device resource. Uncaptured
+allocation, internal, and unrelated validation/parity errors remain fatal.
+Surface and device errors never silently select CPU-frame recovery.
 
 ## Executable evidence
 
@@ -192,7 +206,7 @@ Renderer and scene tests pin the backend boundary:
   text capture.
 - App tests `m06_l033_all_graphical_modes_produce_retained_scenes`,
   `m06_l033_scale_native_text_keeps_logical_physical_painter_order`, and
-  `m06_l033_surface_error_policy_rebuilds_or_retries_only_recoverable_errors`
+  `m06_l033_pixels_handles_surface_recovery_and_app_handles_renderer_failures`
   cover mode integration and recovery policy. The scale-one and every-scale
   startup-font tests ensure reachable retained text cannot fall back to a
   point-rasterized or mismatched atlas.
@@ -268,9 +282,12 @@ the re-pinned Dragon Rock hashes embed them end to end).
 ## Remaining limits and review rules
 
 - A true operating-system/device-loss injection test is not portable. Direct
-  replacement-device recreation, uncaptured-error classification, recognized
-  native device-loss conversion, and the app's surface-error policy test cover
-  the deterministic portions; live recovery still needs platform smoke tests.
+  replacement-device recreation, wgpu 29 callback and uncaptured-error
+  classification, recognized compatibility-panic conversion, and the app's
+  presentation-recovery policy test cover the deterministic portions; the
+  vendored Pixels tests pin bounded `Lost`, `Outdated`, and `Suboptimal`
+  acquisition behavior. Live device-loss recovery still needs platform smoke
+  tests.
 - New draw code must not read the destination CPU pixels during active capture.
   It must emit a blend command, use an isolated CPU scratch resource before
   capture, or return a typed parity error. Tests that only inspect a completed

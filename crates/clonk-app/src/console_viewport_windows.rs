@@ -68,7 +68,7 @@ pub(crate) fn reconcile_console_viewport_windows(
     windows: &mut crate::developer_windows::DeveloperWindows<crate::developer_host::DeveloperHost>,
     next_key: &mut u64,
     scale: f32,
-    target: &winit::event_loop::EventLoopWindowTarget<crate::NetworkEventWake>,
+    target: &winit::event_loop::ActiveEventLoop,
 ) {
     use crate::developer_host::DeveloperHost;
     use crate::developer_windows::{HostPurpose, WindowId};
@@ -156,11 +156,10 @@ pub(crate) fn reconcile_console_viewport_windows(
 
 /// Which OS window an event names, if any.
 pub(crate) fn event_window_id(
-    event: &winit::event::Event<'_, crate::NetworkEventWake>,
+    event: &winit::event::Event<crate::NetworkEventWake>,
 ) -> Option<winit::window::WindowId> {
     match event {
         winit::event::Event::WindowEvent { window_id, .. } => Some(*window_id),
-        winit::event::Event::RedrawRequested(id) => Some(*id),
         _ => None,
     }
 }
@@ -173,7 +172,7 @@ pub(crate) fn event_window_id(
 /// it — that is what the player-keyed overload (`:314-331`) would do.
 pub(crate) fn handle_console_viewport_event(
     key: crate::developer_windows::WindowId,
-    event: &winit::event::Event<'_, crate::NetworkEventWake>,
+    event: &winit::event::Event<crate::NetworkEventWake>,
     app: &mut crate::GameApp,
     windows: &mut crate::developer_windows::DeveloperWindows<crate::developer_host::DeveloperHost>,
 ) {
@@ -198,15 +197,12 @@ pub(crate) fn handle_console_viewport_event(
             windows.resize(key, size.width.max(1), size.height.max(1));
             windows.request_redraw(key);
         }
+        // `ScaleFactorChanged` no longer carries the proposed size. Winit
+        // follows it with `Resized`, which is the authoritative surface size.
         Event::WindowEvent {
-            event: WindowEvent::ScaleFactorChanged { new_inner_size, .. },
+            event: WindowEvent::ScaleFactorChanged { .. },
             ..
         } => {
-            windows.resize(
-                key,
-                new_inner_size.width.max(1),
-                new_inner_size.height.max(1),
-            );
             windows.request_redraw(key);
         }
         // `C4Viewport`'s pointer handlers convert the coordinates carried by
@@ -223,7 +219,13 @@ pub(crate) fn handle_console_viewport_event(
             viewport.last_pointer = (position.x as i32, position.y as i32);
             let (identity, local) = (viewport.identity, viewport.last_pointer);
             let modifiers = app.keyboard_modifiers;
-            app.console_viewport_motion(identity, local, 1.0, modifiers.ctrl(), modifiers.shift());
+            app.console_viewport_motion(
+                identity,
+                local,
+                1.0,
+                modifiers.control_key(),
+                modifiers.shift_key(),
+            );
         }
         Event::WindowEvent {
             event:
@@ -252,9 +254,18 @@ pub(crate) fn handle_console_viewport_event(
             // `LeftButtonDown(fControl)` and `Move`'s Shift arm read the
             // live modifier state (`C4EditCursor.cpp:143,206`).
             let modifiers = app.keyboard_modifiers;
-            app.console_viewport_press(identity, local, 1.0, modifiers.ctrl(), modifiers.shift());
+            app.console_viewport_press(
+                identity,
+                local,
+                1.0,
+                modifiers.control_key(),
+                modifiers.shift_key(),
+            );
         }
-        Event::RedrawRequested(_) => {
+        Event::WindowEvent {
+            event: WindowEvent::RedrawRequested,
+            ..
+        } => {
             if let Some(host) = windows.host_mut(key) {
                 if let Err(error) = host.present(app) {
                     tracing::error!(%error, "console viewport window present failed");

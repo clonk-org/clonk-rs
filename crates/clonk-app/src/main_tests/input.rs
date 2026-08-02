@@ -1419,7 +1419,7 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
     assert_eq!((open.x, open.y), (open_world.x, open_world.y));
     assert_eq!(open.add_mode, 1);
 
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("press Control for VehiclePut");
     physical_left_drag(&mut app, vehicle_point, container_point);
     app.handle_modifiers_changed(ModifiersState::empty())
@@ -2105,7 +2105,7 @@ fn l054_ctrl_region_drags_show_put_and_vehicle_put_captions() {
         .expect("move onto dragged inventory object");
         app.handle_ingame_mouse_button(ElementState::Pressed)
             .expect("press inventory object");
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("hold Control for put targeting");
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(container_point.x),
@@ -2193,7 +2193,7 @@ fn l054_group_put_caption_uses_remaining_live_selection() {
     .expect("hover grouped inventory region");
     app.handle_right_mouse_button(ElementState::Pressed)
         .expect("start all-of-ID drag");
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("hold Control for put targeting");
     app.handle_cursor_moved(PhysicalPosition::new(
         f64::from(target_point.x),
@@ -2287,7 +2287,7 @@ fn l054_world_origin_put_caption_uses_dragged_object_name() {
     .expect("hover world parcel");
     app.handle_ingame_mouse_button(ElementState::Pressed)
         .expect("press world parcel");
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("hold Control for put targeting");
     app.handle_cursor_moved(PhysicalPosition::new(
         f64::from(target_point.x),
@@ -2990,11 +2990,11 @@ fn autostop_ignores_repeated_physical_keydown_until_release() {
 
     let mut keyboard = AppVirtualKeyboard::new(&mut app);
     keyboard
-        .press(VirtualKeyCode::X)
+        .press(VirtualKeyCode::KeyX)
         .expect("press physical Down");
     let first_press = keyboard.player_control();
     keyboard
-        .repeat(VirtualKeyCode::X)
+        .repeat(VirtualKeyCode::KeyX)
         .expect("receive repeated physical Down");
     let repeated_press = keyboard.player_control();
 
@@ -3007,7 +3007,7 @@ fn autostop_ignores_repeated_physical_keydown_until_release() {
         "OS key-repeat must not arm the drop/double-down window"
     );
     keyboard
-        .release(VirtualKeyCode::X)
+        .release(VirtualKeyCode::KeyX)
         .expect("release physical Down");
     assert_eq!(keyboard.player_control().pressed_coms, 0);
 }
@@ -4387,7 +4387,7 @@ fn l094_portrait_selector_honors_exact_keyboard_modifiers() {
     // `C4FileSelDlg.cpp:118-123`).
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Alt+Enter without a selection is inert");
     assert!(app
         .startup_player_properties_dialog
@@ -4413,11 +4413,11 @@ fn l094_portrait_selector_honors_exact_keyboard_modifiers() {
         .expect("release modifiers");
     app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
         .expect("bare Tab traverses forward");
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("select first portrait");
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("hold Control");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Ctrl+Enter is consumed");
 
     let selector = app
@@ -4452,7 +4452,7 @@ fn l094_portrait_selector_alt_o_activates_the_native_ok_hotkey() {
 
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::O, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyO, ElementState::Pressed)
         .expect("Alt+O invokes OK");
 
     assert_eq!(app.message_dialogs.len(), 1);
@@ -4573,7 +4573,7 @@ fn l094_portrait_selector_f5_requires_dialog_keyboard_activation() {
     controller.handle_key_down(KeyCode::Down);
     fs::write(current.path().join("New.bmp"), b"new").expect("add current portrait");
 
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("hold Control");
     app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
         .expect("modified F5 remains unbound");
@@ -4639,7 +4639,7 @@ fn l094_portrait_selector_errors_use_screen_owned_modals() {
         );
 
     missing
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("missing selection opens an error");
     assert!(missing
         .startup_player_properties_dialog
@@ -4675,7 +4675,7 @@ fn l094_portrait_selector_errors_use_screen_owned_modals() {
     controller.handle_key_down(KeyCode::Down);
 
     broken
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("corrupt selection closes then reports an error");
     assert!(broken
         .startup_player_properties_dialog
@@ -4798,7 +4798,7 @@ fn keyboard_subscreen_back_reconstructs_main() {
     );
 
     assert!(app.status_text.is_empty());
-    app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Backspace, ElementState::Pressed)
         .expect("classic Options Back remains routed to OptionsDlgState");
     assert_eq!(app.startup_view, StartupView::MainMenu);
 }
@@ -6472,8 +6472,8 @@ fn l051_assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     assert_eq!(
         parsed.net_observer_next_player,
         vec![
-            RuntimeKeyChord::keyboard(VirtualKeyCode::N, ModifiersState::ALT),
-            RuntimeKeyChord::keyboard(VirtualKeyCode::Right, ModifiersState::empty()),
+            RuntimeKeyChord::keyboard(VirtualKeyCode::KeyN, ModifiersState::ALT),
+            RuntimeKeyChord::keyboard(VirtualKeyCode::ArrowRight, ModifiersState::empty()),
             RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),
             RuntimeKeyChord::keyboard(VirtualKeyCode::F6, ModifiersState::empty()),
             RuntimeKeyChord::keyboard(VirtualKeyCode::F7, ModifiersState::empty()),
@@ -6500,7 +6500,7 @@ fn l051_assigned_observer_key_uses_production_dispatch_and_physical_gate() {
         .set(Ok(parsed.clone()))
         .expect("install observer key registry");
 
-    app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
         .expect("a canonical directional binding loads without taking scroll priority");
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
 
@@ -6511,7 +6511,7 @@ fn l051_assigned_observer_key_uses_production_dispatch_and_physical_gate() {
         assert_eq!(app.film_view_player, Some(first));
 
         assert!(app.set_physical_film_view(OWNER_NONE));
-        app.keyboard_modifiers = ModifiersState::CTRL;
+        app.keyboard_modifiers = ModifiersState::CONTROL;
         app.handle_key(key, ElementState::Pressed)
             .expect("the earlier generic debug chord retains priority");
         assert_eq!(app.film_view_player, Some(OWNER_NONE));
@@ -6520,20 +6520,20 @@ fn l051_assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     assert_eq!(runtime_flash_text(&app), Some("Actions"));
     assert!(app.set_physical_film_view(OWNER_NONE));
 
-    app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
         .expect("a modifier mismatch is inert");
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
     app.keyboard_modifiers = ModifiersState::ALT;
-    app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
         .expect("assigned observer key dispatches");
     assert_eq!(app.film_view_player, Some(first));
-    app.handle_key(VirtualKeyCode::N, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyN, ElementState::Released)
         .expect("observer release has no callback or player-control leak");
     assert_eq!(app.film_view_player, Some(first));
-    app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
         .expect("assigned observer key repeats");
     assert_eq!(app.film_view_player, Some(second));
-    app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
         .expect("observer sequence reaches NO_OWNER after the last player");
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
 
@@ -6548,19 +6548,19 @@ fn l051_assigned_observer_key_uses_production_dispatch_and_physical_gate() {
             &IngameMenuLabels::default(),
         ),
     );
-    app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
         .expect("ownerless fullscreen menu replaces FreeView scope");
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
     app.ingame_menu.clear();
 
     app.start_running_chat(RunningChatMode::All);
-    app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
         .expect("exclusive chat replaces FreeView scope");
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
     app.close_running_chat()
         .expect("close exclusive chat through its production lifecycle");
 
-    app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
         .expect("observer cycling resumes after exclusive UI closes");
     assert_eq!(app.film_view_player, Some(first));
     assert!(app.physical_viewports[0].is_no_owner_viewport);
@@ -6580,7 +6580,7 @@ fn l051_assigned_observer_key_uses_production_dispatch_and_physical_gate() {
         .expect("install observer key registry");
     owned.keyboard_modifiers = ModifiersState::ALT;
     owned
-        .handle_key(VirtualKeyCode::N, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
         .expect("owned viewport ignores a FreeView-only binding");
     assert_eq!(owned.film_view_player, None);
 }
@@ -6712,7 +6712,7 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
         )],
     );
 
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set Control modifier");
     app.on_ingame_mouse_double()
         .expect("Control landscape double-click queues DigMaterial");
@@ -7052,9 +7052,9 @@ fn l128_running_f4_only_stronger_escape_owns_keyboard_input() {
     app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
         .expect("open runtime client list");
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Return stays outside the nonexclusive F4 GUI scope");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("Return release stays outside the nonexclusive F4 GUI scope");
     assert!(app.runtime_client_list.is_some());
     assert!(
@@ -7140,33 +7140,33 @@ fn keyconfig_accepts_extended_sdl_scancode_names() {
     // Media and volume keys.
     assert_eq!(
         physical("MusicToggle"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::Mute)
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::AudioVolumeMute)
     );
     assert_eq!(
         physical("SoundToggle"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::VolumeDown)
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::AudioVolumeDown)
     );
     assert_eq!(
         physical("MsgBoardScrollUp"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::NextTrack)
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::MediaTrackNext)
     );
     // The extra ISO key next to left Shift, which winit reports as OEM102.
     assert_eq!(
         physical("ToggleChat"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::OEM102)
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::IntlBackslash)
     );
     // Application-control, modifier, international and editing keys.
     assert_eq!(
         physical("Screenshot"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::WebHome)
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::BrowserHome)
     );
     assert_eq!(
         physical("ScreenshotEx"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::LWin)
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::SuperLeft)
     );
     assert_eq!(
         physical("ScoreboardToggle"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::Yen)
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::IntlYen)
     );
     assert_eq!(
         physical("ToggleShowHelp"),
@@ -7174,7 +7174,7 @@ fn keyconfig_accepts_extended_sdl_scancode_names() {
     );
     assert_eq!(
         physical("NetClientListDlgToggle"),
-        RuntimePhysicalKey::Keyboard(VirtualKeyCode::Calculator)
+        RuntimePhysicalKey::Keyboard(VirtualKeyCode::LaunchApp2)
     );
     // A name SDL does not know keeps the disabled outcome.
     assert_eq!(physical("MsgBoardScrollDown"), RuntimePhysicalKey::Disabled);
@@ -7189,10 +7189,151 @@ fn keyconfig_accepts_extended_sdl_scancode_names() {
         .expect("parse the Mute help binding")))
         .expect("install the Mute binding");
     assert!(!app.runtime_help_visible);
-    app.handle_key(VirtualKeyCode::Mute, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::AudioVolumeMute, ElementState::Pressed)
         .expect("an extended-scancode binding dispatches");
     assert!(
         app.runtime_help_visible,
         "a KeyConfig action bound to an extended SDL scancode must execute"
     );
+}
+
+fn platform_ime_test_app() -> GameApp {
+    let mut app =
+        test_game_app(320, 200, AudioOptions::default(), None).expect("initialize IME policy app");
+    install_classic_test_assets(&mut app);
+    app
+}
+
+fn open_platform_ime_test_context(app: &mut GameApp) {
+    app.open_context_menu_at(Vec::new(), GuiPoint::new(10.0, 10.0))
+        .expect("open IME policy context menu");
+    assert!(app.context_menu.is_some());
+}
+
+#[test]
+fn platform_ime_follows_the_shell_mode_and_console_ownership() {
+    let mut app = platform_ime_test_app();
+    app.console_mode = false;
+
+    app.mode = AppMode::Loading;
+    assert!(!app.platform_ime_allowed());
+    app.mode = AppMode::Menu;
+    assert!(app.platform_ime_allowed());
+    app.window_active = false;
+    assert!(!app.platform_ime_allowed());
+    app.window_active = true;
+
+    let (_startup_sender, startup_receiver) = mpsc::channel();
+    app.startup_network_connection = Some(StartupNetworkConnection::new(
+        startup_receiver,
+        None,
+        StartupNetworkPurpose::StagedHost,
+    ));
+    assert!(!app.platform_ime_allowed());
+    app.startup_network_connection = None;
+
+    app.push_message_dialog(
+        clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+            "Notice",
+            "Clonk",
+            clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+        ),
+        MessageDialogContinuation::None,
+    )
+    .expect("open ordinary IME-blocking message");
+    assert!(!app.platform_ime_allowed());
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+        .expect("close ordinary IME-blocking message");
+
+    app.mode = AppMode::Running;
+    assert!(!app.platform_ime_allowed());
+
+    app.console_mode = true;
+    assert!(app.platform_ime_allowed());
+}
+
+#[test]
+fn platform_ime_tracks_game_option_and_running_chat_keyboard_focus() {
+    let mut app = platform_ime_test_app();
+    app.mode = AppMode::Running;
+    app.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+        purpose: PendingInputDialogPurpose::GameOption(GameOptionInputKind::Password),
+        controller: InputDialogController::new(
+            "Password",
+            "Options",
+            InputDialogIcon::LOCKED_FRONTAL,
+        ),
+    });
+    assert!(app.platform_ime_allowed());
+    open_platform_ime_test_context(&mut app);
+    assert!(!app.platform_ime_allowed());
+    app.close_context_menu_silently();
+    app.game_option_input_dialog = None;
+
+    app.start_running_chat(RunningChatMode::All);
+    app.set_running_chat_active(false);
+    assert!(!app.platform_ime_allowed());
+    app.set_running_chat_active(true);
+    assert!(app.platform_ime_allowed());
+    open_platform_ime_test_context(&mut app);
+    assert!(!app.platform_ime_allowed());
+}
+
+#[test]
+fn platform_ime_tracks_league_signup_and_its_context_menu() {
+    let mut app = platform_ime_test_app();
+    app.mode = AppMode::Running;
+    app.league_signup_dialog = Some(PendingLeagueSignupDialog {
+        controller: clonk_frontend::league_signup::LeagueSignupController::new(
+            clonk_frontend::league_signup::LeagueSignupConfig::new(
+                "Player",
+                "league.example",
+                clonk_frontend::league_signup::LeagueSignupMode::Login,
+            ),
+            clonk_frontend::league_signup::LeagueSignupStrings::default(),
+        ),
+        auth: clonk_network::LeagueAuthRequestHead::default(),
+        continuation: LeaguePlayerAuthContinuation::InitialClient {
+            request: clonk_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: 0,
+                players: Vec::new(),
+            },
+            index: 0,
+            server_name: "league.example".to_string(),
+        },
+    });
+    assert!(app.platform_ime_allowed());
+    open_platform_ime_test_context(&mut app);
+    assert!(!app.platform_ime_allowed());
+}
+
+#[test]
+fn platform_ime_tracks_external_irc_z_order_and_menu_mode() {
+    let mut app = platform_ime_test_app();
+    app.mode = AppMode::Running;
+    app.external_irc_dialog_visible = true;
+    app.scoreboard_dialog = Some(ScoreboardPresentationRequest {
+        rows: 0,
+        columns: 0,
+        show_count: 0,
+        layout_revision: 0,
+        title_widget_present: false,
+        scoreboard: clonk_engine::ScoreboardState::default(),
+    });
+    app.runtime_default_dialog_order = vec![
+        RuntimeDefaultDialog::ExternalIrc,
+        RuntimeDefaultDialog::Scoreboard,
+    ];
+    assert!(!app.platform_ime_allowed());
+
+    app.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
+    assert!(app.platform_ime_allowed());
+    open_platform_ime_test_context(&mut app);
+    assert!(!app.platform_ime_allowed());
+
+    app.mode = AppMode::Menu;
+    assert!(!app.platform_ime_allowed());
+    app.close_context_menu_silently();
+    assert!(app.platform_ime_allowed());
 }

@@ -18,12 +18,13 @@ use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter};
 use crate::{present_retained_gpu_frame, GameApp};
 use clonk_app_render::gpu_renderer::RetainedGpuRenderer;
 use pixels::Pixels;
+use std::sync::Arc;
 use winit::window::Window;
 
 /// The console shell's window and everything bound to its surface.
 pub struct ShellWindowHost {
-    pub window: Window,
-    pub pixels: Pixels,
+    pub window: Arc<Window>,
+    pub pixels: Pixels<'static>,
     pub presenter: clonk_scaling::FramePresenter,
     /// Built from `pixels`' device/queue/format, so it is part of this surface.
     pub renderer: RetainedGpuRenderer,
@@ -32,11 +33,14 @@ pub struct ShellWindowHost {
 
 impl ShellWindowHost {
     pub fn new(
-        window: Window,
-        pixels: Pixels,
+        window: Arc<Window>,
+        pixels: Pixels<'static>,
         presenter: clonk_scaling::FramePresenter,
         renderer: RetainedGpuRenderer,
     ) -> Self {
+        // Leave winit's IME disabled for the game shell. While preedit is
+        // active winit suppresses KeyboardInput, which can lose releases and
+        // leave gameplay controls stuck. The legacy shell had no IME opt-in.
         Self {
             window,
             pixels,
@@ -74,6 +78,7 @@ impl DeveloperWindowPresenter<GameApp> for ShellWindowHost {
     /// global `Game`; the port just has to say so.
     fn present(&mut self, app: &mut GameApp) -> Result<(), String> {
         present_retained_gpu_frame(app, &self.pixels, &self.presenter, &mut self.renderer)
+            .map(|_| ())
             .map_err(|error| error.to_string())
     }
 }

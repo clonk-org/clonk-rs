@@ -3,7 +3,7 @@ use std::{fs, io::ErrorKind};
 use clonk_core::std_config::Config;
 use clonk_engine::{CommandKind, ControlButton, ControlCommand, ControlEvent};
 use clonk_platform::AppPaths;
-use winit::event::{ElementState, VirtualKeyCode};
+use winit::{event::ElementState, keyboard::KeyCode as VirtualKeyCode};
 
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1045,48 +1045,48 @@ pub fn legacy_gamepad_key_label(raw_key: Option<i32>) -> String {
 
 fn letter_from_offset(offset: i32) -> Option<VirtualKeyCode> {
     Some(match offset {
-        0 => VirtualKeyCode::A,
-        1 => VirtualKeyCode::B,
-        2 => VirtualKeyCode::C,
-        3 => VirtualKeyCode::D,
-        4 => VirtualKeyCode::E,
-        5 => VirtualKeyCode::F,
-        6 => VirtualKeyCode::G,
-        7 => VirtualKeyCode::H,
-        8 => VirtualKeyCode::I,
-        9 => VirtualKeyCode::J,
-        10 => VirtualKeyCode::K,
-        11 => VirtualKeyCode::L,
-        12 => VirtualKeyCode::M,
-        13 => VirtualKeyCode::N,
-        14 => VirtualKeyCode::O,
-        15 => VirtualKeyCode::P,
-        16 => VirtualKeyCode::Q,
-        17 => VirtualKeyCode::R,
-        18 => VirtualKeyCode::S,
-        19 => VirtualKeyCode::T,
-        20 => VirtualKeyCode::U,
-        21 => VirtualKeyCode::V,
-        22 => VirtualKeyCode::W,
-        23 => VirtualKeyCode::X,
-        24 => VirtualKeyCode::Y,
-        25 => VirtualKeyCode::Z,
+        0 => VirtualKeyCode::KeyA,
+        1 => VirtualKeyCode::KeyB,
+        2 => VirtualKeyCode::KeyC,
+        3 => VirtualKeyCode::KeyD,
+        4 => VirtualKeyCode::KeyE,
+        5 => VirtualKeyCode::KeyF,
+        6 => VirtualKeyCode::KeyG,
+        7 => VirtualKeyCode::KeyH,
+        8 => VirtualKeyCode::KeyI,
+        9 => VirtualKeyCode::KeyJ,
+        10 => VirtualKeyCode::KeyK,
+        11 => VirtualKeyCode::KeyL,
+        12 => VirtualKeyCode::KeyM,
+        13 => VirtualKeyCode::KeyN,
+        14 => VirtualKeyCode::KeyO,
+        15 => VirtualKeyCode::KeyP,
+        16 => VirtualKeyCode::KeyQ,
+        17 => VirtualKeyCode::KeyR,
+        18 => VirtualKeyCode::KeyS,
+        19 => VirtualKeyCode::KeyT,
+        20 => VirtualKeyCode::KeyU,
+        21 => VirtualKeyCode::KeyV,
+        22 => VirtualKeyCode::KeyW,
+        23 => VirtualKeyCode::KeyX,
+        24 => VirtualKeyCode::KeyY,
+        25 => VirtualKeyCode::KeyZ,
         _ => return None,
     })
 }
 
 fn digit_key(value: i32) -> Option<VirtualKeyCode> {
     Some(match value {
-        0 => VirtualKeyCode::Key0,
-        1 => VirtualKeyCode::Key1,
-        2 => VirtualKeyCode::Key2,
-        3 => VirtualKeyCode::Key3,
-        4 => VirtualKeyCode::Key4,
-        5 => VirtualKeyCode::Key5,
-        6 => VirtualKeyCode::Key6,
-        7 => VirtualKeyCode::Key7,
-        8 => VirtualKeyCode::Key8,
-        9 => VirtualKeyCode::Key9,
+        0 => VirtualKeyCode::Digit0,
+        1 => VirtualKeyCode::Digit1,
+        2 => VirtualKeyCode::Digit2,
+        3 => VirtualKeyCode::Digit3,
+        4 => VirtualKeyCode::Digit4,
+        5 => VirtualKeyCode::Digit5,
+        6 => VirtualKeyCode::Digit6,
+        7 => VirtualKeyCode::Digit7,
+        8 => VirtualKeyCode::Digit8,
+        9 => VirtualKeyCode::Digit9,
         _ => return None,
     })
 }
@@ -1139,48 +1139,48 @@ fn function_key(value: i32) -> Option<VirtualKeyCode> {
 
 fn letter_offset(key: VirtualKeyCode) -> Option<i32> {
     Some(match key {
-        VirtualKeyCode::A => 0,
-        VirtualKeyCode::B => 1,
-        VirtualKeyCode::C => 2,
-        VirtualKeyCode::D => 3,
-        VirtualKeyCode::E => 4,
-        VirtualKeyCode::F => 5,
-        VirtualKeyCode::G => 6,
-        VirtualKeyCode::H => 7,
-        VirtualKeyCode::I => 8,
-        VirtualKeyCode::J => 9,
-        VirtualKeyCode::K => 10,
-        VirtualKeyCode::L => 11,
-        VirtualKeyCode::M => 12,
-        VirtualKeyCode::N => 13,
-        VirtualKeyCode::O => 14,
-        VirtualKeyCode::P => 15,
-        VirtualKeyCode::Q => 16,
-        VirtualKeyCode::R => 17,
-        VirtualKeyCode::S => 18,
-        VirtualKeyCode::T => 19,
-        VirtualKeyCode::U => 20,
-        VirtualKeyCode::V => 21,
-        VirtualKeyCode::W => 22,
-        VirtualKeyCode::X => 23,
-        VirtualKeyCode::Y => 24,
-        VirtualKeyCode::Z => 25,
+        VirtualKeyCode::KeyA => 0,
+        VirtualKeyCode::KeyB => 1,
+        VirtualKeyCode::KeyC => 2,
+        VirtualKeyCode::KeyD => 3,
+        VirtualKeyCode::KeyE => 4,
+        VirtualKeyCode::KeyF => 5,
+        VirtualKeyCode::KeyG => 6,
+        VirtualKeyCode::KeyH => 7,
+        VirtualKeyCode::KeyI => 8,
+        VirtualKeyCode::KeyJ => 9,
+        VirtualKeyCode::KeyK => 10,
+        VirtualKeyCode::KeyL => 11,
+        VirtualKeyCode::KeyM => 12,
+        VirtualKeyCode::KeyN => 13,
+        VirtualKeyCode::KeyO => 14,
+        VirtualKeyCode::KeyP => 15,
+        VirtualKeyCode::KeyQ => 16,
+        VirtualKeyCode::KeyR => 17,
+        VirtualKeyCode::KeyS => 18,
+        VirtualKeyCode::KeyT => 19,
+        VirtualKeyCode::KeyU => 20,
+        VirtualKeyCode::KeyV => 21,
+        VirtualKeyCode::KeyW => 22,
+        VirtualKeyCode::KeyX => 23,
+        VirtualKeyCode::KeyY => 24,
+        VirtualKeyCode::KeyZ => 25,
         _ => return None,
     })
 }
 
 fn digit_value(key: VirtualKeyCode) -> Option<i32> {
     Some(match key {
-        VirtualKeyCode::Key0 => 0,
-        VirtualKeyCode::Key1 => 1,
-        VirtualKeyCode::Key2 => 2,
-        VirtualKeyCode::Key3 => 3,
-        VirtualKeyCode::Key4 => 4,
-        VirtualKeyCode::Key5 => 5,
-        VirtualKeyCode::Key6 => 6,
-        VirtualKeyCode::Key7 => 7,
-        VirtualKeyCode::Key8 => 8,
-        VirtualKeyCode::Key9 => 9,
+        VirtualKeyCode::Digit0 => 0,
+        VirtualKeyCode::Digit1 => 1,
+        VirtualKeyCode::Digit2 => 2,
+        VirtualKeyCode::Digit3 => 3,
+        VirtualKeyCode::Digit4 => 4,
+        VirtualKeyCode::Digit5 => 5,
+        VirtualKeyCode::Digit6 => 6,
+        VirtualKeyCode::Digit7 => 7,
+        VirtualKeyCode::Digit8 => 8,
+        VirtualKeyCode::Digit9 => 9,
         _ => return None,
     })
 }
@@ -1231,53 +1231,60 @@ fn function_key_index(key: VirtualKeyCode) -> Option<i32> {
     })
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn decode_windows_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
         value @ 0x70..=0x87 => function_key(value - 0x70),
         value @ 65..=90 => letter_from_offset(value - 65),
         value @ 48..=57 => digit_key(value - 48),
         value @ 96..=105 => numpad_key(value - 96),
-        8 => Some(VirtualKeyCode::Back),
+        8 => Some(VirtualKeyCode::Backspace),
         9 => Some(VirtualKeyCode::Tab),
-        13 => Some(VirtualKeyCode::Return),
+        12 => Some(VirtualKeyCode::NumpadClear),
+        13 => Some(VirtualKeyCode::Enter),
         19 => Some(VirtualKeyCode::Pause),
-        20 => Some(VirtualKeyCode::Capital),
+        20 => Some(VirtualKeyCode::CapsLock),
         27 => Some(VirtualKeyCode::Escape),
         32 => Some(VirtualKeyCode::Space),
         33 => Some(VirtualKeyCode::PageUp),
         34 => Some(VirtualKeyCode::PageDown),
         35 => Some(VirtualKeyCode::End),
         36 => Some(VirtualKeyCode::Home),
-        37 => Some(VirtualKeyCode::Left),
-        38 => Some(VirtualKeyCode::Up),
-        39 => Some(VirtualKeyCode::Right),
-        40 => Some(VirtualKeyCode::Down),
-        44 => Some(VirtualKeyCode::Snapshot),
+        37 => Some(VirtualKeyCode::ArrowLeft),
+        38 => Some(VirtualKeyCode::ArrowUp),
+        39 => Some(VirtualKeyCode::ArrowRight),
+        40 => Some(VirtualKeyCode::ArrowDown),
+        44 => Some(VirtualKeyCode::PrintScreen),
         45 => Some(VirtualKeyCode::Insert),
         46 => Some(VirtualKeyCode::Delete),
-        93 => Some(VirtualKeyCode::Apps),
+        93 => Some(VirtualKeyCode::ContextMenu),
         106 => Some(VirtualKeyCode::NumpadMultiply),
         107 => Some(VirtualKeyCode::NumpadAdd),
         108 => Some(VirtualKeyCode::NumpadComma),
         109 => Some(VirtualKeyCode::NumpadSubtract),
         110 => Some(VirtualKeyCode::NumpadDecimal),
         111 => Some(VirtualKeyCode::NumpadDivide),
-        144 => Some(VirtualKeyCode::Numlock),
-        145 => Some(VirtualKeyCode::Scroll),
+        144 => Some(VirtualKeyCode::NumLock),
+        145 => Some(VirtualKeyCode::ScrollLock),
         186 => Some(VirtualKeyCode::Semicolon),
+        187 => Some(VirtualKeyCode::Equal),
         188 => Some(VirtualKeyCode::Comma),
         189 => Some(VirtualKeyCode::Minus),
         190 => Some(VirtualKeyCode::Period),
         191 => Some(VirtualKeyCode::Slash),
-        192 => Some(VirtualKeyCode::Grave),
-        219 => Some(VirtualKeyCode::LBracket),
+        192 => Some(VirtualKeyCode::Backquote),
+        219 => Some(VirtualKeyCode::BracketLeft),
         220 => Some(VirtualKeyCode::Backslash),
-        221 => Some(VirtualKeyCode::RBracket),
-        222 => Some(VirtualKeyCode::Apostrophe),
-        226 => Some(VirtualKeyCode::OEM102),
+        221 => Some(VirtualKeyCode::BracketRight),
+        222 => Some(VirtualKeyCode::Quote),
+        226 => Some(VirtualKeyCode::IntlBackslash),
         _ => None,
     }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
+    decode_windows_platform_key_code(value)
 }
 
 #[cfg(target_os = "linux")]
@@ -1289,38 +1296,38 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         value @ 48..=57 => digit_key(value - 48),
         value @ 0xffb0..=0xffb9 => numpad_key(value - 0xffb0),
         0x20 => Some(VirtualKeyCode::Space),
-        0x27 => Some(VirtualKeyCode::Apostrophe),
+        0x27 => Some(VirtualKeyCode::Quote),
         0x2c => Some(VirtualKeyCode::Comma),
         0x2d => Some(VirtualKeyCode::Minus),
         0x2e => Some(VirtualKeyCode::Period),
         0x2f => Some(VirtualKeyCode::Slash),
         0x3b => Some(VirtualKeyCode::Semicolon),
-        0x3c => Some(VirtualKeyCode::OEM102),
-        0x3d => Some(VirtualKeyCode::Equals),
-        0x5b => Some(VirtualKeyCode::LBracket),
+        0x3c => Some(VirtualKeyCode::IntlBackslash),
+        0x3d => Some(VirtualKeyCode::Equal),
+        0x5b => Some(VirtualKeyCode::BracketLeft),
         0x5c => Some(VirtualKeyCode::Backslash),
-        0x5d => Some(VirtualKeyCode::RBracket),
-        0x60 => Some(VirtualKeyCode::Grave),
-        0xe4 => Some(VirtualKeyCode::Apostrophe),
+        0x5d => Some(VirtualKeyCode::BracketRight),
+        0x60 => Some(VirtualKeyCode::Backquote),
+        0xe4 => Some(VirtualKeyCode::Quote),
         0xf6 => Some(VirtualKeyCode::Semicolon),
-        0xfc => Some(VirtualKeyCode::LBracket),
-        0xff08 => Some(VirtualKeyCode::Back),
+        0xfc => Some(VirtualKeyCode::BracketLeft),
+        0xff08 => Some(VirtualKeyCode::Backspace),
         0xff09 => Some(VirtualKeyCode::Tab),
-        0xff0d => Some(VirtualKeyCode::Return),
+        0xff0d => Some(VirtualKeyCode::Enter),
         0xff13 => Some(VirtualKeyCode::Pause),
-        0xff14 => Some(VirtualKeyCode::Scroll),
+        0xff14 => Some(VirtualKeyCode::ScrollLock),
         0xff1b => Some(VirtualKeyCode::Escape),
         0xff50 => Some(VirtualKeyCode::Home),
-        0xff51 => Some(VirtualKeyCode::Left),
-        0xff52 => Some(VirtualKeyCode::Up),
-        0xff53 => Some(VirtualKeyCode::Right),
-        0xff54 => Some(VirtualKeyCode::Down),
+        0xff51 => Some(VirtualKeyCode::ArrowLeft),
+        0xff52 => Some(VirtualKeyCode::ArrowUp),
+        0xff53 => Some(VirtualKeyCode::ArrowRight),
+        0xff54 => Some(VirtualKeyCode::ArrowDown),
         0xff55 => Some(VirtualKeyCode::PageUp),
         0xff56 => Some(VirtualKeyCode::PageDown),
         0xff57 => Some(VirtualKeyCode::End),
-        0xff61 => Some(VirtualKeyCode::Snapshot),
-        0xff67 => Some(VirtualKeyCode::Apps),
-        0xff7f => Some(VirtualKeyCode::Numlock),
+        0xff61 => Some(VirtualKeyCode::PrintScreen),
+        0xff67 => Some(VirtualKeyCode::ContextMenu),
+        0xff7f => Some(VirtualKeyCode::NumLock),
         0xff95 => Some(VirtualKeyCode::Numpad7),
         0xff96 => Some(VirtualKeyCode::Numpad4),
         0xff97 => Some(VirtualKeyCode::Numpad8),
@@ -1341,8 +1348,8 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         0xffad => Some(VirtualKeyCode::NumpadSubtract),
         0xffae => Some(VirtualKeyCode::NumpadDecimal),
         0xffaf => Some(VirtualKeyCode::NumpadDivide),
-        0xffbd => Some(VirtualKeyCode::NumpadEquals),
-        0xffe5 => Some(VirtualKeyCode::Capital),
+        0xffbd => Some(VirtualKeyCode::NumpadEqual),
+        0xffe5 => Some(VirtualKeyCode::CapsLock),
         _ => None,
     }
 }
@@ -1354,27 +1361,27 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         value @ 104..=115 => function_key(value - 104 + 12),
         value @ 4..=29 => letter_from_offset(value - 4),
         value @ 30..=38 => digit_key(value - 29),
-        39 => Some(VirtualKeyCode::Key0),
-        40 => Some(VirtualKeyCode::Return),
+        39 => Some(VirtualKeyCode::Digit0),
+        40 => Some(VirtualKeyCode::Enter),
         41 => Some(VirtualKeyCode::Escape),
-        42 => Some(VirtualKeyCode::Back),
+        42 => Some(VirtualKeyCode::Backspace),
         43 => Some(VirtualKeyCode::Tab),
         44 => Some(VirtualKeyCode::Space),
         45 => Some(VirtualKeyCode::Minus),
-        46 => Some(VirtualKeyCode::Equals),
-        47 => Some(VirtualKeyCode::LBracket),
-        48 => Some(VirtualKeyCode::RBracket),
+        46 => Some(VirtualKeyCode::Equal),
+        47 => Some(VirtualKeyCode::BracketLeft),
+        48 => Some(VirtualKeyCode::BracketRight),
         49 => Some(VirtualKeyCode::Backslash),
-        50 | 100 => Some(VirtualKeyCode::OEM102),
+        50 | 100 => Some(VirtualKeyCode::IntlBackslash),
         51 => Some(VirtualKeyCode::Semicolon),
-        52 => Some(VirtualKeyCode::Apostrophe),
-        53 => Some(VirtualKeyCode::Grave),
+        52 => Some(VirtualKeyCode::Quote),
+        53 => Some(VirtualKeyCode::Backquote),
         54 => Some(VirtualKeyCode::Comma),
         55 => Some(VirtualKeyCode::Period),
         56 => Some(VirtualKeyCode::Slash),
-        57 => Some(VirtualKeyCode::Capital),
-        70 => Some(VirtualKeyCode::Snapshot),
-        71 => Some(VirtualKeyCode::Scroll),
+        57 => Some(VirtualKeyCode::CapsLock),
+        70 => Some(VirtualKeyCode::PrintScreen),
+        71 => Some(VirtualKeyCode::ScrollLock),
         72 => Some(VirtualKeyCode::Pause),
         73 => Some(VirtualKeyCode::Insert),
         74 => Some(VirtualKeyCode::Home),
@@ -1382,11 +1389,11 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         76 => Some(VirtualKeyCode::Delete),
         77 => Some(VirtualKeyCode::End),
         78 => Some(VirtualKeyCode::PageDown),
-        79 => Some(VirtualKeyCode::Right),
-        80 => Some(VirtualKeyCode::Left),
-        81 => Some(VirtualKeyCode::Down),
-        82 => Some(VirtualKeyCode::Up),
-        83 => Some(VirtualKeyCode::Numlock),
+        79 => Some(VirtualKeyCode::ArrowRight),
+        80 => Some(VirtualKeyCode::ArrowLeft),
+        81 => Some(VirtualKeyCode::ArrowDown),
+        82 => Some(VirtualKeyCode::ArrowUp),
+        83 => Some(VirtualKeyCode::NumLock),
         84 => Some(VirtualKeyCode::NumpadDivide),
         85 => Some(VirtualKeyCode::NumpadMultiply),
         86 => Some(VirtualKeyCode::NumpadSubtract),
@@ -1395,15 +1402,15 @@ pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         value @ 89..=97 => numpad_key(value - 88),
         98 => Some(VirtualKeyCode::Numpad0),
         99 => Some(VirtualKeyCode::NumpadDecimal),
-        101 => Some(VirtualKeyCode::Apps),
-        103 => Some(VirtualKeyCode::NumpadEquals),
+        101 => Some(VirtualKeyCode::ContextMenu),
+        103 => Some(VirtualKeyCode::NumpadEqual),
         133 => Some(VirtualKeyCode::NumpadComma),
         _ => None,
     }
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn encode_windows_platform_key_code(key: VirtualKeyCode) -> Option<i32> {
     if let Some(index) = function_key_index(key) {
         return Some(0x70 + index);
     }
@@ -1417,46 +1424,53 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         return Some(96 + value);
     }
     Some(match key {
-        VirtualKeyCode::Back => 8,
+        VirtualKeyCode::Backspace => 8,
         VirtualKeyCode::Tab => 9,
-        VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => 13,
+        VirtualKeyCode::NumpadClear => 12,
+        VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter => 13,
         VirtualKeyCode::Pause => 19,
-        VirtualKeyCode::Capital => 20,
+        VirtualKeyCode::CapsLock => 20,
         VirtualKeyCode::Escape => 27,
         VirtualKeyCode::Space => 32,
         VirtualKeyCode::PageUp => 33,
         VirtualKeyCode::PageDown => 34,
         VirtualKeyCode::End => 35,
         VirtualKeyCode::Home => 36,
-        VirtualKeyCode::Left => 37,
-        VirtualKeyCode::Up => 38,
-        VirtualKeyCode::Right => 39,
-        VirtualKeyCode::Down => 40,
-        VirtualKeyCode::Snapshot => 44,
+        VirtualKeyCode::ArrowLeft => 37,
+        VirtualKeyCode::ArrowUp => 38,
+        VirtualKeyCode::ArrowRight => 39,
+        VirtualKeyCode::ArrowDown => 40,
+        VirtualKeyCode::PrintScreen => 44,
         VirtualKeyCode::Insert => 45,
         VirtualKeyCode::Delete => 46,
-        VirtualKeyCode::Apps => 93,
+        VirtualKeyCode::ContextMenu => 93,
         VirtualKeyCode::NumpadMultiply => 106,
         VirtualKeyCode::NumpadAdd => 107,
         VirtualKeyCode::NumpadComma => 108,
         VirtualKeyCode::NumpadSubtract => 109,
         VirtualKeyCode::NumpadDecimal => 110,
         VirtualKeyCode::NumpadDivide => 111,
-        VirtualKeyCode::Numlock => 144,
-        VirtualKeyCode::Scroll => 145,
+        VirtualKeyCode::NumLock => 144,
+        VirtualKeyCode::ScrollLock => 145,
         VirtualKeyCode::Semicolon => 186,
+        VirtualKeyCode::Equal => 187,
         VirtualKeyCode::Comma => 188,
         VirtualKeyCode::Minus => 189,
         VirtualKeyCode::Period => 190,
         VirtualKeyCode::Slash => 191,
-        VirtualKeyCode::Grave => 192,
-        VirtualKeyCode::LBracket => 219,
+        VirtualKeyCode::Backquote => 192,
+        VirtualKeyCode::BracketLeft => 219,
         VirtualKeyCode::Backslash => 220,
-        VirtualKeyCode::RBracket => 221,
-        VirtualKeyCode::Apostrophe => 222,
-        VirtualKeyCode::OEM102 => 226,
+        VirtualKeyCode::BracketRight => 221,
+        VirtualKeyCode::Quote => 222,
+        VirtualKeyCode::IntlBackslash => 226,
         _ => return None,
     })
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+    encode_windows_platform_key_code(key)
 }
 
 #[cfg(target_os = "linux")]
@@ -1475,35 +1489,35 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     }
     Some(match key {
         VirtualKeyCode::Space => 0x20,
-        VirtualKeyCode::Apostrophe => 0x27,
+        VirtualKeyCode::Quote => 0x27,
         VirtualKeyCode::Comma => 0x2c,
         VirtualKeyCode::Minus => 0x2d,
         VirtualKeyCode::Period => 0x2e,
         VirtualKeyCode::Slash => 0x2f,
         VirtualKeyCode::Semicolon => 0x3b,
-        VirtualKeyCode::OEM102 => 0x3c,
-        VirtualKeyCode::Equals => 0x3d,
-        VirtualKeyCode::LBracket => 0x5b,
+        VirtualKeyCode::IntlBackslash => 0x3c,
+        VirtualKeyCode::Equal => 0x3d,
+        VirtualKeyCode::BracketLeft => 0x5b,
         VirtualKeyCode::Backslash => 0x5c,
-        VirtualKeyCode::RBracket => 0x5d,
-        VirtualKeyCode::Grave => 0x60,
-        VirtualKeyCode::Back => 0xff08,
+        VirtualKeyCode::BracketRight => 0x5d,
+        VirtualKeyCode::Backquote => 0x60,
+        VirtualKeyCode::Backspace => 0xff08,
         VirtualKeyCode::Tab => 0xff09,
-        VirtualKeyCode::Return => 0xff0d,
+        VirtualKeyCode::Enter => 0xff0d,
         VirtualKeyCode::Pause => 0xff13,
-        VirtualKeyCode::Scroll => 0xff14,
+        VirtualKeyCode::ScrollLock => 0xff14,
         VirtualKeyCode::Escape => 0xff1b,
         VirtualKeyCode::Home => 0xff50,
-        VirtualKeyCode::Left => 0xff51,
-        VirtualKeyCode::Up => 0xff52,
-        VirtualKeyCode::Right => 0xff53,
-        VirtualKeyCode::Down => 0xff54,
+        VirtualKeyCode::ArrowLeft => 0xff51,
+        VirtualKeyCode::ArrowUp => 0xff52,
+        VirtualKeyCode::ArrowRight => 0xff53,
+        VirtualKeyCode::ArrowDown => 0xff54,
         VirtualKeyCode::PageUp => 0xff55,
         VirtualKeyCode::PageDown => 0xff56,
         VirtualKeyCode::End => 0xff57,
-        VirtualKeyCode::Snapshot => 0xff61,
-        VirtualKeyCode::Apps => 0xff67,
-        VirtualKeyCode::Numlock => 0xff7f,
+        VirtualKeyCode::PrintScreen => 0xff61,
+        VirtualKeyCode::ContextMenu => 0xff67,
+        VirtualKeyCode::NumLock => 0xff7f,
         VirtualKeyCode::Insert => 0xff63,
         VirtualKeyCode::Delete => 0xffff,
         VirtualKeyCode::NumpadEnter => 0xff8d,
@@ -1513,8 +1527,8 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::NumpadSubtract => 0xffad,
         VirtualKeyCode::NumpadDecimal => 0xffae,
         VirtualKeyCode::NumpadDivide => 0xffaf,
-        VirtualKeyCode::NumpadEquals => 0xffbd,
-        VirtualKeyCode::Capital => 0xffe5,
+        VirtualKeyCode::NumpadEqual => 0xffbd,
+        VirtualKeyCode::CapsLock => 0xffe5,
         _ => return None,
     })
 }
@@ -1538,25 +1552,25 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         return Some(if value == 0 { 98 } else { 88 + value });
     }
     Some(match key {
-        VirtualKeyCode::Return => 40,
+        VirtualKeyCode::Enter => 40,
         VirtualKeyCode::Escape => 41,
-        VirtualKeyCode::Back => 42,
+        VirtualKeyCode::Backspace => 42,
         VirtualKeyCode::Tab => 43,
         VirtualKeyCode::Space => 44,
         VirtualKeyCode::Minus => 45,
-        VirtualKeyCode::Equals => 46,
-        VirtualKeyCode::LBracket => 47,
-        VirtualKeyCode::RBracket => 48,
+        VirtualKeyCode::Equal => 46,
+        VirtualKeyCode::BracketLeft => 47,
+        VirtualKeyCode::BracketRight => 48,
         VirtualKeyCode::Backslash => 49,
         VirtualKeyCode::Semicolon => 51,
-        VirtualKeyCode::Apostrophe => 52,
-        VirtualKeyCode::Grave => 53,
+        VirtualKeyCode::Quote => 52,
+        VirtualKeyCode::Backquote => 53,
         VirtualKeyCode::Comma => 54,
         VirtualKeyCode::Period => 55,
         VirtualKeyCode::Slash => 56,
-        VirtualKeyCode::Capital => 57,
-        VirtualKeyCode::Snapshot => 70,
-        VirtualKeyCode::Scroll => 71,
+        VirtualKeyCode::CapsLock => 57,
+        VirtualKeyCode::PrintScreen => 70,
+        VirtualKeyCode::ScrollLock => 71,
         VirtualKeyCode::Pause => 72,
         VirtualKeyCode::Insert => 73,
         VirtualKeyCode::Home => 74,
@@ -1564,20 +1578,20 @@ pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::Delete => 76,
         VirtualKeyCode::End => 77,
         VirtualKeyCode::PageDown => 78,
-        VirtualKeyCode::Right => 79,
-        VirtualKeyCode::Left => 80,
-        VirtualKeyCode::Down => 81,
-        VirtualKeyCode::Up => 82,
-        VirtualKeyCode::Numlock => 83,
+        VirtualKeyCode::ArrowRight => 79,
+        VirtualKeyCode::ArrowLeft => 80,
+        VirtualKeyCode::ArrowDown => 81,
+        VirtualKeyCode::ArrowUp => 82,
+        VirtualKeyCode::NumLock => 83,
         VirtualKeyCode::NumpadDivide => 84,
         VirtualKeyCode::NumpadMultiply => 85,
         VirtualKeyCode::NumpadSubtract => 86,
         VirtualKeyCode::NumpadAdd => 87,
         VirtualKeyCode::NumpadEnter => 88,
         VirtualKeyCode::NumpadDecimal => 99,
-        VirtualKeyCode::OEM102 => 100,
-        VirtualKeyCode::Apps => 101,
-        VirtualKeyCode::NumpadEquals => 103,
+        VirtualKeyCode::IntlBackslash => 100,
+        VirtualKeyCode::ContextMenu => 101,
+        VirtualKeyCode::NumpadEqual => 103,
         VirtualKeyCode::NumpadComma => 133,
         _ => return None,
     })
@@ -1648,11 +1662,11 @@ mod tests {
         // src/C4Game.cpp:3388-3437; src/C4PlayerList.cpp:588-594).
         let bindings = KeyboardBindings::default_bindings();
         assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::S, ElementState::Pressed),
+            bindings.event_for_key(VirtualKeyCode::KeyS, ElementState::Pressed),
             Some(ControlEvent::Press(ControlButton::Up))
         );
         assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::C, ElementState::Released),
+            bindings.event_for_key(VirtualKeyCode::KeyC, ElementState::Released),
             Some(ControlEvent::Release(ControlButton::Right))
         );
         assert_eq!(
@@ -1668,20 +1682,24 @@ mod tests {
         // arrow-key aliases.
         let bindings = KeyboardBindings::default_bindings();
         for (id, key, button) in [
-            (ControlBindingId::Up, VirtualKeyCode::S, ControlButton::Up),
+            (
+                ControlBindingId::Up,
+                VirtualKeyCode::KeyS,
+                ControlButton::Up,
+            ),
             (
                 ControlBindingId::Left,
-                VirtualKeyCode::Z,
+                VirtualKeyCode::KeyZ,
                 ControlButton::Left,
             ),
             (
                 ControlBindingId::Down,
-                VirtualKeyCode::X,
+                VirtualKeyCode::KeyX,
                 ControlButton::Down,
             ),
             (
                 ControlBindingId::Right,
-                VirtualKeyCode::C,
+                VirtualKeyCode::KeyC,
                 ControlButton::Right,
             ),
         ] {
@@ -1693,10 +1711,10 @@ mod tests {
         }
 
         for key in [
-            VirtualKeyCode::Up,
-            VirtualKeyCode::Left,
-            VirtualKeyCode::Down,
-            VirtualKeyCode::Right,
+            VirtualKeyCode::ArrowUp,
+            VirtualKeyCode::ArrowLeft,
+            VirtualKeyCode::ArrowDown,
+            VirtualKeyCode::ArrowRight,
         ] {
             assert_eq!(bindings.event_for_key(key, ElementState::Pressed), None);
         }
@@ -1708,7 +1726,7 @@ mod tests {
         assert!(german_system);
         assert_eq!(
             cpp_default_keyboard_keys(german_system)[0][ControlBindingId::PlayerMenu.spec().index],
-            VirtualKeyCode::OEM102
+            VirtualKeyCode::IntlBackslash
         );
         #[cfg(target_os = "macos")]
         assert_eq!(
@@ -1789,14 +1807,14 @@ mod tests {
     fn cursor_toggle_binding_produces_command() {
         let bindings = KeyboardBindings::default_bindings();
         assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::W, ElementState::Pressed),
+            bindings.event_for_key(VirtualKeyCode::KeyW, ElementState::Pressed),
             Some(ControlEvent::Command {
                 command: ControlCommand::CursorToggle,
                 kind: CommandKind::Press
             })
         );
         assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::W, ElementState::Released),
+            bindings.event_for_key(VirtualKeyCode::KeyW, ElementState::Released),
             Some(ControlEvent::Command {
                 command: ControlCommand::CursorToggle,
                 kind: CommandKind::Release
@@ -1808,14 +1826,14 @@ mod tests {
     fn player_menu_binding_has_no_release() {
         let bindings = KeyboardBindings::default_bindings();
         assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::R, ElementState::Pressed),
+            bindings.event_for_key(VirtualKeyCode::KeyR, ElementState::Pressed),
             Some(ControlEvent::Command {
                 command: ControlCommand::PlayerMenu,
                 kind: CommandKind::Press
             })
         );
         assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::R, ElementState::Released),
+            bindings.event_for_key(VirtualKeyCode::KeyR, ElementState::Released),
             None,
             "player menu key should not emit release event"
         );
@@ -2118,10 +2136,10 @@ mod tests {
     fn config_overrides_replace_defaults() {
         let mut cfg = Config::new();
         for (name, key) in [
-            ("Kbd1Key5", VirtualKeyCode::W),
-            ("Kbd1Key7", VirtualKeyCode::A),
-            ("Kbd1Key8", VirtualKeyCode::S),
-            ("Kbd1Key9", VirtualKeyCode::D),
+            ("Kbd1Key5", VirtualKeyCode::KeyW),
+            ("Kbd1Key7", VirtualKeyCode::KeyA),
+            ("Kbd1Key8", VirtualKeyCode::KeyS),
+            ("Kbd1Key9", VirtualKeyCode::KeyD),
         ] {
             cfg.set_in(
                 Some("Controls"),
@@ -2134,28 +2152,28 @@ mod tests {
         let bindings = KeyboardBindings::from_config(&cfg).expect("overrides present");
 
         assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::W, ElementState::Pressed),
+            bindings.event_for_key(VirtualKeyCode::KeyW, ElementState::Pressed),
             Some(ControlEvent::Press(ControlButton::Up))
         );
         assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::A, ElementState::Released),
+            bindings.event_for_key(VirtualKeyCode::KeyA, ElementState::Released),
             Some(ControlEvent::Release(ControlButton::Left))
         );
         assert_eq!(
             bindings.key_for(ControlBindingId::Up),
-            Some(VirtualKeyCode::W)
+            Some(VirtualKeyCode::KeyW)
         );
         assert_eq!(
             bindings.key_for(ControlBindingId::Left),
-            Some(VirtualKeyCode::A)
+            Some(VirtualKeyCode::KeyA)
         );
         assert_eq!(
             bindings.key_for(ControlBindingId::Down),
-            Some(VirtualKeyCode::S)
+            Some(VirtualKeyCode::KeyS)
         );
         assert_eq!(
             bindings.key_for(ControlBindingId::Right),
-            Some(VirtualKeyCode::D)
+            Some(VirtualKeyCode::KeyD)
         );
         // Config overrides do not add a non-C++ Space fallback either.
         assert_eq!(
@@ -2173,18 +2191,18 @@ mod tests {
         #[cfg(target_os = "windows")]
         let expected_defaults = [
             [
-                VirtualKeyCode::Q,
-                VirtualKeyCode::W,
-                VirtualKeyCode::E,
-                VirtualKeyCode::A,
-                VirtualKeyCode::S,
-                VirtualKeyCode::D,
-                VirtualKeyCode::Z,
-                VirtualKeyCode::X,
-                VirtualKeyCode::C,
-                VirtualKeyCode::R,
-                VirtualKeyCode::V,
-                VirtualKeyCode::F,
+                VirtualKeyCode::KeyQ,
+                VirtualKeyCode::KeyW,
+                VirtualKeyCode::KeyE,
+                VirtualKeyCode::KeyA,
+                VirtualKeyCode::KeyS,
+                VirtualKeyCode::KeyD,
+                VirtualKeyCode::KeyZ,
+                VirtualKeyCode::KeyX,
+                VirtualKeyCode::KeyC,
+                VirtualKeyCode::KeyR,
+                VirtualKeyCode::KeyV,
+                VirtualKeyCode::KeyF,
             ],
             [
                 VirtualKeyCode::Numpad7,
@@ -2201,17 +2219,17 @@ mod tests {
                 VirtualKeyCode::NumpadAdd,
             ],
             [
-                VirtualKeyCode::I,
-                VirtualKeyCode::O,
-                VirtualKeyCode::P,
-                VirtualKeyCode::K,
-                VirtualKeyCode::L,
+                VirtualKeyCode::KeyI,
+                VirtualKeyCode::KeyO,
+                VirtualKeyCode::KeyP,
+                VirtualKeyCode::KeyK,
+                VirtualKeyCode::KeyL,
                 VirtualKeyCode::Semicolon,
                 VirtualKeyCode::Comma,
                 VirtualKeyCode::Period,
                 VirtualKeyCode::Slash,
-                VirtualKeyCode::M,
-                VirtualKeyCode::Apostrophe,
+                VirtualKeyCode::KeyM,
+                VirtualKeyCode::Quote,
                 VirtualKeyCode::Semicolon,
             ],
             [
@@ -2219,31 +2237,31 @@ mod tests {
                 VirtualKeyCode::Home,
                 VirtualKeyCode::PageUp,
                 VirtualKeyCode::Delete,
-                VirtualKeyCode::Up,
+                VirtualKeyCode::ArrowUp,
                 VirtualKeyCode::PageDown,
-                VirtualKeyCode::Left,
-                VirtualKeyCode::Down,
-                VirtualKeyCode::Right,
+                VirtualKeyCode::ArrowLeft,
+                VirtualKeyCode::ArrowDown,
+                VirtualKeyCode::ArrowRight,
                 VirtualKeyCode::End,
-                VirtualKeyCode::Return,
-                VirtualKeyCode::Back,
+                VirtualKeyCode::Enter,
+                VirtualKeyCode::Backspace,
             ],
         ];
         #[cfg(not(target_os = "windows"))]
         let expected_defaults = [
             [
-                VirtualKeyCode::Q,
-                VirtualKeyCode::W,
-                VirtualKeyCode::E,
-                VirtualKeyCode::A,
-                VirtualKeyCode::S,
-                VirtualKeyCode::D,
-                VirtualKeyCode::Z,
-                VirtualKeyCode::X,
-                VirtualKeyCode::C,
-                VirtualKeyCode::R,
-                VirtualKeyCode::V,
-                VirtualKeyCode::F,
+                VirtualKeyCode::KeyQ,
+                VirtualKeyCode::KeyW,
+                VirtualKeyCode::KeyE,
+                VirtualKeyCode::KeyA,
+                VirtualKeyCode::KeyS,
+                VirtualKeyCode::KeyD,
+                VirtualKeyCode::KeyZ,
+                VirtualKeyCode::KeyX,
+                VirtualKeyCode::KeyC,
+                VirtualKeyCode::KeyR,
+                VirtualKeyCode::KeyV,
+                VirtualKeyCode::KeyF,
             ],
             [
                 VirtualKeyCode::Numpad7,
@@ -2260,32 +2278,32 @@ mod tests {
                 VirtualKeyCode::NumpadAdd,
             ],
             [
-                VirtualKeyCode::I,
-                VirtualKeyCode::O,
-                VirtualKeyCode::P,
-                VirtualKeyCode::K,
-                VirtualKeyCode::L,
+                VirtualKeyCode::KeyI,
+                VirtualKeyCode::KeyO,
+                VirtualKeyCode::KeyP,
+                VirtualKeyCode::KeyK,
+                VirtualKeyCode::KeyL,
                 VirtualKeyCode::Semicolon,
                 VirtualKeyCode::Comma,
                 VirtualKeyCode::Period,
                 VirtualKeyCode::Slash,
-                VirtualKeyCode::M,
-                VirtualKeyCode::Apostrophe,
-                VirtualKeyCode::LBracket,
+                VirtualKeyCode::KeyM,
+                VirtualKeyCode::Quote,
+                VirtualKeyCode::BracketLeft,
             ],
             [
                 VirtualKeyCode::Insert,
                 VirtualKeyCode::Home,
                 VirtualKeyCode::PageUp,
                 VirtualKeyCode::Delete,
-                VirtualKeyCode::Up,
+                VirtualKeyCode::ArrowUp,
                 VirtualKeyCode::PageDown,
-                VirtualKeyCode::Left,
-                VirtualKeyCode::Down,
-                VirtualKeyCode::Right,
+                VirtualKeyCode::ArrowLeft,
+                VirtualKeyCode::ArrowDown,
+                VirtualKeyCode::ArrowRight,
                 VirtualKeyCode::End,
-                VirtualKeyCode::Return,
-                VirtualKeyCode::Back,
+                VirtualKeyCode::Enter,
+                VirtualKeyCode::Backspace,
             ],
         ];
         assert_eq!(cpp_default_keyboard_keys(false), expected_defaults);
@@ -2297,7 +2315,7 @@ mod tests {
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         let raw_g = "10"; // SDL_SCANCODE_G
         assert_eq!(
-            encode_virtual_key_code(VirtualKeyCode::G),
+            encode_virtual_key_code(VirtualKeyCode::KeyG),
             Some(raw_g.parse().expect("fixture platform code"))
         );
 
@@ -2309,7 +2327,7 @@ mod tests {
 
         assert_eq!(
             bindings
-                .control_events_for_key(VirtualKeyCode::G, ElementState::Pressed)
+                .control_events_for_key(VirtualKeyCode::KeyG, ElementState::Pressed)
                 .collect::<Vec<_>>(),
             vec![
                 (
@@ -2366,7 +2384,7 @@ mod tests {
 
         assert_eq!(
             bindings
-                .control_candidates_for_key(VirtualKeyCode::G, ElementState::Released)
+                .control_candidates_for_key(VirtualKeyCode::KeyG, ElementState::Released)
                 .collect::<Vec<_>>(),
             vec![
                 (0, None),
@@ -2392,12 +2410,12 @@ mod tests {
 
         assert_eq!(
             parse_key_code_value(&format!("0x{a:x}")),
-            Some(VirtualKeyCode::A),
+            Some(VirtualKeyCode::KeyA),
             "hex parsing should support the active C++ platform code"
         );
         assert_eq!(
             parse_key_code_value(&format!("0X{b:X}")),
-            Some(VirtualKeyCode::B),
+            Some(VirtualKeyCode::KeyB),
             "hex parsing should support alternate prefix"
         );
     }
@@ -2413,12 +2431,12 @@ mod tests {
 
         assert_eq!(
             parse_key_code_value(&s.to_string()),
-            Some(VirtualKeyCode::S),
+            Some(VirtualKeyCode::KeyS),
             "active-platform code for S should parse"
         );
         assert_eq!(
             parse_key_code_value(&right.to_string()),
-            Some(VirtualKeyCode::Right),
+            Some(VirtualKeyCode::ArrowRight),
             "active-platform code for Right should parse"
         );
     }
@@ -2428,23 +2446,23 @@ mod tests {
         let mut bindings = KeyboardBindings::default_bindings();
         assert_eq!(
             bindings.key_for(ControlBindingId::Throw),
-            Some(VirtualKeyCode::A)
+            Some(VirtualKeyCode::KeyA)
         );
 
-        bindings.rebind(ControlBindingId::Throw, VirtualKeyCode::Key1);
+        bindings.rebind(ControlBindingId::Throw, VirtualKeyCode::Digit1);
         assert_eq!(
             bindings.key_for(ControlBindingId::Throw),
-            Some(VirtualKeyCode::Key1)
+            Some(VirtualKeyCode::Digit1)
         );
         assert_ne!(
             bindings.key_for(ControlBindingId::Throw),
-            Some(VirtualKeyCode::A)
+            Some(VirtualKeyCode::KeyA)
         );
 
-        bindings.rebind(ControlBindingId::Right, VirtualKeyCode::Right);
+        bindings.rebind(ControlBindingId::Right, VirtualKeyCode::ArrowRight);
         assert_eq!(
             bindings.key_for(ControlBindingId::Right),
-            Some(VirtualKeyCode::Right)
+            Some(VirtualKeyCode::ArrowRight)
         );
 
         bindings.reset_binding(ControlBindingId::Throw);
@@ -2458,7 +2476,7 @@ mod tests {
     fn keyboard_set_three_and_four_rebinds_round_trip_through_config() {
         let mut bindings = KeyboardBindings::default_bindings();
         assert!(bindings.rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::F11));
-        assert!(bindings.rebind_for_set(3, ControlBindingId::Special2, VirtualKeyCode::Key9));
+        assert!(bindings.rebind_for_set(3, ControlBindingId::Special2, VirtualKeyCode::Digit9));
         assert!(!bindings.rebind_for_set(4, ControlBindingId::Up, VirtualKeyCode::F12));
 
         let mut config = Config::new();
@@ -2475,7 +2493,7 @@ mod tests {
         assert_eq!(
             config.get_in(Some("Controls"), "Kbd4Key12"),
             Some(
-                encode_virtual_key_code(VirtualKeyCode::Key9)
+                encode_virtual_key_code(VirtualKeyCode::Digit9)
                     .unwrap()
                     .to_string()
                     .as_str()
@@ -2499,7 +2517,7 @@ mod tests {
         );
         assert_eq!(
             loaded.key_for_set(3, ControlBindingId::Special2),
-            Some(VirtualKeyCode::Key9)
+            Some(VirtualKeyCode::Digit9)
         );
     }
 
@@ -2523,7 +2541,7 @@ mod tests {
 
     #[test]
     fn supported_key_detection_matches_encoder() {
-        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Q));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::KeyQ));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Space));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F3));
@@ -2544,6 +2562,19 @@ mod tests {
         assert!(KeyboardBindings::is_supported_key(
             VirtualKeyCode::NumpadEnter
         ));
+    }
+
+    // C4KeyboardInput.cpp:82,242 registers VK_CLEAR and VK_OEM_PLUS in the
+    // pinned Win32 KeyCodeMap; their SDK values are 12 and 187 respectively.
+    #[test]
+    fn windows_clear_and_oem_plus_round_trip_through_the_oracle_codec() {
+        for (raw, key) in [
+            (12, VirtualKeyCode::NumpadClear),
+            (187, VirtualKeyCode::Equal),
+        ] {
+            assert_eq!(decode_windows_platform_key_code(raw), Some(key));
+            assert_eq!(encode_windows_platform_key_code(key), Some(raw));
+        }
     }
 
     #[test]
@@ -2598,11 +2629,11 @@ mod tests {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let raw = encode_virtual_key_code(VirtualKeyCode::NumpadEquals)
+            let raw = encode_virtual_key_code(VirtualKeyCode::NumpadEqual)
                 .expect("numpad Equals must have a config representation");
             assert_eq!(
                 decode_platform_key_code(raw),
-                Some(VirtualKeyCode::NumpadEquals)
+                Some(VirtualKeyCode::NumpadEqual)
             );
             let raw = encode_virtual_key_code(VirtualKeyCode::NumpadEnter)
                 .expect("numpad Enter must have a config representation");
@@ -2618,11 +2649,8 @@ mod tests {
             // their physical distinction.
             let raw = encode_virtual_key_code(VirtualKeyCode::NumpadEnter)
                 .expect("numpad Enter aliases VK_RETURN");
-            assert_eq!(
-                raw,
-                encode_virtual_key_code(VirtualKeyCode::Return).unwrap()
-            );
-            assert_eq!(decode_platform_key_code(raw), Some(VirtualKeyCode::Return));
+            assert_eq!(raw, encode_virtual_key_code(VirtualKeyCode::Enter).unwrap());
+            assert_eq!(decode_platform_key_code(raw), Some(VirtualKeyCode::Enter));
         }
     }
 }

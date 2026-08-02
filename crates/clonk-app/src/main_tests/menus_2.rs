@@ -181,7 +181,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
             .expect("push lower message");
         app.handle_modifiers_changed(modifiers)
             .expect("set chat-open modifier");
-        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
             .expect("modified Return falls through lower message to chat");
         assert_eq!(app.running_chat_text(), Some(expected));
         assert_eq!(app.message_dialogs.len(), 1);
@@ -192,7 +192,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .push_message_dialog(notice(), MessageDialogContinuation::None)
         .expect("push lower message for bare Return");
     bare_return
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("bare Return opens chat above nonexclusive lower message");
     assert_eq!(bare_return.running_chat_text(), Some(""));
     assert_eq!(bare_return.message_dialogs.len(), 1);
@@ -260,12 +260,12 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .handle_mouse_button(ElementState::Released)
         .expect("release lower-message activation click");
     inactive_return
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("active lower message owns Return down");
     assert_eq!(inactive_return.message_dialogs.len(), 1);
     assert!(!inactive_return.running_chat_active());
     inactive_return
-        .handle_key(VirtualKeyCode::Return, ElementState::Released)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("active lower message owns Return up");
     assert!(inactive_return.message_dialogs.is_empty());
     assert!(inactive_return.running_chat_active());
@@ -519,10 +519,10 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .expect("insert second message below inactive chat");
     assert_eq!(stacked_active.active_message_dialog_index(), Some(0));
     stacked_active
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("previous lower active dialog owns Return down");
     stacked_active
-        .handle_key(VirtualKeyCode::Return, ElementState::Released)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("previous lower active dialog owns Return up");
     assert_eq!(stacked_active.message_dialogs.len(), 1);
     assert!(matches!(
@@ -761,24 +761,24 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
         .expect("push exclusive vote for bare Return");
     vote_return
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("bare Return remains owned by exclusive vote");
     assert!(vote_return.running_chat.is_none());
     assert_eq!(vote_return.message_dialogs.len(), 1);
     vote_return
-        .handle_key(VirtualKeyCode::Return, ElementState::Released)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("focused No rejects vote on Return release");
     assert!(vote_return.message_dialogs.is_empty());
     assert_eq!(vote_return.mode, AppMode::Running);
 
     for (key, modifiers) in [
-        (VirtualKeyCode::Return, ModifiersState::CTRL),
-        (VirtualKeyCode::Space, ModifiersState::CTRL),
+        (VirtualKeyCode::Enter, ModifiersState::CONTROL),
+        (VirtualKeyCode::Space, ModifiersState::CONTROL),
         (VirtualKeyCode::Space, ModifiersState::SHIFT),
-        (VirtualKeyCode::Escape, ModifiersState::CTRL),
+        (VirtualKeyCode::Escape, ModifiersState::CONTROL),
         (
-            VirtualKeyCode::Y,
-            ModifiersState::CTRL | ModifiersState::ALT,
+            VirtualKeyCode::KeyY,
+            ModifiersState::CONTROL | ModifiersState::ALT,
         ),
     ] {
         let mut app = boxed_running_sandbox_app();
@@ -802,11 +802,11 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt over vote");
     unmatched_vote_hotkey
-        .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("unmatched vote mnemonic falls through to global Alt+C");
     assert!(unmatched_vote_hotkey.external_irc_dialog_visible);
     unmatched_vote_hotkey
-        .handle_key(VirtualKeyCode::C, ElementState::Released)
+        .handle_key(VirtualKeyCode::KeyC, ElementState::Released)
         .expect("global Alt+C release also falls through the vote");
     assert_eq!(unmatched_vote_hotkey.message_dialogs.len(), 1);
 
@@ -821,7 +821,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt over checkbox mnemonic");
     assert!(handled_message_hotkey
-        .handle_message_dialog_key(VirtualKeyCode::D, ElementState::Pressed)
+        .handle_message_dialog_key(VirtualKeyCode::KeyD, ElementState::Pressed)
         .expect("checkbox mnemonic down is handled"));
     assert_eq!(
         handled_message_hotkey.message_dialogs[0]
@@ -831,9 +831,9 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     );
     assert!(!handled_message_hotkey
         .message_dialog_consumed_keys
-        .contains(&VirtualKeyCode::D));
+        .contains(&VirtualKeyCode::KeyD));
     assert!(!handled_message_hotkey
-        .handle_message_dialog_key(VirtualKeyCode::D, ElementState::Released)
+        .handle_message_dialog_key(VirtualKeyCode::KeyD, ElementState::Released)
         .expect("mnemonic release is not owned by the dialog"));
 
     let mut changed_release = boxed_running_sandbox_app();
@@ -841,13 +841,13 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
         .expect("push vote for modifier-changed release");
     changed_release
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("bare Return presses focused No");
     changed_release
-        .handle_modifiers_changed(ModifiersState::CTRL)
+        .handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("change modifiers before Return up");
     changed_release
-        .handle_key(VirtualKeyCode::Return, ElementState::Released)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("modified Return up does not match the bare button binding");
     assert_eq!(changed_release.message_dialogs.len(), 1);
     assert!(changed_release.running_chat.is_none());
@@ -877,10 +877,10 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .expect("release ordinary A activation");
     assert_eq!(exclusive_top_scope.active_message_dialog_index(), Some(0));
     exclusive_top_scope
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("top exclusive B supplies GUI scope to active A");
     exclusive_top_scope
-        .handle_key(VirtualKeyCode::Return, ElementState::Released)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("active ordinary A accepts Return under B's GUI scope");
     assert_eq!(exclusive_top_scope.message_dialogs.len(), 1);
     assert!(matches!(
@@ -917,15 +917,15 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         Some(0)
     );
     nonexclusive_top_scope
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("nonexclusive top B leaves bare Return in global chat scope");
     assert_eq!(nonexclusive_top_scope.running_chat_text(), Some(""));
     assert_eq!(nonexclusive_top_scope.message_dialogs.len(), 2);
 
     for (key, modifiers, expected) in [
         (VirtualKeyCode::F2, ModifiersState::empty(), ""),
-        (VirtualKeyCode::Return, ModifiersState::SHIFT, "/team "),
-        (VirtualKeyCode::Return, ModifiersState::ALT, "\""),
+        (VirtualKeyCode::Enter, ModifiersState::SHIFT, "/team "),
+        (VirtualKeyCode::Enter, ModifiersState::ALT, "\""),
     ] {
         let mut app = boxed_running_sandbox_app();
         app.push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
@@ -940,8 +940,8 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
 
     for (key, modifiers, expected) in [
         (VirtualKeyCode::F2, ModifiersState::empty(), ""),
-        (VirtualKeyCode::Return, ModifiersState::SHIFT, "/team "),
-        (VirtualKeyCode::Return, ModifiersState::ALT, "\""),
+        (VirtualKeyCode::Enter, ModifiersState::SHIFT, "/team "),
+        (VirtualKeyCode::Enter, ModifiersState::ALT, "\""),
     ] {
         let mut app = boxed_running_sandbox_app();
         app.open_context_menu_at(
@@ -974,7 +974,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     );
     let board_before = app.message_board_line();
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("open running chat");
     let surface_width = app.graphics.surface().width() as i32;
     let surface_height = app.graphics.surface().height() as i32;
@@ -1011,25 +1011,25 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     for modifiers in [ModifiersState::SHIFT, ModifiersState::ALT] {
         app.handle_modifiers_changed(modifiers)
             .expect("hold modifier over the context-menu key");
-        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
             .expect("modified Apps is not the exact context binding");
-        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+        app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
             .expect("release modified Apps probe");
         assert!(app.context_menu.is_none());
     }
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("release context-menu modifier");
 
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open context over empty chat");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("release context-menu key");
     assert!(app.context_menu.is_some());
     app.handle_modifiers_changed(ModifiersState::SHIFT)
         .expect("hold Shift over empty chat context");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("global allies binding reopens empty chat through its context");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("release allies binding");
     assert!(app.context_menu.is_none());
     assert_eq!(app.running_chat_text(), Some("/team "));
@@ -1038,17 +1038,17 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
         .expect("close allies chat");
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("reopen empty chat for context say binding");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open context for say binding");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("release context-menu key");
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt over empty chat context");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("global say binding reopens empty chat through its context");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("release say binding");
     assert!(app.context_menu.is_none());
     assert_eq!(app.running_chat_text(), Some("\""));
@@ -1057,11 +1057,11 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
         .expect("close say chat");
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("reopen empty chat for context F2 binding");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open context for F2 binding");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("release context-menu key");
     app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
         .expect("global all-chat binding reopens empty chat through its context");
@@ -1071,32 +1071,32 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
         .expect("Escape closes chat without sending");
     assert!(app.running_chat.is_none());
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("reopen running chat");
     app.handle_modifiers_changed(ModifiersState::SHIFT)
         .expect("hold Shift");
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
         .expect("Shift+Escape does not cancel the exact bare binding");
     assert_eq!(app.running_chat_text(), Some(""));
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Shift+Return replaces empty chat with allies mode");
     assert_eq!(app.running_chat_text(), Some("/team "));
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("release Shift");
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
         .expect("close allies chat");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("reopen ordinary running chat");
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Alt+Return replaces empty chat with say mode");
     assert_eq!(app.running_chat_text(), Some("\""));
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("release Alt");
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
         .expect("close say chat");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("reopen ordinary chat for editing");
 
     for character in "alpha beta".chars() {
@@ -1129,13 +1129,13 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
         .caret();
     for modifiers in [
         ModifiersState::ALT,
-        ModifiersState::CTRL | ModifiersState::ALT,
+        ModifiersState::CONTROL | ModifiersState::ALT,
         ModifiersState::ALT | ModifiersState::SHIFT,
-        ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
+        ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
     ] {
         app.handle_modifiers_changed(modifiers)
             .expect("hold an Alt modifier mask over chat edit");
-        for key in [VirtualKeyCode::Left, VirtualKeyCode::Back] {
+        for key in [VirtualKeyCode::ArrowLeft, VirtualKeyCode::Backspace] {
             app.handle_key(key, ElementState::Pressed)
                 .expect("Alt navigation is not an Edit cursor binding");
             app.handle_key(key, ElementState::Released)
@@ -1153,14 +1153,14 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
         .expect("release Alt navigation modifier");
     app.handle_modifiers_changed(ModifiersState::SHIFT)
         .expect("hold Shift over nonempty chat");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Shift+Return leaves nonempty chat unchanged");
     assert_eq!(app.running_chat_text(), Some("alpha beta"));
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("release Shift");
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt over nonempty chat");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Alt+Return leaves nonempty chat unchanged");
     assert_eq!(app.running_chat_text(), Some("alpha beta"));
     app.handle_modifiers_changed(ModifiersState::empty())
@@ -1171,15 +1171,15 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
         "the message board remains a fading log instead of echoing edit text"
     );
 
-    app.pressed_engine_keys.insert(VirtualKeyCode::A);
+    app.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
     app.engine
         .player_mut(app.local_owner)
         .expect("local sandbox player")
         .control
         .pressed_coms = 1 << clonk_engine::COM_LEFT;
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("open chat context before lower message");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("release chat context key");
     assert!(app.context_menu.is_some());
     app.push_message_dialog(
@@ -1192,7 +1192,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     )
     .expect("push message below chat");
     assert!(app.context_menu.is_some());
-    assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::A));
+    assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
     assert_ne!(
         app.engine
             .player(app.local_owner)
@@ -1215,9 +1215,9 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
         .expect("render chat above the lower message dialog");
     assert!(frame.iter().any(|byte| *byte != 0));
 
-    app.handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::SHIFT)
+    app.handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::SHIFT)
         .expect("hold Ctrl+Shift");
-    app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
         .expect("select previous word in chat edit");
     assert!(app
         .running_chat_controller()
@@ -1263,9 +1263,9 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
         .expect("release context-menu button");
 
     let text_before_context_key = app.running_chat_text().map(str::to_string);
-    app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
         .expect("context menu outranks chat history");
-    app.handle_key(VirtualKeyCode::Up, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Released)
         .expect("release context-menu navigation");
     assert!(app.game_option_input_consumed_keys.is_empty());
     assert_eq!(app.running_chat_text(), text_before_context_key.as_deref());
@@ -1278,9 +1278,9 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
         .running_chat_controller()
         .expect("chat remains under its context menu")
         .caret();
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("hold Ctrl over chat context menu");
-    app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
         .expect("context makes the parent chat edit inactive");
     assert_eq!(
         app.running_chat_controller()
@@ -1294,16 +1294,16 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
 
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt over chat context menu");
-    app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("global IRC chord replaces compact chat with the standalone dialog");
     assert!(app.external_irc_dialog_visible);
     assert!(app.running_chat.is_none());
     assert!(app.context_menu.is_none());
-    app.handle_key(VirtualKeyCode::C, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Released)
         .expect("consume global IRC chord release");
-    app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("second global IRC chord closes the standalone dialog");
-    app.handle_key(VirtualKeyCode::C, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Released)
         .expect("consume closing IRC chord release");
     assert!(!app.external_irc_dialog_visible);
     app.handle_modifiers_changed(ModifiersState::empty())
@@ -1565,7 +1565,7 @@ fn secondary_local_player_controls_own_initial_team_menu() {
         replay: false,
         disable_mouse: false,
     });
-    app.handle_key(VirtualKeyCode::Z, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyZ, ElementState::Pressed)
         .expect("primary holds left");
 
     app.open_initial_team_selection(secondary);
@@ -3102,7 +3102,7 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
             .options
             .sound_enabled;
         sound_app
-            .handle_modifiers_changed(ModifiersState::CTRL)
+            .handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("set Ctrl");
         sound_app
             .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -3225,7 +3225,7 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
                 .options
                 .sound_enabled;
             sound
-                .handle_modifiers_changed(ModifiersState::CTRL)
+                .handle_modifiers_changed(ModifiersState::CONTROL)
                 .expect("set Ctrl");
             sound
                 .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -3295,10 +3295,10 @@ fn runtime_flash_draws_above_f1_help_and_below_recursive_context_gui() {
         .expect("open overlapping recursive context");
     for depth in 0..2 {
         context
-            .handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+            .handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("open context depth {depth}: {error}"));
         context
-            .handle_key(VirtualKeyCode::Right, ElementState::Released)
+            .handle_key(VirtualKeyCode::ArrowRight, ElementState::Released)
             .unwrap_or_else(|error| panic!("release context depth {depth}: {error}"));
     }
     context
@@ -3869,9 +3869,9 @@ fn running_only_globals_are_excluded_from_menu_and_loading_modes() {
     }
     menu.handle_modifiers_changed(ModifiersState::ALT)
         .expect("set menu Alt modifier");
-    menu.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+    menu.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("runtime IRC frontend is not registered in Menu mode");
-    menu.handle_key(VirtualKeyCode::C, ElementState::Released)
+    menu.handle_key(VirtualKeyCode::KeyC, ElementState::Released)
         .expect("menu IRC chord release remains outside the runtime helper");
 
     let mut loading = new_running_sandbox_app();
@@ -3892,10 +3892,10 @@ fn running_only_globals_are_excluded_from_menu_and_loading_modes() {
         .handle_modifiers_changed(ModifiersState::ALT)
         .expect("set loading Alt modifier");
     loading
-        .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("runtime IRC frontend is not registered in Loading mode");
     loading
-        .handle_key(VirtualKeyCode::C, ElementState::Released)
+        .handle_key(VirtualKeyCode::KeyC, ElementState::Released)
         .expect("loading IRC chord release remains outside the runtime helper");
 }
 

@@ -803,8 +803,8 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
     app.mode = AppMode::Running;
     let mut keyboard = AppVirtualKeyboard::new(&mut app);
     for (key, held_direction) in [
-        (VirtualKeyCode::C, CommandDirection::Right),
-        (VirtualKeyCode::Z, CommandDirection::Left),
+        (VirtualKeyCode::KeyC, CommandDirection::Right),
+        (VirtualKeyCode::KeyZ, CommandDirection::Left),
     ] {
         keyboard.press(key).expect("press movement key");
         assert_eq!(
@@ -2267,9 +2267,9 @@ fn enter_unported_startup_subscreen(app: &mut GameApp, subscreen: ClassicStartup
                 clonk_frontend::startup_options_dlg::OptionsSheet::Network,
             ];
             for sheet in sheets {
-                app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+                app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
                     .unwrap_or_else(|error| panic!("open Options {sheet:?}: {error}"));
-                app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+                app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
                     .expect("release options sheet key");
                 if sheet == target {
                     break;

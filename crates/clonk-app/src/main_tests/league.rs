@@ -426,7 +426,7 @@ fn l081_remove_aborts_countdown_before_swap_removed_update_and_clears_league_pas
     }])
     .expect("player context opens");
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::R, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::KeyR, ElementState::Pressed)
         .expect("activate Remove hotkey"));
 
     assert_eq!(
@@ -3234,19 +3234,19 @@ fn league_signup_edit_interactions_match_classic_edit_behavior() {
     );
 
     for key in [
-        VirtualKeyCode::Return,
+        VirtualKeyCode::Enter,
         VirtualKeyCode::NumpadEnter,
         VirtualKeyCode::Escape,
         VirtualKeyCode::Space,
     ] {
-        assert!(league_signup_dialog_key_code(key, ModifiersState::CTRL).is_none());
+        assert!(league_signup_dialog_key_code(key, ModifiersState::CONTROL).is_none());
         assert!(league_signup_dialog_key_code(key, ModifiersState::SHIFT).is_none());
     }
     assert_eq!(
         league_signup_dialog_key_code(VirtualKeyCode::Tab, ModifiersState::SHIFT),
         Some(KeyCode::Tab)
     );
-    assert!(league_signup_dialog_key_code(VirtualKeyCode::Tab, ModifiersState::CTRL).is_none());
+    assert!(league_signup_dialog_key_code(VirtualKeyCode::Tab, ModifiersState::CONTROL).is_none());
 
     let first_press = Instant::now();
     let mut last_press = None;

@@ -2349,7 +2349,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     let mut frame = vec![0_u8; 1280 * 720 * 4];
     app.render(&mut frame)
         .expect("exact classic selector resources render");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("unselected Enter opens recursive error");
     assert!(app.definition_selector.is_some());
     assert_eq!(app.message_dialogs.len(), 1);
@@ -2362,7 +2362,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         .expect("nested message renders above inactive selector");
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .expect("close nested error");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("the error-opening release remains captured");
 
     app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
@@ -4009,15 +4009,15 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
 
     // An unhandled mapped key on the focused chrome button reroutes to
     // the chat default first (Dialog::KeyFocusDefault), like the strip.
-    app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
         .expect("Up on Exit reroutes to the chat default");
     assert_eq!(controller_focus(&mut app), LobbyControl::ChatInput);
-    app.handle_key(VirtualKeyCode::Up, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Released)
         .expect("Up release after the reroute");
 
     tab_to(&mut app, LobbyControl::Exit);
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Return downs the focused Exit button");
     assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
     assert_eq!(
@@ -4025,7 +4025,7 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         StartupView::NetworkLobby,
         "KeyButtonDown only downs the button"
     );
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("Return release presses the focused Exit button");
     assert_eq!(
         app.ui_sound_log,
@@ -4097,7 +4097,7 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
 
     tab_to(&mut app, LobbyControl::Ready);
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Return on Ready reroutes to the chat default");
     assert_eq!(controller_focus(&mut app), LobbyControl::ChatInput);
     assert!(app.ui_sound_log.is_empty());
@@ -4107,7 +4107,7 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         .expect("joined lobby")
         .local_ready());
     assert!(commands.take_submitted_ready_checks().is_empty());
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("Return release after the Ready reroute");
 
     tab_to(&mut app, LobbyControl::Ready);
@@ -4157,9 +4157,9 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     let mut app = joined_app();
     tab_to(&mut app, LobbyControl::Roster);
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("roster-focus Return stays eaten");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("roster-focus Return release stays eaten");
     assert_eq!(controller_focus(&mut app), LobbyControl::Roster);
     assert!(app.ui_sound_log.is_empty());
@@ -4852,7 +4852,7 @@ fn l034_network_tab_and_shift_tab_are_inverse_and_wrap() {
         NetDlgControl::GameList
     );
 
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("hold unsupported Tab modifier");
     app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
         .expect("Ctrl+Tab is inert in the network dialog");
@@ -5249,11 +5249,11 @@ fn options_program_font_combos_accept_native_alt_open_bindings() {
 
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("Alt+Down opens Font Face");
     assert!(app.context_menu.is_some());
     app.close_context_menu_silently();
-    app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
         .expect("release Alt+Down");
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("release Alt");

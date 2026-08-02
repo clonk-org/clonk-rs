@@ -46,7 +46,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects the valley CLNK");
         let valley = app
             .engine
@@ -79,9 +79,9 @@
             .position
             .x;
         let toward_wood = if wood_x < valley_x {
-            VirtualKeyCode::Z
+            VirtualKeyCode::KeyZ
         } else {
-            VirtualKeyCode::C
+            VirtualKeyCode::KeyC
         };
         hold_app_key_until(
             &mut app,
@@ -92,7 +92,7 @@
         );
         if app_clonk_carries(&app, valley, "METL") {
             AppVirtualKeyboard::new(&mut app)
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z faces away from valley WOOD");
             advance_app_until(&mut app, "valley CLNK faces left with METL", 30, |app| {
                 app.engine
@@ -102,10 +102,10 @@
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::Z)
+                    .release(VirtualKeyCode::KeyZ)
                     .expect("release physical Z before METL throw");
                 keyboard
-                    .tap(VirtualKeyCode::A)
+                    .tap(VirtualKeyCode::KeyA)
                     .expect("physical A sets METL aside for the second relay");
             }
             advance_app_until(&mut app, "METL leaves valley CLNK inventory", 30, |app| {
@@ -126,9 +126,9 @@
                 .position
                 .x;
             let toward_wood = if wood_x < valley_x {
-                VirtualKeyCode::Z
+                VirtualKeyCode::KeyZ
             } else {
-                VirtualKeyCode::C
+                VirtualKeyCode::KeyC
             };
             hold_app_key_until(
                 &mut app,
@@ -153,7 +153,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "the WOOD-carrying valley CLNK reaches CATA",
             160,
             |app| {
@@ -167,7 +167,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs the valley CATA");
         advance_app_until(&mut app, "the valley CLNK grabs the real CATA", 80, |app| {
             app.engine.object_snapshot(valley).is_some_and(|object| {
@@ -182,7 +182,7 @@
             |app| app_tutorial_message_contains(app, "Press 'throw' to load the catapult"),
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A loads valley WOOD into CATA");
         advance_app_until(&mut app, "WOOD enters the real valley CATA", 80, |app| {
             app.engine
@@ -197,10 +197,10 @@
         );
 
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::X)
+            .press(VirtualKeyCode::KeyX)
             .expect("hold physical X to tension CATA");
         AppVirtualKeyboard::new(&mut app)
-            .repeat(VirtualKeyCode::X)
+            .repeat(VirtualKeyCode::KeyX)
             .expect("OS repeat while physical X remains held");
         assert!(
             app.engine.object_snapshot(valley).is_some_and(|object| {
@@ -214,7 +214,7 @@
                 .is_some_and(|object| object.action.name == "Ready" && object.action.phase == 6)
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::X)
+            .release(VirtualKeyCode::KeyX)
             .expect("release physical X at full CATA tension");
         let tensioned = app
             .engine
@@ -237,7 +237,7 @@
             .any(|effect| effect.name == "IntJnRAim" && effect.priority == 0));
 
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A fires the fully tensioned CATA");
         assert_eq!(
             app.engine
@@ -282,7 +282,7 @@
         // state (src/C4GameObjects.cpp:155-196). Keep both operations behind
         // the app's E/Z/C keyboard mapping.
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects the right-hill CLNK");
         let catapult_clonk = app
             .engine
@@ -331,9 +331,9 @@
             .position
             .x;
         let collect_key = if wood_x < catapult_clonk_x {
-            VirtualKeyCode::Z
+            VirtualKeyCode::KeyZ
         } else {
-            VirtualKeyCode::C
+            VirtualKeyCode::KeyC
         };
         hold_app_key_until(
             &mut app,
@@ -394,9 +394,9 @@
             .position
             .x;
         let reach_hill_cata = if hill_cata_x < catapult_clonk_x {
-            VirtualKeyCode::Z
+            VirtualKeyCode::KeyZ
         } else {
-            VirtualKeyCode::C
+            VirtualKeyCode::KeyC
         };
         hold_app_key_until(
             &mut app,
@@ -414,7 +414,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs the right-hill CATA");
         advance_app_until(
             &mut app,
@@ -444,7 +444,7 @@
         {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::Z,
+                VirtualKeyCode::KeyZ,
                 "pushing left turns the right-hill CATA toward the cabin",
                 40,
                 |app| {
@@ -469,7 +469,7 @@
             |app| app_tutorial_message_contains(app, "load the catapult"),
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A loads the exact WOOD into the right-hill CATA");
         advance_app_until(
             &mut app,
@@ -494,7 +494,7 @@
         );
 
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::X)
+            .press(VirtualKeyCode::KeyX)
             .expect("hold physical X to tension the right-hill CATA");
         advance_app_until(
             &mut app,
@@ -507,7 +507,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::X)
+            .release(VirtualKeyCode::KeyX)
             .expect("release physical X at full right-hill CATA tension");
         let tensioned = app
             .engine
@@ -530,7 +530,7 @@
             .any(|effect| effect.name == "IntJnRAim" && effect.priority == 0));
 
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A fires the fully tensioned right-hill CATA");
         assert_eq!(
             app.engine
@@ -590,7 +590,7 @@
         // only when they cross the selected crew's collection rectangle
         // (src/C4Player.cpp:1261-1275; src/C4GameObjects.cpp:140-196).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E wraps selection to the constructor CLNK");
         assert_eq!(
             app.engine.crew_cursor(app.local_owner),
@@ -632,9 +632,9 @@
                 .position
                 .x;
             let collect_key = if delivered_x < constructor_x {
-                VirtualKeyCode::Z
+                VirtualKeyCode::KeyZ
             } else {
-                VirtualKeyCode::C
+                VirtualKeyCode::KeyC
             };
             hold_app_key_until(
                 &mut app,
@@ -690,9 +690,9 @@
             .x;
         if (constructor_x - elevator_x).abs() > 4 {
             let approach_key = if elevator_x < constructor_x {
-                VirtualKeyCode::Z
+                VirtualKeyCode::KeyZ
             } else {
-                VirtualKeyCode::C
+                VirtualKeyCode::KeyC
             };
             hold_app_key_until(
                 &mut app,
@@ -712,10 +712,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes DownSingle");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X emits DownDouble at ELEV");
         }
         // ELEV needs WOOD=4 and METL=2. C++ consumes the carried missing
@@ -783,7 +783,7 @@
         // movement/collection (src/C4Player.cpp:1261-1275,1522-1536;
         // src/C4Object.cpp:3520-3567; src/C4GameObjects.cpp:140-196).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects the valley CLNK for the second relay");
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
         if app
@@ -793,10 +793,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes valley DownSingle");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X ungrabs the valley CATA");
         }
         advance_app_until(&mut app, "valley CLNK releases its CATA", 80, |app| {
@@ -817,9 +817,9 @@
             .position
             .x;
         let collect_metal_key = if metal_x < valley_x {
-            VirtualKeyCode::Z
+            VirtualKeyCode::KeyZ
         } else {
-            VirtualKeyCode::C
+            VirtualKeyCode::KeyC
         };
         hold_app_key_until(
             &mut app,
@@ -853,9 +853,9 @@
             .position
             .x;
         let return_to_valley_cata = if valley_cata_x < valley_x {
-            VirtualKeyCode::Z
+            VirtualKeyCode::KeyZ
         } else {
-            VirtualKeyCode::C
+            VirtualKeyCode::KeyC
         };
         hold_app_key_until(
             &mut app,
@@ -873,7 +873,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X regrabs the valley CATA");
         advance_app_until(&mut app, "valley CLNK regrabs its CATA", 80, |app| {
             app.engine.object_snapshot(valley).is_some_and(|object| {
@@ -887,7 +887,7 @@
         {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::C,
+                VirtualKeyCode::KeyC,
                 "valley CATA faces the right hill for its second shot",
                 40,
                 |app| {
@@ -898,7 +898,7 @@
             );
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A loads the original METL into valley CATA");
         advance_app_until(&mut app, "original METL enters valley CATA", 80, |app| {
             app.engine
@@ -907,7 +907,7 @@
         });
         assert_eq!(app_object_contents_count(&app, valley_cata, "METL"), 1);
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::X)
+            .press(VirtualKeyCode::KeyX)
             .expect("hold physical X for the valley CATA's second shot");
         advance_app_until(
             &mut app,
@@ -920,10 +920,10 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::X)
+            .release(VirtualKeyCode::KeyX)
             .expect("release physical X at full valley METL tension");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A fires METL toward the right hill");
         advance_app_until(
             &mut app,
@@ -957,7 +957,7 @@
         // from Projectile (Catapult.c4d/Script.c:31-77,121-163;
         // src/C4Object.cpp:3520-3567).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects the right-hill CLNK for METL");
         assert_eq!(
             app.engine.crew_cursor(app.local_owner),
@@ -970,10 +970,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes hill DownSingle");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X ungrabs the hill CATA");
         }
         advance_app_until(&mut app, "right-hill CLNK releases its CATA", 80, |app| {
@@ -994,9 +994,9 @@
             .position
             .x;
         let collect_hill_metal = if landed_metal_x < hill_clonk_x {
-            VirtualKeyCode::Z
+            VirtualKeyCode::KeyZ
         } else {
-            VirtualKeyCode::C
+            VirtualKeyCode::KeyC
         };
         hold_app_key_until(
             &mut app,
@@ -1030,9 +1030,9 @@
             .position
             .x;
         let return_to_hill_cata = if hill_cata_x < hill_clonk_x {
-            VirtualKeyCode::Z
+            VirtualKeyCode::KeyZ
         } else {
-            VirtualKeyCode::C
+            VirtualKeyCode::KeyC
         };
         hold_app_key_until(
             &mut app,
@@ -1050,7 +1050,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X regrabs the hill CATA");
         advance_app_until(&mut app, "right-hill CLNK regrabs its CATA", 80, |app| {
             app.engine
@@ -1066,7 +1066,7 @@
         {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::Z,
+                VirtualKeyCode::KeyZ,
                 "hill CATA faces the cabin for its METL shot",
                 40,
                 |app| {
@@ -1077,7 +1077,7 @@
             );
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A loads the original METL into hill CATA");
         advance_app_until(&mut app, "original METL enters hill CATA", 80, |app| {
             app.engine
@@ -1086,7 +1086,7 @@
         });
         assert_eq!(app_object_contents_count(&app, hill_cata, "METL"), 1);
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::X)
+            .press(VirtualKeyCode::KeyX)
             .expect("hold physical X for the hill CATA's METL shot");
         advance_app_until(
             &mut app,
@@ -1099,10 +1099,10 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::X)
+            .release(VirtualKeyCode::KeyX)
             .expect("release physical X at full hill METL tension");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A fires METL toward the cabin hill");
         advance_app_until(
             &mut app,
@@ -1123,7 +1123,7 @@
         // ELEC (src/C4Object.cpp:1682-1762; src/C4ObjectCom.cpp:573-589;
         // Elevator.c4d/DefCore.txt:16; Elevator.c4d/Script.c:8-15).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E wraps selection to constructor for METL");
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
         advance_app_until(
@@ -1154,9 +1154,9 @@
                 .position
                 .x;
             let collect_cabin_metal = if metal_x < constructor_x {
-                VirtualKeyCode::Z
+                VirtualKeyCode::KeyZ
             } else {
-                VirtualKeyCode::C
+                VirtualKeyCode::KeyC
             };
             hold_app_key_until(
                 &mut app,
@@ -1191,9 +1191,9 @@
             .x;
         if (constructor_x - elevator_x).abs() > 4 {
             let return_to_elevator = if elevator_x < constructor_x {
-                VirtualKeyCode::Z
+                VirtualKeyCode::KeyZ
             } else {
-                VirtualKeyCode::C
+                VirtualKeyCode::KeyC
             };
             hold_app_key_until(
                 &mut app,
@@ -1213,10 +1213,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes final DownSingle");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X builds ELEV with METL");
         }
         advance_app_until(
@@ -1255,7 +1255,7 @@
         // Elevator.c4d/Case.c4d/Script.c:346-360,612-631;
         // src/C4Object.cpp:3520-3567).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs Tutorial05's real ELEC");
         advance_app_until(
             &mut app,
@@ -1276,7 +1276,7 @@
             |app| app_tutorial_message_contains(app, "Hold the 'dig' key"),
         );
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::D)
+            .press(VirtualKeyCode::KeyD)
             .expect("hold physical D to start ELEC shaft drilling");
         advance_app_until(
             &mut app,
@@ -1319,7 +1319,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::D)
+            .release(VirtualKeyCode::KeyD)
             .expect("release physical D after Tutorial05 accepts Drill");
         advance_app_until(
             &mut app,
@@ -1333,10 +1333,10 @@
         // platform (Tutorial05/Script.c:288-313; C4Player.cpp:1261-1293,
         // 1453-1553; C4Object.cpp:3406-3556).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("first physical E advances toward the right-hill CLNK");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("second physical E selects the right-hill CLNK");
         assert_eq!(
             app.engine.crew_cursor(app.local_owner),
@@ -1344,7 +1344,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "right-hill CLNK descends into the valley",
             500,
             |app| {
@@ -1376,7 +1376,7 @@
 
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "right-hill CLNK reaches the drilled shaft lip",
             180,
             |app| {
@@ -1388,10 +1388,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("hold physical Z for the right-hill shaft-lip jump");
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S jumps the right-hill CLNK across the shaft lip");
         }
         advance_app_until(
@@ -1405,7 +1405,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z after the right-hill lip jump");
         advance_app_until(&mut app, "right-hill CLNK reaches ELEC", 160, |app| {
             app.engine
@@ -1423,7 +1423,7 @@
         {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::X,
+                VirtualKeyCode::KeyX,
                 "right-hill CLNK scales down onto ELEC",
                 160,
                 |app| {
@@ -1440,15 +1440,15 @@
         }
 
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("first physical E advances toward the valley CLNK");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("second physical E selects the valley CLNK");
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "valley CLNK reaches the drilled shaft lip",
             240,
             |app| {
@@ -1460,10 +1460,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("hold physical Z for the valley shaft-lip jump");
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S jumps the valley CLNK across the shaft lip");
         }
         advance_app_until(
@@ -1477,7 +1477,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z after the valley lip jump");
         advance_app_until(&mut app, "valley CLNK reaches ELEC", 160, |app| {
             app.engine
@@ -1495,7 +1495,7 @@
         {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::X,
+                VirtualKeyCode::KeyX,
                 "valley CLNK scales down onto ELEC",
                 160,
                 |app| {
@@ -1512,7 +1512,7 @@
         }
 
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X makes the valley CLNK grab ELEC");
         if app
             .engine
@@ -1520,7 +1520,7 @@
             .is_some_and(|object| object.action.name != "Push")
         {
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X completes valley DownDouble");
         }
         advance_app_until(&mut app, "valley CLNK grabs ELEC for ascent", 120, |app| {
@@ -1529,7 +1529,7 @@
             })
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects the boarded right-hill CLNK");
         assert_eq!(
             app.engine.crew_cursor(app.local_owner),
@@ -1537,7 +1537,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "right-hill CLNK centers on ELEC before grabbing",
             40,
             |app| {
@@ -1547,7 +1547,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X makes the right-hill CLNK grab ELEC");
         if app
             .engine
@@ -1555,7 +1555,7 @@
             .is_some_and(|object| object.action.name != "Push")
         {
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X completes right-hill DownDouble");
         }
         advance_app_until(
@@ -1571,11 +1571,11 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E returns to the constructor");
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X makes the constructor grab ELEC");
         if app
             .engine
@@ -1583,7 +1583,7 @@
             .is_some_and(|object| object.action.name != "Push")
         {
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X completes constructor DownDouble");
         }
         advance_app_until(&mut app, "constructor grabs ELEC for ascent", 120, |app| {
@@ -1602,10 +1602,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::W)
+                .tap(VirtualKeyCode::KeyW)
                 .expect("first physical W primes CursorToggleSingle");
             keyboard
-                .tap(VirtualKeyCode::W)
+                .tap(VirtualKeyCode::KeyW)
                 .expect("second physical W selects all Tutorial05 Clonks");
         }
         let mut selected = app.engine.selected_crew(app.local_owner);
@@ -1624,7 +1624,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::S,
+            VirtualKeyCode::KeyS,
             "ELEC carries the selected crew to the cabin hill",
             600,
             |app| {
@@ -1657,10 +1657,10 @@
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .tap(VirtualKeyCode::X)
+                    .tap(VirtualKeyCode::KeyX)
                     .unwrap_or_else(|error| panic!("first X releasing {caption}: {error}"));
                 keyboard
-                    .tap(VirtualKeyCode::X)
+                    .tap(VirtualKeyCode::KeyX)
                     .unwrap_or_else(|error| panic!("second X releasing {caption}: {error}"));
             }
             advance_app_until(
@@ -1675,7 +1675,7 @@
             );
             if clonk != catapult_clonk {
                 AppVirtualKeyboard::new(&mut app)
-                    .tap(VirtualKeyCode::E)
+                    .tap(VirtualKeyCode::KeyE)
                     .unwrap_or_else(|error| panic!("select next Clonk after {caption}: {error}"));
             }
         }
@@ -1683,10 +1683,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("hold Z for right-hill CLNK's top-lip jump");
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S jumps the right-hill CLNK over the top lip");
         }
         advance_app_until(
@@ -1700,7 +1700,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release Z after right-hill top-lip jump");
         advance_app_until(
             &mut app,
@@ -1717,16 +1717,16 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E returns to constructor at shaft top");
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("hold Z for constructor's top-lip jump");
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S jumps constructor over the top lip");
         }
         advance_app_until(
@@ -1740,7 +1740,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release Z after constructor top-lip jump");
         advance_app_until(
             &mut app,
@@ -1757,12 +1757,12 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects valley CLNK for the top lip");
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "valley CLNK takes a run-up on ELEC",
             40,
             |app| {
@@ -1774,10 +1774,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("hold Z for valley CLNK's top-lip jump");
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S jumps valley CLNK over the top lip");
         }
         advance_app_until(
@@ -1791,7 +1791,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release Z after valley top-lip jump");
         advance_app_until(
             &mut app,
@@ -1808,10 +1808,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::W)
+                .tap(VirtualKeyCode::KeyW)
                 .expect("first plateau W primes CursorToggleSingle");
             keyboard
-                .tap(VirtualKeyCode::W)
+                .tap(VirtualKeyCode::KeyW)
                 .expect("second plateau W reselects all Clonks");
         }
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
@@ -1830,7 +1830,7 @@
             .x;
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "selected crew follows constructor to HUT3",
             360,
             |app| {
@@ -1841,7 +1841,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::X,
+            VirtualKeyCode::KeyX,
             "constructor descends from the HUT3 wall",
             80,
             |app| {
@@ -1852,7 +1852,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "constructor walks into HUT3's real entrance",
             80,
             |app| {
@@ -1891,7 +1891,7 @@
         // crew member before HUT3 opens its context menu (Hut3.c4d/
         // DefCore.txt:18; C4ObjectCom.cpp:335-350; C4Command.cpp:545-617).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects valley CLNK at HUT3");
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
         if app
@@ -1901,7 +1901,7 @@
         {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::Z,
+                VirtualKeyCode::KeyZ,
                 "valley CLNK steps fully inside HUT3's entrance",
                 20,
                 |app| {
@@ -1912,7 +1912,7 @@
             );
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects right-hill CLNK at HUT3");
         assert_eq!(
             app.engine.crew_cursor(app.local_owner),
@@ -1925,7 +1925,7 @@
         {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::Z,
+                VirtualKeyCode::KeyZ,
                 "right-hill CLNK steps fully inside HUT3's entrance",
                 20,
                 |app| {
@@ -1936,7 +1936,7 @@
             );
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E returns to constructor at HUT3");
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
         if app
@@ -1946,7 +1946,7 @@
         {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::Z,
+                VirtualKeyCode::KeyZ,
                 "constructor steps fully inside HUT3's entrance",
                 20,
                 |app| {
@@ -1957,24 +1957,24 @@
             );
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S queues constructor Enter HUT3");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E returns to valley CLNK for queued HUT3 entry");
         assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S queues valley CLNK Enter HUT3");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E returns to right-hill CLNK for queued HUT3 entry");
         assert_eq!(
             app.engine.crew_cursor(app.local_owner),
             Some(catapult_clonk)
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S queues right-hill CLNK Enter HUT3");
         advance_app_until(
             &mut app,
@@ -2050,7 +2050,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "the first CLNK naturally collects the exact Tutorial06 CRYS",
             800,
             |app| {
@@ -2091,7 +2091,7 @@
 
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "the CRYS-carrying CLNK reaches the trapped cavern",
             800,
             |app| {
@@ -2107,7 +2107,7 @@
             |app| app_tutorial_message_contains(app, "With the other clonk"),
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects Tutorial06's surface CLNK");
         let builder = app
             .engine
@@ -2136,7 +2136,7 @@
                 .expect("construction identification deserializes");
 
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S enters Tutorial06 HUT3");
         advance_app_until(&mut app, "surface CLNK enters exact HUT3", 80, |app| {
             app.engine
@@ -2150,7 +2150,7 @@
         });
         app_navigate_object_menu_to(&mut app, "Contents", |item| item.caption == "Contents");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A opens HUT3 Contents");
         advance_app_until(&mut app, "HUT3 opens its real Contents menu", 30, |app| {
             app.engine
@@ -2159,7 +2159,7 @@
         });
         app_navigate_object_menu_to(&mut app, "CNKT", |item| item.item_id == "CNKT");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A takes Tutorial06's exact CNKT");
         advance_app_until(&mut app, "surface CLNK takes exact CNKT", 80, |app| {
             app.engine
@@ -2167,7 +2167,7 @@
                 .is_some_and(|object| object.container == Some(builder))
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D closes HUT3 Contents");
         advance_app_until(&mut app, "HUT3 restores its context menu", 30, |app| {
             app.engine
@@ -2176,7 +2176,7 @@
         });
         app_navigate_object_menu_to(&mut app, "Exit", |item| item.caption == "Exit");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A exits HUT3 with CNKT");
         advance_app_until(&mut app, "CNKT-carrying CLNK exits exact HUT3", 80, |app| {
             app.engine
@@ -2185,7 +2185,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "builder reaches the ELEV construction site",
             100,
             |app| {
@@ -2197,10 +2197,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("first physical D primes CNKT activation");
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("second physical D activates CNKT");
         }
         advance_app_until(
@@ -2215,7 +2215,7 @@
         );
         app_navigate_object_menu_to(&mut app, "ELEV", |item| item.item_id == "ELEV");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A creates Tutorial06 ELEV");
         advance_app_until(&mut app, "exact Tutorial06 ELEV is created", 30, |app| {
             app_object_with_definition(app, "ELEV").is_some()
@@ -2225,10 +2225,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X leaves ELEV construction");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X leaves ELEV construction");
         }
         advance_app_until(
@@ -2258,7 +2258,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "surface CLNK reaches the coal seam",
             300,
             |app| {
@@ -2269,7 +2269,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "surface CLNK steps off the coal wall",
             40,
             |app| {
@@ -2281,10 +2281,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::C)
+                .press(VirtualKeyCode::KeyC)
                 .expect("physical C holds the surface CLNK toward coal");
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("physical D starts digging coal");
         }
         advance_app_until(&mut app, "surface CLNK starts digging coal", 30, |app| {
@@ -2307,7 +2307,7 @@
             app.update().expect("advance Tutorial06 coal Dig");
         }
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C after Tutorial06 coal Dig");
         let coal = app
             .engine
@@ -2334,7 +2334,7 @@
             .expect("preserve Tutorial06's exact POWR identity");
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "COAL-carrying CLNK reaches POWR's chute",
             160,
             |app| {
@@ -2357,7 +2357,7 @@
             })
             .expect("the builder's exact first content is real COAL at the chute");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A throws the exact COAL into POWR");
         advance_app_until(
             &mut app,
@@ -2389,7 +2389,7 @@
             .expect("preserve Tutorial06's exact ELEC identity");
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "builder returns to the elevator shaft",
             180,
             |app| {
@@ -2399,7 +2399,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X calls ELEC to the waiting builder");
         for _ in 0..12 {
             app.update()
@@ -2415,11 +2415,11 @@
                 })
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S jumps toward ELEC");
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "builder jumps onto ELEC's center",
             80,
             |app| {
@@ -2429,7 +2429,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X centers the builder on ELEC");
         advance_app_until(&mut app, "builder lands centered on ELEC", 80, |app| {
             app.engine.object_snapshot(builder).is_some_and(|object| {
@@ -2441,7 +2441,7 @@
                 .expect("wait out ELEC grab double-click window");
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs ELEC under AutoStopControl");
         advance_app_until(&mut app, "builder grabs exact ELEC", 100, |app| {
             app.engine.object_snapshot(builder).is_some_and(|object| {
@@ -2450,7 +2450,7 @@
         });
 
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::D)
+            .press(VirtualKeyCode::KeyD)
             .expect("held physical D starts ELEC drilling");
         advance_app_until(&mut app, "ELEC starts drilling the real shaft", 80, |app| {
             app.engine
@@ -2475,7 +2475,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::D)
+            .release(VirtualKeyCode::KeyD)
             .expect("release physical D at Tutorial06's lower cavern");
         advance_app_until(
             &mut app,
@@ -2484,7 +2484,7 @@
             |app| app_tutorial_message_contains(app, "get the water out of the way"),
         );
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::D)
+            .press(VirtualKeyCode::KeyD)
             .expect("held physical D resumes ELEC drilling");
         advance_app_until(
             &mut app,
@@ -2507,15 +2507,15 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::D)
+            .release(VirtualKeyCode::KeyD)
             .expect("release physical D at drainage level");
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes lower ELEC release");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X releases lower ELEC");
         }
         advance_app_until(
@@ -2530,7 +2530,7 @@
         );
 
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D starts the dry basin approach");
         advance_app_until(
             &mut app,
@@ -2545,10 +2545,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z aims the dry approach left");
             keyboard
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .expect("physical X aims the dry approach down-left");
         }
         advance_app_until(&mut app, "dry approach reaches basin wall", 100, |app| {
@@ -2559,14 +2559,14 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release physical X at dry basin wall");
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z at dry basin wall");
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X stops builder at dry basin wall");
         advance_app_until(&mut app, "builder stops at dry basin wall", 40, |app| {
             app.engine
@@ -2574,7 +2574,7 @@
                 .is_some_and(|object| object.action.name == "Walk")
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D starts the diagonal upper passage");
         advance_app_until(
             &mut app,
@@ -2589,10 +2589,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z aims the upper passage left");
             keyboard
-                .press(VirtualKeyCode::S)
+                .press(VirtualKeyCode::KeyS)
                 .expect("physical S aims the upper passage up-left");
         }
         advance_app_until(
@@ -2608,10 +2608,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::S)
+                .release(VirtualKeyCode::KeyS)
                 .expect("release physical S after upper-passage Dig");
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z after upper-passage Dig");
         }
         advance_app_until(
@@ -2626,7 +2626,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "builder returns from the dry upper passage",
             140,
             |app| {
@@ -2637,7 +2637,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "builder aligns with the lower basin wall",
             100,
             |app| {
@@ -2657,7 +2657,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D starts lower basin drain");
         advance_app_until(&mut app, "builder starts lower basin drain", 40, |app| {
             app.engine
@@ -2667,10 +2667,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z aims lower drain left");
             keyboard
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .expect("physical X aims lower drain down-left");
         }
         advance_app_until(&mut app, "lower drain reaches dry basin wall", 100, |app| {
@@ -2681,10 +2681,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release physical X before opening lower drain");
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z before opening lower drain");
         }
         advance_app_until(
@@ -2698,7 +2698,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D resumes lower basin drain");
         advance_app_until(&mut app, "builder resumes lower basin drain", 40, |app| {
             app.engine
@@ -2706,7 +2706,7 @@
                 .is_some_and(|object| object.action.name == "Dig")
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("held physical Z aims lower drain left");
         advance_app_until(
             &mut app,
@@ -2719,7 +2719,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::S)
+            .press(VirtualKeyCode::KeyS)
             .expect("held physical S turns lower drain up-left");
         assert_eq!(
             app.engine
@@ -2742,15 +2742,15 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z after entering basin water");
             keyboard
-                .release(VirtualKeyCode::S)
+                .release(VirtualKeyCode::KeyS)
                 .expect("release physical S after entering basin water");
         }
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::S,
+            VirtualKeyCode::KeyS,
             "rescuer swims straight up through the pre-cleared passage",
             160,
             |app| {
@@ -2761,7 +2761,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "rescuer swims right of the basin drain",
             120,
             |app| {
@@ -2772,7 +2772,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "rescuer traverses the dry east passage",
             240,
             |app| {
@@ -2783,7 +2783,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "rescuer centers below the east cavern handhold",
             40,
             |app| {
@@ -2794,7 +2794,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::S,
+            VirtualKeyCode::KeyS,
             "rescuer rises toward the east cavern wall",
             160,
             |app| {
@@ -2805,7 +2805,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "rescuer reaches the east cavern Scale",
             160,
             |app| {
@@ -2816,7 +2816,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::S,
+            VirtualKeyCode::KeyS,
             "rescuer climbs into the dry east cavern",
             160,
             |app| {
@@ -2839,7 +2839,7 @@
                 })
                 .expect("rescuer carries exact incidental COAL");
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::A)
+                .tap(VirtualKeyCode::KeyA)
                 .expect("physical A drops incidental COAL outside drain");
             advance_app_until(&mut app, "rescuer drops exact incidental COAL", 60, |app| {
                 app.engine
@@ -2848,7 +2848,7 @@
             });
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X stops rescuer above drained outlet");
         advance_app_until(
             &mut app,
@@ -2867,7 +2867,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E selects the CRYS-carrying CLNK");
         assert_eq!(
             app.engine.crew_cursor(app.local_owner),
@@ -2877,13 +2877,13 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::C)
+                .tap(VirtualKeyCode::KeyC)
                 .expect("physical C faces trapped CLNK toward escape tunnel");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("physical X settles trapped CLNK at escape tunnel");
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("physical D starts trapped CLNK's escape tunnel");
         }
         advance_app_until(
@@ -2899,10 +2899,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::C)
+                .press(VirtualKeyCode::KeyC)
                 .expect("held physical C aims escape Dig right");
             keyboard
-                .press(VirtualKeyCode::S)
+                .press(VirtualKeyCode::KeyS)
                 .expect("held physical S aims escape Dig up-right");
         }
         advance_app_until(
@@ -2918,15 +2918,15 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::S)
+                .release(VirtualKeyCode::KeyS)
                 .expect("release physical S in the drained basin");
             keyboard
-                .release(VirtualKeyCode::C)
+                .release(VirtualKeyCode::KeyC)
                 .expect("release physical C in the lower cavern");
         }
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "escaped CLNK reaches the lower-cavern wall or flooded basin",
             80,
             |app| {
@@ -2944,7 +2944,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::Z)
+                .tap(VirtualKeyCode::KeyZ)
                 .expect("physical Z releases the escaped CLNK from the cavern wall");
             advance_app_until(
                 &mut app,
@@ -2957,7 +2957,7 @@
                 },
             );
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("physical D resumes digging east");
             advance_app_until(&mut app, "escaped CLNK resumes digging east", 40, |app| {
                 app.engine
@@ -2967,10 +2967,10 @@
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .press(VirtualKeyCode::C)
+                    .press(VirtualKeyCode::KeyC)
                     .expect("held physical C aims the resumed Dig right");
                 keyboard
-                    .press(VirtualKeyCode::S)
+                    .press(VirtualKeyCode::KeyS)
                     .expect("held physical S aims the resumed Dig up-right");
             }
             advance_app_until(
@@ -2986,16 +2986,16 @@
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::S)
+                    .release(VirtualKeyCode::KeyS)
                     .expect("release physical S in the flooded basin");
                 keyboard
-                    .release(VirtualKeyCode::C)
+                    .release(VirtualKeyCode::KeyC)
                     .expect("release physical C in the flooded basin");
             }
         }
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "the CRYS carrier reaches the upper-passage wall",
             600,
             |app| {
@@ -3008,7 +3008,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::S,
+            VirtualKeyCode::KeyS,
             "the CRYS carrier climbs beside the opened upper passage",
             160,
             |app| {
@@ -3019,7 +3019,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "the CRYS carrier traverses the opened upper passage",
             240,
             |app| {
@@ -3041,10 +3041,10 @@
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .tap(VirtualKeyCode::C)
+                    .tap(VirtualKeyCode::KeyC)
                     .expect("physical C faces dropped content toward the rescuer");
                 keyboard
-                    .tap(VirtualKeyCode::A)
+                    .tap(VirtualKeyCode::KeyA)
                     .expect("physical A drops one escaped-CLNK content");
             }
             advance_app_until(
@@ -3070,7 +3070,7 @@
         );
 
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::E)
+            .tap(VirtualKeyCode::KeyE)
             .expect("physical E returns to the elevator builder");
         assert_eq!(
             app.engine.crew_cursor(app.local_owner),
@@ -3083,7 +3083,7 @@
             .is_some_and(|object| object.action.name == "Scale")
         {
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::C)
+                .tap(VirtualKeyCode::KeyC)
                 .expect("physical C releases the builder from the eastern cavern wall");
             advance_app_until(
                 &mut app,
@@ -3098,7 +3098,7 @@
         }
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "builder grabs the eastern drain wall",
             160,
             |app| {
@@ -3109,7 +3109,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::X,
+            VirtualKeyCode::KeyX,
             "builder descends beside the drain",
             180,
             |app| {
@@ -3120,7 +3120,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "builder re-enters the drain",
             100,
             |app| {
@@ -3131,7 +3131,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::X,
+            VirtualKeyCode::KeyX,
             "builder dives to the dropped CRYS",
             80,
             |app| {
@@ -3142,7 +3142,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "builder returns above the dropped CRYS",
             180,
             |app| {
@@ -3154,7 +3154,7 @@
         if !app_clonk_carries(&app, builder, "CRYS") {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::X,
+                VirtualKeyCode::KeyX,
                 "builder descends to the dropped CRYS",
                 120,
                 |app| {
@@ -3178,9 +3178,9 @@
                 .position
                 .x;
             let toward_crystal = if crystal_x < builder_x {
-                VirtualKeyCode::Z
+                VirtualKeyCode::KeyZ
             } else {
-                VirtualKeyCode::C
+                VirtualKeyCode::KeyC
             };
             hold_app_key_until(
                 &mut app,
@@ -3198,7 +3198,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "CRYS-carrying builder reaches ELEC shaft",
             80,
             |app| {
@@ -3209,7 +3209,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::S,
+            VirtualKeyCode::KeyS,
             "CRYS-carrying builder surfaces by ELEC",
             180,
             |app| {
@@ -3220,7 +3220,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "CRYS-carrying builder centers over ELEC",
             80,
             |app| {
@@ -3244,7 +3244,7 @@
                 .expect("wait out CRYS-carrying ELEC grab buffer");
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs ELEC under AutoStopControl");
         advance_app_until(
             &mut app,
@@ -3258,7 +3258,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::S,
+            VirtualKeyCode::KeyS,
             "ELEC carries exact CRYS back to surface",
             600,
             |app| {
@@ -3270,10 +3270,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes surface ELEC release");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X releases surface ELEC");
         }
         advance_app_until(
@@ -3294,7 +3294,7 @@
             .x;
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "CRYS-carrying builder returns to HUT3",
             120,
             |app| {
@@ -3304,7 +3304,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S enters HUT3 with exact CRYS");
         advance_app_until(
             &mut app,
@@ -3329,7 +3329,7 @@
         });
         app_navigate_object_menu_to(&mut app, "Put", |item| item.caption == "Put");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A puts exact CRYS into HUT3");
         advance_app_until(
             &mut app,
@@ -3353,7 +3353,7 @@
         );
         app_navigate_object_menu_to(&mut app, "Sell", |item| item.caption == "Sell");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A opens HUT3 Sell menu");
         let sell_identification = serde_json::from_value(serde_json::json!({ "Int": 5 }))
             .expect("sell identification deserializes");
@@ -3364,7 +3364,7 @@
         });
         app_navigate_object_menu_to(&mut app, "CRYS", |item| item.item_id == "CRYS");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A sells Tutorial06's exact CRYS");
         advance_app_until(
             &mut app,
@@ -3448,7 +3448,7 @@
         let contents_identification = serde_json::from_value(serde_json::json!({ "Int": 18 }))
             .expect("contents identification deserializes");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S enters Tutorial07 HUT3");
         advance_app_until(&mut app, "Tutorial07 CLNK enters HUT3", 60, |app| {
             app.engine
@@ -3462,7 +3462,7 @@
         });
         app_navigate_object_menu_to(&mut app, "Contents", |item| item.caption == "Contents");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A opens Tutorial07 HUT3 Contents");
         advance_app_until(&mut app, "HUT3 opens its real Contents menu", 30, |app| {
             app.engine
@@ -3471,7 +3471,7 @@
         });
         app_navigate_object_menu_to(&mut app, "FLNT", |item| item.item_id == "FLNT");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::F)
+            .tap(VirtualKeyCode::KeyF)
             .expect("physical F takes one Tutorial07 FLNT");
         advance_app_until(&mut app, "C++ Get keeps one FLNT", 120, |app| {
             app_object_contents_count(app, clonk, "FLNT") == 1
@@ -3479,7 +3479,7 @@
         });
 
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D closes HUT3 Contents");
         advance_app_until(&mut app, "HUT3 restores its context menu", 30, |app| {
             app.engine
@@ -3488,7 +3488,7 @@
         });
         app_navigate_object_menu_to(&mut app, "Exit", |item| item.caption == "Exit");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A exits HUT3 with FLNT");
         advance_app_until(&mut app, "FLNT-carrying CLNK exits HUT3", 60, |app| {
             app.engine
@@ -3500,7 +3500,7 @@
             app_object_with_definition(&app, "ELEC").expect("Tutorial07 places a ready ELEC");
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "FLNT-carrying CLNK reaches ELEC",
             100,
             |app| {
@@ -3513,7 +3513,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs Tutorial07 ELEC");
         advance_app_until(&mut app, "CLNK grabs Tutorial07 ELEC", 60, |app| {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -3522,7 +3522,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::D,
+            VirtualKeyCode::KeyD,
             "ELEC lowers CLNK to Tutorial07 GOLD layer",
             360,
             |app| {
@@ -3534,10 +3534,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes ELEC release");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X releases ELEC");
         }
         advance_app_until(&mut app, "CLNK releases ELEC at GOLD layer", 60, |app| {
@@ -3554,7 +3554,7 @@
         }
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "CLNK reaches Tutorial07 first GOLD-side blast pocket",
             80,
             |app| {
@@ -3585,7 +3585,7 @@
             })
             .expect("first Tutorial07 FLNT is ready to throw");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A throws the first FLNT");
         // Execute Throw before the retreat control can clear its command.
         // The same update may also run the first contact explosion, so keep
@@ -3625,7 +3625,7 @@
             "physical A executes Throw before retreat"
         );
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("hold physical C to retreat from the first FLNT");
         if detonation.is_none() {
             for _ in 0..180 {
@@ -3649,7 +3649,7 @@
             }
         }
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C after the first FLNT");
         let (center, before, after) = detonation.unwrap_or_else(|| {
             panic!(
@@ -3719,7 +3719,7 @@
         });
         app_navigate_object_menu_to(&mut app, "Contents", |item| item.caption == "Contents");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A reopens HUT3 Contents");
         advance_app_until(&mut app, "HUT3 exposes its second FLNT", 30, |app| {
             app.engine
@@ -3728,19 +3728,19 @@
         });
         app_navigate_object_menu_to(&mut app, "second FLNT", |item| item.item_id == "FLNT");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A takes the second Tutorial07 FLNT");
         advance_app_until(&mut app, "CLNK carries the second FLNT", 120, |app| {
             app_object_contents_count(app, clonk, "FLNT") == 1
                 && app_object_contents_count(app, hut, "FLNT") == 0
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D closes HUT3 Contents after second FLNT");
         app_tutorial07_exit_hut_and_descend_to_gold(&mut app, clonk, elevator_case, hut);
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "second FLNT reaches Tutorial07 marked GOLD seam",
             80,
             |app| {
@@ -3759,12 +3759,12 @@
         if let Some((action, direction)) = attached {
             let let_go = if action.starts_with("Scale") {
                 if direction == Direction::Left {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 } else {
-                    VirtualKeyCode::Z
+                    VirtualKeyCode::KeyZ
                 }
             } else {
-                VirtualKeyCode::X
+                VirtualKeyCode::KeyX
             };
             AppVirtualKeyboard::new(&mut app)
                 .tap(let_go)
@@ -3782,7 +3782,7 @@
         }
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "CLNK faces the GOLD seam before second FLNT throw",
             30,
             |app| {
@@ -3806,7 +3806,7 @@
             })
             .expect("second Tutorial07 FLNT is ready to throw");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A throws the second FLNT");
         advance_app_until(&mut app, "second FLNT leaves CLNK inventory", 60, |app| {
             app.engine
@@ -3815,7 +3815,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "second Tutorial07 FLNT detonates",
             180,
             |app| app.engine.object_snapshot(second_flint).is_none(),
@@ -3837,7 +3837,7 @@
 
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "CLNK reaches the far wall of the exposed GOLD pocket",
             200,
             |app| {
@@ -3854,7 +3854,7 @@
             }
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::C,
+                VirtualKeyCode::KeyC,
                 "CLNK naturally collects the first exposed GOLD chunk",
                 200,
                 |app| app_clonk_carries(app, clonk, "GOLD"),
@@ -3875,7 +3875,7 @@
             app_tutorial07_exit_hut_and_descend_to_gold(&mut app, clonk, elevator_case, hut);
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::C,
+                VirtualKeyCode::KeyC,
                 "empty CLNK sweeps the far side of the GOLD seam",
                 160,
                 |app| {
@@ -3889,7 +3889,7 @@
             if !app_clonk_carries(&app, clonk, "GOLD") {
                 hold_app_key_until(
                     &mut app,
-                    VirtualKeyCode::Z,
+                    VirtualKeyCode::KeyZ,
                     "CLNK naturally collects another GOLD chunk",
                     180,
                     |app| app_clonk_carries(app, clonk, "GOLD"),
@@ -3923,7 +3923,7 @@
         });
         app_navigate_object_menu_to(&mut app, "Exit", |item| item.caption == "Exit");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A exits funded CLNK from HUT3");
         advance_app_until(&mut app, "funded CLNK exits HUT3", 60, |app| {
             app.engine
@@ -3931,7 +3931,7 @@
                 .is_some_and(|object| object.container != Some(hut))
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C starts funded walk toward WRKS");
         let mut previous_action = app
             .engine
@@ -3955,21 +3955,21 @@
             if entered_scale {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::C)
+                    .release(VirtualKeyCode::KeyC)
                     .expect("release physical C on WRKS Scale");
                 keyboard
-                    .press(VirtualKeyCode::C)
+                    .press(VirtualKeyCode::KeyC)
                     .expect("repress physical C on WRKS Scale");
             } else if landed || left_scale_in_flight {
                 AppVirtualKeyboard::new(&mut app)
-                    .tap(VirtualKeyCode::S)
+                    .tap(VirtualKeyCode::KeyS)
                     .expect("physical S jumps toward WRKS");
             }
             previous_action = action;
             app.update().expect("advance funded WRKS walk");
         }
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C at WRKS");
         assert!(app
             .engine
@@ -3982,7 +3982,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "funded CLNK aligns with WRKS entrance",
             100,
             |app| {
@@ -3992,7 +3992,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S enters Tutorial07 WRKS");
         advance_app_until(&mut app, "funded CLNK enters WRKS", 60, |app| {
             app.engine
@@ -4006,7 +4006,7 @@
         });
         app_navigate_object_menu_to(&mut app, "Production", |item| item.caption == "Production");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A opens WRKS Production");
         let production_identification =
             serde_json::from_value(serde_json::json!({ "C4Id": "CXCN" }))
@@ -4031,7 +4031,7 @@
         // advances to the sailboat prompt without any test-side state write
         // (Tutorial07.c4s/Script.c:92-99).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A starts BALN production");
         advance_app_until(&mut app, "WRKS creates real BALN construction", 80, |app| {
             app_object_with_definition(app, "BALN").is_some()
@@ -4060,7 +4060,7 @@
         {
             if app.engine.cursor_object_menu(owner).is_none() {
                 AppVirtualKeyboard::new(&mut app)
-                    .tap(VirtualKeyCode::S)
+                    .tap(VirtualKeyCode::KeyS)
                     .expect("physical S restores WRKS context after production");
                 advance_app_until(&mut app, "WRKS restores context after BALN", 30, |app| {
                     app.engine
@@ -4070,7 +4070,7 @@
             }
             app_navigate_object_menu_to(&mut app, "Exit", |item| item.caption == "Exit");
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::A)
+                .tap(VirtualKeyCode::KeyA)
                 .expect("physical A exits BALN builder from WRKS");
         }
         advance_app_until(&mut app, "BALN builder exits WRKS", 100, |app| {
@@ -4082,10 +4082,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes BALN boarding");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X boards BALN");
         }
         advance_app_until(&mut app, "CLNK boards produced BALN", 100, |app| {
@@ -4094,7 +4094,7 @@
             })
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::S)
+            .press(VirtualKeyCode::KeyS)
             .expect("held physical S climbs in BALN");
         // The 50px BALN must clear Landscape.bmp's rough crystal shelf near
         // y=130 before Stop/ClearDir's downward coast. The pushing CLNK rides
@@ -4107,7 +4107,7 @@
             })
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::S)
+            .release(VirtualKeyCode::KeyS)
             .expect("release physical S at CRYS flight level");
         assert_eq!(
             app.engine
@@ -4118,7 +4118,7 @@
             "physical S release immediately stops BALN through ControlUpdate"
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X down-tap returns BALN to Stop");
         assert_eq!(
             app.engine
@@ -4168,7 +4168,7 @@
                     "BALN's ground-triggered Down is not a stuck physical key"
                 );
                 AppVirtualKeyboard::new(&mut app)
-                    .press(VirtualKeyCode::S)
+                    .press(VirtualKeyCode::KeyS)
                     .expect("physical S raises BALN away from the cliff contact");
                 advance_app_until(
                     &mut app,
@@ -4181,7 +4181,7 @@
                     },
                 );
                 AppVirtualKeyboard::new(&mut app)
-                    .release(VirtualKeyCode::S)
+                    .release(VirtualKeyCode::KeyS)
                     .expect("release physical S above the CRYS cliff lip");
                 assert_eq!(
                     app.engine
@@ -4221,10 +4221,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes BALN exit");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X leaves BALN");
         }
         advance_app_until(&mut app, "CLNK lands on CRYS cliff", 180, |app| {
@@ -4236,7 +4236,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "CLNK crosses the objective CRYS",
             120,
             |app| {
@@ -4250,7 +4250,7 @@
         if !app_clonk_carries(&app, clonk, "CRYS") {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::Z,
+                VirtualKeyCode::KeyZ,
                 "CLNK naturally collects objective CRYS",
                 180,
                 |app| app_clonk_carries(app, clonk, "CRYS"),
@@ -4266,7 +4266,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "CRYS-carrying CLNK steps fully onto the cliff",
             120,
             |app| {
@@ -4287,10 +4287,10 @@
         // are the same balanced AutoStop key edges a live player uses; no
         // object position or terrain state is written by the test.
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D arms the sailboat tunnel");
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("held physical Z starts the sailboat tunnel left");
         advance_app_until(
             &mut app,
@@ -4313,7 +4313,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::X)
+            .press(VirtualKeyCode::KeyX)
             .expect("held physical X turns the sailboat tunnel down-left");
         advance_app_until(
             &mut app,
@@ -4329,10 +4329,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release physical X at the first tunnel exit");
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z at the first tunnel exit");
         }
         assert!(
@@ -4362,9 +4362,9 @@
             }
             if clonk_now.action.name == "Jump" {
                 let toward_sailboat = if clonk_now.position.x < sailboat_x {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 } else {
-                    VirtualKeyCode::Z
+                    VirtualKeyCode::KeyZ
                 };
                 hold_app_key_until(
                     &mut app,
@@ -4384,7 +4384,7 @@
             } else if clonk_now.action.name.starts_with("Scale") {
                 hold_app_key_until(
                     &mut app,
-                    VirtualKeyCode::X,
+                    VirtualKeyCode::KeyX,
                     &format!("CRYS-carrying CLNK descends cave lip {lip}"),
                     180,
                     |app| {
@@ -4396,7 +4396,7 @@
             } else {
                 hold_app_key_until(
                     &mut app,
-                    VirtualKeyCode::Z,
+                    VirtualKeyCode::KeyZ,
                     &format!("CRYS-carrying CLNK reaches cave lip {lip}"),
                     120,
                     |app| {
@@ -4420,14 +4420,14 @@
                 break;
             }
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .unwrap_or_else(|error| panic!("physical D starts cave dig {segment}: {error}"));
             AppVirtualKeyboard::new(&mut app)
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .unwrap_or_else(|error| panic!("physical X aims cave dig {segment}: {error}"));
             if segment >= 2 {
                 AppVirtualKeyboard::new(&mut app)
-                    .press(VirtualKeyCode::C)
+                    .press(VirtualKeyCode::KeyC)
                     .unwrap_or_else(|error| {
                         panic!("physical C aims cave dig {segment} right: {error}")
                     });
@@ -4466,13 +4466,13 @@
             );
             if segment >= 2 {
                 AppVirtualKeyboard::new(&mut app)
-                    .release(VirtualKeyCode::C)
+                    .release(VirtualKeyCode::KeyC)
                     .unwrap_or_else(|error| {
                         panic!("release physical C after cave dig {segment}: {error}")
                     });
             }
             AppVirtualKeyboard::new(&mut app)
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .unwrap_or_else(|error| {
                     panic!("release physical X after cave dig {segment}: {error}")
                 });
@@ -4494,7 +4494,7 @@
                     {
                         hold_app_key_until(
                             &mut app,
-                            VirtualKeyCode::C,
+                            VirtualKeyCode::KeyC,
                             &format!("CLNK walks off tunnel lip {lip}"),
                             120,
                             |app| {
@@ -4531,7 +4531,7 @@
                         continue;
                     }
                     AppVirtualKeyboard::new(&mut app)
-                        .press(VirtualKeyCode::X)
+                        .press(VirtualKeyCode::KeyX)
                         .unwrap_or_else(|error| {
                             panic!("physical X scales below tunnel lip {lip}: {error}")
                         });
@@ -4548,7 +4548,7 @@
                         },
                     );
                     AppVirtualKeyboard::new(&mut app)
-                        .release(VirtualKeyCode::X)
+                        .release(VirtualKeyCode::KeyX)
                         .unwrap_or_else(|error| {
                             panic!("release physical X below tunnel lip {lip}: {error}")
                         });
@@ -4580,7 +4580,7 @@
                 if clonk_now.position.y > sailboat_now.position.y + 10 {
                     hold_app_key_until(
                         &mut app,
-                        VirtualKeyCode::S,
+                        VirtualKeyCode::KeyS,
                         &format!("CLNK climbs toward SLBS on approach {approach}"),
                         180,
                         |app| {
@@ -4595,9 +4595,9 @@
                     );
                 } else {
                     let away_from_wall = if clonk_now.direction == Direction::Left {
-                        VirtualKeyCode::C
+                        VirtualKeyCode::KeyC
                     } else {
-                        VirtualKeyCode::Z
+                        VirtualKeyCode::KeyZ
                     };
                     AppVirtualKeyboard::new(&mut app)
                         .tap(away_from_wall)
@@ -4609,9 +4609,9 @@
             }
             if clonk_now.action.name == "Jump" {
                 let toward_sailboat = if clonk_now.position.x < sailboat_now.position.x {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 } else {
-                    VirtualKeyCode::Z
+                    VirtualKeyCode::KeyZ
                 };
                 hold_app_key_until(
                     &mut app,
@@ -4627,9 +4627,9 @@
                 continue;
             }
             let horizontal = if clonk_now.position.x < sailboat_now.position.x - 5 {
-                VirtualKeyCode::C
+                VirtualKeyCode::KeyC
             } else {
-                VirtualKeyCode::Z
+                VirtualKeyCode::KeyZ
             };
             hold_app_key_until(
                 &mut app,
@@ -4664,10 +4664,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes SLBS grab");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X grabs SLBS");
         }
         advance_app_until(&mut app, "CRYS-carrying CLNK grabs SLBS", 100, |app| {
@@ -4684,7 +4684,7 @@
         // then leave the boat with the normal X/X ungrab gesture.
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "SLBS reaches Tutorial07's home cave",
             900,
             |app| {
@@ -4696,10 +4696,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes home-cave SLBS release");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X leaves SLBS at home");
         }
         advance_app_until(&mut app, "CLNK steps off SLBS at home", 100, |app| {
@@ -4709,7 +4709,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "CRYS-carrying CLNK walks from SLBS into the home cave",
             160,
             |app| {
@@ -4734,7 +4734,7 @@
 
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "CRYS-carrying CLNK reaches the home blast-pocket wall",
             160,
             |app| {
@@ -4770,7 +4770,7 @@
         });
         app_navigate_object_menu_to(&mut app, "Put", |item| item.caption == "Put");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A transfers CRYS through HUT3 context Put");
         advance_app_until(
             &mut app,
@@ -4794,7 +4794,7 @@
         );
         app_navigate_object_menu_to(&mut app, "Sell", |item| item.caption == "Sell");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A opens HUT3 Sell menu");
         let sell_identification = serde_json::from_value(serde_json::json!({ "Int": 5 }))
             .expect("sell identification deserializes");
@@ -4805,7 +4805,7 @@
         });
         app_navigate_object_menu_to(&mut app, "CRYS", |item| item.item_id == "CRYS");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A sells the objective CRYS");
         advance_app_until(&mut app, "selling CRYS removes the objective", 60, |app| {
             app.engine.object_snapshot(crystal).is_none()
@@ -4853,10 +4853,10 @@
         delivery: usize,
     ) -> ObjectId {
         for key in [
-            VirtualKeyCode::Z,
-            VirtualKeyCode::C,
-            VirtualKeyCode::S,
-            VirtualKeyCode::X,
+            VirtualKeyCode::KeyZ,
+            VirtualKeyCode::KeyC,
+            VirtualKeyCode::KeyS,
+            VirtualKeyCode::KeyX,
         ] {
             AppVirtualKeyboard::new(app)
                 .release(key)
@@ -4873,9 +4873,9 @@
             .object_snapshot(clonk)
             .is_some_and(|object| object.position.x < 400)
         {
-            VirtualKeyCode::C
+            VirtualKeyCode::KeyC
         } else {
-            VirtualKeyCode::Z
+            VirtualKeyCode::KeyZ
         };
         AppVirtualKeyboard::new(app)
             .press(search_key)
@@ -4899,16 +4899,16 @@
                 AppVirtualKeyboard::new(app)
                     .release(search_key)
                     .expect("release WIPF sweep before clearing incidental material");
-                let behind = if search_key == VirtualKeyCode::C {
-                    VirtualKeyCode::Z
+                let behind = if search_key == VirtualKeyCode::KeyC {
+                    VirtualKeyCode::KeyZ
                 } else {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 };
                 AppVirtualKeyboard::new(app)
                     .tap(behind)
                     .expect("physical direction faces away from the WIPF sweep");
                 AppVirtualKeyboard::new(app)
-                    .tap(VirtualKeyCode::A)
+                    .tap(VirtualKeyCode::KeyA)
                     .expect("physical A throws incidental WIPF-sweep material");
                 advance_app_until(
                     app,
@@ -4934,9 +4934,9 @@
                 .position
                 .x;
             let next_key = if x <= 8 {
-                VirtualKeyCode::C
+                VirtualKeyCode::KeyC
             } else if x >= 790 {
-                VirtualKeyCode::Z
+                VirtualKeyCode::KeyZ
             } else {
                 search_key
             };
@@ -4993,9 +4993,9 @@
             .zip(app.engine.object_snapshot(lorry))
             .map(|(clonk, lorry)| {
                 if clonk.position.x < lorry.position.x {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 } else {
-                    VirtualKeyCode::Z
+                    VirtualKeyCode::KeyZ
                 }
             })
             .expect("CLNK and LORY survive the WIPF search");
@@ -5017,10 +5017,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes LORY grab");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X grabs LORY");
         }
         advance_app_until(app, "WIPF-carrying CLNK grabs LORY", 80, |app| {
@@ -5029,7 +5029,7 @@
             })
         });
         AppVirtualKeyboard::new(app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .unwrap_or_else(|error| panic!("physical A loads WIPF {delivery} into LORY: {error}"));
         advance_app_until(
             app,
@@ -5044,10 +5044,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes LORY release");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X releases LORY");
         }
         advance_app_until(app, "CLNK releases loaded LORY", 60, |app| {
@@ -5126,9 +5126,9 @@
             .object_snapshot(clonk)
             .is_some_and(|object| object.position.x < 400)
         {
-            VirtualKeyCode::C
+            VirtualKeyCode::KeyC
         } else {
-            VirtualKeyCode::Z
+            VirtualKeyCode::KeyZ
         };
         AppVirtualKeyboard::new(&mut app)
             .press(search_key)
@@ -5154,16 +5154,16 @@
                 AppVirtualKeyboard::new(&mut app)
                     .release(search_key)
                     .expect("release surface sweep before throwing incidental material");
-                let behind = if search_key == VirtualKeyCode::C {
-                    VirtualKeyCode::Z
+                let behind = if search_key == VirtualKeyCode::KeyC {
+                    VirtualKeyCode::KeyZ
                 } else {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 };
                 AppVirtualKeyboard::new(&mut app)
                     .tap(behind)
                     .expect("physical direction faces away from the WIPF sweep");
                 AppVirtualKeyboard::new(&mut app)
-                    .tap(VirtualKeyCode::A)
+                    .tap(VirtualKeyCode::KeyA)
                     .expect("physical A throws incidental surface material");
                 advance_app_until(
                     &mut app,
@@ -5189,9 +5189,9 @@
                 .position
                 .x;
             let next_key = if x <= 8 {
-                VirtualKeyCode::C
+                VirtualKeyCode::KeyC
             } else if x >= 790 {
-                VirtualKeyCode::Z
+                VirtualKeyCode::KeyZ
             } else {
                 search_key
             };
@@ -5226,10 +5226,10 @@
         );
 
         for key in [
-            VirtualKeyCode::Z,
-            VirtualKeyCode::C,
-            VirtualKeyCode::S,
-            VirtualKeyCode::X,
+            VirtualKeyCode::KeyZ,
+            VirtualKeyCode::KeyC,
+            VirtualKeyCode::KeyS,
+            VirtualKeyCode::KeyX,
         ] {
             AppVirtualKeyboard::new(&mut app)
                 .release(key)
@@ -5244,9 +5244,9 @@
             .zip(app.engine.object_snapshot(lorry))
             .map(|(clonk, lorry)| {
                 if clonk.position.x < lorry.position.x {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 } else {
-                    VirtualKeyCode::Z
+                    VirtualKeyCode::KeyZ
                 }
             })
             .expect("CLNK and LORY survive the first WIPF search");
@@ -5268,10 +5268,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes LORY grab");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X grabs LORY");
         }
         advance_app_until(&mut app, "WIPF-carrying CLNK grabs LORY", 80, |app| {
@@ -5280,7 +5280,7 @@
             })
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A loads carried WIPF into LORY");
         advance_app_until(&mut app, "first caught WIPF enters LORY", 60, |app| {
             app.engine
@@ -5290,10 +5290,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes LORY release");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X releases LORY");
         }
         advance_app_until(&mut app, "CLNK releases first-loaded LORY", 60, |app| {
@@ -5376,9 +5376,9 @@
             .zip(app.engine.object_snapshot(lorry))
             .map(|(clonk, lorry)| {
                 if clonk.position.x < lorry.position.x {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 } else {
-                    VirtualKeyCode::Z
+                    VirtualKeyCode::KeyZ
                 }
             })
             .expect("CLNK and six-WIPF LORY remain observable");
@@ -5400,10 +5400,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X primes loaded LORY grab");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X grabs loaded LORY");
         }
         advance_app_until(&mut app, "CLNK grabs six-WIPF LORY", 80, |app| {
@@ -5417,9 +5417,9 @@
             .zip(app.engine.object_snapshot(hut))
             .map(|(lorry, hut)| {
                 if lorry.position.x < hut.position.x + 10 {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 } else {
-                    VirtualKeyCode::Z
+                    VirtualKeyCode::KeyZ
                 }
             })
             .expect("loaded LORY and HUT3 remain observable");
@@ -5440,7 +5440,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S enters six-WIPF LORY into HUT3");
         advance_app_until(&mut app, "loaded LORY enters HUT3", 80, |app| {
             app.engine

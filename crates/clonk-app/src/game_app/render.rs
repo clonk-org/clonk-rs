@@ -4089,7 +4089,7 @@ impl GameApp {
                 }
                 _ => false,
             };
-        if construction_cursor_drawn && self.mouse_control && self.keyboard_modifiers.shift() {
+        if construction_cursor_drawn && self.mouse_control && self.keyboard_modifiers.shift_key() {
             if let (Some((_, _, pointer, _)), Some(primary_offset), Some(viewport_clip)) = (
                 construction_cursor,
                 construction_primary_offset,
@@ -4172,7 +4172,7 @@ impl GameApp {
                             );
                         }
                         if self.mouse_control
-                            && self.keyboard_modifiers.shift()
+                            && self.keyboard_modifiers.shift_key()
                             && cursor_kind.allows_add_marker()
                         {
                             if let Some(primary_offset) =

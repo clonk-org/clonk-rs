@@ -1533,10 +1533,10 @@
         );
         assert_eq!(
             app.bindings.key_for(ControlBindingId::Up),
-            Some(VirtualKeyCode::S)
+            Some(VirtualKeyCode::KeyS)
         );
 
-        app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
             .expect("unbound arrow press");
         assert!(
             app.engine
@@ -1548,7 +1548,7 @@
             "the default Up arrow must not alias keyboard-set-1 Up"
         );
 
-        app.handle_key(VirtualKeyCode::S, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyS, ElementState::Pressed)
             .expect("press keyboard-set-1 Up");
         assert_eq!(
             app.engine
@@ -1584,7 +1584,7 @@
             "ObjectComJump launches upward (C4ObjectCom.cpp:280-307)"
         );
 
-        app.handle_key(VirtualKeyCode::S, ElementState::Released)
+        app.handle_key(VirtualKeyCode::KeyS, ElementState::Released)
             .expect("release keyboard-set-1 Up");
         assert_eq!(
             app.engine
@@ -2818,7 +2818,7 @@
             .expect("player dialog")
             .set_pointer_position(Some(GuiPoint::new(639.0, 479.0)));
 
-        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
             .expect("open selected-row context menu");
         let popup = app.context_menu.as_ref().expect("keyboard context menu");
         let panel = &popup.layout().panels[0];
@@ -2834,7 +2834,7 @@
             .expect("move focus away from list");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
             .expect("release Tab");
-        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
             .expect("Apps outside list focus is inert");
         assert!(app.context_menu.is_none());
     }
@@ -3116,7 +3116,7 @@
             .expect("the player-properties modal renders over selection");
         app.startup_player_properties_dialog = None;
 
-        for key in [VirtualKeyCode::Return, VirtualKeyCode::F2] {
+        for key in [VirtualKeyCode::Enter, VirtualKeyCode::F2] {
             app.handle_key(key, ElementState::Pressed)
                 .expect("existing-player shortcut opens editor");
             assert!(matches!(
@@ -3421,7 +3421,7 @@
 
         let mut app = new_classic_menu_app(640, 480);
         app.open_options_menu();
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("hold Ctrl");
         for expected in [
             OptionsSheet::Graphics,
@@ -3462,9 +3462,9 @@
         *dialog.controls_mut() = controls;
         dialog.restore_sheet(OptionsSheet::Keyboard);
 
-        app.handle_key(VirtualKeyCode::Key2, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Digit2, ElementState::Pressed)
             .expect("bare digit is inert");
-        app.handle_key(VirtualKeyCode::Key2, ElementState::Released)
+        app.handle_key(VirtualKeyCode::Digit2, ElementState::Released)
             .expect("release bare digit");
         assert_eq!(
             app.startup_options_dialog
@@ -3477,9 +3477,9 @@
 
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("hold Alt");
-        app.handle_key(VirtualKeyCode::Key2, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Digit2, ElementState::Pressed)
             .expect("select Keyboard 2");
-        app.handle_key(VirtualKeyCode::Key2, ElementState::Released)
+        app.handle_key(VirtualKeyCode::Digit2, ElementState::Released)
             .expect("release Alt+2");
         assert_eq!(
             app.startup_options_dialog
@@ -3502,7 +3502,7 @@
 
         app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
             .expect("hold Alt+Shift");
-        app.handle_key(VirtualKeyCode::Key4, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Digit4, ElementState::Pressed)
             .expect("select Keyboard 4 with shifted mnemonic mask");
         assert_eq!(
             app.startup_options_dialog
@@ -3512,9 +3512,9 @@
                 .selected_set(ControlDevice::Keyboard),
             3
         );
-        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CONTROL)
             .expect("hold unsupported Ctrl+Alt mask");
-        app.handle_key(VirtualKeyCode::Key1, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Digit1, ElementState::Pressed)
             .expect("Ctrl+Alt digit is inert");
         assert_eq!(
             app.startup_options_dialog
@@ -3533,7 +3533,7 @@
             .expect("enter Gamepad sheet");
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("hold Alt on Gamepad sheet");
-        app.handle_key(VirtualKeyCode::Key3, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Digit3, ElementState::Pressed)
             .expect("select visible Gamepad 3");
         assert_eq!(
             app.startup_options_dialog
@@ -3545,7 +3545,7 @@
         );
         assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(2)));
 
-        for key in [VirtualKeyCode::Key4, VirtualKeyCode::Key0] {
+        for key in [VirtualKeyCode::Digit4, VirtualKeyCode::Digit0] {
             app.handle_key(key, ElementState::Pressed)
                 .expect("disconnected Gamepad mnemonic is inert");
         }
@@ -3576,7 +3576,7 @@
 
         app.process_options_dialog_actions(vec![OptionsDlgAction::ResetConfiguration])
             .expect("open reset confirmation above Options");
-        app.handle_key(VirtualKeyCode::Key2, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Digit2, ElementState::Pressed)
             .expect("message modal owns the unmatched mnemonic");
         assert_eq!(
             app.startup_options_dialog
@@ -3591,7 +3591,7 @@
 
         app.process_options_dialog_actions(vec![OptionsDlgAction::OpenGraphicsScaleText])
             .expect("open input modal above Options");
-        app.handle_key(VirtualKeyCode::Key2, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Digit2, ElementState::Pressed)
             .expect("input modal owns the unmatched mnemonic");
         assert_eq!(
             app.startup_options_dialog
@@ -3746,12 +3746,12 @@
 
         let modifier_masks = [
             ModifiersState::ALT,
-            ModifiersState::CTRL,
+            ModifiersState::CONTROL,
             ModifiersState::SHIFT,
-            ModifiersState::ALT | ModifiersState::CTRL,
+            ModifiersState::ALT | ModifiersState::CONTROL,
             ModifiersState::ALT | ModifiersState::SHIFT,
-            ModifiersState::CTRL | ModifiersState::SHIFT,
-            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
         ];
 
         let mut checkbox = new_running_sandbox_app();
@@ -3765,12 +3765,12 @@
                 .handle_modifiers_changed(modifiers)
                 .expect("set exact C++ modifier mask");
             for key in [
-                VirtualKeyCode::Up,
-                VirtualKeyCode::Down,
-                VirtualKeyCode::Left,
-                VirtualKeyCode::Back,
+                VirtualKeyCode::ArrowUp,
+                VirtualKeyCode::ArrowDown,
+                VirtualKeyCode::ArrowLeft,
+                VirtualKeyCode::Backspace,
                 VirtualKeyCode::Escape,
-                VirtualKeyCode::Right,
+                VirtualKeyCode::ArrowRight,
             ] {
                 checkbox
                     .handle_key(key, ElementState::Pressed)
@@ -3826,8 +3826,8 @@
                 .expect("set exact C++ modifier mask");
             for key in [
                 VirtualKeyCode::Space,
-                VirtualKeyCode::Left,
-                VirtualKeyCode::Back,
+                VirtualKeyCode::ArrowLeft,
+                VirtualKeyCode::Backspace,
                 VirtualKeyCode::Escape,
             ] {
                 checkbox
@@ -3850,7 +3850,7 @@
         }
 
         checkbox
-            .handle_modifiers_changed(ModifiersState::LOGO)
+            .handle_modifiers_changed(ModifiersState::SUPER)
             .expect("Logo is outside the C++ modifier mask");
         checkbox
             .handle_key(VirtualKeyCode::Space, ElementState::Pressed)
@@ -3880,7 +3880,7 @@
             back.handle_modifiers_changed(modifiers)
                 .expect("set exact C++ modifier mask");
             for key in [
-                VirtualKeyCode::Return,
+                VirtualKeyCode::Enter,
                 VirtualKeyCode::NumpadEnter,
                 VirtualKeyCode::Space,
             ] {
@@ -4450,7 +4450,7 @@
             .expect("configured release remains consumed");
 
         assert!(
-            !app.handle_network_chart_key(VirtualKeyCode::Up, ElementState::Pressed),
+            !app.handle_network_chart_key(VirtualKeyCode::ArrowUp, ElementState::Pressed),
             "the non-exclusive chart must not invent GUI-scope arrow navigation"
         );
         assert_eq!(
@@ -4564,9 +4564,9 @@
                 [
                     RuntimeKeyChord::keyboard(
                         VirtualKeyCode::F2,
-                        ModifiersState::CTRL | ModifiersState::SHIFT,
+                        ModifiersState::CONTROL | ModifiersState::SHIFT,
                     ),
-                    RuntimeKeyChord::keyboard(VirtualKeyCode::Return, ModifiersState::empty(),),
+                    RuntimeKeyChord::keyboard(VirtualKeyCode::Enter, ModifiersState::empty(),),
                 ]
                 .as_slice()
             )
@@ -4604,7 +4604,7 @@
             partial.override_for("ChatOpen"),
             Some(
                 [
-                    RuntimeKeyChord::keyboard(VirtualKeyCode::Capital, ModifiersState::empty(),),
+                    RuntimeKeyChord::keyboard(VirtualKeyCode::CapsLock, ModifiersState::empty(),),
                     RuntimeKeyChord::keyboard(VirtualKeyCode::F2, ModifiersState::empty(),),
                 ]
                 .as_slice()
@@ -4627,14 +4627,14 @@
             RuntimePhysicalKey::Keyboard(VirtualKeyCode::Numpad1)
         );
 
-        let caps_raw = input::encode_virtual_key_code(VirtualKeyCode::Capital)
+        let caps_raw = input::encode_virtual_key_code(VirtualKeyCode::CapsLock)
             .expect("the active platform represents CapsLock");
         let raw_caps = format!("[Keys]\nToggleChat=\\x{caps_raw:x}\n");
         let raw_caps = parse_runtime_key_config(raw_caps.as_bytes())
             .expect("compile an active-platform raw key code");
         assert_eq!(
             raw_caps.override_for("ToggleChat").unwrap()[0].physical,
-            RuntimePhysicalKey::Keyboard(VirtualKeyCode::Capital)
+            RuntimePhysicalKey::Keyboard(VirtualKeyCode::CapsLock)
         );
 
         let noncanonical = parse_runtime_key_config(b"[Keys]\nKbd01Key01=F2\n")
@@ -4668,12 +4668,12 @@
         assert!(app.primary_physical_viewport_is_no_owner());
         let players_before = app.engine.snapshot().players;
 
-        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
             .expect("production FreeView Left dispatch");
         let production_left = app.graphics.active_viewport_projections()[0];
         assert_eq!(production_left.target_x, initial.target_x - 5);
         assert_eq!(production_left.target_y, initial.target_y);
-        app.handle_key(VirtualKeyCode::Left, ElementState::Released)
+        app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Released)
             .expect("FreeView key-up has no callback");
         assert_eq!(
             app.graphics.active_viewport_projections()[0].target_x,
@@ -4684,7 +4684,7 @@
         let start = app.graphics.active_viewport_projections()[0];
         let now = Instant::now();
         assert!(app.handle_viewport_player_cycle_key_at(
-            VirtualKeyCode::Left,
+            VirtualKeyCode::ArrowLeft,
             ElementState::Pressed,
             now,
         ));
@@ -4693,14 +4693,14 @@
         assert_eq!(first_left.target_y, start.target_y);
 
         assert!(!app.handle_viewport_player_cycle_key_at(
-            VirtualKeyCode::Left,
+            VirtualKeyCode::ArrowLeft,
             ElementState::Released,
             now + Duration::from_millis(25),
         ));
         assert_eq!(app.graphics.active_viewport_projections()[0], first_left);
 
         assert!(app.handle_viewport_player_cycle_key_at(
-            VirtualKeyCode::Left,
+            VirtualKeyCode::ArrowLeft,
             ElementState::Pressed,
             now + Duration::from_millis(50),
         ));
@@ -4709,7 +4709,7 @@
         assert_eq!(second_left.target_y, start.target_y);
 
         assert!(app.handle_viewport_player_cycle_key_at(
-            VirtualKeyCode::Up,
+            VirtualKeyCode::ArrowUp,
             ElementState::Pressed,
             now + Duration::from_millis(75),
         ));
@@ -4718,7 +4718,7 @@
         assert_eq!(cross_axis.target_y, start.target_y - 5);
 
         assert!(app.handle_viewport_player_cycle_key_at(
-            VirtualKeyCode::Right,
+            VirtualKeyCode::ArrowRight,
             ElementState::Pressed,
             now + Duration::from_millis(175),
         ));
@@ -4727,7 +4727,7 @@
         assert_eq!(reset_right.target_y, start.target_y - 5);
 
         assert!(app.handle_viewport_player_cycle_key_at(
-            VirtualKeyCode::Down,
+            VirtualKeyCode::ArrowDown,
             ElementState::Pressed,
             now + Duration::from_millis(275),
         ));
@@ -4753,22 +4753,22 @@
         for (binding, key, command) in [
             (
                 ControlBindingId::Left,
-                VirtualKeyCode::Left,
+                VirtualKeyCode::ArrowLeft,
                 clonk_engine::COM_LEFT,
             ),
             (
                 ControlBindingId::Right,
-                VirtualKeyCode::Right,
+                VirtualKeyCode::ArrowRight,
                 clonk_engine::COM_RIGHT,
             ),
             (
                 ControlBindingId::Up,
-                VirtualKeyCode::Up,
+                VirtualKeyCode::ArrowUp,
                 clonk_engine::COM_UP,
             ),
             (
                 ControlBindingId::Down,
-                VirtualKeyCode::Down,
+                VirtualKeyCode::ArrowDown,
                 clonk_engine::COM_DOWN,
             ),
         ] {
@@ -5730,7 +5730,7 @@
             .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .expect("player owns first bare down");
         changed_on_release
-            .handle_modifiers_changed(ModifiersState::CTRL)
+            .handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("add Ctrl before physical up");
         changed_on_release
             .handle_key(VirtualKeyCode::F3, ElementState::Released)
@@ -5769,7 +5769,7 @@
             .options
             .sound_enabled;
         focus
-            .handle_modifiers_changed(ModifiersState::CTRL)
+            .handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("set Ctrl before focus loss");
         focus.handle_focus_lost().expect("clear raw keyboard state");
         assert!(focus.keyboard_modifiers.is_empty());
@@ -5845,11 +5845,11 @@
             .expect("parse rebound speed keys")))
             .expect("install rebound speed keys");
         rebound
-            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
             .expect("rebound speed-up key");
         assert_eq!(rebound.frame_skip, 2);
         rebound
-            .handle_key(VirtualKeyCode::H, ElementState::Pressed)
+            .handle_key(VirtualKeyCode::KeyH, ElementState::Pressed)
             .expect("rebound speed-down key");
         assert_eq!(rebound.frame_skip, 1);
         assert!(!rebound.full_speed);
@@ -5871,7 +5871,7 @@
             .options
             .sound_enabled;
         global_collision
-            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
             .expect("earlier registered global owns collision");
         assert_eq!(
             global_collision
@@ -5896,13 +5896,13 @@
             .expect("parse player/global collision")))
             .expect("install player/global collision");
         collision
-            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
             .expect("higher-priority player binding owns collision");
         assert_eq!(collision.frame_skip, 1);
         assert!(!collision.full_speed);
         assert!(collision.runtime_flash_message.is_none());
         collision
-            .handle_key(VirtualKeyCode::G, ElementState::Released)
+            .handle_key(VirtualKeyCode::KeyG, ElementState::Released)
             .expect("player binding owns collision release");
     }
 
@@ -6061,7 +6061,7 @@
                 .options
                 .sound_enabled;
             sound
-                .handle_modifiers_changed(ModifiersState::CTRL)
+                .handle_modifiers_changed(ModifiersState::CONTROL)
                 .expect("set Ctrl");
             sound
                 .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -6667,7 +6667,7 @@
         assert_eq!(
             loaded.net_observer_next_player,
             vec![
-                RuntimeKeyChord::keyboard(VirtualKeyCode::Right, ModifiersState::empty()),
+                RuntimeKeyChord::keyboard(VirtualKeyCode::ArrowRight, ModifiersState::empty()),
                 RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),
             ]
         );
@@ -6707,7 +6707,7 @@
         assert_eq!(
             loaded.net_observer_next_player,
             vec![
-                RuntimeKeyChord::keyboard(VirtualKeyCode::Right, ModifiersState::empty()),
+                RuntimeKeyChord::keyboard(VirtualKeyCode::ArrowRight, ModifiersState::empty()),
                 RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),
             ]
         );
@@ -7127,13 +7127,13 @@
     fn modified_f1_does_not_match_an_unmodified_player_binding() {
         for modifiers in [
             ModifiersState::ALT,
-            ModifiersState::CTRL,
+            ModifiersState::CONTROL,
             ModifiersState::SHIFT,
-            ModifiersState::ALT | ModifiersState::CTRL,
+            ModifiersState::ALT | ModifiersState::CONTROL,
             ModifiersState::ALT | ModifiersState::SHIFT,
-            ModifiersState::CTRL | ModifiersState::SHIFT,
-            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
-            ModifiersState::LOGO | ModifiersState::SHIFT,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ModifiersState::SUPER | ModifiersState::SHIFT,
         ] {
             let mut app = new_running_sandbox_app();
             app.bindings
@@ -7250,13 +7250,13 @@
     fn modified_f1_retains_downstream_priority_without_toggling_help() {
         for modifiers in [
             ModifiersState::ALT,
-            ModifiersState::CTRL,
+            ModifiersState::CONTROL,
             ModifiersState::SHIFT,
-            ModifiersState::ALT | ModifiersState::CTRL,
+            ModifiersState::ALT | ModifiersState::CONTROL,
             ModifiersState::ALT | ModifiersState::SHIFT,
-            ModifiersState::CTRL | ModifiersState::SHIFT,
-            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
-            ModifiersState::LOGO | ModifiersState::SHIFT,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ModifiersState::SUPER | ModifiersState::SHIFT,
         ] {
             let mut app = new_running_sandbox_app();
             app.status_text.clear();
@@ -7506,7 +7506,7 @@
             .handle_modifiers_changed(ModifiersState::ALT)
             .expect("set the Continue mnemonic modifier");
         game_over
-            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
             .expect("Continue closes evaluation");
         assert!(game_over.game_over_dialog.is_none());
         game_over

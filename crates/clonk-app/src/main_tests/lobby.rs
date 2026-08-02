@@ -473,7 +473,7 @@ fn joined_lobby_tooltips_survive_frames_and_use_shared_delay() {
     ));
 
     // Non-pointer input suppresses until real motion, exactly as on the host.
-    app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("route physical key");
     assert!(!tooltip_at(&app, Instant::now() + Duration::from_secs(1)));
     app.handle_network_lobby_pointer_move(point)
@@ -556,7 +556,7 @@ fn persistent_classic_lobby_non_pointer_input_suppresses_tooltip_until_motion() 
         .expect("prime lobby hover");
     assert!(tooltip_visible(&app));
 
-    app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("route physical key");
     assert!(!tooltip_visible(&app));
     app.handle_classic_lobby_pointer_move(point)
@@ -605,7 +605,7 @@ fn persistent_classic_lobby_non_pointer_input_suppresses_tooltip_until_motion() 
         .scenario_game_options
         .tooltip_state_at(Instant::now() + Duration::from_secs(1))
         .is_some());
-    app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("suppress embedded option tooltip");
     assert!(app
         .scenario_game_options
@@ -704,7 +704,7 @@ fn captured_classic_lobby_wheel_releases_tooltip_hover_ownership() {
     );
     app.handle_classic_lobby_pointer_move(exit_point)
         .expect("move onto non-scroll control");
-    app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("suppress exit tooltip");
     app.handle_classic_lobby_wheel(60)
         .expect("route unconsumed wheel");
@@ -2850,7 +2850,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
         LobbyControl::Roster,
     );
     app.keyboard_modifiers = ModifiersState::ALT;
-    app.handle_key(VirtualKeyCode::T, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyT, ElementState::Pressed)
         .expect("Alt+T routes through the retained joined lobby label");
     assert_eq!(
         app.network_lobby
@@ -2867,9 +2867,9 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
         .expect("press joined roster after mnemonic focus");
     app.handle_network_lobby_pointer_button(ElementState::Released, false)
         .expect("release joined roster after mnemonic focus");
-    app.keyboard_modifiers = ModifiersState::CTRL;
+    app.keyboard_modifiers = ModifiersState::CONTROL;
     assert!(!app
-        .handle_network_lobby_chat_key(VirtualKeyCode::A, ElementState::Pressed)
+        .handle_network_lobby_chat_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("unfocused joined edit rejects Ctrl+A"));
     app.keyboard_modifiers = ModifiersState::empty();
     assert_eq!(
@@ -2902,7 +2902,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
         .expect("joined lobby")
         .chat_edit
         .clone();
-    app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
         .expect("full key dispatch leaves the unfocused joined edit alone");
     assert_eq!(
         app.network_lobby.as_ref().expect("joined lobby").chat_edit,
@@ -2948,13 +2948,13 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
         .chat_edit
         .clone();
     for (modifiers, key) in [
-        (ModifiersState::SHIFT, VirtualKeyCode::Return),
-        (ModifiersState::ALT, VirtualKeyCode::Left),
+        (ModifiersState::SHIFT, VirtualKeyCode::Enter),
+        (ModifiersState::ALT, VirtualKeyCode::ArrowLeft),
         (
-            ModifiersState::CTRL | ModifiersState::SHIFT,
-            VirtualKeyCode::A,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            VirtualKeyCode::KeyA,
         ),
-        (ModifiersState::CTRL, VirtualKeyCode::Up),
+        (ModifiersState::CONTROL, VirtualKeyCode::ArrowUp),
     ] {
         app.keyboard_modifiers = modifiers;
         app.handle_key(key, ElementState::Pressed)
@@ -4249,7 +4249,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     hotkey.keyboard_modifiers = ModifiersState::ALT;
     hotkey.ui_sound_log.clear();
     hotkey
-        .handle_key(VirtualKeyCode::X, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyX, ElementState::Pressed)
         .expect("Alt+X exits the production joined lobby");
     assert_eq!(hotkey.startup_view, StartupView::MainMenu);
     assert!(hotkey.network_lobby.is_none());
@@ -4338,7 +4338,7 @@ fn l102_joined_client_roster_context_reaches_mute_and_info_without_host_actions(
         2
     );
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::M, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::KeyM, ElementState::Pressed)
         .expect("select Mute"));
     assert!(app.control_messages.is_muted(0));
     assert!(commands.take_submitted_client_updates().is_empty());
@@ -4600,19 +4600,19 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     };
     app.joined_lobby_layouts()
         .expect("synchronize joined chat draft");
-    app.keyboard_modifiers = ModifiersState::CTRL;
-    app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+    app.keyboard_modifiers = ModifiersState::CONTROL;
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("unfocused Ctrl-C stays outside the joined chat edit");
-    app.handle_key(VirtualKeyCode::C, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyC, ElementState::Released)
         .expect("release unfocused joined Ctrl-C");
     assert_eq!(
         app.network_lobby.as_ref().unwrap().controller.focus(),
         LobbyControl::Roster
     );
     app.keyboard_modifiers = ModifiersState::empty();
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Return with roster focus is eaten like C4GUI::Dialog");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("release eaten roster Return");
     assert!(commands.take_submitted_messages().is_empty());
     assert_eq!(
@@ -4620,9 +4620,9 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
         LobbyControl::Roster
     );
 
-    app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
         .expect("Left is an edit key only while the chat edit is focused");
-    app.handle_key(VirtualKeyCode::Left, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Released)
         .expect("release unfocused Left");
     let lobby = app.network_lobby.as_ref().unwrap();
     assert_eq!(lobby.chat_edit.text, "draft");
@@ -4785,14 +4785,14 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     };
     app.joined_lobby_layouts()
         .expect("synchronize joined default-focus draft");
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("a header row has no ListBox context, so Apps is eaten");
     let lobby = app.network_lobby.as_ref().unwrap();
     assert!(app.context_menu.is_none());
     assert_eq!(lobby.controller.focus(), LobbyControl::Roster);
     assert_eq!(lobby.chat_edit.text, "focus me");
     assert_eq!(lobby.chat_edit.caret, 0);
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
         .expect("release eaten joined Apps");
     app.handle_network_lobby_pointer_move(free_point).unwrap();
     app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
@@ -4913,13 +4913,13 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
         2
     );
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::Down, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("select current joined team"));
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::Down, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("select available joined team"));
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("activate joined team selection"));
     let mut team_selected = chooser.clone();
     team_selected.team = 3;
@@ -4970,7 +4970,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .expect("open local player context");
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::R, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::KeyR, ElementState::Pressed)
         .expect("activate joined local Remove"));
     assert_eq!(
         commands.take_player_info_updates(),
@@ -4987,7 +4987,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .expect("reopen local player context");
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::C, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("activate New Color"));
     let mut recolored = chooser.clone();
     recolored.color = recolored.original_color;
@@ -5702,15 +5702,15 @@ fn joined_lobby_game_option_strip_routes_input() {
     // Alt hotkeys reach enabled controls silently and skip locked ones.
     app.keyboard_modifiers = ModifiersState::ALT;
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::R, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
         .expect("Alt+R toggles Record");
-    app.handle_key(VirtualKeyCode::R, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyR, ElementState::Released)
         .expect("Alt+R release");
     assert!(app.scenario_game_options.values().record);
     assert!(app.ui_sound_log.is_empty(), "dialog hotkeys are silent");
-    app.handle_key(VirtualKeyCode::L, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyL, ElementState::Pressed)
         .expect("Alt+L stays inert");
-    app.handle_key(VirtualKeyCode::L, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyL, ElementState::Released)
         .expect("Alt+L release");
     assert!(!app.scenario_game_options.values().lobby_is_league);
     app.keyboard_modifiers = ModifiersState::empty();
@@ -5834,9 +5834,9 @@ fn joined_lobby_game_option_strip_routes_input() {
     app.handle_mouse_button(ElementState::Released)
         .expect("release the league-locked Record");
     app.keyboard_modifiers = ModifiersState::ALT;
-    app.handle_key(VirtualKeyCode::R, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
         .expect("Alt+R on the league-locked Record");
-    app.handle_key(VirtualKeyCode::R, ElementState::Released)
+    app.handle_key(VirtualKeyCode::KeyR, ElementState::Released)
         .expect("Alt+R release on the league-locked Record");
     app.keyboard_modifiers = ModifiersState::empty();
     assert_eq!(app.scenario_game_options.values().record, record_before);
@@ -6036,9 +6036,9 @@ fn l102_lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby()
     assert!(app.runtime_client_list.is_some());
     assert!(app.context_menu.is_none());
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("Return is swallowed by client information");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("Return release remains owned by client information");
     assert!(app.runtime_client_list.is_some());
     assert!(commands.take_submitted_client_updates().is_empty());
@@ -6242,13 +6242,13 @@ fn classic_lobby_team_combo_filters_teams_and_submits_the_full_player_packet() {
     );
 
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::Down, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("select first team row"));
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::Down, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("select second team row"));
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("activate selected team"));
 
     let updates = commands.take_player_info_updates();
@@ -6873,7 +6873,7 @@ fn focused_lobby_team_combo_opens_from_cpp_keyboard_bindings_and_escape_closes()
         LobbyControl::RosterTeam
     );
 
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("Down opens combo");
     assert!(app.context_menu.is_some());
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
@@ -6887,7 +6887,7 @@ fn focused_lobby_team_combo_opens_from_cpp_keyboard_bindings_and_escape_closes()
         .expect("close Space-opened combo");
 
     app.keyboard_modifiers = ModifiersState::ALT;
-    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("Alt+Down opens combo");
     assert!(app.context_menu.is_some());
     app.keyboard_modifiers = ModifiersState::empty();
@@ -7308,7 +7308,7 @@ fn classic_host_lobby_chat_keyboard_routes_edit_locally() {
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     install_test_classic_host_lobby(&mut app);
 
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("Apps opens the classic chat context menu");
     assert!(app.context_menu.is_some());
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
@@ -7316,8 +7316,8 @@ fn classic_host_lobby_chat_keyboard_routes_edit_locally() {
     assert!(app.context_menu.is_none());
 
     for (key, modifiers) in [
-        (VirtualKeyCode::A, ModifiersState::CTRL),
-        (VirtualKeyCode::Left, ModifiersState::CTRL),
+        (VirtualKeyCode::KeyA, ModifiersState::CONTROL),
+        (VirtualKeyCode::ArrowLeft, ModifiersState::CONTROL),
         (VirtualKeyCode::Delete, ModifiersState::empty()),
         (VirtualKeyCode::Home, ModifiersState::SHIFT),
     ] {
@@ -7359,7 +7359,7 @@ fn classic_host_lobby_chat_keyboard_routes_edit_locally() {
             .focus(),
         LobbyControl::Roster
     );
-    app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
         .expect("local client context is safely ignored");
     assert!(app.context_menu.is_none());
 }
@@ -7375,7 +7375,7 @@ fn generic_client_lobby_chat_submits_private_delivery_message_controls() {
     for character in "hello".chars() {
         app.handle_text_input(character).expect("type client chat");
     }
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("submit client chat");
 
     assert_eq!(
@@ -7401,7 +7401,7 @@ fn generic_client_lobby_chat_submits_private_delivery_message_controls() {
         app.handle_text_input(character)
             .expect("type editable client chat");
     }
-    app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Backspace, ElementState::Pressed)
         .expect("client chat backspace");
     assert_eq!(
         app.network_lobby
@@ -7411,7 +7411,7 @@ fn generic_client_lobby_chat_submits_private_delivery_message_controls() {
             .text,
         "a"
     );
-    app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
         .expect("shared lobby history");
     assert_eq!(
         app.network_lobby
@@ -7623,16 +7623,16 @@ fn classic_host_lobby_cancel_paths_clear_pressed_activation_latches() {
         LobbyControl::Exit
     );
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("latch Exit key down");
     app.handle_focus_lost().expect("cancel on focus loss");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("focus loss prevents delayed Exit activation");
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("latch Exit before resize");
     app.resize(650, 490).expect("resize cancels lobby input");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("resize prevents delayed Exit activation");
 
     app.handle_gamepad_action(
@@ -7652,10 +7652,10 @@ fn classic_host_lobby_cancel_paths_clear_pressed_activation_latches() {
     )
     .expect("controller clear prevents delayed Exit activation");
 
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("latch Exit before pointer leave");
     app.pointer_left().expect("process cursor exit");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("ordinary cursor leave preserves and activates the Exit latch");
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert!(app.classic_host_lobby.is_none());
@@ -13152,7 +13152,7 @@ fn message_board_query_opens_on_tick35_and_routes_ui_answer_at_ready_tick() {
             .expect("type message-board answer");
     }
     let submission_tick = app.local_control_submission_tick();
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("submit message-board answer");
     assert!(app.running_chat_controller().is_none());
     assert!(app.engine.active_message_board_input().is_none());

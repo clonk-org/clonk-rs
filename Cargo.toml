@@ -29,6 +29,7 @@ members = [
     "crates/clonk-scaling",
     "crates/clonk-update",
     "crates/clonk-update-net",
+    "third_party/pixels",
     "xtask",
 ]
 resolver = "2"
@@ -46,6 +47,7 @@ publish = false
 
 [patch.crates-io]
 block = { path = "third_party/block" }
+pixels = { path = "third_party/pixels" }
 
 # The shipped profile. Thin LTO retains cross-crate optimization for the
 # simulation loop and C4Script tree-walk. One codegen unit keeps library runtime

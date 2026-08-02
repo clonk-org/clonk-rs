@@ -890,7 +890,7 @@
             .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag))
             .expect("ALC_ has a visible C++ pick point");
 
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .expect("set Control modifier");
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(bag_point.x),
@@ -1867,10 +1867,10 @@
         let mut keyboard = AppVirtualKeyboard::new(&mut app);
 
         for (key, com) in [
-            (VirtualKeyCode::S, clonk_engine::COM_UP),
-            (VirtualKeyCode::Z, clonk_engine::COM_LEFT),
-            (VirtualKeyCode::X, clonk_engine::COM_DOWN),
-            (VirtualKeyCode::C, clonk_engine::COM_RIGHT),
+            (VirtualKeyCode::KeyS, clonk_engine::COM_UP),
+            (VirtualKeyCode::KeyZ, clonk_engine::COM_LEFT),
+            (VirtualKeyCode::KeyX, clonk_engine::COM_DOWN),
+            (VirtualKeyCode::KeyC, clonk_engine::COM_RIGHT),
         ] {
             keyboard.press(key).expect("physical key press");
             assert_ne!(
@@ -1889,10 +1889,10 @@
 
         let before_arrows = keyboard.player_control();
         for key in [
-            VirtualKeyCode::Up,
-            VirtualKeyCode::Left,
-            VirtualKeyCode::Down,
-            VirtualKeyCode::Right,
+            VirtualKeyCode::ArrowUp,
+            VirtualKeyCode::ArrowLeft,
+            VirtualKeyCode::ArrowDown,
+            VirtualKeyCode::ArrowRight,
         ] {
             keyboard.press(key).expect("unbound arrow press");
             keyboard.release(key).expect("unbound arrow release");
@@ -1943,7 +1943,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z toward FLAG");
         }
         for _ in 0..30 {
@@ -1957,7 +1957,7 @@
             if clonk_now.action.name == "Walk" {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .tap(VirtualKeyCode::S)
+                    .tap(VirtualKeyCode::KeyS)
                     .expect("physical S jumps toward FLAG");
                 assert_ne!(
                     keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_LEFT),
@@ -1972,7 +1972,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z at FLAG");
         }
         if !app_clonk_carries(&app, clonk, "FLAG") {
@@ -1984,14 +1984,14 @@
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .press(VirtualKeyCode::C)
+                    .press(VirtualKeyCode::KeyC)
                     .expect("physical C collects FLAG");
             }
             advance_app_until(&mut app, "CLNK naturally collects FLAG", 40, |app| {
                 app_clonk_carries(app, clonk, "FLAG")
             });
             AppVirtualKeyboard::new(&mut app)
-                .release(VirtualKeyCode::C)
+                .release(VirtualKeyCode::KeyC)
                 .expect("release physical C after FLAG pickup");
         }
         assert_eq!(
@@ -2016,7 +2016,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::C)
+                .press(VirtualKeyCode::KeyC)
                 .expect("physical C toward HUT2");
         }
         for _ in 0..90 {
@@ -2030,7 +2030,7 @@
             if clonk_now.action.name == "Walk" {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .tap(VirtualKeyCode::S)
+                    .tap(VirtualKeyCode::KeyS)
                     .expect("physical S jumps toward HUT2");
                 assert_ne!(
                     keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_RIGHT),
@@ -2043,7 +2043,7 @@
             }
         }
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C beside HUT2");
         advance_app_until(&mut app, "CLNK lands beside HUT2", 60, |app| {
             app.engine
@@ -2051,7 +2051,7 @@
                 .is_some_and(|object| object.action.name == "Walk")
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z aligns with HUT2 entrance");
         advance_app_until(&mut app, "CLNK aligns with HUT2 entrance", 20, |app| {
             app.engine
@@ -2061,10 +2061,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z at HUT2 entrance");
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S enters HUT2");
         }
         advance_app_until(&mut app, "FLAG-carrying CLNK enters HUT2", 40, |app| {
@@ -2085,7 +2085,7 @@
                 })
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A puts FLAG into HUT2");
         advance_app_until(&mut app, "FLAG enters HUT2", 80, |app| {
             app.engine
@@ -2137,7 +2137,7 @@
                 break;
             }
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("physical X navigates toward Exit");
         }
         assert!(
@@ -2151,7 +2151,7 @@
             "physical X must select the real Exit row"
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A activates Exit");
         advance_app_until(&mut app, "CLNK exits HUT2", 60, |app| {
             app.engine
@@ -2170,7 +2170,7 @@
         );
         let gold = app_object_with_definition(&app, "GOLD").expect("Tutorial01 GOLD");
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z returns to the lesson valley");
         advance_app_until(
             &mut app,
@@ -2184,7 +2184,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z in lesson valley");
         advance_app_until(&mut app, "Tutorial01 enables digging", 160, |app| {
             app_tutorial_message_contains(app, "start a digging process")
@@ -2199,7 +2199,7 @@
         // on a different press (C4Player.cpp:1522-1536).
         let dig_press_frame = app.engine.frame();
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D starts buffered DigSingle");
         advance_app_until(&mut app, "CLNK starts real Dig action", 30, |app| {
             app.engine
@@ -2213,10 +2213,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .expect("physical X steers Dig down");
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z adds leftward Dig steering");
             let control = keyboard.player_control();
             assert_ne!(control.pressed_coms & (1 << clonk_engine::COM_DOWN), 0);
@@ -2240,7 +2240,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release physical X while Z remains held");
             let control = keyboard.player_control();
             assert_eq!(control.pressed_coms & (1 << clonk_engine::COM_DOWN), 0);
@@ -2259,7 +2259,7 @@
             |app| app_clonk_carries(app, clonk, "GOLD"),
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z after GOLD pickup");
         assert_eq!(
             app.engine
@@ -2295,7 +2295,7 @@
         // transitions jumps clear without assigning position or action
         // (C4Object.cpp:3618-3628,4823-4855).
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C walks out of the GOLD tunnel");
         advance_app_until(
             &mut app,
@@ -2308,10 +2308,10 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C outside the GOLD tunnel");
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C starts the return climb");
         let mut previous_action = String::new();
         for _ in 0..1_800 {
@@ -2330,15 +2330,15 @@
             if entered_scale {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::C)
+                    .release(VirtualKeyCode::KeyC)
                     .expect("release physical C on Scale transition");
                 keyboard
-                    .press(VirtualKeyCode::C)
+                    .press(VirtualKeyCode::KeyC)
                     .expect("re-press physical C on Scale transition");
             } else if landed || left_scale_in_flight {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .tap(VirtualKeyCode::S)
+                    .tap(VirtualKeyCode::KeyS)
                     .expect("physical S advances the return climb");
                 assert_ne!(
                     keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_RIGHT),
@@ -2350,7 +2350,7 @@
             app.update().expect("advance Tutorial01 return climb");
         }
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C on the cabin hill");
         assert!(
             app.engine
@@ -2369,7 +2369,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z aligns GOLD-carrying CLNK with HUT2");
         advance_app_until(
             &mut app,
@@ -2384,10 +2384,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z at HUT2 entrance");
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S enters HUT2 with GOLD");
         }
         advance_app_until(&mut app, "GOLD-carrying CLNK enters HUT2", 60, |app| {
@@ -2475,12 +2475,12 @@
 
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
-            keyboard.press(VirtualKeyCode::X).expect("first physical X");
+            keyboard.press(VirtualKeyCode::KeyX).expect("first physical X");
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release first physical X");
             keyboard
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .expect("second physical X");
         }
         for _ in 0..80 {
@@ -2506,10 +2506,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release second physical X");
             keyboard
-                .press(VirtualKeyCode::S)
+                .press(VirtualKeyCode::KeyS)
                 .expect("physical S while pushing BALN");
         }
         for lift_frame in 1..=20 {
@@ -2586,7 +2586,7 @@
                 "the isolated fresh player must use Jump'n'Run/AutoStop control"
             );
             keyboard
-                .release(VirtualKeyCode::S)
+                .release(VirtualKeyCode::KeyS)
                 .expect("release physical S in flight corridor");
             assert_eq!(
                 keyboard
@@ -2643,7 +2643,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .expect("hold physical X to descend");
             assert_eq!(
                 keyboard
@@ -2695,7 +2695,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release physical X at far island");
             assert_eq!(
                 keyboard
@@ -2733,10 +2733,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X of ungrab double");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X of ungrab double");
         }
         advance_app_until(&mut app, "CLNK lands on the far island", 100, |app| {
@@ -2770,7 +2770,7 @@
                 app_tutorial_message_contains(app, "Please drop the flag for now")
             });
             AppVirtualKeyboard::new(&mut app)
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z faces island center");
             advance_app_until(
                 &mut app,
@@ -2785,7 +2785,7 @@
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::Z)
+                    .release(VirtualKeyCode::KeyZ)
                     .expect("release physical Z before FLAG throw");
                 assert_eq!(
                     keyboard
@@ -2796,7 +2796,7 @@
                     Direction::Left
                 );
                 keyboard
-                    .tap(VirtualKeyCode::A)
+                    .tap(VirtualKeyCode::KeyA)
                     .expect("physical world-A throws temporary FLAG");
             }
             advance_app_until(&mut app, "FLAG leaves CLNK inventory", 30, |app| {
@@ -2833,9 +2833,9 @@
                         .position
                         .x;
                     if clonk_x < loam_x {
-                        VirtualKeyCode::C
+                        VirtualKeyCode::KeyC
                     } else {
-                        VirtualKeyCode::Z
+                        VirtualKeyCode::KeyZ
                     }
                 };
                 let toward_first_object = direction_to_loam(&app);
@@ -2854,7 +2854,7 @@
                         app_tutorial_message_contains(app, "Please drop the flag for now")
                     });
                     AppVirtualKeyboard::new(&mut app)
-                        .press(VirtualKeyCode::C)
+                        .press(VirtualKeyCode::KeyC)
                         .expect("physical C faces away from the LOAM");
                     advance_app_until(
                         &mut app,
@@ -2869,10 +2869,10 @@
                     {
                         let mut keyboard = AppVirtualKeyboard::new(&mut app);
                         keyboard
-                            .release(VirtualKeyCode::C)
+                            .release(VirtualKeyCode::KeyC)
                             .expect("release physical C before FLAG throw");
                         keyboard
-                            .tap(VirtualKeyCode::A)
+                            .tap(VirtualKeyCode::KeyA)
                             .expect("physical world-A throws temporary FLAG away from LOAM");
                     }
                     advance_app_until(&mut app, "FLAG leaves CLNK inventory", 30, |app| {
@@ -2904,7 +2904,7 @@
             app_tutorial_message_contains(app, "Now move to the very left edge")
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z walks to first bridge position");
         advance_app_until(&mut app, "Tutorial02 first bridge position", 120, |app| {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -2912,7 +2912,7 @@
             })
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z at first bridge position");
         advance_app_until(&mut app, "Tutorial02 double-Dig prompt", 180, |app| {
             app_tutorial_message_contains(app, "Press the 'dig' key twice quickly")
@@ -2920,10 +2920,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("first physical D for LOAM activation");
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("second physical D for LOAM activation");
         }
         advance_app_until(&mut app, "LOAM opens LMMS", 10, |app| {
@@ -2939,7 +2939,7 @@
         app.render(&mut rendered)
             .expect("render Tutorial02 LOAM construction menu");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::Z)
+            .tap(VirtualKeyCode::KeyZ)
             .expect("physical Z selects Diagonal left");
         let selected = app
             .engine
@@ -2958,7 +2958,7 @@
             .expect("CLNK before first LOAM bridge")
             .position;
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A starts Diagonal left bridge");
         advance_app_until(&mut app, "CLNK starts first LOAM Bridge", 10, |app| {
             app.engine
@@ -3019,16 +3019,16 @@
         // with Z to its upper-left endpoint. Every fresh LMMS begins at row 7;
         // exactly one physical Z selects row 6, Diagonal left.
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C crosses bridge one for LOAM2");
         advance_app_until(&mut app, "CLNK collects LOAM2", 220, |app| {
             app_clonk_carries(app, clonk, "LOAM")
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C after LOAM2 pickup");
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z returns to bridge-one endpoint");
         advance_app_until(
             &mut app,
@@ -3043,15 +3043,15 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z at bridge-one endpoint");
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("first physical D for LOAM2");
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("second physical D for LOAM2");
         }
         advance_app_until(&mut app, "LOAM2 opens LMMS", 20, |app| {
@@ -3066,7 +3066,7 @@
             Some(7)
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::Z)
+            .tap(VirtualKeyCode::KeyZ)
             .expect("physical Z selects LOAM2 Diagonal left");
         assert_eq!(
             app.engine
@@ -3090,7 +3090,7 @@
             "bridge two must continue bridge one; first_end={first_bridge_end:?}, second_start={second_bridge_start:?}"
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A starts second bridge");
         advance_app_until(&mut app, "CLNK starts second Bridge", 10, |app| {
             app.engine
@@ -3119,17 +3119,17 @@
         // earlier Script30 throw; face right with a physical C frame, throw it
         // using world A, finish Throw, then continue to adjacent LOAM.
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C crosses two bridges for LOAM3");
         advance_app_until(&mut app, "CLNK reaches LOAM3 or FLAG", 260, |app| {
             app_clonk_carries(app, clonk, "LOAM") || app_clonk_carries(app, clonk, "FLAG")
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C at far-island material");
         if app_clonk_carries(&app, clonk, "FLAG") {
             AppVirtualKeyboard::new(&mut app)
-                .press(VirtualKeyCode::C)
+                .press(VirtualKeyCode::KeyC)
                 .expect("physical C faces right before rethrowing FLAG");
             advance_app_until(
                 &mut app,
@@ -3144,7 +3144,7 @@
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::C)
+                    .release(VirtualKeyCode::KeyC)
                     .expect("release physical C before rethrowing FLAG");
                 assert_eq!(
                     keyboard
@@ -3155,7 +3155,7 @@
                     Direction::Right
                 );
                 keyboard
-                    .tap(VirtualKeyCode::A)
+                    .tap(VirtualKeyCode::KeyA)
                     .expect("physical world-A rethrows FLAG");
             }
             advance_app_until(&mut app, "recollected FLAG leaves CLNK", 30, |app| {
@@ -3167,18 +3167,18 @@
                     .is_some_and(|object| object.action.name == "Walk")
             });
             AppVirtualKeyboard::new(&mut app)
-                .press(VirtualKeyCode::C)
+                .press(VirtualKeyCode::KeyC)
                 .expect("physical C continues to LOAM3");
             advance_app_until(&mut app, "CLNK collects LOAM3", 100, |app| {
                 app_clonk_carries(app, clonk, "LOAM")
             });
             AppVirtualKeyboard::new(&mut app)
-                .release(VirtualKeyCode::C)
+                .release(VirtualKeyCode::KeyC)
                 .expect("release physical C after LOAM3 pickup");
         }
         assert!(app_clonk_carries(&app, clonk, "LOAM"));
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z returns to bridge-two endpoint");
         advance_app_until(
             &mut app,
@@ -3193,15 +3193,15 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z at bridge-two endpoint");
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("first physical D for LOAM3");
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("second physical D for LOAM3");
         }
         advance_app_until(&mut app, "LOAM3 opens LMMS", 20, |app| {
@@ -3216,7 +3216,7 @@
             Some(7)
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::Z)
+            .tap(VirtualKeyCode::KeyZ)
             .expect("physical Z selects LOAM3 Diagonal left");
         assert_eq!(
             app.engine
@@ -3240,7 +3240,7 @@
             "bridge three must continue bridge two; second_end={second_bridge_end:?}, third_start={third_bridge_start:?}"
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A starts third bridge");
         advance_app_until(&mut app, "CLNK starts third Bridge", 10, |app| {
             app.engine
@@ -3283,17 +3283,17 @@
         // for three spans, so throw a spare left with world A before continuing
         // right to FLAG; inventory slot zero must then be FLAG.
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C returns to far-island pickup");
         advance_app_until(&mut app, "CLNK reaches FLAG or spare LOAM", 420, |app| {
             app_clonk_carries(app, clonk, "FLAG") || app_clonk_carries(app, clonk, "LOAM")
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C at final pickup");
         if app_clonk_carries(&app, clonk, "LOAM") {
             AppVirtualKeyboard::new(&mut app)
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z faces left before spare LOAM throw");
             advance_app_until(
                 &mut app,
@@ -3308,7 +3308,7 @@
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::Z)
+                    .release(VirtualKeyCode::KeyZ)
                     .expect("release physical Z before spare LOAM throw");
                 assert_eq!(
                     keyboard
@@ -3319,7 +3319,7 @@
                     Direction::Left
                 );
                 keyboard
-                    .tap(VirtualKeyCode::A)
+                    .tap(VirtualKeyCode::KeyA)
                     .expect("physical world-A throws spare LOAM");
             }
             advance_app_until(&mut app, "spare LOAM leaves CLNK", 30, |app| {
@@ -3333,13 +3333,13 @@
         }
         if !app_clonk_carries(&app, clonk, "FLAG") {
             AppVirtualKeyboard::new(&mut app)
-                .press(VirtualKeyCode::C)
+                .press(VirtualKeyCode::KeyC)
                 .expect("physical C continues to FLAG");
             advance_app_until(&mut app, "CLNK collects FLAG", 180, |app| {
                 app_clonk_carries(app, clonk, "FLAG")
             });
             AppVirtualKeyboard::new(&mut app)
-                .release(VirtualKeyCode::C)
+                .release(VirtualKeyCode::KeyC)
                 .expect("release physical C after FLAG pickup");
         }
         let flag = app
@@ -3358,7 +3358,7 @@
         // Keep physical Z held over all three bridges and both jumps home. S
         // release must preserve the held Left bit on each jump.
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z starts FLAG return");
         advance_app_until(
             &mut app,
@@ -3374,7 +3374,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S jumps to center island");
             assert_ne!(
                 keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_LEFT),
@@ -3425,7 +3425,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S jumps to home island");
             assert_ne!(
                 keyboard.player_control().pressed_coms & (1 << clonk_engine::COM_LEFT),
@@ -3479,7 +3479,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z at HUT3 entrance");
         assert_eq!(
             app.engine
@@ -3490,7 +3490,7 @@
             "HUT3 must not be a base while FlyBase FLAG is absent"
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S enters HUT3");
         advance_app_until(&mut app, "FLAG-carrying CLNK enters HUT3", 80, |app| {
             app.engine
@@ -3513,7 +3513,7 @@
             app_tutorial_message_contains(app, "Press 'throw' to put the flag")
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A puts FLAG into HUT3");
         advance_app_until(&mut app, "FLAG enters HUT3", 80, |app| {
             app.engine
@@ -3609,7 +3609,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::C)
+                .press(VirtualKeyCode::KeyC)
                 .expect("physical C walks right");
         }
         for _ in 0..40 {
@@ -3626,13 +3626,13 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::C)
+                .release(VirtualKeyCode::KeyC)
                 .expect("release physical C");
             keyboard
-                .press(VirtualKeyCode::S)
+                .press(VirtualKeyCode::KeyS)
                 .expect("physical S enters HUT3");
             keyboard
-                .release(VirtualKeyCode::S)
+                .release(VirtualKeyCode::KeyS)
                 .expect("release physical S");
         }
         for _ in 0..40 {
@@ -3696,16 +3696,16 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .expect("physical X selects Buy");
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release physical X");
             keyboard
-                .press(VirtualKeyCode::A)
+                .press(VirtualKeyCode::KeyA)
                 .expect("physical A enters Buy");
             keyboard
-                .release(VirtualKeyCode::A)
+                .release(VirtualKeyCode::KeyA)
                 .expect("release physical A");
         }
         for _ in 0..20 {
@@ -3765,7 +3765,7 @@
         // the base (C4Command.cpp:2005-2035; C4ObjectMenu.cpp:124-129,207-237).
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
-            keyboard.tap(VirtualKeyCode::A).expect("buy selected LORY");
+            keyboard.tap(VirtualKeyCode::KeyA).expect("buy selected LORY");
         }
         for _ in 0..20 {
             let bought = app
@@ -3818,7 +3818,7 @@
         // active (C4Player.cpp:1502-1513; C4ObjectMenu.cpp:279-326).
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
-            keyboard.tap(VirtualKeyCode::D).expect("close Buy menu");
+            keyboard.tap(VirtualKeyCode::KeyD).expect("close Buy menu");
         }
         for _ in 0..20 {
             if app
@@ -3835,7 +3835,7 @@
         });
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
-            keyboard.tap(VirtualKeyCode::A).expect("open Contents");
+            keyboard.tap(VirtualKeyCode::KeyA).expect("open Contents");
         }
         for _ in 0..20 {
             if app
@@ -3869,7 +3869,7 @@
         });
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
-            keyboard.tap(VirtualKeyCode::A).expect("activate LORY");
+            keyboard.tap(VirtualKeyCode::KeyA).expect("activate LORY");
         }
         for _ in 0..40 {
             if app
@@ -3897,7 +3897,7 @@
         // 2044-2062; C4Menu.cpp:317-331; Tutorial03.c4s/Script.c:191-200).
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
-            keyboard.tap(VirtualKeyCode::D).expect("close Contents");
+            keyboard.tap(VirtualKeyCode::KeyD).expect("close Contents");
         }
         for _ in 0..20 {
             if app
@@ -3912,7 +3912,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("close context through Exit command");
         }
         for _ in 0..40 {
@@ -3968,7 +3968,7 @@
             app_tutorial_message_contains(app, "once to grab the lorry")
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs LORY");
         advance_app_until(&mut app, "physical X grabs LORY", 40, |app| {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -3976,7 +3976,7 @@
             })
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z pushes LORY left");
         advance_app_until(&mut app, "LORY reaches the sawmill chute", 240, |app| {
             app.engine.object_snapshot(lorry).is_some_and(|lorry| {
@@ -3984,13 +3984,13 @@
             })
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z at the sawmill chute");
         advance_app_until(&mut app, "Tutorial03 LORY release prompt", 180, |app| {
             app_tutorial_message_contains(app, "again to let go of the lorry")
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X releases LORY");
         advance_app_until(&mut app, "physical X releases LORY", 40, |app| {
             app.engine
@@ -4002,7 +4002,7 @@
             app_tutorial_message_contains(app, "first tree on the left")
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z walks to TRE2");
         advance_app_until(
             &mut app,
@@ -4020,7 +4020,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z at TRE2");
         advance_app_until(&mut app, "Tutorial03 double-Dig prompt", 180, |app| {
             app_tutorial_message_contains(app, "twice quickly to start chopping")
@@ -4031,8 +4031,8 @@
         // (C4Player.cpp:1522-1536; Tutorial03.c4s/Script.c:36-63).
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
-            keyboard.tap(VirtualKeyCode::D).expect("first physical D");
-            keyboard.tap(VirtualKeyCode::D).expect("second physical D");
+            keyboard.tap(VirtualKeyCode::KeyD).expect("first physical D");
+            keyboard.tap(VirtualKeyCode::KeyD).expect("second physical D");
         }
         advance_app_until(&mut app, "physical D/D starts Chop", 80, |app| {
             app.engine
@@ -4052,7 +4052,7 @@
                     .is_some_and(|object| object.action.name == "Walk")
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs felled TRE2");
         advance_app_until(&mut app, "physical X grabs felled TRE2", 80, |app| {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -4063,7 +4063,7 @@
             app_tutorial_message_contains(app, "Push the tree over to the sawmill")
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C pushes TRE2 right");
         advance_app_until(&mut app, "TRE2 reaches the SAWM gate", 240, |app| {
             app.engine.object_snapshot(tree).is_some_and(|tree| {
@@ -4071,13 +4071,13 @@
             })
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C at SAWM");
         advance_app_until(&mut app, "Tutorial03 SAWM Up prompt", 180, |app| {
             app_tutorial_message_contains(app, "press 'up' to push it into the sawmill")
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S pushes TRE2 into SAWM");
         advance_app_until(&mut app, "SAWM consumes TRE2", 240, |app| {
             app.engine.object_snapshot(tree).is_none()
@@ -4102,7 +4102,7 @@
         });
         let ore = app_object_with_definition(&app, "ORE1").expect("Tutorial03 ORE1");
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C walks to ORE1");
         advance_app_until(&mut app, "CLNK reaches the ORE1 digging face", 600, |app| {
             app.engine
@@ -4110,14 +4110,14 @@
                 .is_some_and(|object| object.position.x >= 480)
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C at ORE1");
 
         // A single D is buffered to COM_Dig_S after C4DoubleClick. Wait for
         // Dig before pressing X+C so another physical command cannot flush the
         // pending single early (C4Player.cpp:1215-1229,1522-1531).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D starts ORE1 dig");
         advance_app_until(&mut app, "CLNK starts digging toward ORE1", 30, |app| {
             app.engine
@@ -4127,10 +4127,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .expect("physical X supplies Dig down");
             keyboard
-                .press(VirtualKeyCode::C)
+                .press(VirtualKeyCode::KeyC)
                 .expect("physical C supplies Dig right");
         }
         advance_app_until(&mut app, "real dig tunnel collects ORE1", 300, |app| {
@@ -4141,10 +4141,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release physical X after ORE1 pickup");
             keyboard
-                .release(VirtualKeyCode::C)
+                .release(VirtualKeyCode::KeyC)
                 .expect("release physical C after ORE1 pickup");
         }
         advance_app_until(&mut app, "ORE1-carrying CLNK finishes Dig", 80, |app| {
@@ -4157,7 +4157,7 @@
             app_tutorial_message_contains(app, "Throw the chunk of ore into the lorry")
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z returns to LORY");
         advance_app_until(&mut app, "CLNK reaches LORY's right side", 800, |app| {
             app.engine
@@ -4169,7 +4169,7 @@
                 })
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z beside LORY");
         assert!(
             app.engine.cursor_object_menu(app.local_owner).is_none(),
@@ -4180,7 +4180,7 @@
             "no app menu may intercept the world A throw"
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A throws ORE1 into LORY");
         advance_app_until(&mut app, "ORE1 enters LORY", 180, |app| {
             app.engine
@@ -4200,7 +4200,7 @@
                 .is_some_and(|object| object.action.name == "Walk")
         });
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
+            .press(VirtualKeyCode::KeyZ)
             .expect("physical Z returns to LORY's grab area");
         advance_app_until(&mut app, "CLNK returns to LORY's grab area", 160, |app| {
             app.engine
@@ -4209,10 +4209,10 @@
                 .is_some_and(|(clonk, lorry)| clonk.position.x <= lorry.position.x + 10)
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::Z)
+            .release(VirtualKeyCode::KeyZ)
             .expect("release physical Z at LORY");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs loaded LORY");
         advance_app_until(&mut app, "CLNK grabs loaded LORY", 60, |app| {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -4224,7 +4224,7 @@
         // callback transfers ORE1 and WOOD into FNDR before metal production
         // (C4Object.cpp:3702-3710; Lorry.c4d/Script.c:82-91).
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C pushes loaded LORY to FNDR");
         advance_app_until(&mut app, "loaded LORY reaches the FNDR gate", 400, |app| {
             app.engine.object_snapshot(lorry).is_some_and(|lorry| {
@@ -4232,10 +4232,10 @@
             })
         });
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C at FNDR");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S pushes LORY into FNDR");
         advance_app_until(&mut app, "loaded LORY enters FNDR", 120, |app| {
             app.engine
@@ -4364,7 +4364,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z walks toward HUT2");
         }
         advance_app_until(&mut app, "CLNK aligned with HUT2 entrance", 30, |app| {
@@ -4377,10 +4377,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z at HUT2");
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S enters HUT2");
         }
         advance_app_until(&mut app, "CLNK entered HUT2", 50, |app| {
@@ -4413,7 +4413,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::A)
+                .tap(VirtualKeyCode::KeyA)
                 .expect("physical A opens HUT2 Contents");
         }
         advance_app_until(&mut app, "HUT2 Contents menu", 20, |app| {
@@ -4442,7 +4442,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::A)
+                .tap(VirtualKeyCode::KeyA)
                 .expect("physical A takes CNKT");
         }
         advance_app_until(&mut app, "CLNK carries CNKT", 60, |app| {
@@ -4464,7 +4464,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("physical D closes Contents");
         }
         advance_app_until(&mut app, "HUT2 context restored", 30, |app| {
@@ -4490,10 +4490,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S wraps context selection to Exit");
             keyboard
-                .tap(VirtualKeyCode::A)
+                .tap(VirtualKeyCode::KeyA)
                 .expect("physical A activates context Exit");
         }
         advance_app_until(&mut app, "CNKT-carrying CLNK exited HUT2", 60, |app| {
@@ -4508,7 +4508,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z walks to elevator site");
         }
         advance_app_until(&mut app, "CLNK reached elevator site", 120, |app| {
@@ -4519,7 +4519,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z at elevator site");
         }
         advance_app_until(&mut app, "Tutorial04 double-Dig prompt", 240, |app| {
@@ -4540,10 +4540,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("first physical D at elevator site");
             keyboard
-                .tap(VirtualKeyCode::D)
+                .tap(VirtualKeyCode::KeyD)
                 .expect("second physical D at elevator site");
         }
         advance_app_until(&mut app, "CNKT CXCN menu", 20, |app| {
@@ -4590,7 +4590,7 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::A)
+                .tap(VirtualKeyCode::KeyA)
                 .expect("physical A creates ELEV construction");
         }
         advance_app_until(
@@ -4643,7 +4643,7 @@
             app_tutorial_message_contains(app, "press 'down' to start working")
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X starts ELEV construction");
         advance_app_until(&mut app, "CLNK starts building ELEV", 30, |app| {
             app.engine
@@ -4664,7 +4664,7 @@
             app_tutorial_message_contains(app, "Grab the elevator case")
         });
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs ELEC");
         advance_app_until(&mut app, "CLNK grabs ELEC", 60, |app| {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -4680,7 +4680,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::D,
+            VirtualKeyCode::KeyD,
             "ELEC drills CLNK to the shaft bottom",
             360,
             |app| {
@@ -4694,7 +4694,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::S,
+            VirtualKeyCode::KeyS,
             "ELEC carries CLNK back to the surface",
             240,
             |app| {
@@ -4709,10 +4709,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X to ungrab ELEC");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X to ungrab ELEC");
         }
         advance_app_until(&mut app, "CLNK lets go of ELEC", 60, |app| {
@@ -4733,7 +4733,7 @@
         // (C4Object.cpp:3618-3628,4284-4299,4823-4855;
         // Tutorial04.c4s/Script.c:167-179).
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C exits the shaft toward TFLN");
         let mut previous_action = String::new();
         for _ in 0..60 {
@@ -4752,21 +4752,21 @@
             if entered_scale {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::C)
+                    .release(VirtualKeyCode::KeyC)
                     .expect("release physical C on Scale");
                 keyboard
-                    .press(VirtualKeyCode::C)
+                    .press(VirtualKeyCode::KeyC)
                     .expect("repress physical C on Scale");
             } else if (landed || left_scale_in_flight) && clonk_now.position.x < 550 {
                 AppVirtualKeyboard::new(&mut app)
-                    .tap(VirtualKeyCode::S)
+                    .tap(VirtualKeyCode::KeyS)
                     .expect("physical S jumps out of the shaft");
             }
             previous_action = action;
             app.update().expect("advance CLNK toward surface TFLN");
         }
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C after TFLN pickup");
         assert!(
             app_clonk_carries(&app, clonk, "TFLN"),
@@ -4775,7 +4775,7 @@
 
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "TFLN-carrying CLNK returns toward ELEC",
             120,
             |app| {
@@ -4803,7 +4803,7 @@
         if clonk_x < elevator_x - 5 {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::C,
+                VirtualKeyCode::KeyC,
                 "CLNK aligns with ELEC from the left",
                 120,
                 |app| {
@@ -4818,7 +4818,7 @@
         } else if clonk_x > elevator_x + 5 {
             hold_app_key_until(
                 &mut app,
-                VirtualKeyCode::Z,
+                VirtualKeyCode::KeyZ,
                 "CLNK aligns with ELEC from the right",
                 120,
                 |app| {
@@ -4834,9 +4834,9 @@
         if let Some(clonk_now) = app.engine.object_snapshot(clonk) {
             if clonk_now.action.name.starts_with("Scale") {
                 let away = if clonk_now.direction == Direction::Left {
-                    VirtualKeyCode::C
+                    VirtualKeyCode::KeyC
                 } else {
-                    VirtualKeyCode::Z
+                    VirtualKeyCode::KeyZ
                 };
                 AppVirtualKeyboard::new(&mut app)
                     .tap(away)
@@ -4858,7 +4858,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs ELEC with TFLN");
         advance_app_until(&mut app, "TFLN-carrying CLNK grabs ELEC", 60, |app| {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -4867,7 +4867,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::D,
+            VirtualKeyCode::KeyD,
             "ELEC carries TFLN-carrying CLNK underground",
             360,
             |app| {
@@ -4882,10 +4882,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X to ungrab underground");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X to ungrab underground");
         }
         advance_app_until(&mut app, "CLNK lets go underground", 60, |app| {
@@ -4900,7 +4900,7 @@
         // C++ does (Tutorial04.c4s/Script.c:180-207;
         // C4ObjectCom.cpp:353-362; C4Object.cpp:3573-3631,4354-4368).
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D starts the gold tunnel");
         advance_app_until(&mut app, "CLNK starts digging toward GOLD", 30, |app| {
             app.engine
@@ -4910,10 +4910,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .press(VirtualKeyCode::Z)
+                .press(VirtualKeyCode::KeyZ)
                 .expect("physical Z steers Dig left");
             keyboard
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .expect("physical X steers Dig down");
         }
         for _ in 0..12 {
@@ -4922,10 +4922,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release physical X to refresh diagonal Dig");
             keyboard
-                .press(VirtualKeyCode::X)
+                .press(VirtualKeyCode::KeyX)
                 .expect("repress physical X for diagonal Dig");
         }
         let mut reached_gold_face = false;
@@ -4945,10 +4945,10 @@
             if clonk_now.command_direction == CommandDirection::Left {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::X)
+                    .release(VirtualKeyCode::KeyX)
                     .expect("release physical X after bottom redirect");
                 keyboard
-                    .press(VirtualKeyCode::X)
+                    .press(VirtualKeyCode::KeyX)
                     .expect("repress physical X toward GOLD");
             }
             app.update().expect("advance real gold tunnel");
@@ -4956,10 +4956,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::X)
+                .release(VirtualKeyCode::KeyX)
                 .expect("release physical X at the gold face");
             keyboard
-                .release(VirtualKeyCode::Z)
+                .release(VirtualKeyCode::KeyZ)
                 .expect("release physical Z at the gold face");
         }
         assert!(
@@ -4985,7 +4985,7 @@
             + 24;
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::C,
+            VirtualKeyCode::KeyC,
             "TFLN-carrying CLNK reaches a safe throwing distance",
             80,
             |app| {
@@ -4995,12 +4995,12 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::Z)
+            .tap(VirtualKeyCode::KeyZ)
             .expect("physical Z faces CLNK toward the gold vein");
         app.update()
             .expect("settle left-facing CLNK before TFLN throw");
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A throws TFLN toward GOLD");
         advance_app_until(&mut app, "TFLN leaves CLNK inventory", 30, |app| {
             !app_clonk_carries(app, clonk, "TFLN")
@@ -5028,7 +5028,7 @@
             .is_some_and(|object| object.action.name == "Hangle")
         {
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("physical X drops CLNK from the tunnel ceiling");
             advance_app_until(&mut app, "CLNK drops into the GOLD pocket", 60, |app| {
                 app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -5056,7 +5056,7 @@
             .wealth();
 
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C returns GOLD-carrying CLNK to ELEC");
         let mut returned_to_elevator = false;
         let mut previous_action = String::new();
@@ -5079,21 +5079,21 @@
             if action.starts_with("Scale") && !previous_action.starts_with("Scale") {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::C)
+                    .release(VirtualKeyCode::KeyC)
                     .expect("release physical C on tunnel Scale");
                 keyboard
-                    .press(VirtualKeyCode::C)
+                    .press(VirtualKeyCode::KeyC)
                     .expect("repress physical C to leave tunnel Scale");
             } else if action == "Hangle" && previous_action != "Hangle" {
                 AppVirtualKeyboard::new(&mut app)
-                    .tap(VirtualKeyCode::X)
+                    .tap(VirtualKeyCode::KeyX)
                     .expect("physical X drops from the tunnel ceiling");
             }
             previous_action = action;
             app.update().expect("advance GOLD-carrying CLNK to ELEC");
         }
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C beside ELEC");
         assert!(
             returned_to_elevator,
@@ -5102,7 +5102,7 @@
             app.engine.object_snapshot(elevator_case)
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs ELEC with GOLD");
         advance_app_until(&mut app, "GOLD-carrying CLNK grabs ELEC", 60, |app| {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -5111,7 +5111,7 @@
         });
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::S,
+            VirtualKeyCode::KeyS,
             "ELEC raises GOLD-carrying CLNK to the surface",
             300,
             |app| {
@@ -5123,10 +5123,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X to ungrab ELEC with GOLD");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X to ungrab ELEC with GOLD");
         }
         advance_app_until(&mut app, "GOLD-carrying CLNK lets go of ELEC", 60, |app| {
@@ -5140,7 +5140,7 @@
         // GOLD and increments wealth by five (C4Object.cpp:3618-3628,
         // 4284-4299,4823-4855; Tutorial04.c4s/Script.c:214-234).
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C climbs the shaft lip with GOLD");
         let mut previous_action = String::new();
         for _ in 0..240 {
@@ -5159,14 +5159,14 @@
             if entered_scale {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::C)
+                    .release(VirtualKeyCode::KeyC)
                     .expect("release physical C on shaft Scale");
                 keyboard
-                    .press(VirtualKeyCode::C)
+                    .press(VirtualKeyCode::KeyC)
                     .expect("repress physical C on shaft Scale");
             } else if landed || left_scale_in_flight {
                 AppVirtualKeyboard::new(&mut app)
-                    .tap(VirtualKeyCode::S)
+                    .tap(VirtualKeyCode::KeyS)
                     .expect("physical S jumps the shaft lip");
             }
             previous_action = action;
@@ -5174,7 +5174,7 @@
                 .expect("advance GOLD-carrying CLNK over the shaft lip");
         }
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C on the cabin hill");
         assert!(
             app.engine
@@ -5194,7 +5194,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "GOLD-carrying CLNK aligns with HUT2's entrance",
             80,
             |app| {
@@ -5204,7 +5204,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::S)
+            .tap(VirtualKeyCode::KeyS)
             .expect("physical S enters HUT2 with GOLD");
         advance_app_until(&mut app, "GOLD-carrying CLNK enters HUT2", 60, |app| {
             app.engine
@@ -5272,7 +5272,7 @@
             );
         }
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::A)
+            .tap(VirtualKeyCode::KeyA)
             .expect("physical A opens replacement-flint Contents");
         advance_app_until(&mut app, "HUT2 replacement-flint Contents", 30, |app| {
             app.engine
@@ -5292,7 +5292,7 @@
                 break;
             }
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("physical X selects the next Contents row");
         }
         assert_eq!(
@@ -5301,7 +5301,7 @@
             "physical Down navigation must select the replacement TFLN row"
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::F)
+            .tap(VirtualKeyCode::KeyF)
             .expect("physical F takes all replacement TFLNs that fit");
         advance_app_until(
             &mut app,
@@ -5314,7 +5314,7 @@
         );
 
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::D)
+            .tap(VirtualKeyCode::KeyD)
             .expect("physical D closes replacement-flint Contents");
         advance_app_until(&mut app, "HUT2 context restored after TFLN", 30, |app| {
             app.engine
@@ -5339,10 +5339,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::S)
+                .tap(VirtualKeyCode::KeyS)
                 .expect("physical S wraps replacement-flint context to Exit");
             keyboard
-                .tap(VirtualKeyCode::A)
+                .tap(VirtualKeyCode::KeyA)
                 .expect("physical A exits HUT2 with replacement TFLN");
         }
         advance_app_until(&mut app, "replacement-TFLN CLNK exits HUT2", 60, |app| {
@@ -5388,7 +5388,7 @@
         // 3520-3567; Tutorial04.c4s/Script.c:214-234).
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "replacement-TFLN CLNK returns to ELEC",
             180,
             |app| {
@@ -5401,7 +5401,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
+            .press(VirtualKeyCode::KeyC)
             .expect("physical C crosses the replacement-flint shaft lip");
         let mut previous_action = String::new();
         for _ in 0..120 {
@@ -5420,14 +5420,14 @@
             if entered_scale {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
-                    .release(VirtualKeyCode::C)
+                    .release(VirtualKeyCode::KeyC)
                     .expect("release physical C on replacement-flint Scale");
                 keyboard
-                    .press(VirtualKeyCode::C)
+                    .press(VirtualKeyCode::KeyC)
                     .expect("repress physical C on replacement-flint Scale");
             } else if landed || left_scale_in_flight {
                 AppVirtualKeyboard::new(&mut app)
-                    .tap(VirtualKeyCode::S)
+                    .tap(VirtualKeyCode::KeyS)
                     .expect("physical S jumps the replacement-flint shaft lip");
             }
             previous_action = action;
@@ -5435,11 +5435,11 @@
                 .expect("advance replacement-TFLN CLNK across shaft lip");
         }
         AppVirtualKeyboard::new(&mut app)
-            .release(VirtualKeyCode::C)
+            .release(VirtualKeyCode::KeyC)
             .expect("release physical C after replacement-flint shaft lip");
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::Z,
+            VirtualKeyCode::KeyZ,
             "replacement-TFLN CLNK stands beside ELEC",
             80,
             |app| {
@@ -5453,7 +5453,7 @@
             },
         );
         AppVirtualKeyboard::new(&mut app)
-            .tap(VirtualKeyCode::X)
+            .tap(VirtualKeyCode::KeyX)
             .expect("physical X grabs ELEC with the replacement TFLN");
         advance_app_until(
             &mut app,
@@ -5467,7 +5467,7 @@
         );
         hold_app_key_until(
             &mut app,
-            VirtualKeyCode::D,
+            VirtualKeyCode::KeyD,
             "ELEC carries replacement-TFLN CLNK underground",
             360,
             |app| {
@@ -5479,10 +5479,10 @@
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("first physical X releases ELEC underground with TFLN");
             keyboard
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("second physical X releases ELEC underground with TFLN");
         }
         advance_app_until(
@@ -5508,7 +5508,7 @@
             .is_some_and(|object| object.action.name == "Hangle")
         {
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("physical X drops CLNK into the second blast pocket");
             advance_app_until(&mut app, "CLNK drops into second blast pocket", 60, |app| {
                 app.engine
@@ -5541,7 +5541,7 @@
             .is_some_and(|object| object.action.name == "Hangle")
         {
             AppVirtualKeyboard::new(&mut app)
-                .tap(VirtualKeyCode::X)
+                .tap(VirtualKeyCode::KeyX)
                 .expect("physical X drops CLNK into the final blast pocket");
             advance_app_until(&mut app, "CLNK drops into final blast pocket", 60, |app| {
                 app.engine

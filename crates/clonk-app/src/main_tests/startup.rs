@@ -415,12 +415,12 @@ fn about_chrome_uses_runtime_resource_strings() {
 
     // The relocated mnemonic activates, and the old English one does not.
     app.keyboard_modifiers = ModifiersState::ALT;
-    app.handle_key(VirtualKeyCode::U, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyU, ElementState::Pressed)
         .expect("dispatch the translated update mnemonic");
     assert_eq!(app.message_dialogs.len(), 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .expect("abort the update check");
-    app.handle_key(VirtualKeyCode::L, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyL, ElementState::Pressed)
         .expect("dispatch the translated licenses mnemonic");
     assert_eq!(
         app.startup_about_dialog
@@ -1316,7 +1316,7 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
     );
     assert_eq!(app.startup_view, StartupView::About);
 
-    for key in [VirtualKeyCode::Return, VirtualKeyCode::Space] {
+    for key in [VirtualKeyCode::Enter, VirtualKeyCode::Space] {
         let mut app = new_classic_menu_app(640, 480);
         app.open_about_dialog();
         for _ in 0..2 {
@@ -1379,9 +1379,9 @@ fn l034_about_shift_tab_reverses_buttons_and_license_tabs() {
 
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("release Shift");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("press focused Update button");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("activate focused Update button");
     assert_eq!(app.message_dialogs.len(), 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
@@ -1395,9 +1395,9 @@ fn l034_about_shift_tab_reverses_buttons_and_license_tabs() {
         .expect("release final Shift+Tab");
     app.handle_modifiers_changed(ModifiersState::empty())
         .expect("release Shift");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("press focused Back button");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("return from Licenses to Credits");
     assert_eq!(
         app.startup_about_dialog
@@ -2185,7 +2185,7 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
     app.open_network_game_dialog();
     for modifiers in [
         ModifiersState::ALT,
-        ModifiersState::CTRL,
+        ModifiersState::CONTROL,
         ModifiersState::SHIFT,
     ] {
         app.keyboard_modifiers = modifiers;
@@ -2194,7 +2194,7 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
         app.handle_key(VirtualKeyCode::F5, ElementState::Released)
             .expect("release modified Network F5");
     }
-    app.keyboard_modifiers = ModifiersState::LOGO;
+    app.keyboard_modifiers = ModifiersState::SUPER;
     app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
         .expect("Logo is outside C++'s shortcut modifier mask");
     app.handle_key(VirtualKeyCode::F5, ElementState::Released)
@@ -2223,7 +2223,7 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
     app.open_player_selection_dialog();
     for (modifiers, key) in [
         (ModifiersState::ALT, VirtualKeyCode::Insert),
-        (ModifiersState::CTRL, VirtualKeyCode::F2),
+        (ModifiersState::CONTROL, VirtualKeyCode::F2),
         (ModifiersState::SHIFT, VirtualKeyCode::Delete),
     ] {
         app.keyboard_modifiers = modifiers;
@@ -2234,7 +2234,7 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
     }
     assert!(app.message_dialogs.is_empty());
     assert!(app.status_text.is_empty());
-    app.keyboard_modifiers = ModifiersState::LOGO;
+    app.keyboard_modifiers = ModifiersState::SUPER;
     app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
         .expect("Logo+F2 retains the classic Properties shortcut");
     assert!(matches!(
@@ -4754,7 +4754,7 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
         "bare F3 must not rewrite FESamples"
     );
 
-    press_frontend_f3(&mut app, ModifiersState::CTRL, "startup Ctrl+F3");
+    press_frontend_f3(&mut app, ModifiersState::CONTROL, "startup Ctrl+F3");
     let after_startup_sound = {
         app.flush_deferred_config();
         Config::load(paths.config_file()).expect("reload startup frontend-sound toggle")
@@ -4781,7 +4781,7 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
 
     app.mode = AppMode::Loading;
     press_frontend_f3(&mut app, ModifiersState::empty(), "loading F3");
-    press_frontend_f3(&mut app, ModifiersState::CTRL, "loading Ctrl+F3");
+    press_frontend_f3(&mut app, ModifiersState::CONTROL, "loading Ctrl+F3");
     let after_loading = {
         app.flush_deferred_config();
         Config::load(paths.config_file()).expect("reload loading frontend audio toggles")
@@ -4831,7 +4831,7 @@ fn frontend_audio_toggle_write_failure_keeps_live_state() {
         .expect("frontend music stays live after persistence failure");
     app.handle_key(VirtualKeyCode::F3, ElementState::Released)
         .expect("release frontend music key");
-    app.handle_modifiers_changed(ModifiersState::CTRL)
+    app.handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set Ctrl for frontend sound");
     app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
         .expect("frontend sound stays live after persistence failure");
@@ -4900,7 +4900,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             .startup_options_dialog
             .as_ref()
             .map(|dialog| dialog.sound().frontend_sound_effects);
-        app.handle_modifiers_changed(ModifiersState::CTRL)
+        app.handle_modifiers_changed(ModifiersState::CONTROL)
             .unwrap_or_else(|error| panic!("set Ctrl for {label}: {error}"));
         app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("frontend Ctrl+F3 over {label}: {error}"));
@@ -5479,7 +5479,7 @@ fn startup_f6_launches_editor_when_available() {
     // A modified F6 is not the classic binding and must not reach it.
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.show_main_menu();
-    app.keyboard_modifiers = ModifiersState::CTRL;
+    app.keyboard_modifiers = ModifiersState::CONTROL;
     app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
         .expect("Ctrl+F6 is not the editor shortcut");
     assert!(app.pending_editor_launch.is_none());

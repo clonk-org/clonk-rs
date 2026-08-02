@@ -459,12 +459,12 @@ fn l148_restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
         .is_some_and(|line| line.ends_with("TAIL")));
     app.handle_key(VirtualKeyCode::End, ElementState::Released)
         .expect("release retained-log scroll key");
-    app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("dismiss retained Error Log info");
     assert!(app.runtime_client_list.is_none());
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert!(app.startup_network_dialog.is_some());
-    app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("dismissed info owns Return release");
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert_eq!(
@@ -1498,11 +1498,11 @@ fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         .set(Ok(config))
         .expect("install per-game key registry");
 
-    assert!(app.handle_running_chat_open_key(VirtualKeyCode::G, ElementState::Pressed));
+    assert!(app.handle_running_chat_open_key(VirtualKeyCode::KeyG, ElementState::Pressed));
     assert!(app.running_chat_active());
     app.close_running_chat()
         .expect("close custom keyboard chat through the production lifecycle");
-    assert!(!app.handle_running_chat_open_key(VirtualKeyCode::Return, ElementState::Pressed,));
+    assert!(!app.handle_running_chat_open_key(VirtualKeyCode::Enter, ElementState::Pressed,));
     app.handle_gamepad_direction(
         GamepadSlot::new(1),
         ControlButton::Left,
@@ -1514,18 +1514,18 @@ fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         .expect("close custom gamepad chat through the production lifecycle");
 
     assert!(app
-        .handle_scoreboard_key(VirtualKeyCode::H, ElementState::Pressed)
+        .handle_scoreboard_key(VirtualKeyCode::KeyH, ElementState::Pressed)
         .expect("custom scoreboard callback"));
     assert!(!app
         .handle_scoreboard_key(VirtualKeyCode::Tab, ElementState::Pressed)
         .expect("replaced scoreboard default"));
 
     let shifted =
-        app.runtime_control_candidates_for_keyboard(VirtualKeyCode::T, ElementState::Pressed);
+        app.runtime_control_candidates_for_keyboard(VirtualKeyCode::KeyT, ElementState::Pressed);
     assert!(shifted.is_empty(), "the custom chord requires Shift");
     app.keyboard_modifiers = ModifiersState::SHIFT;
     assert_eq!(
-        app.runtime_control_candidates_for_keyboard(VirtualKeyCode::T, ElementState::Pressed,),
+        app.runtime_control_candidates_for_keyboard(VirtualKeyCode::KeyT, ElementState::Pressed,),
         vec![KeyboardBindings::control_candidate_for_set(
             0,
             ControlBindingId::CursorLeft,
@@ -1561,7 +1561,7 @@ fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         .expect("ownerless menu")
         .selection();
     assert!(app
-        .handle_runtime_fullscreen_menu_key(VirtualKeyCode::J, ElementState::Pressed,)
+        .handle_runtime_fullscreen_menu_key(VirtualKeyCode::KeyJ, ElementState::Pressed,)
         .expect("custom ownerless menu callback"));
     assert_ne!(
         app.ingame_menu
@@ -1572,7 +1572,7 @@ fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
     );
     app.ingame_menu.clear();
 
-    app.handle_key(VirtualKeyCode::B, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyB, ElementState::Pressed)
         .expect("custom abort callback");
     assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
         dialog.continuation,
@@ -1615,7 +1615,7 @@ fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         )
         .expect("reopen context for Return priority");
     context_priority
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("context Return precedes custom ScoreboardToggle");
     assert!(context_priority.scoreboard_dialog.is_none());
     context_priority.close_context_menu_silently();
@@ -1626,7 +1626,7 @@ fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         )
         .expect("reopen context for hotkey priority");
     context_priority
-        .handle_key(VirtualKeyCode::R, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
         .expect("context hotkey precedes custom ScoreboardToggle");
     assert!(context_priority.scoreboard_dialog.is_none());
 
@@ -1694,7 +1694,7 @@ fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         .expect("install chat-history collision");
     chat_priority.start_running_chat(RunningChatMode::All);
     chat_priority
-        .handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
         .expect("chat history precedes the remapped global callback");
     assert_eq!(chat_priority.running_chat_text(), Some(""));
 
@@ -1707,7 +1707,7 @@ fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         ))
         .expect("install game-over chat remap");
     game_over_chat
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("game-over OnEnter opens chat independently of ChatOpen");
     assert!(game_over_chat.running_chat_active());
     assert_eq!(game_over_chat.running_chat_text(), Some(""));
@@ -2819,7 +2819,7 @@ fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
 
     // Logo is not represented by C4KeyCodeEx and therefore remains an
     // exact bare-Tab ScoreboardToggle.
-    toggle_scoreboard(&mut eligible, ModifiersState::LOGO);
+    toggle_scoreboard(&mut eligible, ModifiersState::SUPER);
     assert_eq!(
         eligible.scoreboard_dialog,
         Some(eligible.scoreboard_request())
@@ -3862,9 +3862,9 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
     for modifiers in [
         ModifiersState::ALT,
-        ModifiersState::CTRL,
+        ModifiersState::CONTROL,
         ModifiersState::SHIFT,
-        ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
     ] {
         app.handle_modifiers_changed(modifiers)
             .expect("set keyboard modifiers");
@@ -4510,13 +4510,13 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
 #[test]
 fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
     for (key, modifiers, expected_text) in [
-        (VirtualKeyCode::Return, ModifiersState::empty(), ""),
+        (VirtualKeyCode::Enter, ModifiersState::empty(), ""),
         (VirtualKeyCode::F2, ModifiersState::empty(), ""),
-        (VirtualKeyCode::Return, ModifiersState::SHIFT, "/team "),
-        (VirtualKeyCode::Return, ModifiersState::LOGO, ""),
+        (VirtualKeyCode::Enter, ModifiersState::SHIFT, "/team "),
+        (VirtualKeyCode::Enter, ModifiersState::SUPER, ""),
         (
-            VirtualKeyCode::Return,
-            ModifiersState::LOGO | ModifiersState::SHIFT,
+            VirtualKeyCode::Enter,
+            ModifiersState::SUPER | ModifiersState::SHIFT,
             "/team ",
         ),
     ] {
@@ -4532,12 +4532,12 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
     for modifiers in [
         ModifiersState::ALT,
         ModifiersState::ALT | ModifiersState::SHIFT,
-        ModifiersState::LOGO | ModifiersState::ALT,
+        ModifiersState::SUPER | ModifiersState::ALT,
     ] {
         let mut app = new_game_over_keyboard_app();
         app.handle_modifiers_changed(modifiers)
             .expect("set mnemonic modifiers");
-        app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
             .expect("localized Continue mnemonic activates directly");
         assert!(app.game_over_dialog.is_none());
         assert_eq!(app.mode, AppMode::Running);
@@ -4558,14 +4558,14 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
         );
     say.handle_modifiers_changed(ModifiersState::ALT)
         .expect("set Say modifiers");
-    say.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+    say.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("unmatched Alt+Return falls through to Say chat");
     assert_eq!(say.running_chat_text(), Some("\""));
     assert!(say.game_over_dialog.is_some());
 
     for (key, modifiers) in [
         (
-            VirtualKeyCode::Return,
+            VirtualKeyCode::Enter,
             ModifiersState::ALT | ModifiersState::SHIFT,
         ),
         (VirtualKeyCode::Escape, ModifiersState::ALT),
@@ -4582,22 +4582,22 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
 
     let mut app = new_game_over_keyboard_app();
     for modifiers in [
-        ModifiersState::CTRL,
-        ModifiersState::CTRL | ModifiersState::SHIFT,
-        ModifiersState::CTRL | ModifiersState::ALT,
-        ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
+        ModifiersState::CONTROL,
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+        ModifiersState::CONTROL | ModifiersState::ALT,
+        ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
     ] {
         app.handle_modifiers_changed(modifiers)
             .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
             .expect("combined Return has no exact C++ chat binding");
-        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+        app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
             .expect("combined Return release is consumed");
     }
     for modifiers in [
-        ModifiersState::CTRL,
+        ModifiersState::CONTROL,
         ModifiersState::SHIFT,
-        ModifiersState::CTRL | ModifiersState::ALT,
+        ModifiersState::CONTROL | ModifiersState::ALT,
     ] {
         app.handle_modifiers_changed(modifiers)
             .expect("set keyboard modifiers");
@@ -4628,7 +4628,7 @@ fn game_over_mnemonics_use_active_language_resources() {
         .expect("show localized evaluation dialog");
     app.handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::W, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyW, ElementState::Pressed)
         .expect("German &Weiterspielen mnemonic invokes Continue");
 
     assert_eq!(app.mode, AppMode::Running);
@@ -4659,7 +4659,7 @@ fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
         Some(GameOverFocus::PlayerList(0))
     );
     list_focus
-        .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
         .expect("player-list Return falls through to All chat");
     assert_eq!(list_focus.running_chat_text(), Some(""));
     assert!(list_focus.game_over_dialog.is_some());
@@ -4685,7 +4685,7 @@ fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
         .expect("depress focused Continue");
     assert!(keyboard.game_over_dialog.is_some());
     keyboard
-        .handle_key(VirtualKeyCode::Return, ElementState::Released)
+        .handle_key(VirtualKeyCode::Enter, ElementState::Released)
         .expect("any shared activation-key release activates Continue");
     assert!(keyboard.game_over_dialog.is_none());
     assert!(keyboard
@@ -4752,17 +4752,17 @@ fn game_over_arrows_and_space_never_activate_a_hovered_button() {
     );
 
     for key in [
-        VirtualKeyCode::Left,
-        VirtualKeyCode::Right,
-        VirtualKeyCode::Up,
-        VirtualKeyCode::Down,
+        VirtualKeyCode::ArrowLeft,
+        VirtualKeyCode::ArrowRight,
+        VirtualKeyCode::ArrowUp,
+        VirtualKeyCode::ArrowDown,
         VirtualKeyCode::Space,
     ] {
         for modifiers in [
             ModifiersState::empty(),
-            ModifiersState::CTRL | ModifiersState::SHIFT,
-            ModifiersState::CTRL | ModifiersState::ALT,
-            ModifiersState::LOGO,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ModifiersState::CONTROL | ModifiersState::ALT,
+            ModifiersState::SUPER,
         ] {
             app.handle_modifiers_changed(modifiers)
                 .expect("set keyboard modifiers");
@@ -5539,9 +5539,9 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
     for (modifiers, expected) in [
         (ModifiersState::empty(), GameOverFocus::Close),
         (ModifiersState::SHIFT, GameOverFocus::Button(2)),
-        (ModifiersState::LOGO, GameOverFocus::Close),
+        (ModifiersState::SUPER, GameOverFocus::Close),
         (
-            ModifiersState::LOGO | ModifiersState::SHIFT,
+            ModifiersState::SUPER | ModifiersState::SHIFT,
             GameOverFocus::Button(2),
         ),
     ] {
@@ -5560,10 +5560,10 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
         );
     }
     for modifiers in [
-        ModifiersState::CTRL,
-        ModifiersState::CTRL | ModifiersState::ALT,
-        ModifiersState::CTRL | ModifiersState::SHIFT,
-        ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
+        ModifiersState::CONTROL,
+        ModifiersState::CONTROL | ModifiersState::ALT,
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+        ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
     ] {
         let mut app = new_game_over_keyboard_app();
         app.handle_modifiers_changed(modifiers)
@@ -5581,10 +5581,10 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
     }
 
     for modifiers in [
-        ModifiersState::CTRL,
+        ModifiersState::CONTROL,
         ModifiersState::SHIFT,
-        ModifiersState::CTRL | ModifiersState::ALT,
-        ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ModifiersState::CONTROL | ModifiersState::ALT,
+        ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
     ] {
         let mut app = new_game_over_keyboard_app();
         app.handle_modifiers_changed(modifiers)
@@ -5596,7 +5596,7 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
         assert!(app.game_over_dialog.is_some());
     }
 
-    for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
+    for modifiers in [ModifiersState::empty(), ModifiersState::SUPER] {
         let mut ending_app = new_game_over_keyboard_app();
         ending_app
             .handle_modifiers_changed(modifiers)
@@ -5647,7 +5647,7 @@ fn game_over_pending_network_result_preserves_cpp_button_and_escape_latches() {
         .handle_modifiers_changed(ModifiersState::ALT)
         .expect("enable native mnemonic mask");
     clickable
-        .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("visible pending Continue remains clickable like C++");
     assert!(clickable.game_over_dialog.is_none());
     assert_eq!(clickable.mode, AppMode::Running);
@@ -5796,9 +5796,9 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         ModifiersState::ALT,
         ModifiersState::SHIFT,
         ModifiersState::ALT | ModifiersState::SHIFT,
-        ModifiersState::ALT | ModifiersState::CTRL,
-        ModifiersState::CTRL | ModifiersState::SHIFT,
-        ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ModifiersState::ALT | ModifiersState::CONTROL,
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+        ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
     ] {
         let mut modified = new_running_sandbox_app();
         modified
@@ -5826,7 +5826,7 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         .options
         .music_enabled;
     logo_music
-        .handle_modifiers_changed(ModifiersState::LOGO)
+        .handle_modifiers_changed(ModifiersState::SUPER)
         .expect("set Logo");
     logo_music
         .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -5850,7 +5850,7 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         .options
         .sound_enabled;
     logo_sound
-        .handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::LOGO)
+        .handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::SUPER)
         .expect("set Ctrl+Logo");
     logo_sound
         .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -5872,7 +5872,7 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         .as_ref()
         .map(|audio| audio.options.sound_enabled);
     sound
-        .handle_modifiers_changed(ModifiersState::CTRL)
+        .handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set Ctrl+F3");
     sound
         .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -5908,7 +5908,7 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         },
     );
     existing_sound
-        .handle_modifiers_changed(ModifiersState::CTRL)
+        .handle_modifiers_changed(ModifiersState::CONTROL)
         .expect("set Ctrl+F3");
     existing_sound
         .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -5988,10 +5988,10 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
         .handle_modifiers_changed(ModifiersState::ALT)
         .expect("hold Alt over the client list");
     game_over
-        .handle_key(VirtualKeyCode::R, ElementState::Pressed)
+        .handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
         .expect("client list keeps the Restart mnemonic inactive");
     game_over
-        .handle_key(VirtualKeyCode::R, ElementState::Released)
+        .handle_key(VirtualKeyCode::KeyR, ElementState::Released)
         .expect("client list owns the mnemonic release");
     game_over
         .handle_modifiers_changed(ModifiersState::empty())
@@ -6068,7 +6068,7 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
 fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
     let mut game_over = new_game_over_keyboard_app();
     game_over
-        .handle_modifiers_changed(ModifiersState::LOGO)
+        .handle_modifiers_changed(ModifiersState::SUPER)
         .expect("set keyboard modifiers");
     let before_game_over = runtime_global_ui_snapshot(&game_over);
     for state in [
@@ -6116,12 +6116,12 @@ fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
 fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
     for modifiers in [
         ModifiersState::ALT,
-        ModifiersState::LOGO | ModifiersState::ALT,
+        ModifiersState::SUPER | ModifiersState::ALT,
     ] {
         let mut app = new_game_over_keyboard_app();
         app.handle_modifiers_changed(modifiers)
             .expect("set mnemonic modifiers");
-        app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+        app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
             .expect("Continue mnemonic precedes the runtime Alt+C owner");
         assert!(app.game_over_dialog.is_none());
         assert_eq!(app.mode, AppMode::Running);
@@ -6135,7 +6135,7 @@ fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
     ] {
         for modifiers in [
             ModifiersState::ALT,
-            ModifiersState::LOGO | ModifiersState::ALT,
+            ModifiersState::SUPER | ModifiersState::ALT,
         ] {
             let mut app = new_game_over_keyboard_app();
             app.handle_modifiers_changed(modifiers)
@@ -6285,9 +6285,9 @@ fn modified_escape_does_not_match_the_abort_binding() {
     app.status_text.clear();
     for modifiers in [
         ModifiersState::ALT,
-        ModifiersState::CTRL,
+        ModifiersState::CONTROL,
         ModifiersState::SHIFT,
-        ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
     ] {
         app.handle_modifiers_changed(modifiers)
             .expect("set keyboard modifiers");
@@ -6299,7 +6299,7 @@ fn modified_escape_does_not_match_the_abort_binding() {
         assert!(app.object_menu.is_none());
         assert!(app.status_text.is_empty());
     }
-    app.handle_modifiers_changed(ModifiersState::LOGO)
+    app.handle_modifiers_changed(ModifiersState::SUPER)
         .expect("set keyboard modifiers");
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
         .expect("Logo is outside C++'s Alt/Ctrl/Shift modifier mask");

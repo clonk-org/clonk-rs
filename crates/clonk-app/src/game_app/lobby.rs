@@ -3431,7 +3431,7 @@ impl GameApp {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if modifiers != ModifiersState::ALT
             && modifiers != (ModifiersState::ALT | ModifiersState::SHIFT)
         {
@@ -3486,7 +3486,7 @@ impl GameApp {
             return Ok(false);
         }
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if !c4_modifiers.is_empty() && c4_modifiers != ModifiersState::SHIFT {
             return Ok(false);
         }
@@ -3531,7 +3531,7 @@ impl GameApp {
         if gui_key != KeyCode::Tab && !controller_focused {
             return Ok(false);
         }
-        let shift = self.keyboard_modifiers.shift();
+        let shift = self.keyboard_modifiers.shift_key();
         let assets = Arc::clone(&self.assets);
         let actions = {
             let lobby = self
@@ -3578,17 +3578,17 @@ impl GameApp {
             return Ok(false);
         }
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let modifiers = LobbyChatKeyModifiers {
             shift: c4_modifiers.contains(ModifiersState::SHIFT),
-            control: c4_modifiers.contains(ModifiersState::CTRL),
+            control: c4_modifiers.contains(ModifiersState::CONTROL),
         };
-        let clipboard = if c4_modifiers == ModifiersState::CTRL {
+        let clipboard = if c4_modifiers == ModifiersState::CONTROL {
             match key {
-                VirtualKeyCode::C => Some(LobbyChatClipboardShortcut::Copy),
-                VirtualKeyCode::X => Some(LobbyChatClipboardShortcut::Cut),
-                VirtualKeyCode::V => Some(LobbyChatClipboardShortcut::Paste),
-                VirtualKeyCode::A => Some(LobbyChatClipboardShortcut::SelectAll),
+                VirtualKeyCode::KeyC => Some(LobbyChatClipboardShortcut::Copy),
+                VirtualKeyCode::KeyX => Some(LobbyChatClipboardShortcut::Cut),
+                VirtualKeyCode::KeyV => Some(LobbyChatClipboardShortcut::Paste),
+                VirtualKeyCode::KeyA => Some(LobbyChatClipboardShortcut::SelectAll),
                 _ => None,
             }
         } else {
@@ -3598,11 +3598,11 @@ impl GameApp {
             None
         } else {
             match key {
-                VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
-                VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
+                VirtualKeyCode::ArrowLeft => Some(LobbyChatEditKey::Left),
+                VirtualKeyCode::ArrowRight => Some(LobbyChatEditKey::Right),
                 VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
                 VirtualKeyCode::End => Some(LobbyChatEditKey::End),
-                VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
+                VirtualKeyCode::Backspace => Some(LobbyChatEditKey::Backspace),
                 VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
                 _ => None,
             }
@@ -3610,24 +3610,24 @@ impl GameApp {
         let plain_command = c4_modifiers.is_empty()
             && matches!(
                 key,
-                VirtualKeyCode::Return
+                VirtualKeyCode::Enter
                     | VirtualKeyCode::NumpadEnter
-                    | VirtualKeyCode::Up
-                    | VirtualKeyCode::Down
+                    | VirtualKeyCode::ArrowUp
+                    | VirtualKeyCode::ArrowDown
             );
         let recognized = clipboard.is_some() || edit.is_some() || plain_command;
         if !recognized {
             return Ok(matches!(
                 key,
-                VirtualKeyCode::Return
+                VirtualKeyCode::Enter
                     | VirtualKeyCode::NumpadEnter
-                    | VirtualKeyCode::Up
-                    | VirtualKeyCode::Down
-                    | VirtualKeyCode::Left
-                    | VirtualKeyCode::Right
+                    | VirtualKeyCode::ArrowUp
+                    | VirtualKeyCode::ArrowDown
+                    | VirtualKeyCode::ArrowLeft
+                    | VirtualKeyCode::ArrowRight
                     | VirtualKeyCode::Home
                     | VirtualKeyCode::End
-                    | VirtualKeyCode::Back
+                    | VirtualKeyCode::Backspace
                     | VirtualKeyCode::Delete
             ));
         }
@@ -3649,16 +3649,16 @@ impl GameApp {
             return Ok(true);
         }
         match key {
-            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => {
+            VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter => {
                 let text = self
                     .active_lobby_chat_view()
                     .map(|view| view.text)
                     .unwrap_or_default();
                 self.process_classic_lobby_chat_request(LobbyChatRequest::Submit(text))?;
             }
-            VirtualKeyCode::Up | VirtualKeyCode::Down => {
+            VirtualKeyCode::ArrowUp | VirtualKeyCode::ArrowDown => {
                 self.process_classic_lobby_chat_request(LobbyChatRequest::History {
-                    older: key == VirtualKeyCode::Up,
+                    older: key == VirtualKeyCode::ArrowUp,
                 })?;
             }
             _ => {}
@@ -6106,7 +6106,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let (layout, roster) = self.classic_host_lobby_layouts()?;
         let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if state == ElementState::Pressed {
             let chat_focused = self
                 .classic_host_lobby
@@ -6114,12 +6114,12 @@ impl GameApp {
                 .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::ChatInput);
             let chat_command_key = matches!(
                 key,
-                VirtualKeyCode::Return
+                VirtualKeyCode::Enter
                     | VirtualKeyCode::NumpadEnter
-                    | VirtualKeyCode::Up
-                    | VirtualKeyCode::Down
+                    | VirtualKeyCode::ArrowUp
+                    | VirtualKeyCode::ArrowDown
             );
-            let chat_actions = if key == VirtualKeyCode::Apps && c4_modifiers.is_empty() {
+            let chat_actions = if key == VirtualKeyCode::ContextMenu && c4_modifiers.is_empty() {
                 self.classic_host_lobby
                     .as_ref()
                     .map(|lobby| {
@@ -6173,12 +6173,12 @@ impl GameApp {
                     Vec::new()
                 }
             } else {
-                let shortcut = if c4_modifiers == ModifiersState::CTRL {
+                let shortcut = if c4_modifiers == ModifiersState::CONTROL {
                     match key {
-                        VirtualKeyCode::C => Some(LobbyChatClipboardShortcut::Copy),
-                        VirtualKeyCode::X => Some(LobbyChatClipboardShortcut::Cut),
-                        VirtualKeyCode::V => Some(LobbyChatClipboardShortcut::Paste),
-                        VirtualKeyCode::A => Some(LobbyChatClipboardShortcut::SelectAll),
+                        VirtualKeyCode::KeyC => Some(LobbyChatClipboardShortcut::Copy),
+                        VirtualKeyCode::KeyX => Some(LobbyChatClipboardShortcut::Cut),
+                        VirtualKeyCode::KeyV => Some(LobbyChatClipboardShortcut::Paste),
+                        VirtualKeyCode::KeyA => Some(LobbyChatClipboardShortcut::SelectAll),
                         _ => None,
                     }
                 } else {
@@ -6199,11 +6199,11 @@ impl GameApp {
                         None
                     } else {
                         match key {
-                            VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
-                            VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
+                            VirtualKeyCode::ArrowLeft => Some(LobbyChatEditKey::Left),
+                            VirtualKeyCode::ArrowRight => Some(LobbyChatEditKey::Right),
                             VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
                             VirtualKeyCode::End => Some(LobbyChatEditKey::End),
-                            VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
+                            VirtualKeyCode::Backspace => Some(LobbyChatEditKey::Backspace),
                             VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
                             _ => None,
                         }
@@ -6215,7 +6215,7 @@ impl GameApp {
                                     edit_key,
                                     LobbyChatKeyModifiers {
                                         shift: c4_modifiers.contains(ModifiersState::SHIFT),
-                                        control: c4_modifiers.contains(ModifiersState::CTRL),
+                                        control: c4_modifiers.contains(ModifiersState::CONTROL),
                                     },
                                 )
                             })
@@ -6231,8 +6231,8 @@ impl GameApp {
             }
         }
         let alt_combo_open = state == ElementState::Pressed
-            && self.keyboard_modifiers.alt()
-            && matches!(key, VirtualKeyCode::Down | VirtualKeyCode::Space)
+            && self.keyboard_modifiers.alt_key()
+            && matches!(key, VirtualKeyCode::ArrowDown | VirtualKeyCode::Space)
             && self
                 .classic_host_lobby
                 .as_ref()
@@ -6243,7 +6243,7 @@ impl GameApp {
                     self.classic_host_lobby.as_mut().map(|lobby| {
                         lobby.controller.key_down(
                             key,
-                            self.keyboard_modifiers.shift(),
+                            self.keyboard_modifiers.shift_key(),
                             &layout,
                             &roster,
                             Instant::now(),
@@ -6266,11 +6266,11 @@ impl GameApp {
             && c4_modifiers.contains(ModifiersState::ALT)
             && matches!(
                 key,
-                VirtualKeyCode::Left
-                    | VirtualKeyCode::Right
+                VirtualKeyCode::ArrowLeft
+                    | VirtualKeyCode::ArrowRight
                     | VirtualKeyCode::Home
                     | VirtualKeyCode::End
-                    | VirtualKeyCode::Back
+                    | VirtualKeyCode::Backspace
                     | VirtualKeyCode::Delete
             )
             && self
@@ -6287,7 +6287,7 @@ impl GameApp {
                     .map(|lobby| {
                         lobby.controller.key_down(
                             key,
-                            self.keyboard_modifiers.shift(),
+                            self.keyboard_modifiers.shift_key(),
                             &layout,
                             &roster,
                             Instant::now(),
@@ -6648,7 +6648,7 @@ impl GameApp {
             && no_modifiers
             && matches!(
                 key,
-                VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter | VirtualKeyCode::Space
+                VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter | VirtualKeyCode::Space
             )
         {
             return Ok(true);
@@ -6659,8 +6659,8 @@ impl GameApp {
                     no_modifiers
                         && matches!(
                             key,
-                            VirtualKeyCode::Up
-                                | VirtualKeyCode::Down
+                            VirtualKeyCode::ArrowUp
+                                | VirtualKeyCode::ArrowDown
                                 | VirtualKeyCode::Home
                                 | VirtualKeyCode::End
                         )
@@ -6670,14 +6670,14 @@ impl GameApp {
                 }
                 LobbyControl::RosterTeam => {
                     combo_open_modifiers
-                        && matches!(key, VirtualKeyCode::Down | VirtualKeyCode::Space)
-                        || default_focus_modifiers && key == VirtualKeyCode::Up
+                        && matches!(key, VirtualKeyCode::ArrowDown | VirtualKeyCode::Space)
+                        || default_focus_modifiers && key == VirtualKeyCode::ArrowUp
                 }
                 LobbyControl::RosterAddPlayer => {
                     no_modifiers
                         && matches!(
                             key,
-                            VirtualKeyCode::Return
+                            VirtualKeyCode::Enter
                                 | VirtualKeyCode::NumpadEnter
                                 | VirtualKeyCode::Space
                         )
@@ -6691,7 +6691,7 @@ impl GameApp {
             return Ok(false);
         };
         let (layout, roster) = self.joined_lobby_layouts()?;
-        let shift = self.keyboard_modifiers.shift();
+        let shift = self.keyboard_modifiers.shift_key();
         let actions = self
             .network_lobby
             .as_mut()

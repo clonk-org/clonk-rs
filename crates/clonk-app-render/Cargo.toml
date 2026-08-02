@@ -13,7 +13,7 @@ publish.workspace = true
 clonk-engine = { path = "../clonk-engine" }
 clonk-frontend = { path = "../clonk-frontend" }
 clonk-graphics = { path = "../clonk-graphics" }
-pixels = "0.13"
+pixels = "0.17"
 thiserror = "1"
 tracing = "0.1"
 

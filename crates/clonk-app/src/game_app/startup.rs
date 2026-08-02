@@ -399,10 +399,10 @@ impl GameApp {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if self.startup_view == StartupView::NetworkGame
-            && (modifiers == ModifiersState::CTRL
-                || modifiers == (ModifiersState::CTRL | ModifiersState::SHIFT))
+            && (modifiers == ModifiersState::CONTROL
+                || modifiers == (ModifiersState::CONTROL | ModifiersState::SHIFT))
             && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
                 dialog.mode() == clonk_frontend::startup_netdlg::NetDlgMode::Chat
                     && dialog.chat_page() == clonk_frontend::startup_netdlg::NetDlgChatPage::Chats
@@ -488,11 +488,11 @@ impl GameApp {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if modifiers != ModifiersState::ALT
             && modifiers != (ModifiersState::ALT | ModifiersState::SHIFT)
         {
-            return Ok(modifiers.alt() && map_key_code(key).is_some());
+            return Ok(modifiers.alt_key() && map_key_code(key).is_some());
         }
         // Plain dialog bindings compare the same exact modifier mask, so an
         // unmatched Alt key must not fall through to modifier-blind Rust
@@ -580,8 +580,11 @@ impl GameApp {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if state == ElementState::Pressed && key == VirtualKeyCode::Apps && modifiers.is_empty() {
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
+        if state == ElementState::Pressed
+            && key == VirtualKeyCode::ContextMenu
+            && modifiers.is_empty()
+        {
             if let Some(rect) = self.startup_crew_rename_rect() {
                 let anchor =
                     GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32);
@@ -599,9 +602,9 @@ impl GameApp {
         if state == ElementState::Released {
             return Ok(true);
         }
-        let ctrl = modifiers.ctrl();
-        let shift = modifiers.shift();
-        let cursor_modifiers = !modifiers.alt();
+        let ctrl = modifiers.control_key();
+        let shift = modifiers.shift_key();
+        let cursor_modifiers = !modifiers.alt_key();
         match key {
             VirtualKeyCode::F2 if modifiers.is_empty() => {
                 let index = self
@@ -615,10 +618,10 @@ impl GameApp {
             VirtualKeyCode::Escape if modifiers.is_empty() => {
                 self.abort_startup_crew_rename();
             }
-            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter if modifiers.is_empty() => {
+            VirtualKeyCode::Enter | VirtualKeyCode::NumpadEnter if modifiers.is_empty() => {
                 self.commit_startup_crew_rename(false)?;
             }
-            VirtualKeyCode::Back if cursor_modifiers => {
+            VirtualKeyCode::Backspace if cursor_modifiers => {
                 if let Some(rename) = self.startup_crew_rename.as_mut() {
                     rename.edit.backspace(ctrl, shift);
                 }
@@ -628,14 +631,14 @@ impl GameApp {
                     rename.edit.delete(ctrl, shift);
                 }
             }
-            VirtualKeyCode::Left if cursor_modifiers => {
+            VirtualKeyCode::ArrowLeft if cursor_modifiers => {
                 if let Some(rename) = self.startup_crew_rename.as_mut() {
                     rename
                         .edit
                         .move_cursor(RenameEditCursorOperation::Left, ctrl, shift);
                 }
             }
-            VirtualKeyCode::Right if cursor_modifiers => {
+            VirtualKeyCode::ArrowRight if cursor_modifiers => {
                 if let Some(rename) = self.startup_crew_rename.as_mut() {
                     rename
                         .edit
@@ -656,12 +659,12 @@ impl GameApp {
                         .move_cursor(RenameEditCursorOperation::End, ctrl, shift);
                 }
             }
-            VirtualKeyCode::A if modifiers == ModifiersState::CTRL => {
+            VirtualKeyCode::KeyA if modifiers == ModifiersState::CONTROL => {
                 if let Some(rename) = self.startup_crew_rename.as_mut() {
                     rename.edit.select_all();
                 }
             }
-            VirtualKeyCode::C if modifiers == ModifiersState::CTRL => {
+            VirtualKeyCode::KeyC if modifiers == ModifiersState::CONTROL => {
                 let result = self.startup_crew_rename.as_mut().map(|rename| {
                     transfer_edit_selection(&mut rename.edit, false, |selected| {
                         arboard::Clipboard::new()
@@ -672,7 +675,7 @@ impl GameApp {
                     tracing::warn!(%error, "failed to copy startup crew rename text");
                 }
             }
-            VirtualKeyCode::X if modifiers == ModifiersState::CTRL => {
+            VirtualKeyCode::KeyX if modifiers == ModifiersState::CONTROL => {
                 let result = self.startup_crew_rename.as_mut().map(|rename| {
                     transfer_edit_selection(&mut rename.edit, true, |selected| {
                         arboard::Clipboard::new()
@@ -683,7 +686,7 @@ impl GameApp {
                     tracing::warn!(%error, "failed to cut startup crew rename text");
                 }
             }
-            VirtualKeyCode::V if modifiers == ModifiersState::CTRL => {
+            VirtualKeyCode::KeyV if modifiers == ModifiersState::CONTROL => {
                 match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
                     Ok(text) => {
                         if let Some(rename) = self.startup_crew_rename.as_mut() {

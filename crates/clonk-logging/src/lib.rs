@@ -19,16 +19,8 @@ static INITIALIZED: OnceLock<()> = OnceLock::new();
 /// Graphics, windowing and event-loop crates log per-frame detail below `warn`
 /// that would bury our own output. This is applied ahead of any user directive
 /// so a more specific one — `LC_LOG=info,wgpu_hal=debug` — still wins.
-///
-/// `wgpu_hal::vulkan::conv` is the one module muted past `warn`. It warns for
-/// every Vulkan enum value the pinned wgpu cannot map, which a driver newer
-/// than that pin produces as a matter of course — `Unrecognized present mode
-/// 1000361000` (`VK_PRESENT_MODE_FIFO_LATEST_READY_EXT`) lands four times
-/// before the main menu. The mode is then simply not offered, so the warning
-/// describes a version gap rather than a fault, and the call site is wgpu's:
-/// `pixels` pins the version we get. The rest of `wgpu_hal` keeps `warn`.
 const DEFAULT_DEPENDENCY_FILTER: &str = "wgpu=warn,wgpu_core=warn,wgpu_hal=warn,\
-     wgpu_hal::vulkan::conv=error,naga=warn,winit=warn,calloop=warn,mio=warn";
+     naga=warn,winit=warn,calloop=warn,mio=warn";
 /// Target of the panic hook. Deliberately not the script target: a Rust panic
 /// is not content output and has no business on the in-game message board.
 const PANIC_LOG_TARGET: &str = "panic";

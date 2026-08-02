@@ -839,7 +839,7 @@ fn l081_new_color_resets_only_current_color_in_full_packet() {
     }])
     .expect("player context opens");
     assert!(app
-        .handle_context_menu_key(VirtualKeyCode::C, ElementState::Pressed)
+        .handle_context_menu_key(VirtualKeyCode::KeyC, ElementState::Pressed)
         .expect("activate New Color hotkey"));
 
     let mut reset = chooser.clone();
@@ -1160,7 +1160,7 @@ fn startup_tooltip_app_uses_the_shared_cmouse_clock_and_runtime_resources() {
     // A physical key clears active mouse input before any downstream key
     // owner. Same-pixel motion remains suppressed; a genuinely different
     // ceil-quantized pixel starts a fresh delay.
-    app.handle_key(VirtualKeyCode::Z, ElementState::Pressed)
+    app.handle_key(VirtualKeyCode::KeyZ, ElementState::Pressed)
         .expect("route unbound key");
     assert!(!app.startup_element_tooltip_pending());
     app.handle_cursor_moved(PhysicalPosition::new(
