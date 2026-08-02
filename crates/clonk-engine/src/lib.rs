@@ -9912,6 +9912,8 @@ mod engine_script_exec;
 mod engine_solid_mask;
 #[path = "engine/spawn_queue.rs"]
 mod engine_spawn_queue;
+#[path = "engine/splash.rs"]
+mod engine_splash;
 #[path = "engine/state.rs"]
 mod engine_state;
 #[path = "engine/tick.rs"]

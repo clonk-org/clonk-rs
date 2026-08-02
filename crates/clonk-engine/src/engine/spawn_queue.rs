@@ -1309,53 +1309,7 @@ impl Engine {
     /// Splash (C4Effect.cpp:800-835): bubbles + liquid PXS on entering
     /// water fast. The Random draws are synced — order matters.
     pub(crate) fn splash(&mut self, tx: i32, ty: i32, amt: i32) -> Result<(), EngineError> {
-        let Some(landscape) = self.landscape.as_ref() else {
-            return Ok(());
-        };
-        // Splash only if there is free space above.
-        if landscape.is_semi_solid_at(tx, ty - 15) {
-            return Ok(());
-        }
-        // Liquid + instable check on the back material
-        // (DensityLiquid: 25 <= density < 50, C4Material.h).
-        let liquid_ok = landscape
-            .material_at(tx, ty)
-            .and_then(|id| self.materials.get_by_id(id))
-            .map(|material| {
-                let density = material.density();
-                (25..50).contains(&density) && material.instable()
-            })
-            .unwrap_or(false);
-        if !liquid_ok {
-            return Ok(());
-        }
-        let mut sy = ty;
-        while landscape.is_liquid_at(tx, sy) && sy > ty - 20 && sy >= 0 {
-            sy -= 1;
-        }
-        for _ in 0..amt {
-            // force argument evaluation order (C4Effect.cpp:815-817)
-            let r2 = self.rng.random(16);
-            let r1 = self.rng.random(16);
-            self.bubble_out(tx + r1 - 8, ty + r2 - 6)?;
-            let landscape = self.landscape.as_ref().expect("landscape checked above");
-            if landscape.is_liquid_at(tx, ty) && !landscape.is_semi_solid_at(tx, sy) {
-                let r2 = -self.rng.random(200);
-                let r1 = self.rng.random(151) - 75;
-                // Full ExtractMaterial (C4Effect.cpp:825) including the
-                // CheckInstabilityRange half (C4Landscape.cpp:1154).
-                let extracted = self.extract_material(tx, ty);
-                if let Some(material) = extracted {
-                    self.pxs_system.create(
-                        material,
-                        itofix(tx),
-                        itofix(sy),
-                        math::fixed100(r1),
-                        math::fixed100(r2),
-                    );
-                }
-            }
-        }
+        crate::engine_splash::run_splash(self, tx, ty, amt)?;
         // Splash sounds are presentation-only.
         Ok(())
     }

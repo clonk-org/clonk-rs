@@ -5290,7 +5290,56 @@ pub(crate) fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// C4Object::UpdateInLiquid (C4Object.cpp:6132-6149), called by
+impl crate::engine_splash::SplashHost for EffectHostContext {
+    type Error = RuntimeError;
+
+    fn splash_is_semi_solid(&self, x: i32, y: i32) -> bool {
+        self.landscape_ref()
+            .is_some_and(|landscape| landscape.is_semi_solid_at(x, y))
+    }
+
+    fn splash_material_is_liquid(&self, x: i32, y: i32) -> bool {
+        self.landscape_ref()
+            .and_then(|landscape| landscape.material_at(x, y))
+            .and_then(|material| {
+                self.world
+                    .materials()
+                    .and_then(|set| set.get_by_id(material))
+            })
+            .is_some_and(|material| (25..50).contains(&material.density()) && material.instable())
+    }
+
+    fn splash_is_liquid(&self, x: i32, y: i32) -> bool {
+        self.landscape_ref()
+            .is_some_and(|landscape| landscape.is_liquid_at(x, y))
+    }
+
+    fn splash_random(&mut self, upper_bound: i32) -> Result<i32, Self::Error> {
+        draw_context_random(upper_bound)
+    }
+
+    fn splash_bubble_out(&mut self, x: i32, y: i32) -> Result<(), Self::Error> {
+        crate::compat::register_bubble(self, x, y)
+    }
+
+    fn splash_extract_and_cast(
+        &mut self,
+        source: Vector2,
+        destination: Vector2,
+        velocity: FixedVec2,
+    ) -> Result<(), Self::Error> {
+        if let Some(material) = self.preview_extract_liquid(source) {
+            self.register_landscape_operation(LandscapeOperation::CastPxs {
+                material,
+                position: destination,
+                velocities: vec![velocity],
+            });
+        }
+        Ok(())
+    }
+}
+
+/// C4Object::UpdateInLiquid (C4Object.cpp:6093-6110), called by
 /// FnSetPosition after ForcePosition (C4Script.cpp:479). The cached flag is
 /// deliberately updated synchronously so a following InLiquid() in the same
 /// callback sees the native result.
@@ -5322,17 +5371,15 @@ fn update_in_liquid(context: &mut EffectHostContext, target: ObjectId) -> Result
         .and_then(|id| context.definition_metadata(id))
         .map(|metadata| metadata.float_line)
         .unwrap_or(0);
-    let probe_y = position.y.saturating_add(
-        float_line
-            .saturating_mul(construction)
-            .checked_div(FULL_CON)
-            .unwrap_or(0),
-    ) - 1;
+    let probe_y = crate::engine_splash::liquid_probe_y(position.y, float_line, construction);
     let in_liquid = context
         .landscape_ref()
         .is_some_and(|landscape| landscape.is_liquid_at(position.x, probe_y));
-    if in_liquid && !was_in_liquid && ocf & ocf::HIT_SPEED2 != 0 {
-        let mass = reflected_object_mass(context, target, &mut HashSet::new()).max(
+    if crate::engine_splash::should_splash(
+        in_liquid,
+        was_in_liquid,
+        ocf,
+        reflected_object_mass(context, target, &mut HashSet::new()).max(
             definition
                 .as_deref()
                 .and_then(|id| context.definition_metadata(id))
@@ -5344,82 +5391,21 @@ fn update_in_liquid(context: &mut EffectHostContext, target: ObjectId) -> Result
                         / FULL_CON
                 })
                 .unwrap_or(1),
-        );
-        if mass > 3 {
-            let amount = live_object_shape(context, target)
-                .map(|shape| shape.width.saturating_mul(shape.height) / 10)
-                .unwrap_or(0)
-                .min(20);
-            splash(context, position.x, position.y.saturating_add(1), amount)?;
-        }
+        ),
+    ) {
+        let amount = live_object_shape(context, target)
+            .map(|shape| crate::engine_splash::splash_amount(shape.width, shape.height))
+            .unwrap_or(0);
+        crate::engine_splash::run_splash(
+            context,
+            position.x,
+            position.y.saturating_add(1),
+            amount,
+        )?;
     }
     if in_liquid != was_in_liquid {
         if let Some(scope) = context.object_scope_mut(target) {
             scope.set_in_liquid(in_liquid);
-        }
-    }
-    Ok(())
-}
-
-/// `Splash` (C4Effect.cpp:801-835), with the random-dependent choices made
-/// in the live host and the terrain/PXS mutations replayed in order by the
-/// engine fold.
-fn splash(
-    context: &mut EffectHostContext,
-    tx: i32,
-    ty: i32,
-    amount: i32,
-) -> Result<(), RuntimeError> {
-    if context
-        .landscape_ref()
-        .is_some_and(|landscape| landscape.is_semi_solid_at(tx, ty - 15))
-    {
-        return Ok(());
-    }
-    let Some(material_id) = context
-        .landscape_ref()
-        .and_then(|landscape| landscape.material_at(tx, ty))
-    else {
-        return Ok(());
-    };
-    let liquid_ok = context
-        .world
-        .materials()
-        .and_then(|materials| materials.get_by_id(material_id))
-        .is_some_and(|material| (25..50).contains(&material.density()) && material.instable());
-    if !liquid_ok {
-        return Ok(());
-    }
-
-    let mut surface_y = ty;
-    while context
-        .landscape_ref()
-        .is_some_and(|landscape| landscape.is_liquid_at(tx, surface_y))
-        && surface_y > ty - 20
-        && surface_y >= 0
-    {
-        surface_y -= 1;
-    }
-
-    for _ in 0..amount {
-        // Keep C++'s explicit r2/r1 evaluation order (C4Effect.cpp:816-819).
-        let r2 = draw_context_random(16)?;
-        let r1 = draw_context_random(16)?;
-        crate::compat::register_bubble(context, tx + r1 - 8, ty + r2 - 6)?;
-        if context.landscape_ref().is_some_and(|landscape| {
-            landscape.is_liquid_at(tx, ty) && !landscape.is_semi_solid_at(tx, surface_y)
-        }) {
-            // Keep C++'s r2/r1 order before ExtractMaterial
-            // (C4Effect.cpp:820-829).
-            let r2 = -draw_context_random(200)?;
-            let r1 = draw_context_random(151)? - 75;
-            if let Some(material) = context.preview_extract_liquid(Vector2::new(tx, ty)) {
-                context.register_landscape_operation(LandscapeOperation::CastPxs {
-                    material,
-                    position: Vector2::new(tx, surface_y),
-                    velocities: vec![FixedVec2::new(fixed100(r1), fixed100(r2))],
-                });
-            }
         }
     }
     Ok(())

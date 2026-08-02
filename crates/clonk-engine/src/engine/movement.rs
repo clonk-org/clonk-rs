@@ -932,7 +932,7 @@ impl Engine {
         // integration and BEFORE ContactAction/NoAttachAction
         // (C4Movement.cpp:443-460): IsInLiquidCheck probes
         // GBackLiquid(x, y + Float*Con/FullCon - 1)
-        // (C4Object.cpp:5609-5612); entering liquid clears fNoAttach
+        // (C4Object.cpp:5632-5635); entering liquid clears fNoAttach
         // (:452). DoMovement never runs contained or C4D_StaticBack
         // (C4Movement.cpp:553-575; the outer ExecMovement gate has already
         // selected this DoMovement invocation). A callback changing
@@ -946,11 +946,14 @@ impl Engine {
                 .get(&self.objects[idx].definition_id)
                 .map(|definition| definition.float_line)
                 .unwrap_or(0);
-            let offset = float_line
-                .saturating_mul(state.construction)
-                .checked_div(FULL_CON)
-                .unwrap_or(0);
-            Vector2::new(state.position.x, state.position.y + offset - 1)
+            Vector2::new(
+                state.position.x,
+                crate::engine_splash::liquid_probe_y(
+                    state.position.y,
+                    float_line,
+                    state.construction,
+                ),
+            )
         };
         let wet = self
             .landscape
@@ -958,18 +961,18 @@ impl Engine {
             .map(|landscape| landscape.is_liquid_at(probe.x, probe.y))
             .unwrap_or(false);
         let state = &self.objects[idx].state;
-        if wet && !state.in_liquid {
+        if crate::engine_splash::entered_liquid(wet, state.in_liquid) {
             // Entry splash (C4Movement.cpp:450-453): fast + heavy
             // objects splash — synced RNG draws + FXU1 bubbles.
             let object_mass = self.effective_object_mass(idx);
             let state = &self.objects[idx].state;
-            let should_splash = state.ocf & crate::ocf::HIT_SPEED2 != 0 && object_mass > 3;
+            let should_splash =
+                crate::engine_splash::should_splash(wet, state.in_liquid, state.ocf, object_mass);
             let (splash_x, splash_y, splash_amt) = {
                 let shape = self.objects[idx].current_shape_rect();
                 let area = shape
-                    .map(|rect| rect.width * rect.height / 10)
-                    .unwrap_or(0)
-                    .min(20);
+                    .map(|rect| crate::engine_splash::splash_amount(rect.width, rect.height))
+                    .unwrap_or(0);
                 (state.position.x, state.position.y + 1, area)
             };
             if should_splash {
