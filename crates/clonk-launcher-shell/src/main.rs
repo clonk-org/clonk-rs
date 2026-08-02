@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, LineWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use arboard::Clipboard;
@@ -81,9 +82,11 @@ impl LauncherShell {
         let mut runtime = LauncherRuntime {
             window_focused: window.has_focus(),
             window,
-            pixels,
+            pixels: Some(pixels),
             app,
             ime_allowed: false,
+            surface_rebuild: SurfaceRebuildState::default(),
+            surface_retry_at: None,
         };
         runtime.sync_report_search_ime();
         Ok(runtime)
@@ -135,25 +138,62 @@ impl ApplicationHandler for LauncherShell {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(runtime) = &self.runtime {
-            runtime.window.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            match launcher_redraw_action(Instant::now(), runtime.surface_retry_at) {
+                LauncherRedrawAction::Request => {
+                    runtime.surface_retry_at = None;
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                    runtime.window.request_redraw();
+                }
+                LauncherRedrawAction::WaitUntil(retry_at) => {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(retry_at));
+                }
+            }
         }
     }
 }
 
 struct LauncherRuntime {
     window: Arc<Window>,
-    pixels: Pixels<'static>,
+    pixels: Option<Pixels<'static>>,
     app: LauncherApp,
     window_focused: bool,
     ime_allowed: bool,
+    surface_rebuild: SurfaceRebuildState,
+    surface_retry_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LauncherPresentRecovery {
     RebuildFramebuffer,
     Report,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LauncherPresentOutcome {
+    Presented,
+    Skipped,
+}
+
+const fn launcher_present_outcome(render_callback_invoked: bool) -> LauncherPresentOutcome {
+    if render_callback_invoked {
+        LauncherPresentOutcome::Presented
+    } else {
+        LauncherPresentOutcome::Skipped
+    }
+}
+
+fn present_launcher_frame(
+    pixels: &Pixels<'_>,
+) -> std::result::Result<LauncherPresentOutcome, pixels::Error> {
+    let mut render_callback_invoked = false;
+    pixels.render_with(|encoder, surface_view, context| {
+        render_callback_invoked = true;
+        context.scaling_renderer.render(encoder, surface_view);
+        Ok(())
+    })?;
+    Ok(launcher_present_outcome(render_callback_invoked))
 }
 
 fn launcher_present_recovery(error: &pixels::Error) -> LauncherPresentRecovery {
@@ -164,6 +204,56 @@ fn launcher_present_recovery(error: &pixels::Error) -> LauncherPresentRecovery {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceRebuildSchedule {
+    Immediate,
+    Cadenced,
+}
+
+#[derive(Default)]
+struct SurfaceRebuildState {
+    prompt_spent: bool,
+}
+
+impl SurfaceRebuildState {
+    fn note_loss(&mut self) -> SurfaceRebuildSchedule {
+        if self.prompt_spent {
+            SurfaceRebuildSchedule::Cadenced
+        } else {
+            self.prompt_spent = true;
+            SurfaceRebuildSchedule::Immediate
+        }
+    }
+
+    fn note_presented(&mut self) {
+        self.prompt_spent = false;
+    }
+}
+
+const LOST_SURFACE_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LauncherRedrawAction {
+    Request,
+    WaitUntil(Instant),
+}
+
+fn launcher_redraw_action(now: Instant, surface_retry_at: Option<Instant>) -> LauncherRedrawAction {
+    surface_retry_at.filter(|retry_at| *retry_at > now).map_or(
+        LauncherRedrawAction::Request,
+        LauncherRedrawAction::WaitUntil,
+    )
+}
+
+fn replace_after_drop<T, E>(
+    current: &mut Option<T>,
+    build_replacement: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<(), E> {
+    drop(current.take());
+    *current = Some(build_replacement()?);
+    Ok(())
+}
+
 impl LauncherRuntime {
     fn handle_window_event(
         &mut self,
@@ -171,18 +261,36 @@ impl LauncherRuntime {
         event: WindowEvent,
     ) -> Result<()> {
         if event == WindowEvent::RedrawRequested {
+            let pixels = self
+                .pixels
+                .as_mut()
+                .context("launcher framebuffer is unavailable")?;
             self.app
-                .render(self.pixels.frame_mut())
+                .render(pixels.frame_mut())
                 .context("failed to render launcher UI")?;
-            return match self.pixels.render() {
-                Ok(()) => Ok(()),
+            return match present_launcher_frame(pixels) {
+                Ok(LauncherPresentOutcome::Presented) => {
+                    self.surface_rebuild.note_presented();
+                    self.surface_retry_at = None;
+                    Ok(())
+                }
+                Ok(LauncherPresentOutcome::Skipped) => {
+                    self.surface_retry_at = Some(Instant::now() + LOST_SURFACE_RETRY_DELAY);
+                    Ok(())
+                }
                 Err(error)
                     if launcher_present_recovery(&error)
                         == LauncherPresentRecovery::RebuildFramebuffer =>
                 {
+                    let schedule = self.surface_rebuild.note_loss();
                     tracing::warn!("launcher surface was lost; rebuilding its framebuffer");
                     self.rebuild_framebuffer()?;
-                    self.window.request_redraw();
+                    match schedule {
+                        SurfaceRebuildSchedule::Immediate => self.window.request_redraw(),
+                        SurfaceRebuildSchedule::Cadenced => {
+                            self.surface_retry_at = Some(Instant::now() + LOST_SURFACE_RETRY_DELAY);
+                        }
+                    }
                     Ok(())
                 }
                 Err(error) => Err(error).context("failed to swap launcher buffers"),
@@ -191,27 +299,34 @@ impl LauncherRuntime {
         if let WindowEvent::Focused(focused) = &event {
             self.window_focused = *focused;
         }
-        let result = self
-            .app
-            .handle_window_event(&mut self.pixels, event, event_loop);
+        let result = self.pixels.as_mut().map_or_else(
+            || Err(anyhow!("launcher framebuffer is unavailable")),
+            |pixels| self.app.handle_window_event(pixels, event, event_loop),
+        );
         self.sync_report_search_ime();
         result
     }
 
     fn rebuild_framebuffer(&mut self) -> Result<()> {
-        let prior_frame = self.pixels.frame().to_vec();
+        let prior_frame = self
+            .pixels
+            .as_ref()
+            .context("launcher framebuffer is unavailable")?
+            .frame()
+            .to_vec();
         let (surface_width, surface_height) = enforce_min_size(self.window.inner_size());
         let buffer_width = self.app.surface.width().max(1);
         let buffer_height = self.app.surface.height().max(1);
-        let surface_texture =
-            SurfaceTexture::new(surface_width, surface_height, Arc::clone(&self.window));
-        let mut replacement = Pixels::new(buffer_width, buffer_height, surface_texture)
-            .context("failed to rebuild launcher framebuffer")?;
-        if replacement.frame().len() == prior_frame.len() {
-            replacement.frame_mut().copy_from_slice(&prior_frame);
-        }
-        self.pixels = replacement;
-        Ok(())
+        replace_after_drop(&mut self.pixels, || {
+            let surface_texture =
+                SurfaceTexture::new(surface_width, surface_height, Arc::clone(&self.window));
+            let mut replacement = Pixels::new(buffer_width, buffer_height, surface_texture)
+                .context("failed to rebuild launcher framebuffer")?;
+            if replacement.frame().len() == prior_frame.len() {
+                replacement.frame_mut().copy_from_slice(&prior_frame);
+            }
+            Ok(replacement)
+        })
     }
 
     fn sync_report_search_ime(&mut self) {
@@ -3792,6 +3907,81 @@ mod tests {
         assert_eq!(
             launcher_present_recovery(&pixels::Error::Validation),
             LauncherPresentRecovery::Report
+        );
+    }
+
+    #[test]
+    fn launcher_builds_a_replacement_only_after_dropping_the_previous_surface() {
+        struct DropProbe<'a>(&'a std::cell::Cell<bool>);
+
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let previous_dropped = std::cell::Cell::new(false);
+        let replacement_dropped = std::cell::Cell::new(false);
+        let mut surface = Some(DropProbe(&previous_dropped));
+        replace_after_drop(&mut surface, || {
+            assert!(previous_dropped.get());
+            Ok::<_, std::convert::Infallible>(DropProbe(&replacement_dropped))
+        })
+        .expect("replace the launcher surface");
+
+        assert!(surface.is_some());
+        assert!(!replacement_dropped.get());
+
+        let failed_dropped = std::cell::Cell::new(false);
+        let mut failed_surface = Some(DropProbe(&failed_dropped));
+        let result = replace_after_drop(&mut failed_surface, || {
+            Err::<DropProbe<'_>, _>("replacement failed")
+        });
+        assert_eq!(result, Err("replacement failed"));
+        assert!(failed_dropped.get());
+        assert!(failed_surface.is_none());
+    }
+
+    #[test]
+    fn launcher_requires_a_presented_frame_before_another_surface_rebuild() {
+        let mut recovery = SurfaceRebuildState::default();
+        assert_eq!(recovery.note_loss(), SurfaceRebuildSchedule::Immediate);
+        assert_eq!(
+            recovery.note_loss(),
+            SurfaceRebuildSchedule::Cadenced,
+            "a skipped frame must not replenish the prompt redraw"
+        );
+        recovery.note_presented();
+        assert_eq!(recovery.note_loss(), SurfaceRebuildSchedule::Immediate);
+    }
+
+    #[test]
+    fn launcher_distinguishes_a_skipped_surface_acquisition_from_presentation() {
+        assert_eq!(
+            launcher_present_outcome(false),
+            LauncherPresentOutcome::Skipped
+        );
+        assert_eq!(
+            launcher_present_outcome(true),
+            LauncherPresentOutcome::Presented
+        );
+    }
+
+    #[test]
+    fn launcher_waits_before_a_cadenced_surface_retry() {
+        let now = Instant::now();
+        let retry_at = now + LOST_SURFACE_RETRY_DELAY;
+        assert_eq!(
+            launcher_redraw_action(now, Some(retry_at)),
+            LauncherRedrawAction::WaitUntil(retry_at)
+        );
+        assert_eq!(
+            launcher_redraw_action(retry_at, Some(retry_at)),
+            LauncherRedrawAction::Request
+        );
+        assert_eq!(
+            launcher_redraw_action(now, None),
+            LauncherRedrawAction::Request
         );
     }
 

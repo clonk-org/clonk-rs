@@ -58,6 +58,52 @@ pub(crate) fn present_pixels_frame(
     Ok(retained_gpu_present_outcome(render_callback_invoked))
 }
 
+pub(crate) fn replace_after_drop<T, E>(
+    current: &mut Option<T>,
+    build_replacement: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<(), E> {
+    drop(current.take());
+    *current = Some(build_replacement()?);
+    Ok(())
+}
+
+fn restore_framebuffer_contents(
+    previous: &[u8],
+    replacement: &mut [u8],
+) -> std::result::Result<(), &'static str> {
+    if previous.len() != replacement.len() {
+        return Err("replacement framebuffer length does not match the previous frame");
+    }
+    replacement.copy_from_slice(previous);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SurfaceRebuildSchedule {
+    Immediate,
+    Cadenced,
+}
+
+#[derive(Default)]
+pub(crate) struct SurfaceRebuildState {
+    prompt_spent: bool,
+}
+
+impl SurfaceRebuildState {
+    pub(crate) fn note_loss(&mut self) -> SurfaceRebuildSchedule {
+        if self.prompt_spent {
+            SurfaceRebuildSchedule::Cadenced
+        } else {
+            self.prompt_spent = true;
+            SurfaceRebuildSchedule::Immediate
+        }
+    }
+
+    pub(crate) fn note_presented(&mut self) {
+        self.prompt_spent = false;
+    }
+}
+
 #[cfg(all(
     test,
     any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
@@ -78,6 +124,65 @@ mod window_api_tests {
             retained_gpu_present_outcome(true),
             RetainedGpuPresentOutcome::Presented
         );
+    }
+
+    #[test]
+    fn a_replacement_surface_is_built_only_after_the_previous_one_is_dropped() {
+        struct DropProbe<'a>(&'a std::cell::Cell<bool>);
+
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let previous_dropped = std::cell::Cell::new(false);
+        let replacement_dropped = std::cell::Cell::new(false);
+        let mut surface = Some(DropProbe(&previous_dropped));
+        replace_after_drop(&mut surface, || {
+            assert!(
+                previous_dropped.get(),
+                "the old native surface must be unconfigured before a replacement swapchain is created"
+            );
+            Ok::<_, std::convert::Infallible>(DropProbe(&replacement_dropped))
+        })
+        .expect("replace the surface");
+
+        assert!(surface.is_some());
+        assert!(!replacement_dropped.get());
+
+        let failed_dropped = std::cell::Cell::new(false);
+        let mut failed_surface = Some(DropProbe(&failed_dropped));
+        let result = replace_after_drop(&mut failed_surface, || {
+            Err::<DropProbe<'_>, _>("replacement failed")
+        });
+        assert_eq!(result, Err("replacement failed"));
+        assert!(failed_dropped.get());
+        assert!(failed_surface.is_none());
+    }
+
+    #[test]
+    fn only_the_first_surface_rebuild_before_presentation_is_prompted() {
+        let mut recovery = SurfaceRebuildState::default();
+        assert_eq!(recovery.note_loss(), SurfaceRebuildSchedule::Immediate);
+        assert_eq!(
+            recovery.note_loss(),
+            SurfaceRebuildSchedule::Cadenced,
+            "a skipped frame must not replenish the prompt redraw"
+        );
+        recovery.note_presented();
+        assert_eq!(recovery.note_loss(), SurfaceRebuildSchedule::Immediate);
+    }
+
+    #[test]
+    fn framebuffer_recovery_preserves_unchanged_cpu_output() {
+        let previous = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut replacement = [0; 8];
+        restore_framebuffer_contents(&previous, &mut replacement)
+            .expect("restore the cached CPU frame");
+        assert_eq!(replacement, previous);
+
+        assert!(restore_framebuffer_contents(&previous, &mut replacement[..4]).is_err());
     }
 
     // C4FullScreen.cpp:54-65,227-238,387-400 — Win32 dispatches virtual
@@ -544,25 +649,35 @@ pub(crate) fn build_framebuffer(
 
 pub(crate) fn rebuild_retained_gpu_device(
     window: &Arc<Window>,
-    pixels: &mut Pixels<'static>,
+    pixels: &mut Option<Pixels<'static>>,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
 ) -> Result<()> {
     let size = enforce_min_size(window.inner_size());
-    let mut replacement =
-        build_framebuffer(window, size).context("failed to rebuild retained GPU surface")?;
-    replacement
-        .resize_buffer(1, 1)
-        .context("failed to restore retained GPU presentation buffer")?;
-    renderer.recreate(
-        replacement.device(),
-        replacement.queue(),
-        replacement.surface_texture_format(),
-    );
-    renderer
-        .check_health()
-        .context("replacement retained GPU device failed initialization")?;
-    *pixels = replacement;
-    Ok(())
+    let previous = pixels
+        .as_ref()
+        .context("presentation framebuffer is unavailable")?;
+    let previous_width = previous.context().texture_extent.width;
+    let previous_height = previous.context().texture_extent.height;
+    let previous_frame = previous.frame().to_vec();
+    replace_after_drop(pixels, || {
+        let mut replacement =
+            build_framebuffer(window, size).context("failed to rebuild retained GPU surface")?;
+        replacement
+            .resize_buffer(previous_width, previous_height)
+            .context("failed to restore retained GPU presentation buffer")?;
+        restore_framebuffer_contents(&previous_frame, replacement.frame_mut())
+            .map_err(anyhow::Error::msg)
+            .context("failed to restore retained GPU presentation contents")?;
+        renderer.recreate(
+            replacement.device(),
+            replacement.queue(),
+            replacement.surface_texture_format(),
+        );
+        renderer
+            .check_health()
+            .context("replacement retained GPU device failed initialization")?;
+        Ok(replacement)
+    })
 }
 
 pub(crate) fn present_retained_gpu_frame(
@@ -1262,10 +1377,12 @@ fn legacy_virtual_key(
         winit::keyboard::PhysicalKey::Code(key) => Some(key),
         winit::keyboard::PhysicalKey::Unidentified(_) => None,
     };
+    #[cfg(not(target_os = "windows"))]
+    let _ = control_down;
 
     #[cfg(target_os = "macos")]
     let selected = {
-        let _ = (logical_key, location, control_down);
+        let _ = (logical_key, location);
         physical
     };
     #[cfg(target_os = "windows")]

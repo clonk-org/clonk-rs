@@ -1016,9 +1016,10 @@ fn run() -> Result<()> {
             }
             let shell_window_host::ShellWindowHost {
                 window,
-                pixels,
+                pixels: pixels_slot,
                 presenter,
                 renderer: retained_gpu_renderer,
+                surface_rebuild,
                 ..
             } = developer_windows
                 .shell_mut()
@@ -1036,6 +1037,9 @@ fn run() -> Result<()> {
                     if window_id == window.id()
                         && !matches!(event, WindowEvent::RedrawRequested) =>
                 {
+                    let Some(pixels) = pixels_slot.as_mut() else {
+                        return;
+                    };
                     if let Err(err) = handle_window_event(
                         window,
                         &mut app,
@@ -1305,6 +1309,9 @@ fn run() -> Result<()> {
                         retained_gpu_renderer.requires_cpu_presentation(),
                     ) {
                         app.retained_gpu_presentation_active = true;
+                        let Some(pixels) = pixels_slot.as_mut() else {
+                            return;
+                        };
                         if pixels.context().texture_extent.width != 1
                             || pixels.context().texture_extent.height != 1
                         {
@@ -1321,6 +1328,7 @@ fn run() -> Result<()> {
                             retained_gpu_renderer,
                         ) {
                             Ok(RetainedGpuPresentOutcome::Presented) => {
+                                surface_rebuild.note_presented();
                                 if app.mode == AppMode::Running && !app.console_mode {
                                     app.finish_rendered_object_audibility_pass();
                                 }
@@ -1386,16 +1394,23 @@ fn run() -> Result<()> {
                             }
                             Err(error) => match retained_gpu_present_recovery(&error) {
                                 RetainedGpuPresentRecovery::RebuildDevice => {
+                                    let rebuild_schedule = surface_rebuild.note_loss();
                                     tracing::warn!(
                                         ?error,
                                         "retained GPU device requires recreation"
                                     );
                                     match rebuild_retained_gpu_device(
                                         window,
-                                        pixels,
+                                        pixels_slot,
                                         retained_gpu_renderer,
                                     ) {
-                                        Ok(()) => window.request_redraw(),
+                                        Ok(()) => {
+                                            render_floor.note_refused_presentation(Instant::now());
+                                            if rebuild_schedule == SurfaceRebuildSchedule::Immediate
+                                            {
+                                                window.request_redraw();
+                                            }
+                                        }
                                         Err(rebuild_error) => {
                                             tracing::error!(
                                                 ?rebuild_error,
@@ -1431,6 +1446,9 @@ fn run() -> Result<()> {
                             return;
                         }
                     }
+                    let Some(pixels) = pixels_slot.as_mut() else {
+                        return;
+                    };
                     app.retained_gpu_presentation_active = false;
                     let (physical_width, physical_height) = presenter.physical_size();
                     let max_texture_dimension_2d =
@@ -1554,6 +1572,7 @@ fn run() -> Result<()> {
                     }
                     match present_pixels_frame(pixels) {
                         Ok(RetainedGpuPresentOutcome::Presented) => {
+                            surface_rebuild.note_presented();
                             while !app.pending_screenshots.is_empty() {
                                 let (width, height) = presenter.physical_size();
                                 let result = app.save_next_screenshot(
@@ -1630,18 +1649,21 @@ fn run() -> Result<()> {
                             if retained_gpu_present_recovery(&error)
                                 == RetainedGpuPresentRecovery::RebuildDevice
                             {
+                                let rebuild_schedule = surface_rebuild.note_loss();
                                 tracing::warn!(
                                     ?error,
                                     "CPU presentation surface requires recreation"
                                 );
                                 match rebuild_retained_gpu_device(
                                     window,
-                                    pixels,
+                                    pixels_slot,
                                     retained_gpu_renderer,
                                 ) {
                                     Ok(()) => {
                                         render_floor.note_refused_presentation(Instant::now());
-                                        window.request_redraw();
+                                        if rebuild_schedule == SurfaceRebuildSchedule::Immediate {
+                                            window.request_redraw();
+                                        }
                                     }
                                     Err(rebuild_error) => {
                                         tracing::error!(

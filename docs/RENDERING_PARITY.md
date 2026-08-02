@@ -146,6 +146,17 @@ whether the callback ran, reports a skipped presentation when it did not, and
 leaves screenshots and save-thumbnail requests queued for the next drawable
 frame.
 
+Every `SurfaceLost` owner moves its old `Pixels` value out of an explicit slot
+and drops it before the replacement builder runs. Dropping wgpu's surface
+synchronously unconfigures the old swapchain, so Vulkan and DX12 never see two
+configured swapchains for one native window. A successful rebuild may request
+one prompt redraw; further losses rebuild only on the owner's normal graphics
+cadence until an actually presented frame rearms that prompt. Skipped frames do
+not rearm it. The game surface also restores its prior buffer extent and bytes,
+so an unchanged cached CPU frame survives device recreation. The launcher's
+otherwise-unconditional redraw loop additionally paces continued
+loss/occlusion retries at 250 ms.
+
 wgpu 29 reports device loss through the device-loss callback. The retained
 renderer converts that notification into a typed recreation request. The app
 checks renderer health before presentation, after a successful return, and

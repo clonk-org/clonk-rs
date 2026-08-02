@@ -15,7 +15,7 @@
 //! of it.
 
 use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter};
-use crate::{present_retained_gpu_frame, GameApp};
+use crate::{present_retained_gpu_frame, GameApp, SurfaceRebuildState};
 use clonk_app_render::gpu_renderer::RetainedGpuRenderer;
 use pixels::Pixels;
 use std::sync::Arc;
@@ -24,10 +24,12 @@ use winit::window::Window;
 /// The console shell's window and everything bound to its surface.
 pub struct ShellWindowHost {
     pub window: Arc<Window>,
-    pub pixels: Pixels<'static>,
+    pub pixels: Option<Pixels<'static>>,
     pub presenter: clonk_scaling::FramePresenter,
     /// Built from `pixels`' device/queue/format, so it is part of this surface.
     pub renderer: RetainedGpuRenderer,
+    /// Limits prompt redraws while a replacement surface remains unproven.
+    pub surface_rebuild: SurfaceRebuildState,
     visible: bool,
 }
 
@@ -43,9 +45,10 @@ impl ShellWindowHost {
         // leave gameplay controls stuck. The legacy shell had no IME opt-in.
         Self {
             window,
-            pixels,
+            pixels: Some(pixels),
             presenter,
             renderer,
+            surface_rebuild: SurfaceRebuildState::default(),
             visible: true,
         }
     }
@@ -55,8 +58,10 @@ impl DeveloperWindowHost for ShellWindowHost {
     fn resize(&mut self, width: u32, height: u32) {
         // Surface and buffer are resized together by the runner's own resize
         // path, which reports its errors; this is the registry-facing form.
-        let _ = self.pixels.resize_surface(width, height);
-        let _ = self.pixels.resize_buffer(width, height);
+        if let Some(pixels) = self.pixels.as_mut() {
+            let _ = pixels.resize_surface(width, height);
+            let _ = pixels.resize_buffer(width, height);
+        }
     }
 
     fn request_redraw(&mut self) {
@@ -77,7 +82,11 @@ impl DeveloperWindowPresenter<GameApp> for ShellWindowHost {
     /// The shell draws from `GameApp` exactly as a C++ viewport draws from the
     /// global `Game`; the port just has to say so.
     fn present(&mut self, app: &mut GameApp) -> Result<(), String> {
-        present_retained_gpu_frame(app, &self.pixels, &self.presenter, &mut self.renderer)
+        let pixels = self
+            .pixels
+            .as_ref()
+            .ok_or_else(|| "the shell framebuffer is unavailable".to_string())?;
+        present_retained_gpu_frame(app, pixels, &self.presenter, &mut self.renderer)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
