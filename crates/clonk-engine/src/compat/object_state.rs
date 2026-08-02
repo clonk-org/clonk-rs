@@ -5285,8 +5285,133 @@ pub(crate) fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
             // 552-561). The C4SolidMask instance itself survives.
             context.update_live_solid_mask(target, false);
         }
+        update_in_liquid(context, target)?;
         Ok(Value::Bool(true))
     })
+}
+
+impl crate::engine_splash::SplashHost for EffectHostContext {
+    type Error = RuntimeError;
+
+    fn splash_is_semi_solid(&self, x: i32, y: i32) -> bool {
+        self.landscape_ref()
+            .is_some_and(|landscape| landscape.is_semi_solid_at(x, y))
+    }
+
+    fn splash_material_is_liquid(&self, x: i32, y: i32) -> bool {
+        self.landscape_ref()
+            .and_then(|landscape| landscape.material_at(x, y))
+            .and_then(|material| {
+                self.world
+                    .materials()
+                    .and_then(|set| set.get_by_id(material))
+            })
+            .is_some_and(|material| (25..50).contains(&material.density()) && material.instable())
+    }
+
+    fn splash_is_liquid(&self, x: i32, y: i32) -> bool {
+        self.landscape_ref()
+            .is_some_and(|landscape| landscape.is_liquid_at(x, y))
+    }
+
+    fn splash_random(&mut self, upper_bound: i32) -> Result<i32, Self::Error> {
+        draw_context_random(upper_bound)
+    }
+
+    fn splash_bubble_out(&mut self, x: i32, y: i32) -> Result<(), Self::Error> {
+        crate::compat::register_bubble(self, x, y)
+    }
+
+    fn splash_extract_and_cast(
+        &mut self,
+        source: Vector2,
+        destination: Vector2,
+        velocity: FixedVec2,
+    ) -> Result<(), Self::Error> {
+        if let Some(material) = self.preview_extract_liquid(source) {
+            self.register_landscape_operation(LandscapeOperation::CastPxs {
+                material,
+                position: destination,
+                velocities: vec![velocity],
+            });
+        }
+        Ok(())
+    }
+}
+
+/// C4Object::UpdateInLiquid (C4Object.cpp:6093-6110), called by
+/// FnSetPosition after ForcePosition (C4Script.cpp:479). The cached flag is
+/// deliberately updated synchronously so a following InLiquid() in the same
+/// callback sees the native result.
+fn update_in_liquid(context: &mut EffectHostContext, target: ObjectId) -> Result<(), RuntimeError> {
+    let (position, construction, was_in_liquid, ocf, scope_definition) = {
+        let Some(scope) = context.object_scope(target) else {
+            return Ok(());
+        };
+        (
+            scope.effective_position(),
+            scope.construction(),
+            scope.in_liquid(),
+            scope.ocf(),
+            scope
+                .pending_update
+                .change_def
+                .clone()
+                .or_else(|| scope.definition_id.clone()),
+        )
+    };
+    let definition = scope_definition.or_else(|| {
+        context
+            .get_world_object(target)
+            .map(|object| object.definition_id().to_string())
+    });
+    let float_line = definition
+        .as_deref()
+        .and_then(|id| context.definition_metadata(id))
+        .map(|metadata| metadata.float_line)
+        .unwrap_or(0);
+    let probe_y = crate::engine_splash::liquid_probe_y(position.y, float_line, construction);
+    let in_liquid = context
+        .landscape_ref()
+        .is_some_and(|landscape| landscape.is_liquid_at(position.x, probe_y));
+    if crate::engine_splash::entered_liquid(in_liquid, was_in_liquid) {
+        let mass = current_object_mass(context, target);
+        if crate::engine_splash::should_splash(in_liquid, was_in_liquid, ocf, mass) {
+            let amount = live_object_shape(context, target)
+                .map(|shape| crate::engine_splash::splash_amount(shape.width, shape.height))
+                .unwrap_or(0);
+            crate::engine_splash::run_splash(
+                context,
+                position.x,
+                position.y.saturating_add(1),
+                amount,
+            )?;
+        }
+    }
+    if in_liquid != was_in_liquid {
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.set_in_liquid(in_liquid);
+        }
+    }
+    Ok(())
+}
+
+fn current_object_mass(context: &EffectHostContext, target: ObjectId) -> i32 {
+    // C4Object::Mass is a live compiled cache (C4Object.cpp:497-505), not
+    // merely DefCore mass plus contents. SetMass/DoCon/ChangeDef invalidate
+    // it before their deferred update is folded, so use the cached value only
+    // while those same-call invalidations are absent.
+    let compiled_mass = context.object_scope(target).and_then(|scope| {
+        let pending_invalidates_cache = scope.pending_update.own_mass.is_some()
+            || scope.pending_update.construction.is_some()
+            || scope.pending_update.change_def.is_some()
+            || scope.pending_update.contents_front.is_some();
+        (!pending_invalidates_cache)
+            .then(|| context.get_world_object(target))
+            .flatten()
+            .and_then(|object| object.compiled_mass)
+    });
+    compiled_mass.unwrap_or_else(|| reflected_object_mass(context, target, &mut HashSet::new()))
 }
 
 /// FnIsNewgfx (C4Script.cpp:4947): the compatibility probe is always true.

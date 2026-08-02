@@ -280,89 +280,100 @@ pub(crate) fn bubble(args: &[Value]) -> Result<Value, RuntimeError> {
             x = x.saturating_add(position.x);
             y = y.saturating_add(position.y);
         }
-        // No bubbles from nowhere (C4Effect.cpp:850).
-        let semi_solid = context
-            .landscape_ref()
-            .map(|landscape| landscape.is_semi_solid_at(x, y))
-            .unwrap_or(false);
-        if !semi_solid {
-            return Ok(Value::Nil);
-        }
-        let Some(metadata) = context
-            .definition_metadata(crate::BUBBLE_DEFINITION_ID)
-            .cloned()
-        else {
-            // Unknown FXU1 def: Game.CreateObject returns nullptr.
-            return Ok(Value::Nil);
-        };
-        // Enough bubbles out there already (C4Effect.cpp:853-854) —
-        // pending same-call spawns count like the live objects.
-        let bubbles = context
-            .world_object_ids()
-            .into_iter()
-            .filter(|id| {
-                context
-                    .get_world_object(*id)
-                    .filter(|object| object.definition_id() == crate::BUBBLE_DEFINITION_ID)
-                    .filter(|object| object.status().is_active())
-                    .is_some()
-            })
-            .count();
-        if crate::bubble_cap_reached(bubbles, context.world.smoke_level()) {
-            return Ok(Value::Nil);
-        }
-        let id = context.allocate_object_id();
-        let spawn = SpawnConfig::new(crate::BUBBLE_DEFINITION_ID)
-            .with_position(Vector2::new(x, y))
-            .with_owner(OWNER_NONE)
-            .with_category(metadata.category)
-            .with_id(id);
-        let preview_ocf = ocf::compute(
-            metadata.ocf_base,
-            metadata.crew_member,
-            true,
-            ObjectStatus::Normal,
-            false,
-            FULL_CON,
-            metadata.category,
-        );
-        let preview = HostWorldObject::with_category(
-            id,
-            crate::BUBBLE_DEFINITION_ID,
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            metadata.category,
-            0,
-            FULL_CON,
-            0,
-            Vector2::new(x, y),
-            Vector2::ZERO,
-            0,
-            Vec::new(),
-            0,
-            0,
-            0,
-            None,
-            None,
-        )
-        .with_ocf(preview_ocf)
-        .with_full_state(Rc::new(crate::preview_spawn_state_with_components(
-            Vector2::new(x, y),
-            OWNER_NONE,
-            OWNER_NONE,
-            metadata.category,
-            FULL_CON,
-            metadata.contact_density(),
-            metadata.vertices.clone(),
-            metadata.components.as_slice(),
-        )));
-        context.register_spawn(spawn, preview);
+        register_bubble(context, x, y)?;
         Ok(Value::Nil)
     })
+}
+
+/// `C4Effect::BubbleOut` (C4Effect.cpp:847-857), shared by the script
+/// Bubble host call and the synchronous entry Splash path.
+pub(crate) fn register_bubble(
+    context: &mut EffectHostContext,
+    x: i32,
+    y: i32,
+) -> Result<(), RuntimeError> {
+    // No bubbles from nowhere (C4Effect.cpp:850).
+    let semi_solid = context
+        .landscape_ref()
+        .map(|landscape| landscape.is_semi_solid_at(x, y))
+        .unwrap_or(false);
+    if !semi_solid {
+        return Ok(());
+    }
+    let Some(metadata) = context
+        .definition_metadata(crate::BUBBLE_DEFINITION_ID)
+        .cloned()
+    else {
+        // Unknown FXU1 def: Game.CreateObject returns nullptr.
+        return Ok(());
+    };
+    // Enough bubbles out there already (C4Effect.cpp:853-854) — pending
+    // same-call spawns count like the live objects.
+    let bubbles = context
+        .world_object_ids()
+        .into_iter()
+        .filter(|id| {
+            context
+                .get_world_object(*id)
+                .filter(|object| object.definition_id() == crate::BUBBLE_DEFINITION_ID)
+                .filter(|object| object.status().is_active())
+                .is_some()
+        })
+        .count();
+    if crate::bubble_cap_reached(bubbles, context.world.smoke_level()) {
+        return Ok(());
+    }
+    let id = context.allocate_object_id();
+    let spawn = SpawnConfig::new(crate::BUBBLE_DEFINITION_ID)
+        .with_position(Vector2::new(x, y))
+        .with_owner(OWNER_NONE)
+        .with_category(metadata.category)
+        .with_id(id);
+    let preview_ocf = ocf::compute(
+        metadata.ocf_base,
+        metadata.crew_member,
+        true,
+        ObjectStatus::Normal,
+        false,
+        FULL_CON,
+        metadata.category,
+    );
+    let preview = HostWorldObject::with_category(
+        id,
+        crate::BUBBLE_DEFINITION_ID,
+        ObjectStatus::Normal,
+        "Idle",
+        None,
+        None,
+        None,
+        OWNER_NONE,
+        metadata.category,
+        0,
+        FULL_CON,
+        0,
+        Vector2::new(x, y),
+        Vector2::ZERO,
+        0,
+        Vec::new(),
+        0,
+        0,
+        0,
+        None,
+        None,
+    )
+    .with_ocf(preview_ocf)
+    .with_full_state(Rc::new(crate::preview_spawn_state_with_components(
+        Vector2::new(x, y),
+        OWNER_NONE,
+        OWNER_NONE,
+        metadata.category,
+        FULL_CON,
+        metadata.contact_density(),
+        metadata.vertices.clone(),
+        metadata.components.as_slice(),
+    )));
+    context.register_spawn(spawn, preview);
+    Ok(())
 }
 
 /// FnSmoke (C4Script.cpp:2182-2186) -> Smoke (C4Effect.cpp:859-866): with

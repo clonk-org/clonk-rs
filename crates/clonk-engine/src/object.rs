@@ -444,6 +444,9 @@ impl ObjectState {
         if let Some(velocity) = delta.velocity {
             self.velocity = velocity;
         }
+        if let Some(in_liquid) = delta.in_liquid {
+            self.in_liquid = in_liquid;
+        }
         if let Some(rotation) = delta.rotation {
             self.rotation = rotation.rem_euclid(360);
         }
@@ -749,6 +752,8 @@ pub(crate) struct ObjectDelta {
     shape_override: Option<Option<DefinitionRect>>,
     pub(crate) position: Option<Vector2>,
     pub(crate) velocity: Option<Vector2>,
+    /// Runtime C4Object::InLiquid overwrite from a synchronous host call.
+    in_liquid: Option<bool>,
     /// Sub-pixel velocity in 16.16 fixed-point. When present, this takes
     /// precedence over the whole-pixel `velocity` mirror so that script
     /// surfaces (e.g. `SetXDir`) can express fractional `C4Fixed` velocity
@@ -902,6 +907,9 @@ impl ObjectDelta {
         }
         if let Some(position) = update.position {
             self.position = Some(position);
+        }
+        if let Some(in_liquid) = update.in_liquid {
+            self.in_liquid = Some(in_liquid);
         }
         if let Some(position) = update.resolved_docon_position {
             self.resolved_docon_position = Some(position);
@@ -1096,6 +1104,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             fixed_velocity_x: update.fixed_velocity_x,
             fixed_velocity_y: update.fixed_velocity_y,
             position: update.position,
+            in_liquid: update.in_liquid,
             own_mass: update.own_mass,
             velocity: update.velocity,
             fixed_velocity: update.fixed_velocity,
@@ -1267,6 +1276,10 @@ pub struct ObjectUpdate {
     pub change_def_reset_action_time: bool,
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
+    /// Runtime C4Object::InLiquid overwrite; it is not serialized into
+    /// queued control data.
+    #[serde(skip)]
+    pub in_liquid: Option<bool>,
     /// Sub-pixel velocity in 16.16 fixed-point, set by precision-aware script
     /// surfaces (`SetXDir`/`SetYDir`). Takes precedence over `velocity` when
     /// applied. Mirrors C++ storing velocity as `C4Fixed` (`C4Object.h` xdir/ydir).
@@ -1521,6 +1534,11 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_in_liquid(mut self, in_liquid: bool) -> Self {
+        self.in_liquid = Some(in_liquid);
+        self
+    }
+
     pub fn with_rotation(mut self, rotation: i32) -> Self {
         self.rotation = Some(rotation);
         self
@@ -1711,6 +1729,7 @@ impl ObjectUpdate {
             && self.resolved_docon_position.is_none()
             && self.resolved_docon_fixed_position.is_none()
             && self.velocity.is_none()
+            && self.in_liquid.is_none()
             && self.fixed_velocity.is_none()
             && self.fixed_velocity_x.is_none()
             && self.fixed_velocity_y.is_none()

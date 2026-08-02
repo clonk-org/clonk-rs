@@ -87,6 +87,10 @@ pub(crate) struct HostWorldObject {
     /// GameCall): lets host functions build a complete object scope for
     /// another object mid-VM-call. `None` in legacy fixture contexts.
     pub(crate) state: Option<Rc<ObjectState>>,
+    /// C4Object::Mass as loaded by Objects.txt. It is a cache, not a derived
+    /// getter; keep it beside the full state because ObjectState does not
+    /// serialize this object-wrapper field.
+    pub(crate) compiled_mass: Option<i32>,
     /// C4Object::MaterialContents at callback entry. This runtime-only
     /// accumulation is not part of ObjectState, but DigFree must update and
     /// inspect it synchronously before the engine outcome folds.
@@ -641,6 +645,8 @@ pub(crate) struct DefinitionMetadata {
     pub allow_picture_stack: i32,
     #[allow(dead_code)]
     pub mass: i32,
+    /// DefCore `Float`, the vertical liquid probe offset.
+    pub float_line: i32,
     /// DefCore NoComponentMass suppresses the contents contribution to the
     /// live cached C4Object::Mass.
     pub no_component_mass: bool,
@@ -1358,6 +1364,7 @@ impl HostWorldObject {
             commands: Vec::new(),
             command_stack: CommandStackSnapshot::default(),
             state: None,
+            compiled_mass: None,
             material_contents: Vec::new(),
             last_energy_loss_cause: OWNER_NONE,
         }
@@ -1450,6 +1457,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_full_state(mut self, state: Rc<ObjectState>) -> Self {
         self.state = Some(state);
+        self
+    }
+
+    pub(crate) fn with_compiled_mass(mut self, compiled_mass: Option<i32>) -> Self {
+        self.compiled_mass = compiled_mass;
         self
     }
 

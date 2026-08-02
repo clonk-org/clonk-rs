@@ -1870,6 +1870,11 @@ impl Definition {
         self.float_line = float_line;
     }
 
+    /// `Float` DefCore value used by C4Object::IsInLiquidCheck.
+    pub fn float_line(&self) -> i32 {
+        self.float_line
+    }
+
     pub fn set_shape_rect(&mut self, rect: Option<DefinitionRect>) {
         self.shape = rect;
     }
