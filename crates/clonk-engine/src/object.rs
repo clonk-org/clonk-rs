@@ -2261,28 +2261,6 @@ impl Object {
         self.fixed_velocity = FixedVec2::from_ints(velocity.x, velocity.y);
     }
 
-    fn set_velocity_preserving_subpixel(&mut self, velocity: Vector2) {
-        fn preserve_axis(fixed: &mut C4Fixed, previous: i32, resolved: i32) {
-            if resolved == previous {
-                return;
-            }
-            if resolved == 0 {
-                *fixed = C4Fixed::ZERO;
-                return;
-            }
-            if previous != 0 && previous.signum() != resolved.signum() {
-                *fixed = -*fixed;
-                return;
-            }
-            *fixed = itofix(resolved);
-        }
-
-        let previous = self.state.velocity;
-        preserve_axis(&mut self.fixed_velocity.x, previous.x, velocity.x);
-        preserve_axis(&mut self.fixed_velocity.y, previous.y, velocity.y);
-        self.refresh_velocity_from_fixed();
-    }
-
     pub(crate) fn refresh_velocity_from_fixed(&mut self) {
         self.state.velocity = self.velocity_pixels();
     }
@@ -3590,18 +3568,6 @@ impl Object {
         }
         let slot = &mut self.material_contents[index];
         *slot = slot.saturating_add(amount);
-    }
-
-    pub(crate) fn apply_material_interaction(&mut self, material: &Material) {
-        let friction = material.friction();
-        if friction != 0 {
-            self.fixed_velocity.x =
-                apply_horizontal_friction_fixed(self.fixed_velocity.x, friction);
-            self.refresh_velocity_from_fixed();
-            for vertex in &mut self.state.vertices {
-                vertex.friction = friction;
-            }
-        }
     }
 
     // iIntervall/iTime are stored verbatim (C4Effect.cpp:66-67) - a zero

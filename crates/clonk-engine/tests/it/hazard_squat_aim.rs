@@ -6,13 +6,17 @@ use clonk_engine::{
 use clonk_script::Value;
 use std::collections::HashMap;
 
-fn hazard_pixel_landscape() -> Landscape {
-    let width = 400_u32;
-    let height = 1000_u32;
+// The scenario supplies the anchor; no terrain dimensions or surface are
+// imported from the retired column fallback.
+fn hazard_pixel_landscape(anchor: Vector2, loaded_width: u32, loaded_height: i32) -> Landscape {
+    let width = loaded_width.max(anchor.x.saturating_add(1).max(1) as u32);
+    let height = loaded_height.max(anchor.y.saturating_add(1).max(1)) as u32;
+    let ground_y = anchor.y.clamp(0, height as i32 - 1) as u32;
+    let solid_right_x = anchor.x.clamp(0, width as i32 - 1) as u32;
     let bytes = (0..height)
-        .flat_map(|y| (0..width).map(move |x| u8::from(y >= 400 && x <= 52)))
+        .flat_map(|y| (0..width).map(move |x| u8::from(y >= ground_y && x <= solid_right_x)))
         .collect();
-    let mut landscape = Landscape::flat(400, 400);
+    let mut landscape = Landscape::flat(width, ground_y as i32);
     landscape.set_world_height(height as i32);
     landscape.set_pixel_grid(PixelGrid::new(
         width,
@@ -100,10 +104,9 @@ fn hazard_pistol_bullet_keeps_its_cpp_velocity_through_the_first_frame() {
     // Weapon.c4d/Shot.c4d/DefCore.txt:15-16;
     // oracle-src-pinned src/C4Object.cpp:5291-5310).
     let mut engine = load_installed_scenario("Hazard.c4f/Tutorial.c4s", 0);
-    // The loaded fixture places HZCK at y=899. Keep its old narrow solid
-    // contact column in a real pixel plane while leaving the shot tunnel
-    // clear; the test must not depend on a column-only collision substitute.
-    engine.set_landscape(hazard_pixel_landscape());
+    // Build the smallest test-only pixel plane from the loaded HZCK anchor.
+    // Its anchor column remains solid while the shot tunnel stays clear; the
+    // test does not depend on the retired column-only collision substitute.
     let owner = join_local_player(&mut engine, "Hazard bullet parity");
     let hazard_clonk = engine
         .snapshot()
@@ -112,6 +115,15 @@ fn hazard_pistol_bullet_keeps_its_cpp_velocity_through_the_first_frame() {
         .find(|object| object.owner == owner && object.definition_id == "HZCK")
         .expect("Hazard joins with an HZCK")
         .id;
+    let anchor = engine
+        .object_snapshot(hazard_clonk)
+        .expect("HZCK snapshot")
+        .position;
+    let (loaded_width, loaded_height) = engine
+        .landscape()
+        .map(|landscape| (landscape.width(), landscape.estimated_height()))
+        .expect("Hazard scenario has a landscape");
+    engine.set_landscape(hazard_pixel_landscape(anchor, loaded_width, loaded_height));
     let mut ready = ObjectUpdate::new().with_action("Walk");
     ready.crew_disabled = Some(false);
     engine
@@ -220,10 +232,9 @@ fn hazard_pistol_bullet_sweeps_through_an_alien_on_its_first_frame() {
     // 245-295; planet/System.c4g/FindObject.c:49-50;
     // oracle-src-pinned src/C4Effect.cpp:328-355).
     let mut engine = load_installed_scenario("Hazard.c4f/Tutorial.c4s", 0);
-    // The loaded fixture places HZCK at y=899. Keep its old narrow solid
-    // contact column in a real pixel plane while leaving the shot tunnel
-    // clear; the test must not depend on a column-only collision substitute.
-    engine.set_landscape(hazard_pixel_landscape());
+    // Build the same test-only pixel plane from the loaded HZCK anchor. Its
+    // anchor column remains solid while the shot tunnel stays clear; the test
+    // does not depend on the retired column-only collision substitute.
     let owner = join_local_player(&mut engine, "Hazard alien-hit parity");
     let hazard_clonk = engine
         .snapshot()
@@ -232,6 +243,15 @@ fn hazard_pistol_bullet_sweeps_through_an_alien_on_its_first_frame() {
         .find(|object| object.owner == owner && object.definition_id == "HZCK")
         .expect("Hazard joins with an HZCK")
         .id;
+    let anchor = engine
+        .object_snapshot(hazard_clonk)
+        .expect("HZCK snapshot")
+        .position;
+    let (loaded_width, loaded_height) = engine
+        .landscape()
+        .map(|landscape| (landscape.width(), landscape.estimated_height()))
+        .expect("Hazard scenario has a landscape");
+    engine.set_landscape(hazard_pixel_landscape(anchor, loaded_width, loaded_height));
     let mut ready = ObjectUpdate::new().with_action("Walk");
     ready.crew_disabled = Some(false);
     engine
