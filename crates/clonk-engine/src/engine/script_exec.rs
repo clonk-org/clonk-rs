@@ -1088,6 +1088,16 @@ impl Engine {
         self.film_viewport_available = available;
     }
 
+    /// Set the ordered process-local physical viewport targets, including
+    /// OWNER_NONE observer slots. This projection is presentation-only and
+    /// excluded from EngineState, like `film_viewport_available`.
+    pub fn set_physical_viewport_players<I>(&mut self, players: I)
+    where
+        I: IntoIterator<Item = i32>,
+    {
+        *self.physical_viewport_players.borrow_mut() = players.into_iter().collect();
+    }
+
     #[doc(hidden)]
     pub fn is_control_host(&self) -> bool {
         self.control_host

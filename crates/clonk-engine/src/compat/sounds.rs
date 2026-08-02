@@ -121,10 +121,16 @@ pub(crate) fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
     with_host_context_mut(Ok(Value::Bool(true)), |context| {
         if at_player != 0 {
             let player_id = at_player.wrapping_sub(1);
-            let Some(player) = context.player_state(player_id) else {
+            let Some(_) = context.player_state(player_id) else {
                 return Ok(Value::Bool(false));
             };
-            if !context.world.local_players.contains(&player_id) && player.viewports.is_empty() {
+            if !context.world.local_players.contains(&player_id)
+                && !context
+                    .world
+                    .physical_viewport_players
+                    .borrow()
+                    .contains(&player_id)
+            {
                 return Ok(Value::Bool(true));
             }
         }
@@ -147,6 +153,19 @@ pub(crate) fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
 
         if loop_flag < 0 {
             context.audio_mut().stop_sound(&name, target_id);
+            return Ok(Value::Bool(true));
+        }
+
+        // A lethal DoEnergy can synchronously clear an object's effects and
+        // then resume the enclosing script callback. Do not let that dead
+        // continuation restart a loop its Fx*Stop just stopped. One-shots
+        // remain valid for ordinary death callbacks.
+        if at_player != 0
+            && loop_flag > 0
+            && context
+                .object_context()
+                .is_some_and(|object| !object.alive())
+        {
             return Ok(Value::Bool(true));
         }
 

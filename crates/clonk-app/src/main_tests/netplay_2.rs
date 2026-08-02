@@ -13679,6 +13679,135 @@ fn network_host_own_join_binds_the_local_presentation_to_its_player() {
 }
 
 #[test]
+fn network_client_routes_player_targeted_sound_only_to_its_local_player() {
+    // C4Player::LocalControl is derived from the joined player's AtClient and
+    // the process-local client (C4Player.cpp:1871-1877). A provisional owner
+    // from scenario activation must not survive after that number is assigned
+    // to a remote player, or Sound(..., iAtPlayer) leaks that player's global
+    // loops onto this client (C4Script.cpp:2297-2309).
+    let mut app = new_state_only_running_sandbox_app();
+    let provisional_owner = app.local_owner;
+    app.remove_local_control_assignment(provisional_owner);
+    app.engine
+        .remove_player(provisional_owner)
+        .expect("drop the sandbox local player");
+    app.engine.set_local_players([provisional_owner]);
+
+    let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+    app.engine.set_network_game(true);
+    app.engine
+        .load_scenario_script_with_convention(
+            "player-targeted sound fixture",
+            concat!(
+                "#strict 3\n",
+                "global func InitializePlayer(int plr) {\n",
+                "  if (plr == 0) Sound(\"Join0\", true, nil, 100, 1);\n",
+                "  if (plr == 1) Sound(\"Join1\", true, nil, 100, 2);\n",
+                "  if (plr == 2) Sound(\"Join2\", true, nil, 100, 3);\n",
+                "}\n",
+                "global func ProbeRemote(int plr) { Sound(\"Warning_lowoxygen\", true, nil, 100, plr + 1, 1); }\n",
+            ),
+            true,
+        )
+        .expect("player-targeted sound fixture links");
+    app.engine.pending_audio.clear();
+    for client in [0, 3, 7] {
+        app.control_clients.register(client, true, false);
+    }
+
+    let packed_player = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../clonk-engine/tests/fixtures/embedded_player.c4p"
+    ))
+    .expect("read embedded player fixture");
+    for (info_id, at_client, name) in [
+        (10, 0, "Remote host"),
+        (11, 3, "Remote client"),
+        (12, 7, "Local client"),
+    ] {
+        app.control_player_infos
+            .apply(clonk_engine::PlayerInfoControlData {
+                client_id: at_client,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: info_id,
+                    name: LegacyCString::from_bytes(name.as_bytes().to_vec())
+                        .expect("valid player name"),
+                    ..Default::default()
+                }],
+                by_client: 0,
+                ..Default::default()
+            });
+        app.apply_join_player_control(clonk_engine::JoinPlayerControlData {
+            filename: LegacyCString::from_bytes(format!("Player{info_id}.c4p").into_bytes())
+                .expect("valid player filename"),
+            at_client,
+            info_id,
+            source: clonk_engine::JoinPlayerSource::Embedded(packed_player.clone()),
+            by_client: 0,
+        })
+        .expect("network player joins");
+    }
+
+    let player_by_info = |app: &GameApp, info_id| {
+        app.engine
+            .players()
+            .find(|player| player.player_info_id() == info_id)
+            .map(|player| player.id())
+            .expect("network player joined")
+    };
+    let remote_player = player_by_info(&app, 11);
+    let local_player = player_by_info(&app, 12);
+    let join_sounds = app
+        .engine
+        .pending_audio
+        .iter()
+        .filter_map(|command| match command {
+            clonk_engine::AudioCommand::PlaySound { name, .. } if name.starts_with("Join") => {
+                Some(name.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        join_sounds,
+        vec![format!("Join{local_player}")],
+        "InitializePlayer audio must use the join's authoritative local assignment; all audio: {:?}",
+        app.engine.pending_audio
+    );
+    assert_eq!(
+        app.engine.snapshot().hud.local_players,
+        vec![local_player],
+        "remote players must not pass player-targeted sound's local-client gate"
+    );
+
+    app.engine
+        .tick_without_snapshot()
+        .expect("player views advance once");
+    assert!(
+        !app.engine
+            .player(remote_player)
+            .expect("remote player remains")
+            .viewports()
+            .is_empty(),
+        "the regression must cover a remote player's logical simulation viewport"
+    );
+    app.engine.pending_audio.clear();
+    app.engine
+        .call_scenario_script_function("ProbeRemote", vec![Value::Int(remote_player)])
+        .expect("remote player alarm probe executes");
+    assert!(
+        !app.engine.pending_audio.iter().any(|command| matches!(
+            command,
+            clonk_engine::AudioCommand::PlaySound { name, .. }
+                if name == "Warning_lowoxygen"
+        )),
+        "a remote logical viewport is not a process-local graphics viewport"
+    );
+}
+
+#[test]
 fn losing_the_last_local_viewport_flashes_the_native_observer_hint() {
     // C4FullScreen::ViewportCheck's no-viewport case creates the ownerless
     // observer viewport and then, outside film mode, flashes

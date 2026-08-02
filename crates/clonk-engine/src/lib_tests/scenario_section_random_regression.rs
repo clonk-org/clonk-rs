@@ -134,6 +134,42 @@ fn synthetic_section_without_a_group_uses_its_explicit_object_fallback() {
 }
 
 #[test]
+fn scenario_section_switch_preserves_physical_viewport_sound_routing() {
+    // C4Game::LoadScenarioSection reinitializes the section and recalculates
+    // the existing graphics viewports; it does not discard them
+    // (src/C4Game.cpp:4220-4234). Sound must therefore still find a remote
+    // player displayed by this process after the switch
+    // (src/C4Script.cpp:2297-2309).
+    let mut engine = Engine::with_seed(3);
+    engine
+        .register_player(PlayerConfig::new(1, "Remote observer target"))
+        .expect("remote player registers");
+    engine.set_local_players([]);
+    engine.set_physical_viewport_players([1]);
+    engine
+        .load_scenario_script_with_convention(
+            "SectionViewport.c",
+            "#strict 3\nfunc Probe() { Sound(\"SectionObserver\", true, nil, 100, 2); }\n",
+            true,
+        )
+        .expect("section viewport probe compiles");
+    engine.configure_scenario_sections(&[section("main", 80, true), section("next", 120, true)]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+
+    assert!(engine
+        .load_scenario_section("next", 0, Vec::new())
+        .expect("section loads"));
+    engine
+        .call_scenario_script_function("Probe", Vec::new())
+        .expect("post-section sound probe runs");
+
+    assert!(engine.pending_audio.iter().any(|command| matches!(
+        command,
+        AudioCommand::PlaySound { name, .. } if name == "SectionObserver"
+    )));
+}
+
+#[test]
 fn resumed_non_main_implicit_root_cannot_reopen_after_unsaved_departure() {
     let mut engine = resumed_non_main_root_engine();
 
