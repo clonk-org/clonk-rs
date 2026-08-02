@@ -240,6 +240,12 @@ impl MessageManager {
         let matching_index =
             matching_index.filter(|&index| self.messages[index].target == spec.target);
         let Some(message) = matching_index.and_then(|index| self.messages.get_mut(index)) else {
+            // C4GameMessageList::Append delegates to New for a missing
+            // message. New treats an empty string as a successful delete/no-op
+            // request rather than inserting an empty message.
+            if spec.text.is_empty() {
+                return;
+            }
             self.add_message(spec);
             return;
         };
@@ -603,6 +609,16 @@ mod tests {
             appended.remaining,
             before.remaining + i32::try_from(distinct.text.len()).unwrap() * DELAY_FACTOR
         );
+    }
+
+    #[test]
+    fn append_empty_text_does_not_insert_a_message() {
+        // C4GameMessageList::Append delegates to New when there is no
+        // matching record, and New returns after its empty-text clear path
+        // without creating a record (C4GameMessage.cpp:290-305,315-329).
+        let mut messages = MessageManager::new();
+        messages.append_message(tutorial_message(""), false);
+        assert!(messages.snapshot().is_empty());
     }
 
     #[test]

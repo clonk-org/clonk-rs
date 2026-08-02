@@ -1596,6 +1596,8 @@ pub(crate) fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub(crate) fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
+    const ANY_OWNER: i32 = -2;
+
     let raw_message = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
@@ -1617,27 +1619,32 @@ pub(crate) fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
     let formatted = format_script_string("AddMessage", &raw_message, format_args)?;
 
     try_with_host_context_mut("AddMessage requires an active engine context", |context| {
-        let text = formatted.clone();
-        if !text.trim().is_empty() {
-            let spec = MessageSpec {
-                kind: if target_raw.is_some() {
-                    MessageKind::Target
-                } else {
-                    MessageKind::Global
-                },
-                text,
-                target: target_raw.map(ObjectId::new),
-                player: None,
-                offset: Vector2::ZERO,
-                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                flags: FLAG_MULTIPLE,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            };
-            context.register_message(MessageCommand::Add(spec));
-        }
+        let spec = MessageSpec {
+            kind: if target_raw.is_some() {
+                MessageKind::Target
+            } else {
+                MessageKind::Global
+            },
+            text: formatted.clone(),
+            target: target_raw.map(ObjectId::new),
+            // FnAddMessage uses NO_OWNER for target messages and ANY_OWNER
+            // for global messages (C4Script.cpp:2435-2441). Keep those
+            // native values distinct from CustomMessage's ownerless -1.
+            player: target_raw.is_none().then_some(ANY_OWNER),
+            offset: Vector2::ZERO,
+            color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        };
+        // FnAddMessage calls C4GameMessageList::Append, not New with
+        // C4GM_Multiple. The native call also passes fNoDuplicates=false.
+        context.register_message(MessageCommand::Append {
+            spec,
+            no_duplicates: false,
+        });
 
         Ok(Value::Bool(true))
     })
