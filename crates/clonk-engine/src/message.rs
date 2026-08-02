@@ -8,6 +8,10 @@ const DELAY_FACTOR: i32 = 2;
 pub const FLAG_NO_BREAK: u32 = 1 << 0;
 pub const FLAG_BOTTOM: u32 = 1 << 1;
 pub const FLAG_MULTIPLE: u32 = 1 << 2;
+/// C++ `NO_OWNER` is represented as `None` at the message-storage boundary.
+pub const MESSAGE_NO_OWNER: Option<i32> = None;
+/// C++ `ANY_OWNER` remains distinct from `NO_OWNER` in global messages.
+pub const MESSAGE_ANY_OWNER: Option<i32> = Some(-2);
 pub const FLAG_TOP: u32 = 1 << 3;
 pub const FLAG_LEFT: u32 = 1 << 4;
 pub const FLAG_RIGHT: u32 = 1 << 5;
@@ -208,15 +212,7 @@ impl MessageManager {
     pub fn add_message(&mut self, spec: MessageSpec) {
         let order = self.allocate_order();
         if !spec.allows_multiple() {
-            self.remove_conflicting(&spec, None);
-            self.pending_speech.retain(|_, pending| {
-                !message_fields_conflict_with_spec(
-                    pending.spec.target,
-                    pending.spec.player,
-                    pending.spec.flags,
-                    &spec,
-                )
-            });
+            self.clear_for_new(&spec);
         }
         self.insert_message(spec, order, 0);
     }
@@ -241,12 +237,17 @@ impl MessageManager {
             matching_index.filter(|&index| self.messages[index].target == spec.target);
         let Some(message) = matching_index.and_then(|index| self.messages.get_mut(index)) else {
             // C4GameMessageList::Append delegates to New for a missing
-            // message. New treats an empty string as a successful delete/no-op
-            // request rather than inserting an empty message.
+            // message. New clears the conflicting messages first, then treats
+            // an empty string as a successful delete/no-op request
+            // (C4GameMessage.cpp:290-305).
+            if !spec.allows_multiple() {
+                self.clear_for_new(&spec);
+            }
             if spec.text.is_empty() {
                 return;
             }
-            self.add_message(spec);
+            let order = self.allocate_order();
+            self.insert_message(spec, order, 0);
             return;
         };
 
@@ -473,6 +474,18 @@ impl MessageManager {
         });
     }
 
+    fn clear_for_new(&mut self, spec: &MessageSpec) {
+        self.remove_conflicting(spec, None);
+        self.pending_speech.retain(|_, pending| {
+            !message_fields_conflict_with_spec(
+                pending.spec.target,
+                pending.spec.player,
+                pending.spec.flags,
+                spec,
+            )
+        });
+    }
+
     fn allocate_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
@@ -618,6 +631,44 @@ mod tests {
         // without creating a record (C4GameMessage.cpp:290-305,315-329).
         let mut messages = MessageManager::new();
         messages.append_message(tutorial_message(""), false);
+        assert!(messages.snapshot().is_empty());
+    }
+
+    #[test]
+    fn append_empty_text_clears_conflicting_new_message() {
+        // New clears matching player messages before its empty-text return
+        // (C4GameMessage.cpp:290-305). This is reachable when a global
+        // ANY_OWNER append finds a same-player target record first.
+        let mut messages = MessageManager::new();
+        messages.add_message(MessageSpec {
+            kind: MessageKind::Target,
+            text: "target".into(),
+            target: Some(ObjectId::new(7)),
+            player: MESSAGE_ANY_OWNER,
+            offset: Vector2::ZERO,
+            color: 0,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        });
+        messages.append_message(
+            MessageSpec {
+                kind: MessageKind::Global,
+                text: String::new(),
+                target: None,
+                player: MESSAGE_ANY_OWNER,
+                offset: Vector2::ZERO,
+                color: 0,
+                flags: 0,
+                width: None,
+                decoration: None,
+                frame_decoration: None,
+                portrait: None,
+            },
+            false,
+        );
         assert!(messages.snapshot().is_empty());
     }
 

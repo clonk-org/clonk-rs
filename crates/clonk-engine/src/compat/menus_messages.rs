@@ -1596,8 +1596,6 @@ pub(crate) fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub(crate) fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
-    const ANY_OWNER: i32 = -2;
-
     let raw_message = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
@@ -1625,12 +1623,16 @@ pub(crate) fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
             } else {
                 MessageKind::Global
             },
-            text: formatted.clone(),
+            text: formatted,
             target: target_raw.map(ObjectId::new),
             // FnAddMessage uses NO_OWNER for target messages and ANY_OWNER
             // for global messages (C4Script.cpp:2435-2441). Keep those
-            // native values distinct from CustomMessage's ownerless -1.
-            player: target_raw.is_none().then_some(ANY_OWNER),
+            // native values distinct at the storage boundary.
+            player: if target_raw.is_some() {
+                MESSAGE_NO_OWNER
+            } else {
+                MESSAGE_ANY_OWNER
+            },
             offset: Vector2::ZERO,
             color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
             flags: 0,

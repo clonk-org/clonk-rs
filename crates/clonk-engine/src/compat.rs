@@ -19,7 +19,7 @@ use crate::math::{
 };
 use crate::message::{
     MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_DROP_SPEECH,
-    HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
+    HORIZONTAL_POSITION_FLAGS, MESSAGE_ANY_OWNER, MESSAGE_NO_OWNER, VERTICAL_POSITION_FLAGS,
 };
 use crate::ocf;
 use crate::rng::LcgRng;
