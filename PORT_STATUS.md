@@ -2329,22 +2329,14 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   synchronously so a same-callback `InLiquid()` observes it, while the
   random bubble/PXS operations remain ordered. C++-cited regressions cover the
   flag refresh and heavy fast-object entry splash (`compat/tests/part_08.rs`).
-- Open gap (found 2026-07-29, not closed): `Landscape::resolve_collision`
-  (`crates/clonk-engine/src/landscape.rs:6312`) is an invented column-surface
-  snap with no C++ counterpart — it lifts any object whose `y` is below
-  `surface_height(x)` onto that surface and zeroes downward velocity, where C++
-  resolves contact per vertex and per pixel in `C4Object::ContactCheck` /
-  `C4Object::DoMovement` (`C4Movement.cpp:165-181`, `:231`) and `C4Landscape`
-  has no per-column surface array at all. It self-disables once a pixel grid
-  exists (`landscape.rs:6317-6324`) and every real scenario installs one
-  (`scenario/map.rs:802,864`), so shipped content is unaffected; but on a
-  pixel-less fixture landscape it runs for every object every frame
-  (`engine/procedures.rs:3859`, reached from `engine/tick.rs:930,1420`) and also
-  from `Engine::apply_object_update` (`engine/tick.rs:2178`) and
-  `Object::execute_command_queue` (`object.rs:3802`). Consequence for test
-  design: a tick-driven fixture test can still show the surface teleport that
-  script `SetPosition` no longer causes, so the column model must be retired
-  (or the fixtures given pixel grids) before such a test means anything.
+- Closed 2026-08-02: the Rust-only `Landscape::resolve_collision` column
+  fallback and all of its engine call sites were removed. C++ resolves contact
+  per vertex and per pixel in `C4Object::ContactCheck` /
+  `C4Object::DoMovement` (`C4Movement.cpp:165-181`, `:231`), so a
+  pixel-less fixture no longer teleports an object to `surface_height(x)` or
+  zeroes its velocity. The C++-cited `ObjectUpdate` regression is in
+  `lib_tests/command_contact_regression.rs`; real terrain movement remains
+  responsible for pixel-grid contact.
 - Intentional divergence from C++ (2026-07-24), not a gap to close: the port
   ships **no trademark notice**. C++ draws `FANPROJECTTEXT " " TRADEMARKTEXT`
   (`C4Version.h:21-22`) in the main-menu and About footers

@@ -1,7 +1,29 @@
 use crate::support::real_scenario::{join_local_player, load_installed_scenario};
-use clonk_engine::{Landscape, ObjectUpdate, SpawnConfig, Vector2, COM_DOWN, COM_RELEASE_OFFSET};
+use clonk_engine::{
+    landscape::PixelGrid, Landscape, ObjectUpdate, SpawnConfig, Vector2, COM_DOWN,
+    COM_RELEASE_OFFSET,
+};
 use clonk_script::Value;
 use std::collections::HashMap;
+
+fn hazard_pixel_landscape() -> Landscape {
+    let width = 400_u32;
+    let height = 1000_u32;
+    let bytes = (0..height)
+        .flat_map(|y| (0..width).map(move |x| u8::from(y >= 400 && x <= 52)))
+        .collect();
+    let mut landscape = Landscape::flat(400, 400);
+    landscape.set_world_height(height as i32);
+    landscape.set_pixel_grid(PixelGrid::new(
+        width,
+        height,
+        bytes,
+        vec![0, 100],
+        vec![None, None],
+        vec![None, None],
+    ));
+    landscape
+}
 
 #[test]
 fn hazard_three_down_presses_enter_squat_aim_with_a_pistol() {
@@ -78,7 +100,10 @@ fn hazard_pistol_bullet_keeps_its_cpp_velocity_through_the_first_frame() {
     // Weapon.c4d/Shot.c4d/DefCore.txt:15-16;
     // oracle-src-pinned src/C4Object.cpp:5291-5310).
     let mut engine = load_installed_scenario("Hazard.c4f/Tutorial.c4s", 0);
-    engine.set_landscape(Landscape::flat(400, 400));
+    // The loaded fixture places HZCK at y=899. Keep its old narrow solid
+    // contact column in a real pixel plane while leaving the shot tunnel
+    // clear; the test must not depend on a column-only collision substitute.
+    engine.set_landscape(hazard_pixel_landscape());
     let owner = join_local_player(&mut engine, "Hazard bullet parity");
     let hazard_clonk = engine
         .snapshot()
@@ -195,7 +220,10 @@ fn hazard_pistol_bullet_sweeps_through_an_alien_on_its_first_frame() {
     // 245-295; planet/System.c4g/FindObject.c:49-50;
     // oracle-src-pinned src/C4Effect.cpp:328-355).
     let mut engine = load_installed_scenario("Hazard.c4f/Tutorial.c4s", 0);
-    engine.set_landscape(Landscape::flat(400, 400));
+    // The loaded fixture places HZCK at y=899. Keep its old narrow solid
+    // contact column in a real pixel plane while leaving the shot tunnel
+    // clear; the test must not depend on a column-only collision substitute.
+    engine.set_landscape(hazard_pixel_landscape());
     let owner = join_local_player(&mut engine, "Hazard alien-hit parity");
     let hazard_clonk = engine
         .snapshot()

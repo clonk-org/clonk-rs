@@ -138,9 +138,9 @@ pub use direct_com::MouseWorldCursor;
 pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;
 pub use landscape::{
-    BlastResult, CollisionResolution, Landscape, LandscapeCommand, LandscapeError,
-    LandscapePersistenceError, LiquidColumn, LiquidSegment, LANDSCAPE_MODE_DYNAMIC,
-    LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC, LANDSCAPE_MODE_UNDEFINED,
+    BlastResult, Landscape, LandscapeCommand, LandscapeError, LandscapePersistenceError,
+    LiquidColumn, LiquidSegment, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT,
+    LANDSCAPE_MODE_STATIC, LANDSCAPE_MODE_UNDEFINED,
 };
 pub use live_c4_player::{
     serialize_aggressively_stripped_c4_player, serialize_live_c4_player,

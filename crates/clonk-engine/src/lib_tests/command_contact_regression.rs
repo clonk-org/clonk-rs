@@ -3,6 +3,39 @@ use crate::landscape::PixelGrid;
 use std::collections::HashMap;
 
 #[test]
+fn pixel_less_landscape_does_not_invent_column_surface_contact() {
+    // C4Object::ContactCheck samples the current shape against landscape
+    // pixels (C4Movement.cpp:165-181); C4Object::DoMovement consumes that
+    // contact result (C4Movement.cpp:231). The C++ oracle has no
+    // per-column surface snap for a pixel-less landscape.
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(20, 5));
+
+    let mut definition =
+        Definition::from_script("FALL", "Falling fixture", "").expect("definition compiles");
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("FALL").with_position(Vector2::new(3, 8)))
+        .expect("object spawns");
+
+    engine
+        .apply_object_update(
+            object,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(3, 8))
+                .with_velocity(Vector2::new(0, 3)),
+        )
+        .expect("object update applies");
+
+    let index = engine.find_object_index(object).expect("object exists");
+    assert_eq!(engine.objects[index].state.position, Vector2::new(3, 8));
+    assert_eq!(engine.objects[index].state.velocity, Vector2::new(0, 3));
+}
+
+#[test]
 fn synchronize_control_applies_clearance_only_when_requested() {
     // C4ControlSynchronize executes Game.Synchronize first and calls
     // Game.SyncClearance only when SyncClear is set. The latter alone

@@ -5470,37 +5470,6 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
     }
 
     #[test]
-    fn landscape_collision_preserves_fixed_x_and_zeroes_contact_y() {
-        let mut definition = simple_definition("Crate");
-        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
-        let mut engine = Engine::with_seed(19);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        engine.set_landscape(Landscape::flat(20, 10));
-        engine.set_physics(PhysicsSettings::new(0, 20, -20));
-
-        let id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(5, 0)))
-            .expect("spawn succeeds");
-        let idx = engine.find_object_index(id).expect("object exists");
-        engine.objects[idx].set_position(Vector2::new(5, 12));
-        engine.objects[idx].set_fixed_velocity(FixedVec2::new(
-            C4Fixed::from_raw(300),
-            C4Fixed::from_raw(70000),
-        ));
-        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
-        engine.objects[idx].state.mobile = true;
-
-        engine.apply_landscape_at_index(idx);
-
-        assert_eq!(engine.objects[idx].state.position.y, 10);
-        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 300);
-        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
-        assert_eq!(engine.objects[idx].state.velocity, Vector2::ZERO);
-    }
-
-    #[test]
     fn per_pixel_horizontal_movement_stops_at_first_solid_column() {
         let library = MaterialLibrary::parse(
             r#"

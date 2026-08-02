@@ -3604,11 +3604,6 @@ impl Object {
         }
     }
 
-    pub(crate) fn apply_collision_resolution(&mut self, resolution: &CollisionResolution) {
-        self.set_position(resolution.position);
-        self.set_velocity_preserving_subpixel(resolution.velocity);
-    }
-
     // iIntervall/iTime are stored verbatim (C4Effect.cpp:66-67) - a zero
     // interval means the timer never fires.
     /// C4Effect::New semantics: same-name effects COEXIST; each gets a
@@ -3854,21 +3849,6 @@ impl Object {
                     op.apply(landscape_ref);
                 }
             }
-            if !self.state.vertices.is_empty() {
-                if let Some(landscape_ref) = &mut landscape {
-                    let resolution = (**landscape_ref)
-                        .resolve_collision(self.state.position, self.state.velocity);
-                    if resolution.collided {
-                        self.apply_collision_resolution(&resolution);
-                        if let Some(material_id) = resolution.material {
-                            if let Some(material) = materials.get_by_id(material_id) {
-                                self.apply_material_interaction(material);
-                            }
-                        }
-                    }
-                }
-            }
-
             if outcome.destroy {
                 self.command_queue.clear();
                 break;

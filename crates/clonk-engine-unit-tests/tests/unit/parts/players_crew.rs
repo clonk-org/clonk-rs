@@ -3620,7 +3620,10 @@ public func ReadIDs(int first, int second)
     }
 
     #[test]
-    fn clamps_objects_to_landscape_surface() {
+    fn pixel_less_landscape_does_not_clamp_objects_to_surface() {
+        // C4Object::ContactCheck samples shape vertices against Surface8
+        // pixels (C4Movement.cpp:165-181); a column-only fixture has no
+        // contact plane for Engine::tick to invent.
         let script = r#"
         global func Step(state, frame, random) {
             return 0;
@@ -3645,8 +3648,8 @@ public func ReadIDs(int first, int second)
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(4, 5));
-        assert_eq!(object.velocity, Vector2::new(0, 0));
+        assert_eq!(object.position, Vector2::new(4, 12));
+        assert_eq!(object.velocity, Vector2::new(0, 3));
     }
 
     #[test]
