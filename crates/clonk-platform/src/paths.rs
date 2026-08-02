@@ -467,11 +467,9 @@ pub fn discover_unvalidated_install_root() -> Result<PathBuf, PathsError> {
     if let Some(path) = env_path("LC_APP_ROOT") {
         return Ok(path);
     }
-    let executable = env::current_exe().ok().map(|executable| {
-        #[cfg(target_os = "macos")]
-        let executable = non_translocated_executable(&executable);
-        executable
-    });
+    let executable = env::current_exe().ok();
+    #[cfg(target_os = "macos")]
+    let executable = executable.map(|executable| non_translocated_executable(&executable));
     let manifest = env_path("CARGO_MANIFEST_DIR");
     let current_dir = env::current_dir().ok();
     if let Some(root) = install_root_from_candidates(
