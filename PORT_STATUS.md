@@ -2297,14 +2297,14 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   device to blit a CPU buffer to the window. Closing this means replacing
   `pixels` with a CPU presenter (`softbuffer` or equivalent) and re-enabling
   that branch; Pi 4/5 are unaffected.
-- Open gap (found 2026-07-25, not closed): script `AddMessage` still emits a
-  fresh `C4GM_Multiple` record (`compat/menus_messages.rs`) instead of calling
-  `C4GameMessageList::Append(..., fNoDuplicates=false)` like C++
-  (`C4Script.cpp:2435-2441`). The target-Build failure path now has the exact
-  append/de-duplicate behavior needed for construction feedback, but converting
-  global `AddMessage` also requires preserving C++'s distinct `ANY_OWNER` (-2)
-  and `NO_OWNER` (-1) message owners; the current `Option<i32>` representation
-  maps both to `None` and can select the wrong first append candidate.
+- Closed 2026-08-02: script `AddMessage` now emits
+  `C4GameMessageList::Append(..., fNoDuplicates=false)` semantics
+  (`compat/menus_messages.rs`, `message.rs`), matching
+  (`C4Script.cpp:2435-2441`, `C4GameMessage.cpp:315-329`). Target messages
+  retain `NO_OWNER` and global messages retain `ANY_OWNER` (-2), so an
+  ownerless `CustomMessage` cannot become the wrong append candidate.
+  C++-cited regressions cover repeated messages, empty fallback text, and the
+  owner distinction (`compat/tests/part_03.rs`).
 - Open gap (found 2026-07-25, not closed): a DFA_FLIGHT object can land one
   frame later than C++. Reproduce with EkeReloaded `TheStippelAge/Invasion`
   under `LC_PIN_SEED=777` and a `#appendto ST5B` per-frame `Log` of

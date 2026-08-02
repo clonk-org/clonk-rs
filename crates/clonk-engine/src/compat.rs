@@ -18,8 +18,8 @@ use crate::math::{
     FixedVec2,
 };
 use crate::message::{
-    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_DROP_SPEECH, FLAG_MULTIPLE,
-    HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
+    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_DROP_SPEECH,
+    HORIZONTAL_POSITION_FLAGS, MESSAGE_ANY_OWNER, MESSAGE_NO_OWNER, VERTICAL_POSITION_FLAGS,
 };
 use crate::ocf;
 use crate::rng::LcgRng;

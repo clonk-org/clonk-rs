@@ -1327,19 +1327,90 @@ public func CheckGoals()
     }
 
     #[test]
-    fn add_message_sets_multiple_flag() {
+    fn add_message_emits_cpp_append_command() {
+        // C4Script.cpp:2435-2441 calls C4GameMessageList::Append with
+        // fNoDuplicates=false (C4GameMessage.cpp:315-329).
         let args = [Value::String("Queued".into())];
         let (result, outcome) = with_object_host_context(|| add_message(&args));
         assert_eq!(result.expect("AddMessage succeeds"), Value::Bool(true));
         assert_eq!(outcome.messages.len(), 1);
         match &outcome.messages[0] {
-            MessageCommand::Add(spec) => {
-                assert_eq!(spec.flags & FLAG_MULTIPLE, FLAG_MULTIPLE);
+            MessageCommand::Append {
+                spec,
+                no_duplicates,
+            } => {
+                assert!(!no_duplicates);
+                assert_eq!(spec.flags, 0);
                 assert_eq!(spec.text, "Queued");
+                assert_eq!(spec.player, Some(-2));
             }
-            MessageCommand::Append { .. } => panic!("AddMessage cannot append"),
+            MessageCommand::Add(_) => panic!("AddMessage must append"),
             MessageCommand::PendingSpeech(_) => panic!("AddMessage cannot defer speech"),
         }
+    }
+
+    #[test]
+    fn add_message_uses_cpp_append_semantics() {
+        // C4Script.cpp:2435-2441 calls C4GameMessageList::Append with
+        // fNoDuplicates=false (C4GameMessage.cpp:315-329), so repeated
+        // AddMessage calls reuse the matching message instead of creating
+        // separate C4GM_Multiple records.
+        let (result, outcome) = with_object_host_context(|| {
+            add_message(&[Value::String("first".into())])?;
+            add_message(&[Value::String("second".into())])
+        });
+
+        assert_eq!(result.expect("AddMessage succeeds"), Value::Bool(true));
+        assert!(matches!(
+            outcome.messages.as_slice(),
+            [
+                MessageCommand::Append {
+                    spec: first,
+                    no_duplicates: false,
+                },
+                MessageCommand::Append {
+                    spec: second,
+                    no_duplicates: false,
+                },
+            ] if first.text == "first" && second.text == "second"
+        ));
+    }
+
+    #[test]
+    fn add_message_keeps_any_owner_distinct_from_ownerless_messages() {
+        // Global AddMessage passes ANY_OWNER (-2), while CustomMessage with
+        // its default owner passes NO_OWNER (-1) (C4Script.cpp:2435-2441;
+        // C4GameMessage.cpp:290-305).
+        let (result, outcome) = with_object_host_context(|| {
+            add_message(&[Value::String("any owner".into())])
+        });
+        assert_eq!(result.expect("AddMessage succeeds"), Value::Bool(true));
+        let MessageCommand::Append { spec, .. } = &outcome.messages[0] else {
+            panic!("AddMessage must append");
+        };
+        assert_eq!(spec.player, Some(-2));
+
+        let mut messages = crate::message::MessageManager::new();
+        messages.apply_command(MessageCommand::Add(MessageSpec {
+            kind: MessageKind::Global,
+            text: "ownerless".into(),
+            target: None,
+            player: None,
+            offset: Vector2::ZERO,
+            color: 0,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        }));
+        messages.apply_command(MessageCommand::Append {
+            spec: spec.clone(),
+            no_duplicates: false,
+        });
+
+        assert_eq!(messages.snapshot().len(), 2);
+        assert_eq!(messages.snapshot()[1].player, Some(-2));
     }
 
     #[test]
