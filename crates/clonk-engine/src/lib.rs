@@ -7582,6 +7582,10 @@ pub struct Engine {
     /// Whether the embedding app currently owns a primary physical viewport.
     /// Scenario Initialize runs before this becomes true.
     film_viewport_available: bool,
+    /// Ordered targets of process-local physical viewports, including
+    /// OWNER_NONE observer slots. Logical C4Player view state exists on every
+    /// peer and therefore cannot stand in for C4GraphicsSystem viewports.
+    physical_viewport_players: Rc<RefCell<Vec<i32>>>,
     /// `Game.Parameters::isLeague()` — specifically whether the synchronized
     /// LeagueAddress is non-empty. This is independent from network play:
     /// ordinary network games may still allow script-driven team switches.
@@ -9976,6 +9980,7 @@ impl Engine {
             recording_active: false,
             replay_control: false,
             film_viewport_available: false,
+            physical_viewport_players: Rc::new(RefCell::new(Vec::new())),
             league_game: false,
             league_name: Rc::new(Vec::new()),
             player_info_league_progress_data: Rc::new(BTreeMap::new()),

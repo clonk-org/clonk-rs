@@ -5662,6 +5662,7 @@ impl GameApp {
         if player != OWNER_NONE {
             self.runtime_flash_message = None;
         }
+        self.update_film_viewport_availability();
         true
     }
 

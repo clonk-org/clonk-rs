@@ -994,6 +994,8 @@ impl GameApp {
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         });
+        self.engine
+            .set_local_players(self.local_controls.owners().collect::<Vec<_>>());
         let config = JoinPlayerConfig {
             name,
             player_info_id: 0,
@@ -1028,6 +1030,8 @@ impl GameApp {
             Ok(joined) => joined,
             Err(error) => {
                 self.remove_local_control_assignment(predicted_owner);
+                self.engine
+                    .set_local_players(self.local_controls.owners().collect::<Vec<_>>());
                 return Err(error);
             }
         };
@@ -6833,6 +6837,12 @@ impl GameApp {
         } else {
             self.local_controls.resolve(control_init)
         };
+        // C4Player::LocalControl is final before PreInitializePlayer and
+        // InitializePlayer run (C4Player.cpp:1871-1877). Publish the registry
+        // projection now so callback-time player-targeted presentation uses
+        // this process's actual assignment, including an empty remote set.
+        let local_players = self.local_controls.owners().collect::<Vec<_>>();
+        self.engine.set_local_players(local_players.clone());
         match self.engine.join_player_with_profile_core(
             config,
             clonk_engine::PlayerAtClient::new(join.at_client),
@@ -6860,11 +6870,6 @@ impl GameApp {
                     self.reset_ingame_mouse_control();
                 }
                 self.mouse_control = self.local_controls.mouse_owner().is_some();
-                let mut local_players = self.engine.snapshot().hud.local_players;
-                if !local_players.contains(&joined.number()) {
-                    local_players.push(joined.number());
-                    self.engine.set_local_players(local_players.clone());
-                }
                 // C4Game::JoinPlayer creates the local viewport for the number
                 // this join produced, and C4Player::FinalInit initializes
                 // C4MouseControl with it (C4Game.cpp:3552-3553;
@@ -6905,6 +6910,8 @@ impl GameApp {
             Err(error) => {
                 if locally_controlled {
                     self.remove_local_control_assignment(predicted_owner);
+                    self.engine
+                        .set_local_players(self.local_controls.owners().collect::<Vec<_>>());
                 }
                 tracing::warn!(info_id = join.info_id, %error, "player join failed");
             }

@@ -104,6 +104,7 @@ shard_modules!(
     literal_zero_strictness,
     manifest_definitions,
     mars_base_research_exit,
+    mars_oxygen,
     message_board_queries,
     optional_int_strictness,
     real_tutorial01_virtual_play,

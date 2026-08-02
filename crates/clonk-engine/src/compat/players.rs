@@ -1971,6 +1971,14 @@ pub(crate) fn set_film_view(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(context) = context
             .filter(|context| context.world.replay_control && context.world.film_viewport_available)
         {
+            if let Some(primary) = context
+                .world
+                .physical_viewport_players
+                .borrow_mut()
+                .first_mut()
+            {
+                *primary = player;
+            }
             context
                 .world
                 .viewport_presentation_requests

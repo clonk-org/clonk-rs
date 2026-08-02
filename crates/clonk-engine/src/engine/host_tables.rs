@@ -658,6 +658,7 @@ impl Engine {
         )
         .with_player_order(self.player_order.iter().copied())
         .with_local_players(local_players)
+        .with_shared_physical_viewport_players(Rc::clone(&self.physical_viewport_players))
         .with_active_message_board_input(self.active_message_board_input.clone())
         .with_mission_access(Rc::clone(&self.mission_access.inner))
         .with_scoreboard(Rc::clone(&self.scoreboard))

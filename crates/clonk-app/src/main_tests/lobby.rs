@@ -241,6 +241,42 @@ fn scenario_join_places_ready_crew_and_selects_cursor() {
 }
 
 #[test]
+fn local_join_publishes_control_before_initialize_player_audio() {
+    // InitControl establishes C4Player::LocalControl before ScenarioInit calls
+    // InitializePlayer (C4Player.cpp:323-349,769-775). Player-targeted Sound
+    // in that callback must therefore pass this process's local gate
+    // (C4Script.cpp:2297-2309).
+    let mut app = GameApp::new(
+        320,
+        200,
+        AudioOptions::default(),
+        None,
+        RuntimeConfig {
+            player_owner: 1,
+            player_name: "Callback listener".to_string(),
+            network: None,
+            record_enabled: false,
+        },
+    )
+    .expect("initialise app");
+    app.engine
+        .load_scenario_script_with_convention(
+            "local join audio fixture",
+            "#strict 3\nglobal func InitializePlayer(int plr) { Sound(\"LocalJoin\", true, nil, 100, plr + 1); }",
+            true,
+        )
+        .expect("local join audio fixture links");
+    app.engine.set_local_players([]);
+
+    app.join_local_player().expect("join local player");
+
+    assert!(app.engine.pending_audio.iter().any(|command| matches!(
+        command,
+        clonk_engine::AudioCommand::PlaySound { name, .. } if name == "LocalJoin"
+    )));
+}
+
+#[test]
 fn network_too_few_warning_ok_stages_and_enters_exact_lobby() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();

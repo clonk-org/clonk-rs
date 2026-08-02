@@ -1383,7 +1383,14 @@ impl GameApp {
         engine.set_fair_crew_forced(fair_crew_forced);
         engine.set_allow_debug(allow_debug);
         arm_configured_engine_debug_mode(&mut engine, self.app_paths.as_ref(), self.console_mode);
-        engine.set_local_players([self.local_owner]);
+        if network_game {
+            // Runtime player numbers are assigned only when synchronized
+            // JoinPlayer controls execute. Until then no provisional number
+            // is locally controlled.
+            engine.set_local_players([]);
+        } else {
+            engine.set_local_players([self.local_owner]);
+        }
         engine.set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         if let Some(timing) = self
             .network_control_clock
@@ -1722,6 +1729,8 @@ impl GameApp {
                         replay: false,
                         disable_mouse: !self.mouse_control_allowed,
                     });
+                    self.engine
+                        .set_local_players(self.local_controls.owners().collect::<Vec<_>>());
                     match self.engine.join_player_with_profile_core(
                         config,
                         clonk_engine::PlayerAtClient::HOST,
@@ -1754,6 +1763,9 @@ impl GameApp {
                         }
                         Err(error) => {
                             self.remove_local_control_assignment(predicted_owner);
+                            self.engine.set_local_players(
+                                self.local_controls.owners().collect::<Vec<_>>(),
+                            );
                             tracing::warn!(
                                 info_id = join.info_id,
                                 %error,

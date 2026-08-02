@@ -1958,6 +1958,10 @@ pub struct HostWorldContext {
     player_order: Rc<Vec<i32>>,
     teams: Rc<Vec<TeamInfo>>,
     pub(crate) local_players: Rc<HashSet<i32>>,
+    /// Ordered targets of this process's physical graphics viewports,
+    /// including OWNER_NONE observer slots. C4Player's logical view state
+    /// exists for remote players as well.
+    pub(crate) physical_viewport_players: Rc<RefCell<Vec<i32>>>,
     active_message_board_input: Option<crate::ActiveMessageBoardInput>,
     /// Legacy selection projection retained only for fixture/FFI contexts
     /// that name crew ids without providing corresponding world objects.
@@ -2171,6 +2175,7 @@ impl Default for HostWorldContext {
             player_order: Rc::new(Vec::new()),
             teams: Rc::new(Vec::new()),
             local_players: Rc::new(HashSet::new()),
+            physical_viewport_players: Rc::new(RefCell::new(Vec::new())),
             active_message_board_input: None,
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
@@ -2541,6 +2546,7 @@ impl HostWorldContext {
             pathfinder_transfer_zones_enabled: true,
             pathfinder_debug: Rc::new(RefCell::new(PathfinderDebugSnapshot::default())),
             local_players: Rc::new(player_ids.iter().copied().collect()),
+            physical_viewport_players: Rc::new(RefCell::new(Vec::new())),
             active_message_board_input: None,
             player_order: Rc::new(player_ids),
             player_info_ids: Rc::new(player_info_ids),
@@ -2733,6 +2739,22 @@ impl HostWorldContext {
         I: IntoIterator<Item = i32>,
     {
         self.local_players = Rc::new(players.into_iter().collect());
+        self
+    }
+
+    pub(crate) fn with_physical_viewport_players<I>(mut self, players: I) -> Self
+    where
+        I: IntoIterator<Item = i32>,
+    {
+        self.physical_viewport_players = Rc::new(RefCell::new(players.into_iter().collect()));
+        self
+    }
+
+    pub(crate) fn with_shared_physical_viewport_players(
+        mut self,
+        players: Rc<RefCell<Vec<i32>>>,
+    ) -> Self {
+        self.physical_viewport_players = players;
         self
     }
 

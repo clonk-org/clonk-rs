@@ -717,6 +717,11 @@ impl Engine {
             .borrow_mut()
             .clear();
         self.film_viewport_available = false;
+        // Physical viewports belong to the embedding process, not the
+        // simulation snapshot. In-place restores such as
+        // LoadScenarioSection keep those windows alive and must keep their
+        // player targets as well. A newly constructed Engine already starts
+        // with an empty projection for full save/network loads.
         self.host_requests
             .player_info_league_progress_updates
             .clear();

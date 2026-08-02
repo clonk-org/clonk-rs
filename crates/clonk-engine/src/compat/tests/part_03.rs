@@ -406,7 +406,9 @@
     fn sound_at_player_gates_playback_to_local_players_and_viewports() {
         // iAtPlayer is one-based and gates playback on each client. A valid
         // remote player remains a successful sync-safe no-op unless this
-        // client owns a viewport for it (C4Script.cpp:2297-2309).
+        // client's graphics system owns a physical viewport for it
+        // (C4Script.cpp:2297-2309). C4Player's logical view state exists on
+        // remote peers and must not satisfy that process-local exception.
         let players = vec![
             PlayerState {
                 id: 0,
@@ -421,10 +423,15 @@
                 viewports: vec![PlayerViewport::new(Vector2::ZERO)],
                 ..PlayerState::default()
             },
+            PlayerState {
+                id: 3,
+                ..PlayerState::default()
+            },
         ];
         let world =
             HostWorldContext::from_objects_with_players(Vec::<HostWorldObject>::new(), players)
-                .with_local_players([0]);
+                .with_local_players([0])
+                .with_physical_viewport_players([3]);
         let (result, outcome) = with_object_host_context_with_world(world, || {
             let call = |name: &str, at_player: i32| {
                 sound(&[
@@ -439,7 +446,8 @@
             assert_eq!(call("DingInvalid", 100)?, Value::Bool(false));
             assert_eq!(call("DingRemote", 2)?, Value::Bool(true));
             assert_eq!(call("DingLocal", 1)?, Value::Bool(true));
-            assert_eq!(call("DingViewport", 3)?, Value::Bool(true));
+            assert_eq!(call("DingLogicalViewport", 3)?, Value::Bool(true));
+            assert_eq!(call("DingViewport", 4)?, Value::Bool(true));
             Ok::<Value, RuntimeError>(Value::Nil)
         });
 

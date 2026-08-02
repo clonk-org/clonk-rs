@@ -412,6 +412,102 @@
     }
 
     #[test]
+    fn set_film_view_updates_player_targeted_sound_routing_within_the_call() {
+        // SetFilmView mutates the first physical viewport synchronously
+        // (C4Script.cpp:5134-5148), so a later Sound in the same callback sees
+        // the new target through GraphicsSystem.GetViewport
+        // (C4Script.cpp:2297-2309).
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Probe() { SetFilmView(1); Sound(\"NewView\", true, nil, 100, 2); Sound(\"OldView\", true, nil, 100, 1); }",
+            )
+            .expect("same-call film-view sound probe compiles");
+
+        let mut engine = crate::Engine::new();
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Old target"))
+            .expect("old film-view target registers");
+        engine
+            .register_player(crate::PlayerConfig::new(1, "New target"))
+            .expect("new film-view target registers");
+        engine.set_local_players([]);
+        engine.set_replay_control(true);
+        engine.set_film_viewport_available(true);
+        engine.set_physical_viewport_players([0]);
+
+        let (result, outcome) =
+            with_effect_context(None, &[], engine.host_world_context(), 1, || {
+                script.call("Probe", &[])
+            });
+        result.expect("same-call film-view sound probe executes");
+        let sounds = outcome
+            .audio
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AudioCommand::PlaySound { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sounds, vec!["NewView"]);
+        assert_eq!(
+            engine.take_viewport_presentation_requests(),
+            vec![crate::ViewportPresentationRequest::SetFilmView { player: 1 }]
+        );
+    }
+
+    #[test]
+    fn set_film_view_sound_routing_survives_new_host_contexts() {
+        // C++ mutates the physical viewport itself, so the new target remains
+        // visible to callbacks later in the same tick before the app returns
+        // to its presentation loop (C4Script.cpp:5134-5148,2297-2309).
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Retarget() { SetFilmView(1); }\n\
+                 func Probe() { Sound(\"NewContextView\", true, nil, 100, 2); Sound(\"OldContextView\", true, nil, 100, 1); }",
+            )
+            .expect("cross-context film-view sound probe compiles");
+
+        let mut engine = crate::Engine::new();
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Old target"))
+            .expect("old film-view target registers");
+        engine
+            .register_player(crate::PlayerConfig::new(1, "New target"))
+            .expect("new film-view target registers");
+        engine.set_local_players([]);
+        engine.set_replay_control(true);
+        engine.set_film_viewport_available(true);
+        engine.set_physical_viewport_players([0]);
+
+        let (result, _) = with_effect_context(None, &[], engine.host_world_context(), 1, || {
+            script.call("Retarget", &[])
+        });
+        result.expect("film view retarget executes");
+        let (result, outcome) =
+            with_effect_context(None, &[], engine.host_world_context(), 1, || {
+                script.call("Probe", &[])
+            });
+        result.expect("later-context sound probe executes");
+        let sounds = outcome
+            .audio
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AudioCommand::PlaySound { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sounds, vec!["NewContextView"]);
+    }
+
+    #[test]
     fn debug_builtin_script_profiler_emits_one_sorted_report_across_vm_calls() {
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -2950,4 +3046,3 @@
         assert_eq!(result.expect("invalid material is contained"), Value::Nil);
         assert!(outcome.landscape.is_empty());
     }
-

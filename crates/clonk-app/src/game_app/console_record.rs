@@ -931,6 +931,11 @@ impl GameApp {
     }
 
     pub(crate) fn update_film_viewport_availability(&mut self) {
+        self.engine.set_physical_viewport_players(
+            self.physical_viewports
+                .iter()
+                .map(|viewport| viewport.displayed_player),
+        );
         self.engine
             .set_film_viewport_available(!self.physical_viewports.is_empty());
     }
