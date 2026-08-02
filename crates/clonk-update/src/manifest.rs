@@ -45,8 +45,9 @@ pub struct TargetArchive {
     /// client too old to read it would resolve `content` against a clonk-rs
     /// release, which is wrong — but bumping the schema makes that same client
     /// refuse the whole manifest, so it would stop seeing engine updates too.
-    /// The narrower failure is the better one while no shipped build downloads
-    /// components at all.
+    /// Clients that ignore this field also predate the component-download
+    /// hand-off and stop at their manual-install notice; downloader-capable
+    /// clients retain the source until it resolves the local staged archive.
     #[serde(default)]
     pub source: Option<ArchiveSource>,
     /// Lowercase hex SHA-256 of the archive bytes. With no manifest signature

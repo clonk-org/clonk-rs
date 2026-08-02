@@ -28,7 +28,7 @@
 //!    is only a bound if it is honest.
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
@@ -252,12 +252,14 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
         return Err(too_large(declared));
     }
 
+    let created_destination_directories = missing_directories(destination);
     std::fs::create_dir_all(destination).map_err(|source| ExtractError::Write {
         archive: archive.to_path_buf(),
         path: destination.to_path_buf(),
         source,
     })?;
 
+    let mut directories = HashSet::from([destination.to_path_buf()]);
     let mut summary = ExtractSummary { files: 0, bytes: 0 };
     for index in 0..zip.len() {
         let mut entry = zip
@@ -295,10 +297,12 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
         };
         if entry.is_dir() {
             std::fs::create_dir_all(&path).map_err(write_error)?;
+            record_extracted_directory(&mut directories, destination, &path);
             continue;
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(write_error)?;
+            record_extracted_directory(&mut directories, destination, parent);
         }
 
         // The declared sizes were only a promise; count what is actually
@@ -316,14 +320,116 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
         if written > remaining {
             return Err(too_large(summary.bytes.saturating_add(written)));
         }
-        file.flush().map_err(write_error)?;
-        drop(file);
-        apply_entry_mode(&path, entry.unix_mode()).map_err(write_error)?;
+        finalize_extracted_file(&file, &path, entry.unix_mode()).map_err(write_error)?;
 
         summary.files += 1;
         summary.bytes = summary.bytes.saturating_add(written);
     }
+    sync_extracted_directories_with(&directories, &created_destination_directories, |path| {
+        sync_extracted_directory(path).map_err(|source| ExtractError::Write {
+            archive: archive.to_path_buf(),
+            path: path.to_path_buf(),
+            source,
+        })
+    })?;
     Ok(summary)
+}
+
+fn missing_directories(path: &Path) -> Vec<PathBuf> {
+    path.ancestors()
+        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
+fn durability_parent(path: &Path) -> Option<PathBuf> {
+    path.parent().map(|parent| {
+        if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.to_path_buf()
+        }
+    })
+}
+
+fn record_extracted_directory(
+    directories: &mut HashSet<PathBuf>,
+    destination: &Path,
+    directory: &Path,
+) {
+    directories.extend(
+        directory
+            .ancestors()
+            .take_while(|ancestor| ancestor.starts_with(destination))
+            .map(Path::to_path_buf),
+    );
+}
+
+fn sync_extracted_directories_with<E, F>(
+    directories: &HashSet<PathBuf>,
+    created_destination_directories: &[PathBuf],
+    mut sync: F,
+) -> Result<(), E>
+where
+    F: FnMut(&Path) -> Result<(), E>,
+{
+    let mut paths = directories.clone();
+    paths.extend(
+        created_destination_directories
+            .iter()
+            .filter_map(|directory| durability_parent(directory)),
+    );
+    let mut paths: Vec<_> = paths.into_iter().collect();
+    paths.sort_by(|left, right| {
+        durability_depth(right)
+            .cmp(&durability_depth(left))
+            .then_with(|| left.cmp(right))
+    });
+    paths.iter().try_for_each(|path| sync(path))
+}
+
+fn durability_depth(path: &Path) -> usize {
+    path.components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .count()
+}
+
+/// Makes directory entries created by extraction durable.
+///
+/// Windows does not expose a portable directory flush through `std`; file
+/// contents and metadata are still synced individually, while its directory
+/// entry durability is left to the filesystem's rename semantics.
+#[cfg(unix)]
+fn sync_extracted_directory(path: &Path) -> Result<(), std::io::Error> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_extracted_directory(_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
+fn finalize_extracted_file(
+    file: &std::fs::File,
+    path: &Path,
+    mode: Option<u32>,
+) -> Result<(), std::io::Error> {
+    finalize_extracted_file_with(file, path, mode, std::fs::File::sync_all)
+}
+
+fn finalize_extracted_file_with<F>(
+    file: &std::fs::File,
+    path: &Path,
+    mode: Option<u32>,
+    sync: F,
+) -> Result<(), std::io::Error>
+where
+    F: FnOnce(&std::fs::File) -> Result<(), std::io::Error>,
+{
+    // Permissions are metadata too. Apply them before the durability boundary
+    // so a power cut cannot leave an executable present but unlaunchable.
+    apply_entry_mode(path, mode)?;
+    sync(file)
 }
 
 #[cfg(unix)]
@@ -629,6 +735,72 @@ mod tests {
             Err(ExtractError::DestinationNotEmpty { .. })
         ));
         assert!(destination.join("stale.txt").exists());
+    }
+
+    #[test]
+    fn an_extracted_file_is_synced_after_its_final_mode_is_applied() {
+        let directory = TempDir::new().expect("directory");
+        let path = directory.path().join("clonk-game");
+        let file = std::fs::File::create(&path).expect("create file");
+        let mut synced = false;
+
+        finalize_extracted_file_with(&file, &path, Some(0o755), |_| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let mode = std::fs::metadata(&path)?.permissions().mode();
+                assert_eq!(mode & 0o777, 0o755);
+            }
+            synced = true;
+            Ok(())
+        })
+        .expect("finish file");
+
+        assert!(synced);
+    }
+
+    #[test]
+    fn extracted_directories_are_synced_bottom_up() {
+        let destination = PathBuf::from("install/staged");
+        let directories = HashSet::from([
+            destination.clone(),
+            destination.join("System.c4g"),
+            destination.join("System.c4g/Nested"),
+        ]);
+        let created = vec![destination];
+        let mut synced = Vec::new();
+
+        sync_extracted_directories_with(&directories, &created, |path| {
+            synced.push(path.to_path_buf());
+            Ok::<_, std::io::Error>(())
+        })
+        .expect("sync directories");
+
+        assert_eq!(
+            synced,
+            [
+                PathBuf::from("install/staged/System.c4g/Nested"),
+                PathBuf::from("install/staged/System.c4g"),
+                PathBuf::from("install/staged"),
+                PathBuf::from("install"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_relative_destination_syncs_the_current_directory() {
+        let destination = PathBuf::from("staged");
+        let directories = HashSet::from([destination.clone()]);
+        let mut synced = Vec::new();
+
+        sync_extracted_directories_with(&directories, &[destination], |path| {
+            synced.push(path.to_path_buf());
+            Ok::<_, std::io::Error>(())
+        })
+        .expect("sync directories");
+
+        assert_eq!(synced, [PathBuf::from("staged"), PathBuf::from(".")]);
     }
 
     #[cfg(unix)]

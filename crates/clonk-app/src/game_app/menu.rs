@@ -3919,6 +3919,7 @@ impl GameApp {
                 | MessageDialogContinuation::LeagueEndRejected
                 // `C4UpdateDlg.cpp:277` opens the wait with btnAbort.
                 | MessageDialogContinuation::UpdateCheckWait
+                | MessageDialogContinuation::UpdateDownloadWait
         ) {
             state.set_button_label(
                 MessageDialogButton::Cancel,
@@ -4455,17 +4456,16 @@ impl GameApp {
             // Closing the wait dialog by any route is C++'s abort
             // (`C4UpdateDlg.cpp:294-296`), which reports nothing.
             MessageDialogContinuation::UpdateCheckWait => self.abort_update_check(),
-            MessageDialogContinuation::UpdatePrompt { version }
-                if result == clonk_frontend::message_dialog::MessageDialogResult::Yes =>
-            {
+            MessageDialogContinuation::UpdatePrompt {
+                manifest_base_url,
+                version,
+                components,
+            } if result == clonk_frontend::message_dialog::MessageDialogResult::Yes => {
                 // C++ downloads and applies here (`C4UpdateDlg.cpp:386-394`).
-                // The download and the out-of-process applier are not wired
-                // yet, so the accepted prompt says so rather than appearing to
-                // start an install that cannot finish.
-                let caption = self.update_check_caption();
-                self.show_manual_install_notice(&version, caption)?;
+                self.start_update_download(manifest_base_url, version, components)?;
             }
             MessageDialogContinuation::UpdatePrompt { .. } => {}
+            MessageDialogContinuation::UpdateDownloadWait => self.abort_update_download(),
             MessageDialogContinuation::UpdateNotice => {}
         }
         Ok(())

@@ -70,6 +70,8 @@ pub enum StateError {
     },
     #[error("{path} records schema {found}; this build understands {STATE_SCHEMA}")]
     UnsupportedSchema { path: PathBuf, found: u32 },
+    #[error("{path} does not contain an installed-state object")]
+    InvalidRoot { path: PathBuf },
 }
 
 /// Reads nothing but the schema, so a newer state file is refused on its
@@ -79,6 +81,18 @@ struct SchemaProbe {
     schema: u32,
 }
 
+/// Parsed state plus the exact bytes that represented it on disk.
+///
+/// Apply rollback needs both: the parsed value produces the next state, while
+/// restoring the original bytes preserves a macOS bundle's existing seal even
+/// when the JSON used different whitespace or carried fields this build does
+/// not know yet.
+#[derive(Debug, Clone)]
+pub(crate) struct InstalledStateSnapshot {
+    pub state: Option<InstalledState>,
+    raw: Option<Vec<u8>>,
+}
+
 /// The staging partner for an atomic save.
 ///
 /// A sibling of the state file, because `rename` is atomic only within one
@@ -86,6 +100,102 @@ struct SchemaProbe {
 /// temporary, and the leading dot keeps it out of casual directory listings.
 fn temporary_path_in(install_root: &Path) -> PathBuf {
     install_root.join(format!(".{STATE_FILE_NAME}.tmp-{}", std::process::id()))
+}
+
+fn temporary_prefix() -> String {
+    format!(".{STATE_FILE_NAME}.tmp-")
+}
+
+#[cfg(unix)]
+fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    std::fs::File::open(directory)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn write_atomic(install_root: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    discard_temporaries(install_root)?;
+    let temporary = temporary_path_in(install_root);
+    let write = |path: &Path| -> Result<(), std::io::Error> {
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    };
+    if let Err(source) = write(&temporary) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(StateError::Write {
+            path: temporary,
+            source,
+        });
+    }
+
+    let path = InstalledState::path_in(install_root);
+    std::fs::rename(&temporary, &path).map_err(|source| {
+        let _ = std::fs::remove_file(&temporary);
+        StateError::Write {
+            path: path.clone(),
+            source,
+        }
+    })?;
+    sync_directory(install_root).map_err(|source| StateError::Write { path, source })
+}
+
+fn discard_temporaries(install_root: &Path) -> Result<(), StateError> {
+    let prefix = temporary_prefix();
+    let listing = std::fs::read_dir(install_root).map_err(|source| StateError::Read {
+        path: install_root.to_path_buf(),
+        source,
+    })?;
+    let mut removed = false;
+    for entry in listing {
+        let entry = entry.map_err(|source| StateError::Read {
+            path: install_root.to_path_buf(),
+            source,
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(pid) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| StateError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.is_dir() {
+            continue;
+        }
+        std::fs::remove_file(&path).map_err(|source| StateError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        removed = true;
+    }
+    if removed {
+        sync_directory(install_root).map_err(|source| StateError::Write {
+            path: install_root.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+impl InstalledStateSnapshot {
+    pub(crate) fn raw(&self) -> Option<&[u8]> {
+        self.raw.as_deref()
+    }
+
+    pub fn restore(&self, install_root: &Path) -> Result<(), StateError> {
+        InstalledState::restore_bytes(install_root, self.raw())
+    }
 }
 
 impl InstalledState {
@@ -101,10 +211,19 @@ impl InstalledState {
     /// Reads the recorded state, or `None` when the installation predates the
     /// updater. An unreadable file is an error, never a silent `None`.
     pub fn load(install_root: &Path) -> Result<Option<Self>, StateError> {
+        Self::load_snapshot(install_root).map(|snapshot| snapshot.state)
+    }
+
+    pub(crate) fn load_snapshot(install_root: &Path) -> Result<InstalledStateSnapshot, StateError> {
         let path = Self::path_in(install_root);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(InstalledStateSnapshot {
+                    state: None,
+                    raw: None,
+                });
+            }
             Err(source) => return Err(StateError::Read { path, source }),
         };
         let malformed = |source| StateError::Malformed {
@@ -118,7 +237,44 @@ impl InstalledState {
                 path: path.clone(),
                 found: probe.schema,
             })?;
-        serde_json::from_slice(&bytes).map(Some).map_err(malformed)
+        let state = serde_json::from_slice(&bytes).map_err(malformed)?;
+        Ok(InstalledStateSnapshot {
+            state: Some(state),
+            raw: Some(bytes),
+        })
+    }
+
+    /// Restores exact journalled bytes, or exact absence, without normalizing
+    /// whitespace or discarding fields this build does not know.
+    pub(crate) fn restore_bytes(
+        install_root: &Path,
+        expected: Option<&[u8]>,
+    ) -> Result<(), StateError> {
+        discard_temporaries(install_root)?;
+        let path = Self::path_in(install_root);
+        match (expected, std::fs::read(&path)) {
+            (Some(expected), Ok(current)) if expected == current => return Ok(()),
+            (None, Err(source)) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            _ => {}
+        }
+        expected.map_or_else(
+            || Self::remove(install_root),
+            |bytes| {
+                let malformed = |source| StateError::Malformed {
+                    path: path.clone(),
+                    source,
+                };
+                let probe: SchemaProbe = serde_json::from_slice(bytes).map_err(malformed)?;
+                (probe.schema == STATE_SCHEMA)
+                    .then_some(())
+                    .ok_or_else(|| StateError::UnsupportedSchema {
+                        path: path.clone(),
+                        found: probe.schema,
+                    })?;
+                serde_json::from_slice::<Self>(bytes).map_err(malformed)?;
+                write_atomic(install_root, bytes)
+            },
+        )
     }
 
     /// Writes the state atomically: a full temporary beside the target, then a
@@ -128,34 +284,78 @@ impl InstalledState {
     /// power mid-apply, and the next launch would refuse to read it — turning a
     /// recoverable interruption into a permanently broken updater.
     pub fn save(&self, install_root: &Path) -> Result<(), StateError> {
-        let temporary = temporary_path_in(install_root);
-        let bytes = serde_json::to_vec_pretty(self).map_err(|source| StateError::Malformed {
-            path: Self::path_in(install_root),
-            source,
-        })?;
-
-        let write = |path: &Path| -> Result<(), std::io::Error> {
-            let mut file = std::fs::File::create(path)?;
-            file.write_all(&bytes)?;
-            file.write_all(b"\n")?;
-            // Durable before the rename, so the rename can never publish a
-            // name that points at unflushed content.
-            file.sync_all()
-        };
-        write(&temporary).map_err(|source| StateError::Write {
-            path: temporary.clone(),
-            source,
-        })?;
-
-        std::fs::rename(&temporary, Self::path_in(install_root)).map_err(|source| {
-            // Best effort: a stranded temporary is harmless, but leaving it
-            // behind on every failed save is not.
-            let _ = std::fs::remove_file(&temporary);
-            StateError::Write {
+        let mut bytes =
+            serde_json::to_vec_pretty(self).map_err(|source| StateError::Malformed {
                 path: Self::path_in(install_root),
                 source,
+            })?;
+        bytes.push(b'\n');
+        write_atomic(install_root, &bytes)
+    }
+
+    /// Saves known fields while retaining same-schema extension fields from a
+    /// previously validated representation.
+    pub(crate) fn save_preserving_unknown(
+        &self,
+        install_root: &Path,
+        previous: Option<&[u8]>,
+    ) -> Result<(), StateError> {
+        let path = Self::path_in(install_root);
+        let malformed = |source| StateError::Malformed {
+            path: path.clone(),
+            source,
+        };
+        let mut document = previous
+            .map(serde_json::from_slice::<serde_json::Value>)
+            .transpose()
+            .map_err(malformed)?
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+        let root = document
+            .as_object_mut()
+            .ok_or_else(|| StateError::InvalidRoot { path: path.clone() })?;
+        root.insert("schema".to_string(), serde_json::Value::from(self.schema));
+        let mut previous_components = root
+            .remove("components")
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        let components = self
+            .components
+            .iter()
+            .map(|(name, component)| {
+                let mut fields = previous_components
+                    .remove(name)
+                    .and_then(|value| value.as_object().cloned())
+                    .unwrap_or_default();
+                fields.insert(
+                    "version".to_string(),
+                    serde_json::Value::String(component.version.clone()),
+                );
+                fields.insert(
+                    "sha256".to_string(),
+                    serde_json::Value::String(component.sha256.clone()),
+                );
+                (name.clone(), serde_json::Value::Object(fields))
+            })
+            .collect();
+        root.insert(
+            "components".to_string(),
+            serde_json::Value::Object(components),
+        );
+        let mut bytes = serde_json::to_vec_pretty(&document).map_err(malformed)?;
+        bytes.push(b'\n');
+        write_atomic(install_root, &bytes)
+    }
+
+    /// Removes recorded state durably, treating absence as success.
+    pub fn remove(install_root: &Path) -> Result<(), StateError> {
+        let path = Self::path_in(install_root);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                sync_directory(install_root).map_err(|source| StateError::Write { path, source })
             }
-        })
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StateError::Write { path, source }),
+        }
     }
 
     pub fn component(&self, name: &str) -> Option<&InstalledComponent> {
@@ -222,6 +422,30 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name())
             .collect();
         assert_eq!(names, [STATE_FILE_NAME]);
+    }
+
+    #[test]
+    fn removing_state_is_idempotent() {
+        let root = TempDir::new().expect("install root");
+        state().save(root.path()).expect("save");
+
+        InstalledState::remove(root.path()).expect("first remove");
+        InstalledState::remove(root.path()).expect("second remove");
+
+        assert_eq!(InstalledState::load(root.path()).expect("load"), None);
+    }
+
+    #[test]
+    fn restoring_a_snapshot_removes_a_stranded_atomic_write_temporary() {
+        let root = TempDir::new().expect("install root");
+        state().save(root.path()).expect("save");
+        let snapshot = InstalledState::load_snapshot(root.path()).expect("snapshot");
+        let temporary = temporary_path_in(root.path());
+        std::fs::write(&temporary, b"partial state").expect("strand temporary");
+
+        snapshot.restore(root.path()).expect("restore");
+
+        assert!(!temporary.exists());
     }
 
     #[test]

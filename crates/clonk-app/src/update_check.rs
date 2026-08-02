@@ -27,6 +27,9 @@ pub(crate) const TARGET_TRIPLE: &str = env!("CLONK_TARGET_TRIPLE");
 pub(crate) enum UpdateCheckOutcome {
     /// A newer release this build can install, and what it would fetch.
     Available {
+        /// The base whose manifest request succeeded. Source-less component
+        /// archives must stay there instead of silently switching servers.
+        manifest_base_url: String,
         version: String,
         components: Vec<clonk_update::PlannedComponent>,
     },
@@ -87,6 +90,7 @@ pub(crate) fn check_for_updates(
             version,
             components,
         } => UpdateCheckOutcome::Available {
+            manifest_base_url: base_url.to_string(),
             version,
             components,
         },
@@ -266,6 +270,7 @@ mod tests {
         let UpdateCheckOutcome::Available {
             version: offered,
             components,
+            ..
         } = outcome
         else {
             panic!("a newer release must be offered: {outcome:?}");

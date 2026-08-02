@@ -59,6 +59,7 @@ mod shell_window_host;
 mod startup_player_files;
 mod system_fonts;
 mod update_check;
+mod update_download;
 mod viewport_window_host;
 mod window_icon;
 
@@ -276,7 +277,7 @@ use clonk_network::{
     ClientId, ClientPingSample, ControlRecordPlayback, ControlRecordWriter, LeagueEndRecord,
     NetworkStats, ParticipantKind, PlayerControlSample, ProtocolRateSample, Tick,
 };
-use clonk_platform::{AppPaths, PathsError};
+use clonk_platform::{discover_unvalidated_install_root, AppPaths, PathsError};
 use clonk_resources::{
     load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
     DefinitionError as ResourceDefinitionError, FontCatalog, FontRole, GraphicsError,
@@ -372,6 +373,46 @@ fn display_refresh_period_ms(window: &Window) -> Option<u64> {
         .map(|millihertz| (1_000_000 / u64::from(millihertz)).max(1))
 }
 
+fn recover_interrupted_update_before_path_discovery() -> Result<clonk_update::ResumeOutcome> {
+    recover_interrupted_update_before_path_discovery_with(&clonk_update::RealPlatform)
+}
+
+fn recover_interrupted_update_before_path_discovery_with(
+    platform: &dyn clonk_update::PlatformOps,
+) -> Result<clonk_update::ResumeOutcome> {
+    if std::env::var_os(clonk_update::UPDATE_RECOVERY_COMPLETE_ENV).as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        return Ok(clonk_update::ResumeOutcome::NothingToDo);
+    }
+    let install_root = match discover_unvalidated_install_root() {
+        Ok(install_root) => install_root,
+        Err(PathsError::InstallRootNotFound) => {
+            return Ok(clonk_update::ResumeOutcome::NothingToDo)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    clonk_update::resume_interrupted_update_with(
+        &clonk_update::InstallLayout::discover(&install_root),
+        platform,
+    )
+    .context("failed to recover interrupted component update")
+}
+
+fn update_recovery_message(outcome: &clonk_update::ResumeOutcome) -> String {
+    match outcome {
+        clonk_update::ResumeOutcome::NothingToDo => {
+            "no interrupted component update to recover".to_string()
+        }
+        clonk_update::ResumeOutcome::RolledForward { version } => {
+            format!("completed interrupted component update to {version}")
+        }
+        clonk_update::ResumeOutcome::RolledBack { version } => {
+            format!("rolled back interrupted component update to {version}")
+        }
+    }
+}
+
 fn run() -> Result<()> {
     // C++ recovers a translocated bundle path and chdirs to the directory
     // holding the .app before anything else (C4WinMain.cpp:233-238;
@@ -413,6 +454,7 @@ fn run() -> Result<()> {
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
+    let update_notice_detail = update_download::take_update_notice_detail();
     let classic = parse_classic_command_line(&cli.classic_arguments);
     install_classic_language_override(&classic);
     let console_log_capture = classic
@@ -426,7 +468,15 @@ fn run() -> Result<()> {
         .config_file
         .as_deref()
         .or(cli.config_file.as_deref());
+    let update_recovery = recover_interrupted_update_before_path_discovery()?;
     let app_paths = discover_validated_startup_paths(explicit_config)?;
+    let _install_use = app_paths
+        .as_ref()
+        .map(|paths| {
+            clonk_update::acquire_install_use(&clonk_update::InstallLayout::for_app_paths(paths))
+        })
+        .transpose()
+        .context("the installation is being updated by another process")?;
     // The crash filter writes its dump under `Config.General.UserPath`
     // (C4CrashHandlerWin32.cpp:374-375).
     #[cfg(windows)]
@@ -489,6 +539,7 @@ fn run() -> Result<()> {
         clonk_core::version::PORT_VERSION,
         clonk_core::version::ENGINE_VERSION_COMPACT,
     );
+    tracing::info!("{}", update_recovery_message(&update_recovery));
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
             tracing::warn!(
@@ -678,6 +729,14 @@ fn run() -> Result<()> {
         runtime,
     )
     .context("failed to initialise app state")?;
+    let update_failure_prefix = app.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.");
+    if let Some(message) = update_download::update_notice_message(
+        &update_failure_prefix,
+        update_notice_detail.as_deref(),
+    ) {
+        let caption = app.update_check_caption();
+        app.show_update_notice(message, caption)?;
+    }
     app.console_mode = classic.console;
     app.console_log_capture = console_log_capture;
     app.game_log_capture = Some(game_log_capture);
@@ -2166,6 +2225,7 @@ impl GameApp {
             incoming_update: None,
             update_check_requested: false,
             update_check: None,
+            update_download: None,
             automatic_update_check_allowed: !cfg!(test),
             ingame_gui_pointer: None,
             ingame_pointer: None,

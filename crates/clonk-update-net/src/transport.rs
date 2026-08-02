@@ -118,6 +118,7 @@ impl HttpTransport {
     /// GETs `url`, following redirects under [`check_hop`].
     async fn get(&self, url: &str) -> Result<Response, TransportError> {
         let origin = parse_url(url)?;
+        check_origin(&origin)?;
         let mut current = origin.clone();
         for hop in 0..=MAX_REDIRECTS {
             let response = self
@@ -164,6 +165,13 @@ impl HttpTransport {
             .ok_or_else(|| TransportError::UndeclaredSize {
                 url: response.url().to_string(),
             })?;
+        // Give the caller the server's ceiling before creating the destination
+        // or accepting a body chunk. The update planner compares this with the
+        // published manifest size and can reject a mismatched asset without
+        // spending disk space on it first.
+        progress(0, declared)
+            .then_some(())
+            .ok_or(TransportError::Cancelled)?;
         let mut file = File::create(into).map_err(|source| TransportError::Io {
             path: into.to_path_buf(),
             source,
@@ -232,6 +240,32 @@ fn parse_url(url: &str) -> Result<Url, TransportError> {
     Url::parse(url).map_err(|_| TransportError::InvalidUrl {
         url: url.to_owned(),
     })
+}
+
+/// TLS authenticates the unsigned manifest that authorizes executable
+/// replacement. Plain HTTP is retained only for an in-process loopback fixture,
+/// where no network peer can answer in the server's place.
+fn check_origin(origin: &Url) -> Result<(), TransportError> {
+    check_origin_with_loopback_fixtures(origin, cfg!(test))
+}
+
+fn check_origin_with_loopback_fixtures(
+    origin: &Url,
+    allow_loopback_http: bool,
+) -> Result<(), TransportError> {
+    let loopback_http = allow_loopback_http
+        && origin.scheme() == "http"
+        && origin.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+    (origin.scheme() == "https" || loopback_http)
+        .then_some(())
+        .ok_or_else(|| TransportError::InsecureOrigin {
+            url: origin.to_string(),
+        })
 }
 
 /// Rejects a response whose status is not a success, keeping the code so the
@@ -427,6 +461,30 @@ mod tests {
     }
 
     #[test]
+    fn a_plaintext_non_loopback_origin_is_refused_before_any_request() {
+        let origin = Url::parse("http://updates.example/manifest.json").expect("origin parses");
+
+        assert!(matches!(
+            check_origin(&origin),
+            Err(TransportError::InsecureOrigin { .. })
+        ));
+    }
+
+    #[test]
+    fn production_policy_refuses_plaintext_loopback_origins() {
+        for url in [
+            "http://127.0.0.1/manifest.json",
+            "http://localhost/manifest.json",
+        ] {
+            let origin = Url::parse(url).expect("origin parses");
+            assert!(matches!(
+                check_origin_with_loopback_fixtures(&origin, false),
+                Err(TransportError::InsecureOrigin { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn a_redirect_to_a_non_http_scheme_is_refused() {
         let fixture = serve(vec![Reply::redirect("file:///etc/passwd")]);
         let transport = fixture.transport();
@@ -584,6 +642,26 @@ mod tests {
     }
 
     #[test]
+    fn a_component_reports_its_declared_size_before_writing_a_body_chunk() {
+        let body = vec![b'z'; 40_000];
+        let fixture = serve(vec![Reply::ok(&body)]);
+        let transport = fixture.transport();
+        let directory = tempfile::tempdir().expect("temporary install cache");
+        let into = directory.path().join("content.zip");
+        let mut seen = Vec::new();
+
+        let outcome =
+            transport.download(&fixture.url("/content.zip"), &into, &mut |done, total| {
+                seen.push((done, total));
+                false
+            });
+
+        assert!(matches!(outcome, Err(TransportError::Cancelled)));
+        assert_eq!(seen, [(0, body.len() as u64)]);
+        assert!(!into.exists(), "cancellation precedes the first body write");
+    }
+
+    #[test]
     fn cancelling_from_the_progress_callback_deletes_the_partial_file() {
         // A cancelled download must not leave bytes behind that a later run
         // could mistake for a complete component.
@@ -592,9 +670,19 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary install cache");
         let into = directory.path().join("content.zip");
 
-        let outcome = transport.download(&fixture.url("/content.zip"), &into, &mut |_, _| false);
+        let mut saw_body = false;
+        let outcome =
+            transport.download(&fixture.url("/content.zip"), &into, &mut |downloaded, _| {
+                if downloaded == 0 {
+                    true
+                } else {
+                    saw_body = true;
+                    false
+                }
+            });
 
         assert!(matches!(outcome, Err(TransportError::Cancelled)));
+        assert!(saw_body, "cancellation follows at least one body write");
         assert!(!into.exists(), "the partial download is removed");
     }
 

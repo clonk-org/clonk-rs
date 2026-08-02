@@ -38,10 +38,10 @@ pub mod manifest;
 pub mod state;
 
 pub use apply::{
-    apply_update, ensure_free_space, required_free_space, resume_interrupted_update,
-    resume_interrupted_update_with, ApplyError, ApplyOutcome, ApplyPlan, FakePlatform,
-    InstallLayout, PlatformCall, PlatformError, PlatformOps, RealPlatform, ResumeOutcome,
-    StagedComponent,
+    acquire_install_use, apply_update, ensure_free_space, required_free_space,
+    resume_interrupted_update, resume_interrupted_update_with, ApplyError, ApplyOutcome, ApplyPlan,
+    FakePlatform, InstallLayout, InstallUseGuard, PlatformCall, PlatformError, PlatformOps,
+    RealPlatform, ResumeOutcome, StagedComponent, UPDATE_RECOVERY_COMPLETE_ENV,
 };
 pub use decide::{
     decide, decide_for_this_build, should_check_for_updates, Decision, PlannedComponent,

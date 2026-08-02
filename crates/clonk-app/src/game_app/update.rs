@@ -25,6 +25,9 @@
 
 use super::*;
 use crate::update_check::{spawn_update_check, PendingUpdateCheck, UpdateCheckOutcome};
+use crate::update_download::{
+    launch_update_applier, spawn_update_download, total_component_size, UpdateDownloadEvent,
+};
 use clonk_update::should_check_for_updates;
 use clonk_update_net::DEFAULT_UPDATE_BASE_URL;
 
@@ -139,7 +142,7 @@ impl GameApp {
         automatic: bool,
         now: i64,
     ) -> Result<(), EngineError> {
-        if self.update_check.is_some() {
+        if self.update_check.is_some() || self.update_download.is_some() {
             // C++ cannot reach this: its check blocks the message loop. Here a
             // second request while one is in flight is possible, and the honest
             // answer is the one the resource table already ships.
@@ -246,10 +249,11 @@ impl GameApp {
         let caption = self.update_check_caption();
         match outcome {
             UpdateCheckOutcome::Available {
+                manifest_base_url,
                 version,
                 components,
             } => {
-                let total: u64 = components.iter().map(|component| component.size).sum();
+                let total = total_component_size(&components);
                 tracing::info!(
                     %version,
                     components = components.len(),
@@ -273,7 +277,11 @@ impl GameApp {
                         clonk_frontend::message_dialog::MessageDialogSize::Regular,
                         false,
                     ),
-                    MessageDialogContinuation::UpdatePrompt { version },
+                    MessageDialogContinuation::UpdatePrompt {
+                        manifest_base_url,
+                        version,
+                        components,
+                    },
                 )
             }
             // `C4UpdateDlg.cpp:396-400`: an automatic check that finds nothing
@@ -303,10 +311,159 @@ impl GameApp {
         }
     }
 
+    /// Starts the component transfer the user accepted in the update prompt.
+    pub(crate) fn start_update_download(
+        &mut self,
+        manifest_base_url: String,
+        version: String,
+        components: Vec<clonk_update::PlannedComponent>,
+    ) -> Result<(), EngineError> {
+        let caption = self.update_check_caption();
+        let Some(paths) = self.app_paths.clone() else {
+            return self.show_update_notice(
+                format!(
+                    "{}: the installation directory could not be located",
+                    self.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.")
+                ),
+                caption,
+            );
+        };
+        self.update_download = Some(spawn_update_download(
+            manifest_base_url,
+            version.clone(),
+            components,
+            paths,
+        ));
+        let message = format_resource_string(
+            self.runtime_resource_text("IDS_MSG_DOWNLOADINGUPDATE", "Downloading update %s..."),
+            &[&version],
+        );
+        self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::new(
+                message,
+                caption,
+                clonk_frontend::message_dialog::MessageDialogButtons::CANCEL,
+                UPDATE_ICON,
+                clonk_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            )
+            .with_progress(0),
+            MessageDialogContinuation::UpdateDownloadWait,
+        )
+    }
+
+    /// Applies download progress and launches the detached applier once every
+    /// component has passed its size and digest checks.
+    pub(crate) fn poll_update_download(&mut self) -> Result<(), EngineError> {
+        let (progress, terminal) = {
+            let Some(pending) = self.update_download.as_ref() else {
+                return Ok(());
+            };
+            let mut progress = None;
+            let mut terminal = None;
+            loop {
+                match pending.receiver.try_recv() {
+                    Ok(UpdateDownloadEvent::Progress { downloaded, total }) => {
+                        progress = Some((downloaded, total));
+                    }
+                    Ok(event @ UpdateDownloadEvent::Prepared { .. })
+                    | Ok(event @ UpdateDownloadEvent::Failed { .. }) => {
+                        terminal = Some(event);
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        terminal = Some(UpdateDownloadEvent::Failed {
+                            detail: "the update download ended without a result".to_string(),
+                        });
+                        break;
+                    }
+                }
+            }
+            (progress, terminal)
+        };
+        if let Some((downloaded, total)) = progress {
+            let percent = if total == 0 {
+                0
+            } else {
+                ((u128::from(downloaded) * 100) / u128::from(total)).min(100) as u8
+            };
+            self.update_update_download_progress(percent);
+        }
+        let Some(terminal) = terminal else {
+            return Ok(());
+        };
+        self.update_download = None;
+        self.close_update_download_dialog();
+        match terminal {
+            UpdateDownloadEvent::Prepared { update } => {
+                let launched = self
+                    .app_paths
+                    .as_ref()
+                    .context("the installation directory disappeared before update apply")
+                    .and_then(|paths| launch_update_applier(paths, update.plan_path()));
+                match launched {
+                    Ok(()) => {
+                        update.hand_off();
+                        self.request_exit();
+                    }
+                    Err(error) => {
+                        let message = format!(
+                            "{}: {error:#}",
+                            self.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.")
+                        );
+                        self.show_update_notice(message, self.update_check_caption())?;
+                    }
+                }
+            }
+            UpdateDownloadEvent::Failed { detail } => {
+                tracing::warn!(%detail, "the update download failed");
+                let message = format!(
+                    "{}: {detail}",
+                    self.runtime_resource_text("IDS_MSG_UPDATEFAILED", "Update failed.")
+                );
+                self.show_update_notice(message, self.update_check_caption())?;
+            }
+            UpdateDownloadEvent::Progress { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn update_update_download_progress(&mut self, percent: u8) {
+        if let Some(dialog) = self.message_dialogs.iter_mut().find(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::UpdateDownloadWait
+            )
+        }) {
+            dialog.state.set_progress(percent);
+            self.mark_menu_dirty();
+        }
+    }
+
+    fn close_update_download_dialog(&mut self) {
+        let Some(index) = self.message_dialogs.iter().position(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::UpdateDownloadWait
+            )
+        }) else {
+            return;
+        };
+        self.remove_message_dialog_at(index);
+        self.mark_menu_dirty();
+    }
+
+    pub(crate) fn abort_update_download(&mut self) {
+        if let Some(pending) = self.update_download.take() {
+            pending.cancel();
+        }
+    }
+
     /// The release cannot be installed from inside the game.
     ///
-    /// Both callers are port-specific: a release built against another engine,
-    /// and — until the download and applier are wired — an accepted prompt.
+    /// The caller is a release built against another engine tuple, whose
+    /// content cannot safely be installed under the running engine.
     pub(crate) fn show_manual_install_notice(
         &mut self,
         version: &str,

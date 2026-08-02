@@ -22,10 +22,13 @@
 //! `Contents/MacOS` inside a bundle) are ever swapped. The install tree is not
 //! read-only: `Screenshots/`, `Records.c4f/`, the launcher's `Clonk-rust-*.log`
 //! and the launcher-staged `System.c4g`/`Graphics.c4g` all live in it, and a
-//! whole-tree replace would delete them. For the same reason, any top-level
-//! entry of the *old* component that the new archive does not contain — a pack
-//! the user dropped into `content/`, which `clonk-app` scans — is carried into
-//! the staged tree before the swap.
+//! whole-tree replace would delete them. Inside a component, only a top-level
+//! entry of the old `content/` tree that the new archive does not contain — a
+//! pack the user dropped there, which `clonk-app` scans — is carried into the
+//! staged tree before the swap. `planet/` and the binaries directory are exact
+//! release snapshots; retaining an omitted entry there would create a hybrid
+//! install. The launcher recreates its staged `System.c4g`/`Graphics.c4g`
+//! copies from the installed `planet/` before starting the runtime.
 //!
 //! The engine component also ships `COPYING`, `README.md`, `credits.txt` and,
 //! inside a bundle, `Contents/Info.plist`. Those are deliberately left alone:
@@ -54,17 +57,22 @@
 //! the bundle root` for a file next to `Contents` and `a sealed resource is
 //! missing or invalid` for one removed after signing. There is therefore
 //! nowhere inside a `.app` to keep a journal or a backup across the signing
-//! step, so for a bundle both live in the directory *containing* the `.app`
-//! ([`InstallLayout::work_dir`]). A plain install keeps them beside the
-//! destination, where the rename that produced them left them.
+//! step, so for a bundle both live in its private namespace below the directory
+//! *containing* the `.app` ([`InstallLayout::work_dir`]). A plain install keeps
+//! them beside the destination, where the rename that produced them left them.
 
 use crate::decide::PlannedComponent;
 use crate::digest::{verify_file, DigestError};
 use crate::extract::{extract_archive, ExtractError};
-use crate::journal::{Journal, JournalError, JournalStep, StepState};
+use crate::journal::{
+    safe_child_name, Journal, JournalError, JournalStep, PreviousInstalledState, StepState,
+    TransactionPhase,
+};
+use crate::state::{InstalledState, InstalledStateSnapshot, StateError};
 use clonk_platform::AppPaths;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -74,6 +82,10 @@ use thiserror::Error;
 /// An install that fills its own volume is a failure mode the user cannot fix
 /// from inside the game, so the check is deliberately pessimistic.
 pub const RESERVED_FREE_BYTES: u64 = 256 * 1024 * 1024;
+/// Set by `clonk-game` after it has completed install-journal recovery, so the
+/// child runtime does not try to upgrade the same shared install lease to an
+/// exclusive recovery lock.
+pub const UPDATE_RECOVERY_COMPLETE_ENV: &str = "LC_GAME_UPDATE_RECOVERY_COMPLETE";
 
 /// How much a component archive is allowed to unpack to, as a multiple of its
 /// own size.
@@ -99,6 +111,12 @@ const NESTED_BUNDLE_EXECUTABLES: [&str; 2] = ["clonk-game", "c4group"];
 /// The bundle icon, relative to the `.app`, as `xtask` writes it and
 /// `Info.plist`'s `CFBundleIconFile` names it.
 const BUNDLE_ICON: &str = "Contents/Resources/ClonkRust.icns";
+
+/// A stable file whose host lock serializes apply and recovery processes.
+///
+/// The file itself is deliberately retained: unlinking a locked file lets a
+/// second process create a new inode at the same name and lock that instead.
+const UPDATE_LOCK_FILE_NAME: &str = ".clonk-update.lock";
 
 /// `HKCU` subkey the Windows installer writes, and the value naming the
 /// installed release (`scripts/windows-installer.nsi:54,76`).
@@ -204,16 +222,20 @@ impl InstallLayout {
 
     /// Where the journal and the backups wait while an update is in flight.
     ///
-    /// Beside the install for a plain tree. For a bundle it is the directory
-    /// containing the `.app`, because nothing inside a `.app` can survive the
-    /// re-sign that has to follow the last swap — see the module documentation.
+    /// Beside the install for a plain tree. A bundle gets its own namespace
+    /// under a hidden directory beside the `.app`, because nothing inside a
+    /// `.app` can survive the re-sign that follows the last swap and sibling
+    /// bundles must never share recovery state.
     pub fn work_dir(&self) -> PathBuf {
         match self.bundle {
-            true => self
-                .root
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| self.root.clone()),
+            true => {
+                let parent = self.root.parent().unwrap_or_else(|| Path::new("."));
+                let name = self
+                    .root
+                    .file_name()
+                    .unwrap_or_else(|| OsStr::new("bundle"));
+                parent.join(".clonk-update").join(name)
+            }
             false => self.root.clone(),
         }
     }
@@ -438,6 +460,49 @@ fn available_space(path: &Path) -> Result<u64, PlatformError> {
 #[cfg(unix)]
 const PROCESS_POLL: Duration = Duration::from_millis(50);
 
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_INVALID_PARAMETER: u32 = 87;
+#[cfg(any(test, windows))]
+const WINDOWS_WAIT_OBJECT_0: u32 = 0;
+#[cfg(any(test, windows))]
+const WINDOWS_WAIT_TIMEOUT: u32 = 0x102;
+#[cfg(any(test, windows))]
+const WINDOWS_WAIT_FAILED: u32 = u32::MAX;
+
+#[cfg(any(test, windows))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsOpenError {
+    ProcessGone,
+    Failure(u32),
+}
+
+#[cfg(any(test, windows))]
+fn classify_windows_open_error(code: u32) -> WindowsOpenError {
+    match code {
+        WINDOWS_ERROR_INVALID_PARAMETER => WindowsOpenError::ProcessGone,
+        _ => WindowsOpenError::Failure(code),
+    }
+}
+
+#[cfg(any(test, windows))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsWaitResult {
+    Exited,
+    TimedOut,
+    Failure(u32),
+    Unexpected(u32),
+}
+
+#[cfg(any(test, windows))]
+fn classify_windows_wait(status: u32, last_error: u32) -> WindowsWaitResult {
+    match status {
+        WINDOWS_WAIT_OBJECT_0 => WindowsWaitResult::Exited,
+        WINDOWS_WAIT_TIMEOUT => WindowsWaitResult::TimedOut,
+        WINDOWS_WAIT_FAILED => WindowsWaitResult::Failure(last_error),
+        other => WindowsWaitResult::Unexpected(other),
+    }
+}
+
 #[cfg(unix)]
 fn wait_for_process(pid: u32, timeout: Duration) -> Result<(), PlatformError> {
     let deadline = std::time::Instant::now() + timeout;
@@ -461,29 +526,51 @@ fn wait_for_process(pid: u32, timeout: Duration) -> Result<(), PlatformError> {
 
 #[cfg(windows)]
 fn wait_for_process(pid: u32, timeout: Duration) -> Result<(), PlatformError> {
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
     // `SYNCHRONIZE` is a standard access right; windows-sys happens to declare
     // it beside the file rights, and both aliases are plain `u32`.
     use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
 
-    // SAFETY: a plain process-id lookup; a null handle means the process is
-    // already gone, which is exactly what the caller is waiting for.
+    // SAFETY: a plain process-id lookup.
     let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
     if handle == 0 {
-        return Ok(());
+        let code = unsafe { GetLastError() };
+        return match classify_windows_open_error(code) {
+            WindowsOpenError::ProcessGone => Ok(()),
+            WindowsOpenError::Failure(code) => Err(PlatformError::Io {
+                operation: "OpenProcess",
+                path: PathBuf::from(format!("process {pid}")),
+                source: std::io::Error::from_raw_os_error(code as i32),
+            }),
+        };
     }
     let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
     // SAFETY: `handle` is a live handle this function owns until it is closed.
     let waited = unsafe { WaitForSingleObject(handle, milliseconds) };
+    let wait_error = unsafe { GetLastError() };
     // SAFETY: closing the handle opened above, exactly once.
     unsafe { CloseHandle(handle) };
-    (waited == WAIT_OBJECT_0)
-        .then_some(())
-        .ok_or(PlatformError::WaitTimeout {
+    match classify_windows_wait(waited, wait_error) {
+        WindowsWaitResult::Exited => Ok(()),
+        WindowsWaitResult::TimedOut => Err(PlatformError::WaitTimeout {
             pid,
             seconds: timeout.as_secs(),
-        })
+        }),
+        WindowsWaitResult::Failure(code) => Err(PlatformError::Io {
+            operation: "WaitForSingleObject",
+            path: PathBuf::from(format!("process {pid}")),
+            source: std::io::Error::from_raw_os_error(code as i32),
+        }),
+        WindowsWaitResult::Unexpected(status) => Err(PlatformError::Io {
+            operation: "WaitForSingleObject",
+            path: PathBuf::from(format!("process {pid}")),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unexpected wait status {status:#x}"),
+            ),
+        }),
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -585,6 +672,8 @@ pub enum PlatformCall {
 pub struct FakePlatform {
     available_space: u64,
     failing_codesign_argument: Option<String>,
+    failing_codesign_once: bool,
+    codesign_has_failed: std::sync::atomic::AtomicBool,
     calls: std::sync::Mutex<Vec<PlatformCall>>,
 }
 
@@ -599,6 +688,8 @@ impl FakePlatform {
         Self {
             available_space: u64::MAX,
             failing_codesign_argument: None,
+            failing_codesign_once: false,
+            codesign_has_failed: std::sync::atomic::AtomicBool::new(false),
             calls: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -613,6 +704,13 @@ impl FakePlatform {
     /// signing identity or even a macOS host.
     pub fn failing_codesign(mut self, argument: &str) -> Self {
         self.failing_codesign_argument = Some(argument.to_string());
+        self
+    }
+
+    /// Fails only the first `codesign` invocation carrying `argument`.
+    pub fn failing_codesign_once(mut self, argument: &str) -> Self {
+        self.failing_codesign_argument = Some(argument.to_string());
+        self.failing_codesign_once = true;
         self
     }
 
@@ -649,10 +747,15 @@ impl PlatformOps for FakePlatform {
                 .collect(),
             target: target.to_path_buf(),
         });
-        let failing = self
+        let matches_failure = self
             .failing_codesign_argument
             .as_deref()
             .is_some_and(|failing| arguments.contains(&failing));
+        let already_failed = matches_failure
+            && self
+                .codesign_has_failed
+                .swap(true, std::sync::atomic::Ordering::Relaxed);
+        let failing = matches_failure && (!self.failing_codesign_once || !already_failed);
         match failing {
             true => Err(PlatformError::Codesign {
                 arguments: arguments.join(" "),
@@ -675,6 +778,21 @@ impl PlatformOps for FakePlatform {
 pub enum ApplyError {
     #[error("update component {component:?} is not one this build installs")]
     UnknownComponent { component: String },
+    #[error("update journal repeats component {component:?}")]
+    DuplicateComponent { component: String },
+    #[error("update journal belongs to {recorded}, not the requested installation at {requested}")]
+    InstallRootMismatch {
+        recorded: PathBuf,
+        requested: PathBuf,
+    },
+    #[error("macOS update journal does not record whether the old bundle icon existed")]
+    MissingBundleRecoveryState,
+    #[error("legacy macOS update journal cannot prove the original bundle icon state")]
+    UnsafeLegacyBundleJournal,
+    #[error("legacy update journal lacks the digest required for safe recovery")]
+    UnsafeLegacyJournalDigest,
+    #[error("rollback state for component {component:?} is inconsistent with its journal")]
+    InconsistentRollbackState { component: String },
     #[error(
         "component {component} asks to be installed at {destination}, \
          but this install puts it at {expected}"
@@ -688,6 +806,8 @@ pub enum ApplyError {
     MissingPayload { component: String, path: PathBuf },
     #[error("{path} already exists; another update may be in progress")]
     StagingOccupied { path: PathBuf },
+    #[error("another update process already holds {path}")]
+    UpdateInProgress { path: PathBuf },
     #[error("the staged tree for component {component} is gone, so the update cannot be finished")]
     StagingLost { component: String },
     #[error("{path} holds an entry whose name is not text and cannot be carried across an update")]
@@ -718,7 +838,88 @@ pub enum ApplyError {
     #[error(transparent)]
     Journal(#[from] JournalError),
     #[error(transparent)]
+    State(#[from] StateError),
+    #[error(transparent)]
     Platform(#[from] PlatformError),
+}
+
+struct UpdateLock {
+    _file: File,
+}
+
+impl UpdateLock {
+    fn path_in(directory: &Path) -> PathBuf {
+        directory.join(UPDATE_LOCK_FILE_NAME)
+    }
+
+    fn acquire(directory: &Path) -> Result<Self, ApplyError> {
+        let path = Self::path_in(directory);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(io("opening update lock", &path))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => Err(ApplyError::UpdateInProgress { path }),
+            Err(TryLockError::Error(source)) => Err(io("locking", &path)(source)),
+        }
+    }
+}
+
+/// Shared lifetime claim held by every process using an installed tree.
+///
+/// The updater takes an exclusive lock on the same file before its first live
+/// mutation, so a second launcher or a directly started runtime cannot be
+/// missed by a finite PID hand-off list. A read-only installation receives a
+/// no-op guard: the updater cannot create its journal or mutate that tree
+/// either.
+pub struct InstallUseGuard {
+    _file: Option<File>,
+}
+
+pub fn acquire_install_use(layout: &InstallLayout) -> Result<InstallUseGuard, ApplyError> {
+    let work = layout.work_dir();
+    if let Err(error) = ensure_dir(&work) {
+        if matches!(
+            &error,
+            ApplyError::Io { source, .. }
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::PermissionDenied
+                        | std::io::ErrorKind::ReadOnlyFilesystem
+                )
+        ) {
+            return Ok(InstallUseGuard { _file: None });
+        }
+        return Err(error);
+    }
+    let path = UpdateLock::path_in(&work);
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(source)
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            return Ok(InstallUseGuard { _file: None });
+        }
+        Err(source) => return Err(io("opening install-use lock", &path)(source)),
+    };
+    match file.try_lock_shared() {
+        Ok(()) => Ok(InstallUseGuard { _file: Some(file) }),
+        Err(TryLockError::WouldBlock) => Err(ApplyError::UpdateInProgress { path }),
+        Err(TryLockError::Error(source)) => Err(io("locking install for use", &path)(source)),
+    }
 }
 
 /// Bytes that must be free before a download starts.
@@ -822,6 +1023,92 @@ fn resolve(layout: &InstallLayout, component: &StagedComponent) -> Result<Replac
     })
 }
 
+fn validate_journal_layout(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError> {
+    if journal.schema == crate::journal::JOURNAL_SCHEMA {
+        let requested = canonical_install_root(layout)?;
+        if journal.install_root != requested {
+            return Err(ApplyError::InstallRootMismatch {
+                recorded: journal.install_root.clone(),
+                requested,
+            });
+        }
+    }
+    if layout.is_bundle()
+        && journal.schema == crate::journal::JOURNAL_SCHEMA
+        && journal.previous_bundle_icon_present.is_none()
+    {
+        return Err(ApplyError::MissingBundleRecoveryState);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    journal.steps.iter().try_for_each(|step| {
+        if !seen.insert(step.component.as_str()) {
+            return Err(ApplyError::DuplicateComponent {
+                component: step.component.clone(),
+            });
+        }
+        let expected = match step.component.as_str() {
+            name @ ("content" | "planet") => layout.data_relative().join(name),
+            "engine" => layout.binaries_relative(),
+            other => {
+                return Err(ApplyError::UnknownComponent {
+                    component: other.to_string(),
+                });
+            }
+        };
+        let destination = PathBuf::from(&step.destination);
+        (destination == expected)
+            .then_some(())
+            .ok_or_else(|| ApplyError::DestinationOutOfScope {
+                component: step.component.clone(),
+                destination,
+                expected,
+            })
+    })
+}
+
+fn upgrade_legacy_journal(
+    layout: &InstallLayout,
+    journal: &mut Journal,
+    work: &Path,
+) -> Result<(), ApplyError> {
+    if journal.schema == crate::journal::JOURNAL_SCHEMA {
+        return Ok(());
+    }
+    if layout.is_bundle() {
+        return Err(ApplyError::UnsafeLegacyBundleJournal);
+    }
+    let install_root = canonical_install_root(layout)?;
+    if journal.schema == 2 {
+        journal.schema = crate::journal::JOURNAL_SCHEMA;
+        journal.install_root = install_root;
+        journal.save(work)?;
+        return Ok(());
+    }
+    if journal.steps.iter().any(|step| step.sha256.is_empty()) {
+        return Err(ApplyError::UnsafeLegacyJournalDigest);
+    }
+
+    let previous = InstalledState::load_snapshot(&layout.data_dir())?;
+    journal.schema = crate::journal::JOURNAL_SCHEMA;
+    journal.install_root = install_root;
+    journal.previous_installed_state = Some(
+        previous
+            .raw()
+            .map(|bytes| PreviousInstalledState::Present(bytes.to_vec()))
+            .unwrap_or(PreviousInstalledState::Absent),
+    );
+    let nonce = journal.nonce.clone();
+    for step in &mut journal.steps {
+        let destination = step.destination_in(layout.root())?;
+        let locations = locate(layout, &nonce, &step.component, &destination)?;
+        step.destination_existed =
+            Some(present(&locations.destination) || present(&locations.backup));
+        step.rollback_complete = false;
+    }
+    journal.save(work)?;
+    Ok(())
+}
+
 /// Where one step's three trees live.
 #[derive(Debug, Clone)]
 struct Locations {
@@ -878,22 +1165,79 @@ fn io<'a>(operation: &'static str, path: &'a Path) -> impl Fn(std::io::Error) ->
     }
 }
 
+fn canonical_install_root(layout: &InstallLayout) -> Result<PathBuf, ApplyError> {
+    std::fs::canonicalize(layout.root()).map_err(io("resolving install root", layout.root()))
+}
+
 fn rename(from: &Path, to: &Path) -> Result<(), ApplyError> {
     std::fs::rename(from, to).map_err(|source| ApplyError::Io {
         operation: "renaming",
         path: from.to_path_buf(),
         source,
-    })
+    })?;
+    sync_rename_parents_with(from, to, sync_apply_directory)
+}
+
+fn sync_rename_parents_with<F>(from: &Path, to: &Path, mut sync: F) -> Result<(), ApplyError>
+where
+    F: FnMut(&Path) -> Result<(), ApplyError>,
+{
+    if to.parent() != from.parent() {
+        if let Some(parent) = to.parent() {
+            sync(parent)?;
+        }
+    }
+    if let Some(parent) = from.parent() {
+        sync(parent)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_apply_directory(path: &Path) -> Result<(), ApplyError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(io("syncing", path))
+}
+
+#[cfg(not(unix))]
+fn sync_apply_directory(_path: &Path) -> Result<(), ApplyError> {
+    Ok(())
 }
 
 fn ensure_dir(path: &Path) -> Result<(), ApplyError> {
-    std::fs::create_dir_all(path).map_err(io("creating", path))
+    ensure_dir_with_sync(path, sync_apply_directory)
+}
+
+fn ensure_dir_with_sync<F>(path: &Path, mut sync_parent: F) -> Result<(), ApplyError>
+where
+    F: FnMut(&Path) -> Result<(), ApplyError>,
+{
+    let mut missing = Vec::new();
+    let mut current = path;
+    while !present(current) {
+        missing.push(current.to_path_buf());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+
+    std::fs::create_dir_all(path).map_err(io("creating", path))?;
+    // Each new directory entry becomes durable before anything is moved under
+    // it. Outermost first means a later parent sync is itself named durably.
+    for created in missing.iter().rev() {
+        if let Some(parent) = created.parent() {
+            sync_parent(parent)?;
+        }
+    }
+    Ok(())
 }
 
 /// Removes a file, directory or symlink, treating absence as success.
 fn remove_any(path: &Path) -> Result<(), ApplyError> {
     match std::fs::symlink_metadata(path) {
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => Err(io("inspecting", path)(source)),
         // A symlink is removed as a link, never followed: `symlink_metadata`
         // reports the link itself, so a link to a directory lands here.
@@ -901,15 +1245,28 @@ fn remove_any(path: &Path) -> Result<(), ApplyError> {
             std::fs::remove_dir_all(path).map_err(io("removing", path))
         }
         Ok(_) => std::fs::remove_file(path).map_err(io("removing", path)),
+    }?;
+    if let Some(parent) = path.parent() {
+        sync_apply_directory(parent)?;
     }
+    Ok(())
 }
 
 /// Top-level names of the old tree that the new archive does not contain.
 ///
-/// Users legitimately drop packs into `content/`, which `clonk-app` scans, and
-/// the launcher stages `System.c4g` beside the executables. Neither is in a
-/// release archive, and neither may be deleted by installing one.
-fn carry_over_names(locations: &Locations) -> Result<Vec<String>, ApplyError> {
+/// Users legitimately drop packs into `content/`, which `clonk-app` scans.
+/// `planet` and the binaries directory are complete release-owned snapshots:
+/// carrying anything there would produce a hybrid installation. The launcher
+/// recreates its `System.c4g` and `Graphics.c4g` copies from `planet` before it
+/// starts the runtime, so those copies do not need to survive an engine swap.
+fn carry_over_names(component: &str, locations: &Locations) -> Result<Vec<String>, ApplyError> {
+    if component != "content" {
+        return Ok(Vec::new());
+    }
+    // Installed state currently records only the archive digest, not the
+    // archive's owned names. Consequently an omitted release pack and an
+    // omitted user pack are indistinguishable here. Preserve the established
+    // user-pack contract; PORT_STATUS.md records the ownership-inventory gap.
     if !std::fs::symlink_metadata(&locations.destination).is_ok_and(|meta| meta.is_dir()) {
         return Ok(Vec::new());
     }
@@ -924,6 +1281,7 @@ fn carry_over_names(locations: &Locations) -> Result<Vec<String>, ApplyError> {
         // entry without being able to restore it is not.
         let name = name
             .to_str()
+            .filter(|name| safe_child_name(name))
             .ok_or_else(|| ApplyError::UnrepresentableEntry {
                 path: locations.destination.clone(),
             })?
@@ -991,7 +1349,7 @@ fn swap_components(
 
         // Recorded *before* the moves: a rollback has to know which entries
         // were the user's without being able to re-derive it afterwards.
-        let carried = carry_over_names(&locations)?;
+        let carried = carry_over_names(&step.component, &locations)?;
         journal.steps[index].carried.clone_from(&carried);
         journal.save(work)?;
         for name in &carried {
@@ -1097,18 +1455,26 @@ fn resign_bundle(layout: &InstallLayout, ops: &dyn PlatformOps) -> Result<(), Ap
     Ok(())
 }
 
-/// Everything that follows the last swap and can still fail.
-fn commit(
-    layout: &InstallLayout,
-    journal: &Journal,
-    ops: &dyn PlatformOps,
-) -> Result<(), ApplyError> {
+/// Fallible finalization that must happen before installed state is recorded.
+fn prepare_commit(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError> {
     if journal.steps.iter().any(|step| step.component == "planet") {
         purge_launcher_staged_groups(layout)?;
     }
     if layout.is_bundle() {
-        // Before signing, so the new seal covers the new icon.
+        // Before state is recorded and the bundle is signed, so the new seal
+        // covers both changes.
         install_bundle_icon(layout, journal)?;
+    }
+    Ok(())
+}
+
+/// Everything after installed state has become durable.
+fn finish_commit(
+    layout: &InstallLayout,
+    journal: &Journal,
+    ops: &dyn PlatformOps,
+) -> Result<(), ApplyError> {
+    if layout.is_bundle() {
         // Nothing transient is inside the bundle at this point: the staged
         // trees were consumed by their swaps, and the scratch and the backups
         // live in the work directory outside the `.app` precisely so the seal
@@ -1119,6 +1485,33 @@ fn commit(
     // way back — and never fatally, because at this point the update has
     // succeeded and a directory that will not delete is no reason to undo it.
     discard_transients_quietly(layout, journal);
+    Ok(())
+}
+
+fn restore_installed_state(
+    layout: &InstallLayout,
+    previous: &InstalledStateSnapshot,
+) -> Result<(), ApplyError> {
+    previous
+        .restore(&layout.data_dir())
+        .map_err(ApplyError::from)
+}
+
+fn restore_journalled_installed_state(
+    layout: &InstallLayout,
+    journal: &Journal,
+) -> Result<(), ApplyError> {
+    match journal.previous_installed_state.as_ref() {
+        Some(PreviousInstalledState::Absent) => {
+            InstalledState::restore_bytes(&layout.data_dir(), None)?
+        }
+        Some(PreviousInstalledState::Present(bytes)) => {
+            InstalledState::restore_bytes(&layout.data_dir(), Some(bytes))?
+        }
+        // Schema 1 never included InstalledState in the apply transaction, so
+        // there is nothing for its rollback to restore.
+        None => {}
+    }
     Ok(())
 }
 
@@ -1146,21 +1539,75 @@ fn discard_transients_quietly(layout: &InstallLayout, journal: &Journal) {
 ///
 /// Safe to run against any journal state because it is written in terms of what
 /// is on disk: a rename either happened or it did not, and each branch asks.
-fn roll_back(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError> {
-    for step in journal.steps.iter().rev() {
+fn roll_back(layout: &InstallLayout, journal: &mut Journal, work: &Path) -> Result<(), ApplyError> {
+    if journal.phase != TransactionPhase::RollingBack {
+        journal.phase = TransactionPhase::RollingBack;
+        journal.save(work)?;
+    }
+
+    for index in (0..journal.steps.len()).rev() {
+        let step = journal.steps[index].clone();
         let destination = step.destination_in(layout.root())?;
         let locations = locate(layout, &journal.nonce, &step.component, &destination)?;
+        let original_existed =
+            step.destination_existed
+                .ok_or_else(|| ApplyError::InconsistentRollbackState {
+                    component: step.component.clone(),
+                })?;
 
-        if step.state != StepState::Pending {
-            // Past `Pending` the destination, if it exists at all, holds the
-            // *new* tree: the backup rename already ran.
+        if step.rollback_complete {
+            if present(&locations.backup) {
+                if !original_existed {
+                    return Err(ApplyError::InconsistentRollbackState {
+                        component: step.component,
+                    });
+                }
+                // The durable bit got ahead of the filesystem (or was
+                // corrupted). Clear it durably, then run the ordinary
+                // idempotent restoration path instead of deleting the backup.
+                journal.steps[index].rollback_complete = false;
+                journal.save(work)?;
+            } else if present(&locations.destination) != original_existed {
+                return Err(ApplyError::InconsistentRollbackState {
+                    component: step.component,
+                });
+            } else {
+                continue;
+            }
+        }
+
+        if original_existed && !present(&locations.backup) && !present(&locations.destination) {
+            return Err(ApplyError::InconsistentRollbackState {
+                component: step.component,
+            });
+        }
+
+        if present(&locations.backup) {
+            // The backup's presence is the durable fact that the first rename
+            // ran. The journal may still say `Pending` if power failed between
+            // that rename and its following save.
             if present(&locations.destination) {
                 remove_any(&locations.staged)?;
                 rename(&locations.destination, &locations.staged)?;
             }
-            if present(&locations.backup) {
-                rename(&locations.backup, &locations.destination)?;
-            }
+            rename(&locations.backup, &locations.destination)?;
+        } else if !original_existed
+            && step.state != StepState::Pending
+            && present(&locations.destination)
+            && !present(&locations.staged)
+        {
+            // A destination that did not exist before the update has no
+            // backup. Moving the installed new tree aside restores absence;
+            // on a retry, the staged tree proves this move already happened.
+            rename(&locations.destination, &locations.staged)?;
+        } else if original_existed
+            && step.state != StepState::Pending
+            && present(&locations.destination)
+            && !present(&locations.staged)
+        {
+            return Err(ApplyError::InconsistentRollbackState {
+                component: step.component,
+            });
         }
 
         // The carried entries were moved out of the old tree; put them back.
@@ -1174,6 +1621,8 @@ fn roll_back(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError
                 rename(&from, &to)?;
             }
         }
+        journal.steps[index].rollback_complete = true;
+        journal.save(work)?;
     }
 
     // The icon is a file rather than one of the swapped trees, so it needs its
@@ -1184,10 +1633,9 @@ fn roll_back(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError
         let installed = layout.root().join(BUNDLE_ICON);
         remove_any(&installed)?;
         rename(&displaced, &installed)?;
+    } else if journal.previous_bundle_icon_present == Some(false) {
+        remove_any(&layout.root().join(BUNDLE_ICON))?;
     }
-    // Every destination is restored by this point, so a stubborn temporary is
-    // untidy rather than a failed rollback.
-    discard_transients_quietly(layout, journal);
     Ok(())
 }
 
@@ -1205,6 +1653,18 @@ pub fn apply_update(
     plan: &ApplyPlan,
     ops: &dyn PlatformOps,
 ) -> Result<ApplyOutcome, ApplyError> {
+    apply_update_with_stager(layout, plan, ops, stage_components)
+}
+
+fn apply_update_with_stager<F>(
+    layout: &InstallLayout,
+    plan: &ApplyPlan,
+    ops: &dyn PlatformOps,
+    stager: F,
+) -> Result<ApplyOutcome, ApplyError>
+where
+    F: FnOnce(&InstallLayout, &[Replacement], &str) -> Result<(), ApplyError>,
+{
     // Resolved first and in full: a manifest naming a component or a
     // destination this build will not install must be refused while the tree is
     // still untouched.
@@ -1223,34 +1683,107 @@ pub fn apply_update(
         return Ok(outcome);
     }
 
-    let nonce = new_nonce();
     let work = layout.work_dir();
     ensure_dir(&work)?;
+    let _lock = UpdateLock::acquire(&work)?;
+    if Journal::load(&work)?.is_some() {
+        return Err(ApplyError::UpdateInProgress {
+            path: Journal::path_in(&work),
+        });
+    }
 
+    // Read before touching the live tree. Besides preserving components this
+    // plan does not replace, this makes an unreadable state file a harmless
+    // refusal rather than a failure discovered halfway through the swap.
+    let previous_state = InstalledState::load_snapshot(&layout.data_dir())?;
+    let mut installed_state = previous_state.state.clone().unwrap_or_default();
+    steps.iter().for_each(|step| {
+        installed_state.record(&step.component, &plan.version, &step.sha256);
+    });
+
+    let nonce = new_nonce();
     let mut journal = Journal::new(
         &plan.version,
         &nonce,
+        canonical_install_root(layout)?,
         steps
             .iter()
-            .map(|step| JournalStep::new(&step.component, &journal_destination(&step.destination)))
+            .map(|step| {
+                let mut journal_step = JournalStep::new(
+                    &step.component,
+                    &step.sha256,
+                    &journal_destination(&step.destination),
+                );
+                journal_step.destination_existed =
+                    Some(present(&layout.root().join(&step.destination)));
+                journal_step
+            })
             .collect(),
     );
-
-    if let Err(error) = stage_components(layout, &steps, &nonce) {
-        // Nothing live has moved yet, so cleaning up is just deleting our own
-        // scratch — there is no install state to restore.
-        let _ = discard_transients(layout, &journal);
-        return Err(error);
-    }
+    journal.previous_installed_state = Some(
+        previous_state
+            .raw()
+            .map(|bytes| PreviousInstalledState::Present(bytes.to_vec()))
+            .unwrap_or(PreviousInstalledState::Absent),
+    );
+    journal.previous_bundle_icon_present = layout
+        .is_bundle()
+        .then(|| present(&layout.root().join(BUNDLE_ICON)));
 
     journal.save(&work)?;
-    let applied = swap_components(layout, &steps, &mut journal, &work)
-        .and_then(|()| commit(layout, &journal, ops));
+    if let Err(cause) = stager(layout, &steps, &nonce) {
+        // The pending journal was durable before staging began. Remove it only
+        // after every partial tree is gone; otherwise startup recovery retains
+        // the exact nonce it needs to finish that cleanup.
+        let cleaned = discard_transients(layout, &journal)
+            .and_then(|()| Journal::remove(&work).map_err(ApplyError::from));
+        return Err(match cleaned {
+            Ok(()) => cause,
+            Err(failure) => ApplyError::RollbackFailed {
+                cause: cause.to_string(),
+                failure: failure.to_string(),
+            },
+        });
+    }
+
+    let mut state_write_attempted = false;
+    let mut signing_attempted = false;
+    let applied = (|| {
+        swap_components(layout, &steps, &mut journal, &work)?;
+        prepare_commit(layout, &journal)?;
+        state_write_attempted = true;
+        installed_state.save_preserving_unknown(&layout.data_dir(), previous_state.raw())?;
+        signing_attempted = layout.is_bundle();
+        finish_commit(layout, &journal, ops)
+    })();
     if let Err(cause) = applied {
-        return Err(match roll_back(layout, &journal) {
+        return Err(match roll_back(layout, &mut journal, &work) {
             Ok(()) => {
-                let _ = Journal::remove(&work);
-                cause
+                let restored: Result<(), ApplyError> = (|| {
+                    if state_write_attempted {
+                        restore_installed_state(layout, &previous_state)?;
+                    }
+                    // Rollback parks the rejected new trees at `.new-*` paths
+                    // beside their restored destinations. They must be gone
+                    // before codesign seals the old bundle again.
+                    discard_transients(layout, &journal)?;
+                    // `codesign --force` mutates signatures in place. Restoring
+                    // the old trees and exact state bytes is not enough to make
+                    // their old seal valid again, especially for a content-only
+                    // update whose executable directory had no swap backup.
+                    if signing_attempted {
+                        resign_bundle(layout, ops)?;
+                    }
+                    Journal::remove(&work)?;
+                    Ok(())
+                })();
+                match restored {
+                    Ok(()) => cause,
+                    Err(failure) => ApplyError::RollbackFailed {
+                        cause: cause.to_string(),
+                        failure: failure.to_string(),
+                    },
+                }
             }
             Err(failure) => ApplyError::RollbackFailed {
                 cause: cause.to_string(),
@@ -1296,28 +1829,76 @@ pub fn resume_interrupted_update(install_root: &Path) -> Result<ResumeOutcome, A
 
 /// [`resume_interrupted_update`] against an explicit layout and host.
 ///
-/// The direction is decided by one rule: **roll forward once any step has
-/// completed, roll back otherwise**. A completed step means the install already
-/// holds new data that the rest of the release expects, so undoing it would
-/// produce a mixture no build was ever tested as.
+/// A schema-2 journal records the recovery direction before rollback touches a
+/// tree, so every retry continues that rollback. A legacy journal is first
+/// upgraded with the missing recovery state; one without component digests, or
+/// one for a macOS bundle, is rejected before recovery mutates the install.
 pub fn resume_interrupted_update_with(
     layout: &InstallLayout,
     ops: &dyn PlatformOps,
 ) -> Result<ResumeOutcome, ApplyError> {
     let work = layout.work_dir();
+    let journal_present = Journal::load(&work)?.is_some();
+    if let Err(error) = ensure_dir(&work) {
+        if !journal_present
+            && matches!(
+                &error,
+                ApplyError::Io { source, .. }
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::ReadOnlyFilesystem
+                    )
+            )
+        {
+            return Ok(ResumeOutcome::NothingToDo);
+        }
+        return Err(error);
+    }
+    // Opening/creating the lock is the atomic operation: an existence check
+    // followed by an early return has a race with an applier creating it. A
+    // pristine read-only install can still take the ordinary no-journal path.
+    let _lock = match UpdateLock::acquire(&work) {
+        Ok(lock) => lock,
+        Err(ApplyError::Io { source, .. })
+            if !journal_present
+                && matches!(
+                    source.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+                ) =>
+        {
+            return Ok(ResumeOutcome::NothingToDo);
+        }
+        Err(error) => return Err(error),
+    };
     let Some(mut journal) = Journal::load(&work)? else {
         return Ok(ResumeOutcome::NothingToDo);
     };
+    validate_journal_layout(layout, &journal)?;
+    upgrade_legacy_journal(layout, &mut journal, &work)?;
+    validate_journal_layout(layout, &journal)?;
     let version = journal.version.clone();
 
-    if !journal.any_step_completed() {
-        roll_back(layout, &journal)?;
+    if journal.phase == TransactionPhase::RollingBack || !journal.any_step_completed() {
+        roll_back(layout, &mut journal, &work)?;
+        restore_journalled_installed_state(layout, &journal)?;
+        discard_transients(layout, &journal)?;
+        if layout.is_bundle() {
+            resign_bundle(layout, ops)?;
+        }
         Journal::remove(&work)?;
         return Ok(ResumeOutcome::RolledBack { version });
     }
 
+    let previous_state = InstalledState::load_snapshot(&layout.data_dir())?;
+    let mut installed_state = previous_state.state.clone().unwrap_or_default();
+    journal.steps.iter().for_each(|step| {
+        installed_state.record(&step.component, &journal.version, &step.sha256);
+    });
     roll_forward(layout, &mut journal, &work)?;
-    commit(layout, &journal, ops)?;
+    prepare_commit(layout, &journal)?;
+    installed_state.save_preserving_unknown(&layout.data_dir(), previous_state.raw())?;
+    finish_commit(layout, &journal, ops)?;
     Journal::remove(&work)?;
     Ok(ResumeOutcome::RolledForward { version })
 }
@@ -1341,14 +1922,11 @@ fn roll_forward(
             StepState::Completed => continue,
             StepState::BackupMoved => {
                 if !present(&locations.destination) {
-                    // Exactly one of the two exists — that is what makes the
-                    // window between the renames survivable.
-                    let source = [&locations.staged, &locations.backup]
-                        .into_iter()
-                        .find(|candidate| present(candidate))
-                        .ok_or_else(lost)?
-                        .clone();
-                    rename(&source, &locations.destination)?;
+                    // Only the staged tree contains the new component. The
+                    // backup is the rollback source and must never be accepted
+                    // as a successful forward install.
+                    present(&locations.staged).then_some(()).ok_or_else(lost)?;
+                    rename(&locations.staged, &locations.destination)?;
                 }
             }
             StepState::Pending => {
@@ -1411,6 +1989,9 @@ mod tests {
                     .strip_prefix(root)
                     .map(|relative| relative.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
+                if relative == UPDATE_LOCK_FILE_NAME {
+                    continue;
+                }
                 if path.is_dir() {
                     into.push((format!("{relative}/"), String::new()));
                     walk(root, &path, into);
@@ -1466,6 +2047,10 @@ mod tests {
     impl Install {
         fn root(&self) -> &Path {
             self.layout.root()
+        }
+
+        fn canonical_root(&self) -> PathBuf {
+            std::fs::canonicalize(self.root()).expect("canonical install root")
         }
 
         fn content_archive(&self) -> PathBuf {
@@ -1591,6 +2176,60 @@ mod tests {
     }
 
     #[test]
+    fn a_successful_apply_records_the_component_release_and_digest() {
+        let install = install();
+        let archive = install.content_archive();
+        let component = component("content", &archive, "content");
+        let digest = component.sha256.clone();
+        let plan = plan("0.4.0", vec![component]);
+
+        apply_update(&install.layout, &plan, &FakePlatform::new()).expect("apply the update");
+
+        let state = InstalledState::load(&install.layout.data_dir())
+            .expect("load installed state")
+            .expect("successful apply records installed state");
+        assert_eq!(
+            state.component("content"),
+            Some(&crate::state::InstalledComponent {
+                version: "0.4.0".to_string(),
+                sha256: digest,
+            })
+        );
+    }
+
+    #[test]
+    fn a_successful_apply_preserves_unknown_installed_state_fields() {
+        let install = install();
+        let previous = format!(
+            "{{\n  \"future_field\": true,\n  \"components\": {{\n    \"content\": {{ \"sha256\": \"{}\", \"version\": \"0.3.0\", \"future_component_field\": 7 }}\n  }},\n  \"schema\": 1\n}}\n",
+            "cc".repeat(32)
+        );
+        std::fs::write(
+            InstalledState::path_in(&install.layout.data_dir()),
+            previous,
+        )
+        .expect("write previous state");
+        let plan = plan(
+            "0.4.0",
+            vec![component("content", &install.content_archive(), "content")],
+        );
+
+        apply_update(&install.layout, &plan, &FakePlatform::new()).expect("apply");
+
+        let written: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(InstalledState::path_in(&install.layout.data_dir()))
+                .expect("read state"),
+        )
+        .expect("parse state");
+        assert_eq!(written["future_field"], true);
+        assert_eq!(
+            written["components"]["content"]["future_component_field"],
+            7
+        );
+        assert_eq!(written["components"]["content"]["version"], "0.4.0");
+    }
+
+    #[test]
     fn apply_carries_over_a_user_added_pack_the_new_archive_does_not_contain() {
         // `clonk-app` scans `content/` for packs, so users drop their own in
         // there. A release archive cannot contain them, and installing one must
@@ -1636,6 +2275,25 @@ mod tests {
     }
 
     #[test]
+    fn applying_planet_drops_a_group_the_new_snapshot_omits() {
+        let install = install();
+        let planet = install.layout.data_dir().join("planet");
+        write_file(&planet.join("Obsolete.c4g/DefCore.txt"), "old group");
+        let plan = plan(
+            "0.4.0",
+            vec![component("planet", &install.planet_archive(), "planet")],
+        );
+
+        apply_update(&install.layout, &plan, &FakePlatform::new()).expect("apply the update");
+
+        assert!(
+            !planet.join("Obsolete.c4g").exists(),
+            "planet is a complete release snapshot, not an overlay"
+        );
+        assert_eq!(read_file(&planet.join("System.c4g/Rank.txt")), "new rank");
+    }
+
+    #[test]
     fn the_engine_component_replaces_only_the_binaries_directory() {
         // The engine archive installs at the root, but only `bin` is swapped:
         // renaming the root would take the whole install with it.
@@ -1651,11 +2309,9 @@ mod tests {
         assert_eq!(read_file(&binaries.join("clonk-app")), "new app");
         assert_eq!(read_file(&binaries.join("clonk-game")), "new launcher");
         assert_eq!(read_file(&binaries.join("c4group")), "new c4group");
-        // The launcher's staged group in `bin` is not in the archive, so it is
-        // carried across rather than deleted.
-        assert_eq!(
-            read_file(&binaries.join("System.c4g/Rank.txt")),
-            "staged rank"
+        assert!(
+            !binaries.join("System.c4g").exists(),
+            "the launcher recreates its staged group from planet"
         );
         // Everything outside `bin` is untouched, including the top-level
         // documents the engine component also ships.
@@ -1666,6 +2322,31 @@ mod tests {
         );
         assert_eq!(read_file(&data.join("Screenshots/shot.png")), "screenshot");
         assert!(!data.join("COPYING").exists());
+    }
+
+    #[test]
+    fn applying_engine_drops_binaries_and_staged_groups_the_snapshot_omits() {
+        let install = install();
+        let binaries = install.layout.binaries_dir();
+        write_file(&binaries.join("obsolete-helper"), "old helper");
+        write_file(&binaries.join("Graphics.c4g/Font.png"), "staged font");
+        let plan = plan(
+            "0.4.0",
+            vec![component("engine", &install.engine_archive(), "")],
+        );
+
+        apply_update(&install.layout, &plan, &FakePlatform::new()).expect("apply the update");
+
+        assert!(
+            !binaries.join("obsolete-helper").exists(),
+            "the binaries directory is a complete release snapshot"
+        );
+        for staged_group in LAUNCHER_STAGED_GROUPS {
+            assert!(
+                !binaries.join(staged_group).exists(),
+                "the installed launcher regenerates {staged_group} from planet"
+            );
+        }
     }
 
     #[test]
@@ -1719,6 +2400,74 @@ mod tests {
         assert_eq!(
             Journal::load(&install.layout.work_dir()).expect("load"),
             None
+        );
+    }
+
+    #[test]
+    fn a_second_applier_is_refused_while_the_install_is_locked() {
+        let install = install();
+        let _first = UpdateLock::acquire(&install.layout.work_dir()).expect("take first lock");
+        let before = snapshot(install.root());
+        let plan = plan(
+            "0.4.0",
+            vec![component("content", &install.content_archive(), "content")],
+        );
+
+        let error = apply_update(&install.layout, &plan, &FakePlatform::new())
+            .expect_err("a concurrent applier must be refused");
+
+        assert!(
+            matches!(error, ApplyError::UpdateInProgress { .. }),
+            "{error}"
+        );
+        assert_eq!(snapshot(install.root()), before);
+    }
+
+    #[test]
+    fn a_live_install_lease_blocks_component_mutation() {
+        let install = install();
+        let lease = acquire_install_use(&install.layout).expect("hold live install lease");
+        let before = snapshot(install.root());
+        let plan = plan(
+            "0.4.0",
+            vec![component("content", &install.content_archive(), "content")],
+        );
+
+        let error = apply_update(&install.layout, &plan, &FakePlatform::new())
+            .expect_err("a running instance must exclude the updater");
+
+        assert!(matches!(error, ApplyError::UpdateInProgress { .. }));
+        assert_eq!(snapshot(install.root()), before);
+        drop(lease);
+        apply_update(&install.layout, &plan, &FakePlatform::new())
+            .expect("the update proceeds after the live instance exits");
+    }
+
+    #[test]
+    fn a_new_apply_never_overwrites_an_interrupted_update_journal() {
+        let install = install();
+        let existing = Journal::new("0.3.0", "interrupted", install.canonical_root(), Vec::new());
+        existing
+            .save(&install.layout.work_dir())
+            .expect("save interrupted journal");
+        drop(UpdateLock::acquire(&install.layout.work_dir()).expect("seed lock file"));
+        let before = snapshot(install.root());
+        let plan = plan(
+            "0.4.0",
+            vec![component("content", &install.content_archive(), "content")],
+        );
+
+        let error = apply_update(&install.layout, &plan, &FakePlatform::new())
+            .expect_err("the interrupted update must be recovered first");
+
+        assert!(
+            matches!(error, ApplyError::UpdateInProgress { .. }),
+            "{error}"
+        );
+        assert_eq!(snapshot(install.root()), before);
+        assert_eq!(
+            Journal::load(&install.layout.work_dir()).expect("load journal"),
+            Some(existing)
         );
     }
 
@@ -1811,6 +2560,49 @@ mod tests {
     }
 
     #[test]
+    fn the_pending_journal_is_durable_before_staging_and_cleared_after_failure() {
+        let install = install_with(true);
+        let plan = plan(
+            "0.4.0",
+            vec![component(
+                "content",
+                &install.content_archive(),
+                "Contents/Resources/content",
+            )],
+        );
+        let staged_path = std::cell::RefCell::new(None);
+
+        let error = apply_update_with_stager(
+            &install.layout,
+            &plan,
+            &FakePlatform::new(),
+            |layout, steps, nonce| {
+                assert!(
+                    Journal::load(&layout.work_dir())
+                        .expect("load journal while staging")
+                        .is_some(),
+                    "a crash while staging needs a durable cleanup record"
+                );
+                let destination = layout.root().join(&steps[0].destination);
+                let locations = locate(layout, nonce, &steps[0].component, &destination)?;
+                write_file(&locations.staged.join("partial"), "partial extraction");
+                staged_path.replace(Some(locations.staged));
+                Err(ApplyError::StagingLost {
+                    component: steps[0].component.clone(),
+                })
+            },
+        )
+        .expect_err("the injected staging failure must propagate");
+
+        assert!(matches!(error, ApplyError::StagingLost { .. }), "{error}");
+        assert_eq!(
+            Journal::load(&install.layout.work_dir()).expect("load after cleanup"),
+            None
+        );
+        assert!(!staged_path.into_inner().expect("staged path").exists());
+    }
+
+    #[test]
     fn staging_is_a_sibling_of_the_destination_not_a_temporary_directory() {
         // `rename` cannot cross filesystems, so staging under `cache_dir` or
         // the system temp directory would fail with EXDEV on any install that
@@ -1825,6 +2617,47 @@ mod tests {
     }
 
     #[test]
+    fn newly_created_update_directories_sync_each_parent_outermost_first() {
+        let directory = TempDir::new().expect("directory");
+        let target = directory.path().join("quarantine/engine");
+        let mut synced = Vec::new();
+
+        ensure_dir_with_sync(&target, |parent| {
+            synced.push(parent.to_path_buf());
+            Ok(())
+        })
+        .expect("create durable directories");
+
+        assert_eq!(
+            synced,
+            [
+                directory.path().to_path_buf(),
+                directory.path().join("quarantine")
+            ]
+        );
+    }
+
+    #[test]
+    fn cross_directory_rename_syncs_destination_before_source() {
+        let mut synced = Vec::new();
+
+        sync_rename_parents_with(
+            Path::new("/installed/bin"),
+            Path::new("/recovery/bin"),
+            |parent| {
+                synced.push(parent.to_path_buf());
+                Ok(())
+            },
+        )
+        .expect("sync renamed entry");
+
+        assert_eq!(
+            synced,
+            [PathBuf::from("/recovery"), PathBuf::from("/installed")]
+        );
+    }
+
+    #[test]
     fn a_bundle_keeps_its_journal_and_backups_outside_the_app() {
         // Measured, not assumed: `codesign --verify --strict` reports
         // "unsealed contents present in the bundle root" for a file beside
@@ -1832,7 +2665,10 @@ mod tests {
         // deleted after signing. Nothing transient can live inside a `.app`
         // across the re-sign that has to follow the last swap.
         let layout = InstallLayout::macos_bundle(Path::new("/Applications/Clonk Rust.app"));
-        assert_eq!(layout.work_dir(), Path::new("/Applications"));
+        assert_eq!(
+            layout.work_dir(),
+            Path::new("/Applications/.clonk-update/Clonk Rust.app")
+        );
         assert_eq!(
             layout.data_dir(),
             Path::new("/Applications/Clonk Rust.app/Contents/Resources")
@@ -1856,8 +2692,22 @@ mod tests {
         );
         assert_eq!(
             locations.backup,
-            Path::new("/Applications/clonk-update-backup-n0nce/content")
+            Path::new(
+                "/Applications/.clonk-update/Clonk Rust.app/clonk-update-backup-n0nce/content"
+            )
         );
+    }
+
+    #[test]
+    fn sibling_bundles_have_disjoint_transaction_namespaces() {
+        let first = InstallLayout::macos_bundle(Path::new("/Applications/First.app"));
+        let second = InstallLayout::macos_bundle(Path::new("/Applications/Second.app"));
+
+        assert_ne!(first.work_dir(), second.work_dir());
+        assert!(first.work_dir().starts_with(Path::new("/Applications")));
+        assert!(second.work_dir().starts_with(Path::new("/Applications")));
+        assert!(!first.work_dir().starts_with(first.root()));
+        assert!(!second.work_dir().starts_with(second.root()));
     }
 
     #[test]
@@ -1951,6 +2801,83 @@ mod tests {
             "old app",
             "{error}"
         );
+        assert_eq!(
+            InstalledState::load(&install.layout.data_dir()).expect("load installed state"),
+            None,
+            "a failed first update must remove the state it wrote before signing"
+        );
+    }
+
+    #[test]
+    fn a_bundle_rollback_restores_the_absence_of_an_icon() {
+        let install = install_with(true);
+        std::fs::remove_file(install.root().join(BUNDLE_ICON)).expect("remove old icon");
+        let plan = plan(
+            "0.4.0",
+            vec![component("engine", &install.engine_archive(), "")],
+        );
+
+        apply_update(
+            &install.layout,
+            &plan,
+            &FakePlatform::new().failing_codesign_once("--verify"),
+        )
+        .expect_err("the first verification must fail");
+
+        assert!(!install.root().join(BUNDLE_ICON).exists());
+    }
+
+    #[test]
+    fn a_rolled_back_bundle_apply_restores_the_previous_installed_state() {
+        let install = install_with(true);
+        let mut previous = InstalledState::default();
+        previous.record("content", "0.3.0", &"cc".repeat(32));
+        previous
+            .save(&install.layout.data_dir())
+            .expect("save previous state");
+        let plan = plan(
+            "0.4.0",
+            vec![component("engine", &install.engine_archive(), "")],
+        );
+
+        apply_update(
+            &install.layout,
+            &plan,
+            &FakePlatform::new().failing_codesign("--verify"),
+        )
+        .expect_err("a bundle whose signature does not verify must not be kept");
+
+        assert_eq!(
+            InstalledState::load(&install.layout.data_dir()).expect("load installed state"),
+            Some(previous)
+        );
+    }
+
+    #[test]
+    fn a_bundle_rollback_restores_the_previous_state_bytes_exactly() {
+        let install = install_with(true);
+        let previous = format!(
+            "{{\n  \"future_field\": true,\n  \"components\": {{\n    \"content\": {{ \"sha256\": \"{}\", \"version\": \"0.3.0\" }}\n  }},\n  \"schema\": 1\n}}\n",
+            "cc".repeat(32)
+        );
+        let path = InstalledState::path_in(&install.layout.data_dir());
+        std::fs::write(&path, previous.as_bytes()).expect("write previous state");
+        let plan = plan(
+            "0.4.0",
+            vec![component("engine", &install.engine_archive(), "")],
+        );
+
+        apply_update(
+            &install.layout,
+            &plan,
+            &FakePlatform::new().failing_codesign("--verify"),
+        )
+        .expect_err("a bundle whose signature does not verify must not be kept");
+
+        assert_eq!(
+            std::fs::read(&path).expect("read restored state"),
+            previous.as_bytes()
+        );
     }
 
     #[test]
@@ -2014,6 +2941,7 @@ mod tests {
     struct Watcher {
         root: PathBuf,
         seen: std::sync::Mutex<Vec<String>>,
+        states_seen: std::sync::Mutex<Vec<Option<InstalledState>>>,
     }
 
     impl PlatformOps for Watcher {
@@ -2038,11 +2966,53 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .extend(transient);
+            self.states_seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(
+                    InstalledState::load(&self.root.join("Contents/Resources"))
+                        .expect("load state while signing"),
+                );
             Ok(())
         }
 
         fn set_installed_version(&self, _version: &str) -> Result<(), PlatformError> {
             Ok(())
+        }
+    }
+
+    struct RollbackWatcher {
+        watcher: Watcher,
+        fail_verify_once: std::sync::atomic::AtomicBool,
+    }
+
+    impl PlatformOps for RollbackWatcher {
+        fn available_space(&self, path: &Path) -> Result<u64, PlatformError> {
+            self.watcher.available_space(path)
+        }
+
+        fn wait_for_process(&self, pid: u32, timeout: Duration) -> Result<(), PlatformError> {
+            self.watcher.wait_for_process(pid, timeout)
+        }
+
+        fn codesign(&self, arguments: &[&str], target: &Path) -> Result<(), PlatformError> {
+            self.watcher.codesign(arguments, target)?;
+            let fail = arguments.contains(&"--verify")
+                && self
+                    .fail_verify_once
+                    .swap(false, std::sync::atomic::Ordering::Relaxed);
+            if fail {
+                return Err(PlatformError::Codesign {
+                    arguments: arguments.join(" "),
+                    target: target.to_path_buf(),
+                    status: "exit status: 1".to_string(),
+                });
+            }
+            Ok(())
+        }
+
+        fn set_installed_version(&self, version: &str) -> Result<(), PlatformError> {
+            self.watcher.set_installed_version(version)
         }
     }
 
@@ -2058,6 +3028,7 @@ mod tests {
         let watcher = Watcher {
             root: install.root().to_path_buf(),
             seen: std::sync::Mutex::new(Vec::new()),
+            states_seen: std::sync::Mutex::new(Vec::new()),
         };
         let plan = plan(
             "0.4.0",
@@ -2079,6 +3050,52 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         assert!(seen.is_empty(), "inside the bundle while signing: {seen:?}");
+        let states_seen = watcher
+            .states_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            !states_seen.is_empty()
+                && states_seen.iter().all(|state| {
+                    state.as_ref().is_some_and(|state| {
+                        state.component("content").is_some() && state.component("engine").is_some()
+                    })
+                }),
+            "installed state was not complete before signing: {states_seen:?}"
+        );
+    }
+
+    #[test]
+    fn bundle_rollback_discards_transients_before_resigning() {
+        let install = install_with(true);
+        let watcher = RollbackWatcher {
+            watcher: Watcher {
+                root: install.root().to_path_buf(),
+                seen: std::sync::Mutex::new(Vec::new()),
+                states_seen: std::sync::Mutex::new(Vec::new()),
+            },
+            fail_verify_once: std::sync::atomic::AtomicBool::new(true),
+        };
+        let plan = plan(
+            "0.4.0",
+            vec![component(
+                "content",
+                &install.content_archive(),
+                "Contents/Resources/content",
+            )],
+        );
+
+        apply_update(&install.layout, &plan, &watcher)
+            .expect_err("the first signature verification triggers rollback");
+
+        let seen = watcher
+            .watcher
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(seen.is_empty(), "inside the bundle while signing: {seen:?}");
     }
 
     #[test]
@@ -2086,7 +3103,6 @@ mod tests {
         // A bundle that will not verify is reported by macOS as "damaged and
         // can't be opened" — strictly worse than a stale but working copy.
         let install = install_with(true);
-        let before = snapshot(install.root());
         let plan = plan(
             "0.4.0",
             vec![
@@ -2110,24 +3126,63 @@ mod tests {
             &FakePlatform::new().failing_codesign("--verify"),
         )
         .expect_err("a bundle that does not verify must not be installed");
+        assert!(
+            matches!(error, ApplyError::RollbackFailed { .. }),
+            "{error}"
+        );
+
+        assert_eq!(
+            read_file(
+                &install
+                    .layout
+                    .data_dir()
+                    .join("content/Worlds.c4f/Info.txt")
+            ),
+            "old world"
+        );
+        assert_eq!(
+            read_file(&install.layout.data_dir().join("planet/System.c4g/Rank.txt")),
+            "old rank"
+        );
+        assert_eq!(
+            read_file(&install.layout.binaries_dir().join("clonk-app")),
+            "old app"
+        );
+        let journal = Journal::load(&install.layout.work_dir())
+            .expect("load")
+            .expect("a failed restored signature must remain retryable");
+        assert_eq!(journal.phase, TransactionPhase::RollingBack);
+        assert!(journal.steps.iter().all(|step| step.rollback_complete));
+    }
+
+    #[test]
+    fn a_bundle_rollback_resigns_and_verifies_the_restored_install() {
+        let install = install_with(true);
+        let platform = FakePlatform::new().failing_codesign_once("--verify");
+        let plan = plan(
+            "0.4.0",
+            vec![component("engine", &install.engine_archive(), "")],
+        );
+
+        let error = apply_update(&install.layout, &plan, &platform)
+            .expect_err("the first bundle verification must fail");
         assert!(matches!(error, ApplyError::Platform(_)), "{error}");
 
-        // The launcher-staged groups are purged before signing and are
-        // recreated on the next launch, so they are the one expected
-        // difference.
-        let expected: Vec<_> = before
+        let codesigns: Vec<_> = platform
+            .calls()
             .into_iter()
-            .filter(|(path, _)| {
-                !path.contains("Resources/System.c4g")
-                    && !path.contains("Resources/Graphics.c4g")
-                    && !path.contains("MacOS/System.c4g")
-            })
+            .filter(|call| matches!(call, PlatformCall::Codesign { .. }))
             .collect();
-        assert_eq!(snapshot(install.root()), expected);
         assert_eq!(
-            Journal::load(&install.layout.work_dir()).expect("load"),
-            None
+            codesigns.len(),
+            8,
+            "the restored bundle needs the complete sign-and-verify sequence"
         );
+        assert!(matches!(
+            codesigns.last(),
+            Some(PlatformCall::Codesign { arguments, .. })
+                if arguments == &["--verify", "--deep", "--strict"]
+        ));
     }
 
     /// Hand-builds the on-disk state a crash would leave, because a test cannot
@@ -2138,17 +3193,25 @@ mod tests {
         let journal = Journal::new(
             "0.4.0",
             nonce,
+            install.canonical_root(),
             steps
                 .iter()
                 .zip(states)
                 .map(|(component, state)| JournalStep {
                     component: (*component).to_string(),
+                    sha256: match *component {
+                        "content" => "aa".repeat(32),
+                        "planet" => "bb".repeat(32),
+                        _ => String::new(),
+                    },
                     destination: (*component).to_string(),
                     carried: match *component {
                         "content" => vec!["MyPack.c4f".to_string()],
                         _ => Vec::new(),
                     },
                     state,
+                    destination_existed: Some(true),
+                    rollback_complete: false,
                 })
                 .collect(),
         );
@@ -2205,6 +3268,105 @@ mod tests {
     }
 
     #[test]
+    fn rollback_restores_a_backup_moved_before_its_state_was_journalled() {
+        let install = install();
+        drop(UpdateLock::acquire(&install.layout.work_dir()).expect("seed lock file"));
+        let before = snapshot(install.root());
+        let nonce = "before-backup-save";
+        interrupt(&install, nonce, [StepState::Pending, StepState::Pending]);
+        let destination = install.layout.data_dir().join("content");
+        let backup = destination.with_file_name(format!("content.old-{nonce}"));
+        std::fs::rename(&destination, &backup).expect("crash after moving backup");
+
+        let outcome =
+            resume_interrupted_update_with(&install.layout, &FakePlatform::new()).expect("resume");
+
+        assert_eq!(
+            outcome,
+            ResumeOutcome::RolledBack {
+                version: "0.4.0".to_string()
+            }
+        );
+        assert_eq!(snapshot(install.root()), before);
+    }
+
+    #[test]
+    fn rollback_can_resume_after_backups_have_already_been_restored() {
+        let install = install();
+        let before = snapshot(install.root());
+        let mut journal = interrupt(
+            &install,
+            "rollback-retry",
+            [StepState::Completed, StepState::BackupMoved],
+        );
+
+        roll_back(&install.layout, &mut journal, &install.layout.work_dir())
+            .expect("first rollback attempt");
+        roll_back(&install.layout, &mut journal, &install.layout.work_dir())
+            .expect("retry rollback after a crash");
+        discard_transients(&install.layout, &journal).expect("discard rollback transients");
+        Journal::remove(&install.layout.work_dir()).expect("remove journal");
+
+        assert_eq!(snapshot(install.root()), before);
+    }
+
+    #[test]
+    fn rollback_complete_never_discards_a_backup_that_still_needs_restoring() {
+        let install = install();
+        let mut journal = interrupt(
+            &install,
+            "false-rollback-complete",
+            [StepState::BackupMoved, StepState::Pending],
+        );
+        journal.phase = TransactionPhase::RollingBack;
+        journal.steps[0].rollback_complete = true;
+        journal
+            .save(&install.layout.work_dir())
+            .expect("save inconsistent crash state");
+
+        resume_interrupted_update_with(&install.layout, &FakePlatform::new()).expect("reconcile");
+
+        assert_eq!(
+            read_file(
+                &install
+                    .layout
+                    .data_dir()
+                    .join("content/Worlds.c4f/Info.txt")
+            ),
+            "old world"
+        );
+    }
+
+    #[test]
+    fn rollback_complete_rejects_a_missing_restored_destination() {
+        let install = install();
+        std::fs::remove_dir_all(install.layout.data_dir().join("content"))
+            .expect("remove allegedly restored destination");
+        let mut step = JournalStep::new("content", &"aa".repeat(32), "content");
+        step.state = StepState::Completed;
+        step.rollback_complete = true;
+        let mut journal = Journal::new(
+            "0.4.0",
+            "missing-restored",
+            install.canonical_root(),
+            vec![step],
+        );
+        journal.phase = TransactionPhase::RollingBack;
+        journal
+            .save(&install.layout.work_dir())
+            .expect("save inconsistent journal");
+
+        let error = resume_interrupted_update_with(&install.layout, &FakePlatform::new())
+            .expect_err("missing old bytes must fail closed");
+
+        assert!(
+            matches!(error, ApplyError::InconsistentRollbackState { ref component } if component == "content"),
+            "{error}"
+        );
+        assert!(Journal::path_in(&install.layout.work_dir()).exists());
+    }
+
+    #[test]
     fn an_update_interrupted_after_a_step_completed_rolls_forward() {
         // `content` is already the new release; undoing it would leave data one
         // release behind the rest, which is a combination no build was tested
@@ -2243,6 +3405,35 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_apply_records_each_component_release_and_digest() {
+        let install = install();
+        interrupt(
+            &install,
+            "crash-state",
+            [StepState::Completed, StepState::BackupMoved],
+        );
+
+        resume_interrupted_update_with(&install.layout, &FakePlatform::new()).expect("resume");
+
+        let state = InstalledState::load(&install.layout.data_dir())
+            .expect("load installed state")
+            .expect("resumed apply records installed state");
+        assert_eq!(
+            state.component("content").expect("content").version,
+            "0.4.0"
+        );
+        assert_eq!(
+            state.component("content").expect("content").sha256,
+            "aa".repeat(32)
+        );
+        assert_eq!(state.component("planet").expect("planet").version, "0.4.0");
+        assert_eq!(
+            state.component("planet").expect("planet").sha256,
+            "bb".repeat(32)
+        );
+    }
+
+    #[test]
     fn a_pending_step_is_completed_from_its_staged_tree_when_rolling_forward() {
         let install = install();
         interrupt(
@@ -2255,6 +3446,35 @@ mod tests {
         assert_eq!(
             read_file(&install.layout.data_dir().join("planet/Fresh.txt")),
             "new planet"
+        );
+    }
+
+    #[test]
+    fn roll_forward_never_mistakes_the_old_backup_for_new_staged_data() {
+        let install = install();
+        let nonce = "missing-new-tree";
+        interrupt(
+            &install,
+            nonce,
+            [StepState::Completed, StepState::BackupMoved],
+        );
+        let destination = install.layout.data_dir().join("planet");
+        let staged = destination.with_file_name(format!("planet.new-{nonce}"));
+        std::fs::remove_dir_all(&staged).expect("lose staged tree");
+
+        let error = resume_interrupted_update_with(&install.layout, &FakePlatform::new())
+            .expect_err("old bytes cannot satisfy a new component step");
+
+        assert!(
+            matches!(error, ApplyError::StagingLost { ref component } if component == "planet"),
+            "{error}"
+        );
+        assert!(!destination.exists());
+        assert!(
+            destination
+                .with_file_name(format!("planet.old-{nonce}"))
+                .exists(),
+            "the old tree remains available for recovery"
         );
     }
 
@@ -2302,6 +3522,81 @@ mod tests {
     }
 
     #[test]
+    fn recovery_is_refused_while_an_applier_holds_the_install_lock() {
+        let install = install();
+        let journal = Journal::new(
+            "0.4.0",
+            "locked-recovery",
+            install.canonical_root(),
+            Vec::new(),
+        );
+        journal
+            .save(&install.layout.work_dir())
+            .expect("save journal");
+        let _applier = UpdateLock::acquire(&install.layout.work_dir()).expect("hold lock");
+
+        let error = resume_interrupted_update_with(&install.layout, &FakePlatform::new())
+            .expect_err("recovery must not race an applier");
+
+        assert!(
+            matches!(error, ApplyError::UpdateInProgress { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            Journal::load(&install.layout.work_dir()).expect("load journal"),
+            Some(journal)
+        );
+    }
+
+    #[test]
+    fn recovery_detects_an_applier_before_its_first_journal_save() {
+        let install = install();
+        let _applier = UpdateLock::acquire(&install.layout.work_dir()).expect("hold lock");
+
+        let error = resume_interrupted_update_with(&install.layout, &FakePlatform::new())
+            .expect_err("startup must not enter an install while staging begins");
+
+        assert!(
+            matches!(error, ApplyError::UpdateInProgress { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rollback_recovery_restores_the_exact_previous_installed_state() {
+        let install = install();
+        let previous = format!(
+            "{{\n  \"future_field\": true,\n  \"components\": {{\n    \"content\": {{ \"sha256\": \"{}\", \"version\": \"0.3.0\" }}\n  }},\n  \"schema\": 1\n}}\n",
+            "cc".repeat(32)
+        )
+        .into_bytes();
+        let mut current = InstalledState::default();
+        current.record("content", "0.4.0", &"dd".repeat(32));
+        current
+            .save(&install.layout.data_dir())
+            .expect("save failed update state");
+        let mut journal = Journal::new(
+            "0.4.0",
+            "state-rollback",
+            install.canonical_root(),
+            Vec::new(),
+        );
+        journal.phase = TransactionPhase::RollingBack;
+        journal.previous_installed_state = Some(PreviousInstalledState::Present(previous.clone()));
+        journal
+            .save(&install.layout.work_dir())
+            .expect("save rollback journal");
+
+        resume_interrupted_update_with(&install.layout, &FakePlatform::new()).expect("resume");
+
+        assert_eq!(
+            std::fs::read(InstalledState::path_in(&install.layout.data_dir()))
+                .expect("read restored state"),
+            previous
+        );
+    }
+
+    #[test]
     fn a_resume_refuses_a_journal_it_cannot_trust() {
         // The journal drives renames and deletions, so a corrupt one is an
         // error rather than an invitation to guess.
@@ -2315,6 +3610,172 @@ mod tests {
             resume_interrupted_update_with(&install.layout, &FakePlatform::new()),
             Err(ApplyError::Journal(_))
         ));
+    }
+
+    #[test]
+    fn recovery_refuses_a_component_mapped_to_an_unrelated_install_directory() {
+        let install = install();
+        let mut step = JournalStep::new("content", &"aa".repeat(32), "Screenshots");
+        step.state = StepState::Completed;
+        Journal::new(
+            "0.4.0",
+            "wrong-destination",
+            install.canonical_root(),
+            vec![step],
+        )
+        .save(&install.layout.work_dir())
+        .expect("save journal");
+        let before = snapshot(install.root());
+
+        let error = resume_interrupted_update_with(&install.layout, &FakePlatform::new())
+            .expect_err("component destinations are fixed by the install layout");
+
+        assert!(
+            matches!(error, ApplyError::DestinationOutOfScope { ref component, .. } if component == "content"),
+            "{error}"
+        );
+        assert_eq!(snapshot(install.root()), before);
+    }
+
+    #[test]
+    fn recovery_refuses_duplicate_component_steps() {
+        let install = install();
+        let step = JournalStep::new("content", &"aa".repeat(32), "content");
+        Journal::new(
+            "0.4.0",
+            "duplicate",
+            install.canonical_root(),
+            vec![step.clone(), step],
+        )
+        .save(&install.layout.work_dir())
+        .expect("save journal");
+
+        let error = resume_interrupted_update_with(&install.layout, &FakePlatform::new())
+            .expect_err("duplicate steps share staging and backup paths");
+
+        assert!(
+            matches!(error, ApplyError::DuplicateComponent { ref component } if component == "content"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bundle_recovery_requires_the_original_icon_presence() {
+        let install = install_with(true);
+        let step = JournalStep::new("content", &"aa".repeat(32), "Contents/Resources/content");
+        ensure_dir(&install.layout.work_dir()).expect("create bundle update work directory");
+        Journal::new(
+            "0.4.0",
+            "missing-icon-state",
+            install.canonical_root(),
+            vec![step],
+        )
+        .save(&install.layout.work_dir())
+        .expect("save journal");
+
+        let error = resume_interrupted_update_with(&install.layout, &FakePlatform::new())
+            .expect_err("bundle rollback cannot guess whether a new icon must be removed");
+
+        assert!(
+            matches!(error, ApplyError::MissingBundleRecoveryState),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_sibling_bundle_never_recovers_another_bundles_transaction() {
+        let directory = TempDir::new().expect("bundle parent");
+        let first = InstallLayout::macos_bundle(directory.path().join("First.app"));
+        let second = InstallLayout::macos_bundle(directory.path().join("Second.app"));
+        let nonce = "first-bundle-interrupted";
+        write_file(&first.root().join("Contents/Info.plist"), "first metadata");
+        let first_backup = first.quarantine_dir(nonce).join("planet");
+        write_file(&first_backup.join("System.c4g/Rank.txt"), "first bundle");
+        let second_planet = second.data_dir().join("planet/System.c4g/Rank.txt");
+        write_file(&second_planet, "second bundle");
+        let mut step = JournalStep::new("planet", &"aa".repeat(32), "Contents/Resources/planet");
+        step.state = StepState::BackupMoved;
+        let mut journal = Journal::new(
+            "0.7.0",
+            nonce,
+            canonical_install_root(&first).expect("canonical first bundle"),
+            vec![step],
+        );
+        journal.previous_bundle_icon_present = Some(false);
+        journal
+            .save(&first.work_dir())
+            .expect("save first bundle journal");
+
+        let recovery = resume_interrupted_update_with(&second, &FakePlatform::new())
+            .expect("a sibling has its own empty recovery namespace");
+
+        assert_eq!(recovery, ResumeOutcome::NothingToDo);
+        assert_eq!(
+            std::fs::read_to_string(&second_planet).expect("read untouched second bundle"),
+            "second bundle"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first_backup.join("System.c4g/Rank.txt"))
+                .expect("read retained first bundle backup"),
+            "first bundle"
+        );
+    }
+
+    #[test]
+    fn legacy_plain_journals_are_upgraded_before_recovery_mutates_the_install() {
+        let install = install();
+        let mut step = JournalStep::new("content", &"aa".repeat(32), "content");
+        step.destination_existed = None;
+        let mut journal = Journal::new(
+            "0.3.0",
+            "legacy-upgrade",
+            install.canonical_root(),
+            vec![step],
+        );
+        journal.schema = 1;
+        journal.previous_installed_state = None;
+        journal
+            .save(&install.layout.work_dir())
+            .expect("save legacy journal");
+
+        upgrade_legacy_journal(&install.layout, &mut journal, &install.layout.work_dir())
+            .expect("upgrade journal");
+
+        assert_eq!(journal.schema, crate::journal::JOURNAL_SCHEMA);
+        assert_eq!(journal.steps[0].destination_existed, Some(true));
+        assert!(journal.previous_installed_state.is_some());
+        assert_eq!(
+            Journal::load(&install.layout.work_dir())
+                .expect("load upgraded")
+                .expect("journal")
+                .schema,
+            crate::journal::JOURNAL_SCHEMA
+        );
+    }
+
+    #[test]
+    fn legacy_journals_without_digests_fail_closed_before_recovery() {
+        let install = install();
+        let mut step = JournalStep::new("content", "", "content");
+        step.destination_existed = None;
+        let mut journal = Journal::new(
+            "0.3.0",
+            "legacy-without-digest",
+            install.canonical_root(),
+            vec![step],
+        );
+        journal.schema = 1;
+        journal.previous_installed_state = None;
+        journal
+            .save(&install.layout.work_dir())
+            .expect("save legacy journal");
+        let before = snapshot(install.root());
+
+        let error = resume_interrupted_update_with(&install.layout, &FakePlatform::new())
+            .expect_err("a legacy journal without digests is unsafe to upgrade");
+
+        assert!(matches!(error, ApplyError::UnsafeLegacyJournalDigest));
+        assert_eq!(snapshot(install.root()), before);
     }
 
     #[test]
@@ -2353,6 +3814,35 @@ mod tests {
             .available_space(directory.path())
             .expect("free space");
         assert!(available > 0, "a writable temporary directory has room");
+    }
+
+    #[test]
+    fn windows_only_treats_an_invalid_pid_as_an_already_exited_process() {
+        assert_eq!(
+            classify_windows_open_error(WINDOWS_ERROR_INVALID_PARAMETER),
+            WindowsOpenError::ProcessGone
+        );
+        assert_eq!(
+            classify_windows_open_error(5),
+            WindowsOpenError::Failure(5),
+            "access denied must not let the updater rename a live process's tree"
+        );
+    }
+
+    #[test]
+    fn windows_wait_failure_is_not_reported_as_a_timeout() {
+        assert_eq!(
+            classify_windows_wait(WINDOWS_WAIT_OBJECT_0, 0),
+            WindowsWaitResult::Exited
+        );
+        assert_eq!(
+            classify_windows_wait(WINDOWS_WAIT_TIMEOUT, 0),
+            WindowsWaitResult::TimedOut
+        );
+        assert_eq!(
+            classify_windows_wait(WINDOWS_WAIT_FAILED, 6),
+            WindowsWaitResult::Failure(6)
+        );
     }
 
     #[test]

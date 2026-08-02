@@ -1047,7 +1047,10 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     // opened it (see `game_app::update`).
     use crate::update_check::test_support::{manifest_for, FakeTransport, OFFERED_VERSION};
 
+    let user_data = tempdir().expect("update download user data");
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_classic_menu_app(640, 480);
+    app.app_paths = Some(paths);
     let transport = FakeTransport::serving(&manifest_for(
         OFFERED_VERSION,
         clonk_core::version::ENGINE_VERSION,
@@ -1087,17 +1090,35 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
         .expect("decline the update");
     assert!(declined.message_dialogs.is_empty());
 
-    // Accepting reports that this build cannot install it: the download
-    // and the out-of-process applier are not wired yet.
+    // Accepting starts the cancellable component download. The test build
+    // parks its network worker, so this pins the hand-off without touching
+    // the network.
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .expect("accept the update");
-    let manual_install = update_result_dialog(&app);
+    let download = update_result_dialog(&app);
+    assert_eq!(download.state.message(), "Downloading update 99.0.0...");
+    assert_eq!(download.state.caption(), "Check for Updates");
+    assert_eq!(download.state.progress(), Some(0));
     assert_eq!(
-        manual_install.state.message(),
-        "Version 99.0.0 cannot be installed from within the game. \
-             Please install it manually."
+        download.state.buttons(),
+        clonk_frontend::message_dialog::MessageDialogButtons::CANCEL
     );
-    assert_eq!(manual_install.state.caption(), "Check for Updates");
+    assert!(app.update_download.is_some());
+
+    app.check_for_updates_at(false, 1_000)
+        .expect("report the accepted download already in progress");
+    assert!(app.update_check.is_none());
+    assert_eq!(
+        update_result_dialog(&app).state.message(),
+        "Update still in progress. Please wait."
+    );
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+        .expect("close the in-progress notice");
+
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+        .expect("cancel the component download");
+    assert!(app.update_download.is_none());
+    assert!(app.message_dialogs.is_empty());
 }
 
 #[test]

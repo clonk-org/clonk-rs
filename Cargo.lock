@@ -1004,6 +1004,7 @@ dependencies = [
  "clonk-launcher",
  "clonk-logging",
  "clonk-platform",
+ "clonk-update",
  "serde",
  "serde_json",
  "tempfile",
