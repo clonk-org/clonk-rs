@@ -42,6 +42,11 @@ const ARRAY_MAX_SIZE: usize = 1_000_000;
 /// `C4ValueList::MaxSize` (C4ValueList.h:32): `Global(index)` may grow up to,
 /// but not including, this index.
 const GLOBAL_SLOT_MAX_SIZE: i32 = 1_000_000;
+/// C++ `DebugLog` diagnostics use a presentation route separate from script
+/// `Log()`. The Mars integration regression compares this value with
+/// `clonk-core`'s canonical routing constant without coupling the standalone
+/// VM crate to the rest of the engine.
+const SCRIPT_DEBUG_LOG_TARGET: &str = "clonk-script-debug";
 
 type CallArgs = SmallVec<[CallArg; MAX_CALL_PARAMETERS]>;
 type CallValues = SmallVec<[Value; MAX_CALL_PARAMETERS]>;
@@ -4472,9 +4477,9 @@ impl<'a> Vm<'a> {
         // Keep the object structured so presentation can choose its label;
         // tracing never enters simulation state or the lockstep hash.
         if let Some(object) = context_object {
-            tracing::warn!(target: "clonk-script", object, "{message}");
+            tracing::warn!(target: SCRIPT_DEBUG_LOG_TARGET, object, "{message}");
         } else {
-            tracing::warn!(target: "clonk-script", "{message}");
+            tracing::warn!(target: SCRIPT_DEBUG_LOG_TARGET, "{message}");
         }
     }
 

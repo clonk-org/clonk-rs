@@ -1,4 +1,5 @@
 use crate::support::real_scenario::load_installed_scenario;
+use clonk_core::log_target::SCRIPT_DEBUG_LOG_TARGET;
 use clonk_engine::{
     command::{CommandId, CommandMode, CommandRequest},
     Engine, ObjectId, PlayerConfig, SpawnConfig, Vector2,
@@ -23,7 +24,9 @@ where
     S: tracing::Subscriber,
 {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        if *event.metadata().level() != Level::WARN || event.metadata().target() != "clonk-script" {
+        if *event.metadata().level() != Level::WARN
+            || event.metadata().target() != SCRIPT_DEBUG_LOG_TARGET
+        {
             return;
         }
         let mut visitor = MessageVisitor::default();
@@ -174,13 +177,23 @@ fn cancelling_mars_base_research_unlocks_the_door() {
             }
         }
     });
+    // C++ reports parameter-conversion diagnostics through DebugLog, not the
+    // ordinary script Log stream (src/C4AulExec.cpp:1345-1362).
     assert!(
         warnings.iter().any(|warning| {
             warning.contains(
                 r#"call to "FxResearchEffect" parameter 5: got "string", but expected "id"!"#,
             )
         }),
-        "Exit must reach SetOverlayAction -> AddEffect(IntOverlayAction) -> the real Research checker; got warnings {warnings:?}"
+        "Exit must reach SetOverlayAction -> AddEffect(IntOverlayAction) -> the real Research checker through DebugLog; got warnings {warnings:?}"
+    );
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.contains(
+                r#"call to "FxResearchEffect" parameter 6: got "int", but expected "object"!"#,
+            )
+        }),
+        "the second legacy conversion warning must use the same DebugLog route; got warnings {warnings:?}"
     );
     for clonk in [researcher, bystander] {
         assert_eq!(
