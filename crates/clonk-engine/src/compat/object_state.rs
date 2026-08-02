@@ -5344,7 +5344,7 @@ impl crate::engine_splash::SplashHost for EffectHostContext {
 /// deliberately updated synchronously so a following InLiquid() in the same
 /// callback sees the native result.
 fn update_in_liquid(context: &mut EffectHostContext, target: ObjectId) -> Result<(), RuntimeError> {
-    let (position, construction, was_in_liquid, ocf, own_mass, scope_definition) = {
+    let (position, construction, was_in_liquid, ocf, scope_definition) = {
         let Some(scope) = context.object_scope(target) else {
             return Ok(());
         };
@@ -5353,7 +5353,6 @@ fn update_in_liquid(context: &mut EffectHostContext, target: ObjectId) -> Result
             scope.construction(),
             scope.in_liquid(),
             scope.ocf(),
-            scope.own_mass(),
             scope
                 .pending_update
                 .change_def
@@ -5375,33 +5374,19 @@ fn update_in_liquid(context: &mut EffectHostContext, target: ObjectId) -> Result
     let in_liquid = context
         .landscape_ref()
         .is_some_and(|landscape| landscape.is_liquid_at(position.x, probe_y));
-    if crate::engine_splash::should_splash(
-        in_liquid,
-        was_in_liquid,
-        ocf,
-        reflected_object_mass(context, target, &mut HashSet::new()).max(
-            definition
-                .as_deref()
-                .and_then(|id| context.definition_metadata(id))
-                .map(|metadata| {
-                    metadata
-                        .mass
-                        .saturating_add(own_mass)
-                        .saturating_mul(construction)
-                        / FULL_CON
-                })
-                .unwrap_or(1),
-        ),
-    ) {
-        let amount = live_object_shape(context, target)
-            .map(|shape| crate::engine_splash::splash_amount(shape.width, shape.height))
-            .unwrap_or(0);
-        crate::engine_splash::run_splash(
-            context,
-            position.x,
-            position.y.saturating_add(1),
-            amount,
-        )?;
+    if crate::engine_splash::entered_liquid(in_liquid, was_in_liquid) {
+        let mass = current_object_mass(context, target);
+        if crate::engine_splash::should_splash(in_liquid, was_in_liquid, ocf, mass) {
+            let amount = live_object_shape(context, target)
+                .map(|shape| crate::engine_splash::splash_amount(shape.width, shape.height))
+                .unwrap_or(0);
+            crate::engine_splash::run_splash(
+                context,
+                position.x,
+                position.y.saturating_add(1),
+                amount,
+            )?;
+        }
     }
     if in_liquid != was_in_liquid {
         if let Some(scope) = context.object_scope_mut(target) {
@@ -5409,6 +5394,24 @@ fn update_in_liquid(context: &mut EffectHostContext, target: ObjectId) -> Result
         }
     }
     Ok(())
+}
+
+fn current_object_mass(context: &EffectHostContext, target: ObjectId) -> i32 {
+    // C4Object::Mass is a live compiled cache (C4Object.cpp:497-505), not
+    // merely DefCore mass plus contents. SetMass/DoCon/ChangeDef invalidate
+    // it before their deferred update is folded, so use the cached value only
+    // while those same-call invalidations are absent.
+    let compiled_mass = context.object_scope(target).and_then(|scope| {
+        let pending_invalidates_cache = scope.pending_update.own_mass.is_some()
+            || scope.pending_update.construction.is_some()
+            || scope.pending_update.change_def.is_some()
+            || scope.pending_update.contents_front.is_some();
+        (!pending_invalidates_cache)
+            .then(|| context.get_world_object(target))
+            .flatten()
+            .and_then(|object| object.compiled_mass)
+    });
+    compiled_mass.unwrap_or_else(|| reflected_object_mass(context, target, &mut HashSet::new()))
 }
 
 /// FnIsNewgfx (C4Script.cpp:4947): the compatibility probe is always true.

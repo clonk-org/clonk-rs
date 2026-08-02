@@ -366,6 +366,7 @@ impl Engine {
         .with_commands(object.commands.command_views())
         .with_command_stack(object.commands.snapshot())
         .with_full_state(state_snapshot)
+        .with_compiled_mass(object.compiled_mass)
         .with_material_contents(object.material_contents.clone())
         .with_last_energy_loss_cause(object.last_energy_loss_cause)
     }

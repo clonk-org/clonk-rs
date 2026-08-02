@@ -2177,7 +2177,7 @@ func Probe(object other)
     #[test]
     fn set_position_runs_cpp_entry_splash_for_heavy_fast_objects() {
         // UpdateInLiquid enters through Splash when OCF_HitSpeed2 and Mass > 3
-        // (C4Object.cpp:6132-6149; C4Effect.cpp:801-835). The random draws
+        // (C4Object.cpp:6093-6110; C4Effect.cpp:801-835). The random draws
         // and ExtractMaterial/PXS order are part of the lockstep result.
         let materials = clonk_resources::MaterialLibrary::parse(
             "[Material Water]\nName=Water\nDensity=30\nInstable=1\n",
@@ -2191,15 +2191,27 @@ func Probe(object other)
             (
                 DefinitionId::from("CLNK"),
                 DefinitionMetadata {
-                    mass: 5,
+                    mass: 1,
                     shape: Some(DefinitionRect::new(-5, -5, 10, 10)),
                     ..DefinitionMetadata::default()
                 },
             ),
             (DefinitionId::from("FXU1"), DefinitionMetadata::default()),
         ]);
+        let state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        let live_object = fixture_world_object(ObjectId::new(1), "CLNK")
+            .with_full_state(Rc::new(state))
+            .with_compiled_mass(Some(5));
         let world = world_with(
-            Vec::<HostWorldObject>::new(),
+            vec![live_object],
             Some(landscape),
             definitions,
             HashMap::new(),
