@@ -18,7 +18,7 @@ use crate::math::{
     FixedVec2,
 };
 use crate::message::{
-    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_DROP_SPEECH, FLAG_MULTIPLE,
+    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_DROP_SPEECH,
     HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
 };
 use crate::ocf;
