@@ -1081,6 +1081,15 @@ impl ReliableUdpSocketDriver {
             crate::dual_stack::SocketFamily::DualStack => {
                 Ok(reliable_udp_send_address(destination))
             }
+            crate::dual_stack::SocketFamily::MappedIpv4 => {
+                match canonical_reliable_udp_peer_address(destination) {
+                    destination @ SocketAddr::V4(_) => Ok(reliable_udp_send_address(destination)),
+                    destination => Err(io::Error::new(
+                        io::ErrorKind::NetworkUnreachable,
+                        format!("this host has no IPv6 route to reliable-UDP peer {destination}"),
+                    )),
+                }
+            }
             crate::dual_stack::SocketFamily::Ipv4Only => {
                 match canonical_reliable_udp_peer_address(destination) {
                     destination @ SocketAddr::V4(_) => Ok(destination),
@@ -1780,6 +1789,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn named_ipv4_bind_uses_a_mapped_ipv6_destination() {
+        // C++ creates an AF_INET6 socket and sends each peer through
+        // addr.AsIPv6() (oracle-src-pinned src/C4NetIO.cpp:1514-1525,
+        // 3136-3144; src/C4Network2Address.cpp:137-179). Rust's named-interface
+        // extension must retain that sockaddr shape: macOS rejects an AF_INET
+        // sockaddr passed to this mapped AF_INET6 socket.
+        let driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        let peer = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 11_112);
+
+        assert_eq!(driver.family, crate::dual_stack::SocketFamily::MappedIpv4);
+        assert_eq!(
+            driver.socket_destination(peer).unwrap(),
+            reliable_udp_send_address(peer)
+        );
+        assert_eq!(
+            driver
+                .socket_destination(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::LOCALHOST,
+                    11_112,
+                    0,
+                    0,
+                )))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NetworkUnreachable
+        );
+    }
+
+    #[tokio::test]
     async fn a_host_without_ipv6_binds_ipv4_and_refuses_the_ipv6_puncher() {
         // A kernel booted with `ipv6.disable=1` fails `socket(AF_INET6, ...)`
         // itself, which used to take down the host's whole UDP transport.
@@ -1797,6 +1836,8 @@ mod tests {
             driver.local_addr().unwrap().ip(),
             std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)
         );
+        let ipv4_peer = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 11_115);
+        assert_eq!(driver.socket_destination(ipv4_peer).unwrap(), ipv4_peer);
 
         // Nothing may be sent to the IPv6 puncher afterwards: trading the bind
         // failure for an EAFNOSUPPORT on the first datagram would only move the
