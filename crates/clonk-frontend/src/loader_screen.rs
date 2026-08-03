@@ -1625,7 +1625,7 @@ mod tests {
 
     fn real_image(name: &str) -> ImageData {
         let path = repo_root().join("planet/Graphics.c4g").join(name);
-        let image = image::open(&path)
+        let image = clonk_resources::open_image(&path)
             .unwrap_or_else(|error| panic!("decode {}: {error}", path.display()))
             .into_rgba8();
         let (width, height) = image.dimensions();

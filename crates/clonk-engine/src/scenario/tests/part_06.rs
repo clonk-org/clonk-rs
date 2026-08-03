@@ -164,7 +164,12 @@
 
         let mut jpeg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
-            .encode(&[80u8, 120, 200, 255].repeat(16), 4, 4, ColorType::Rgba8)
+            .encode(
+                &[80u8, 120, 200].repeat(16),
+                4,
+                4,
+                ColorType::Rgb8.into(),
+            )
             .expect("encode sky jpeg");
         std::fs::write(scenario_dir.join("Sky.jpg"), jpeg).expect("write Sky.jpg");
 
@@ -209,7 +214,7 @@
             use image::ImageEncoder as _;
             let mut png = Vec::new();
             image::codecs::png::PngEncoder::new(&mut png)
-                .write_image(&pixel, 1, 1, ColorType::Rgba8)
+                .write_image(&pixel, 1, 1, ColorType::Rgba8.into())
                 .expect("encode named sky png");
             std::fs::write(path, png).expect("write named sky png");
         };
@@ -299,7 +304,12 @@
         {
             use image::ImageEncoder as _;
             image::codecs::png::PngEncoder::new(&mut png)
-                .write_image(&[10u8, 20, 30, 255], 1, 1, ColorType::Rgba8)
+                .write_image(
+                    &[10u8, 20, 30, 255],
+                    1,
+                    1,
+                    ColorType::Rgba8.into(),
+                )
                 .expect("encode sky png");
         }
         std::fs::write(scenario_dir.join("Sky.png"), png).expect("write Sky.png");
@@ -2785,4 +2795,3 @@
         assert!(!environment.no_gamma);
         assert_eq!(engine.debug_rng_clone(), replay);
     }
-

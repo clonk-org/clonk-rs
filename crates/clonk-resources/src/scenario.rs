@@ -1,7 +1,8 @@
 use crate::{
-    language::component_language_string, ComponentGroups, Group, GroupError, LanguagePacks,
+    language::component_language_string, load_image_from_memory, ComponentGroups, Group,
+    GroupError, LanguagePacks,
 };
-use image::{load_from_memory, ImageError};
+use image::ImageError;
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::fs;
@@ -1266,7 +1267,7 @@ fn load_preview_images(
         let bytes = group
             .read_file(&relative_path)
             .map_err(|err| group_error(&absolute_path, err))?;
-        let image = match load_from_memory(&bytes) {
+        let image = match load_image_from_memory(&bytes) {
             Ok(image) => image,
             Err(source) => {
                 debug!(
@@ -2552,7 +2553,7 @@ mod tests {
         let image = image::RgbaImage::from_raw(2, 2, vec![255u8; 16]).unwrap();
         let mut bytes = Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(image)
-            .write_to(&mut bytes, image::ImageOutputFormat::Png)
+            .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         bytes.into_inner()
     }

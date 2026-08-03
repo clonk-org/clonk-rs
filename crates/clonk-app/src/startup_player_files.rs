@@ -1197,6 +1197,9 @@ fn encode_image_write(update: &PlayerImageWrite) -> Result<EncodedImageWrite, St
                 let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
                 encoder.set_color(ColorType::Rgba);
                 encoder.set_depth(BitDepth::Eight);
+                // Preserve png 0.17's defaults: these bytes feed player archives and CRCs.
+                encoder.set_compression(png::Compression::Fast);
+                encoder.set_filter(png::Filter::Sub);
                 let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
                 writer
                     .write_image_data(image.pixels())
@@ -1579,7 +1582,7 @@ fn decode_png(bytes: Vec<u8>) -> Option<ImageData> {
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     decoder.set_transformations(Transformations::EXPAND | Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
-    let mut buffer = vec![0; reader.output_buffer_size()];
+    let mut buffer = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buffer).ok()?;
     let bytes = &buffer[..info.buffer_size()];
     let pixels = match info.color_type {
@@ -1663,6 +1666,20 @@ mod tests {
                 unreachable!("replace must encode png bytes")
             }
         }
+    }
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+    }
+
+    #[test]
+    fn player_png_encoding_preserves_png_017_bytes() {
+        let encoded = test_png(tiny_image(73));
+
+        assert_eq!(encoded.len(), 77);
+        assert_eq!(fnv1a64(&encoded), 8_220_305_507_732_473_095);
     }
 
     #[test]

@@ -39,7 +39,7 @@ clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
 flate2 = "1"
 # Match clonk-app's image feature request so both test graphs resolve one
 # image fingerprint.
-image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 tempfile = "3.8"
 # Request the workspace test graph's full Tokio feature union so focused
 # netplay-crate runs share one Tokio fingerprint with the app and workspace

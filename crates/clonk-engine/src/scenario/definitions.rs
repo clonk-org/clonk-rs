@@ -1099,11 +1099,12 @@ impl SkyManifest {
                 Err(error) => return Err(ScenarioError::Resources(error)),
             };
 
-            let decoded =
-                load_from_memory(&bytes).map_err(|source| ScenarioError::SkySurfaceDecode {
+            let decoded = load_image_from_memory(&bytes).map_err(|source| {
+                ScenarioError::SkySurfaceDecode {
                     path: path.clone(),
                     source,
-                })?;
+                }
+            })?;
             let rgba = decoded.to_rgba8();
             let (width, height) = rgba.dimensions();
             let pixels = rgba.into_raw();

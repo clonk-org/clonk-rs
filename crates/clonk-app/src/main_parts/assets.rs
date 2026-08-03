@@ -2102,13 +2102,14 @@ pub(crate) fn decode_selected_loader(source: &SelectedLoaderSource) -> Result<Im
     } else {
         image::ImageFormat::Bmp
     };
-    let image = image::load_from_memory_with_format(&bytes, format).with_context(|| {
-        format!(
-            "failed to decode exact classic image entry `{}` from {}",
-            source.presentation_filename(),
-            source.group.root().display()
-        )
-    })?;
+    let image =
+        clonk_resources::load_image_from_memory_with_format(&bytes, format).with_context(|| {
+            format!(
+                "failed to decode exact classic image entry `{}` from {}",
+                source.presentation_filename(),
+                source.group.root().display()
+            )
+        })?;
     let rgba = image.into_rgba8();
     let (width, height) = rgba.dimensions();
     let image = GraphicsImage::new(width, height, rgba.into_raw());

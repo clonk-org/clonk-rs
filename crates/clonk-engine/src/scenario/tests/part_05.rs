@@ -2121,7 +2121,7 @@
         {
             use image::ImageEncoder as _;
             image::codecs::png::PngEncoder::new(&mut sky_png)
-                .write_image(&[11, 22, 33, 255], 1, 1, ColorType::Rgba8)
+                .write_image(&[11, 22, 33, 255], 1, 1, ColorType::Rgba8.into())
                 .expect("encode client sky");
         }
         std::fs::write(graphics.join("ClientSky.png"), sky_png).expect("write client sky");
@@ -2633,4 +2633,3 @@
             Err(ScenarioError::LegacyDefinitionNotFound { path }) if path == "Shared.c4d"
         ));
     }
-

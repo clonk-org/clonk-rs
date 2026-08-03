@@ -1461,7 +1461,7 @@
 
             let mut encoded = Vec::new();
             image::codecs::png::PngEncoder::new(&mut encoded)
-                .write_image(rgba, width, height, ColorType::Rgba8)
+                .write_image(rgba, width, height, ColorType::Rgba8.into())
                 .expect("encode Landscape.png");
             encoded
         }
@@ -1781,7 +1781,7 @@
         {
             let mut encoder = BmpEncoder::new(&mut encoded);
             encoder
-                .encode(&raw, 8, 6, ColorType::Rgba8)
+                .encode(&raw, 8, 6, ColorType::Rgba8.into())
                 .expect("encode landscape bmp");
         }
         std::fs::write(scenario_dir.join("Landscape.bmp"), encoded).expect("write landscape");
@@ -1830,7 +1830,7 @@
         {
             let mut encoder = BmpEncoder::new(&mut encoded);
             encoder
-                .encode(&raw, 4, 4, ColorType::Rgba8)
+                .encode(&raw, 4, 4, ColorType::Rgba8.into())
                 .expect("encode map bmp");
         }
         std::fs::write(scenario_dir.join("mAp.BmP"), encoded).expect("write mixed-case map");

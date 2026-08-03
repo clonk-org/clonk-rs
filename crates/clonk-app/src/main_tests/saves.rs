@@ -1538,14 +1538,40 @@ fn runtime_point_filtering_reloads_after_advanced_config_save() {
 
 fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
     let file = File::open(path).expect("open screenshot");
-    let decoder = png::Decoder::new(file);
+    let decoder = png::Decoder::new(io::BufReader::new(file));
     let mut reader = decoder.read_info().expect("read screenshot header");
-    let mut buffer = vec![0; reader.output_buffer_size()];
+    let mut buffer = vec![0; reader
+        .output_buffer_size()
+        .expect("screenshot buffer size fits usize")];
     let info = reader.next_frame(&mut buffer).expect("decode screenshot");
     assert_eq!(info.color_type, ColorType::Rgb);
     assert_eq!(info.bit_depth, BitDepth::Eight);
     buffer.truncate(info.buffer_size());
     (info.width, info.height, buffer)
+}
+
+fn fnv1a_png_bytes(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+#[test]
+fn rgba_png_encoding_preserves_png_017_bytes() {
+    let pixels = [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8];
+    let encoded = encode_rgba_png(2, 2, &pixels).expect("encode RGBA PNG");
+
+    assert_eq!(encoded.len(), 86);
+    assert_eq!(fnv1a_png_bytes(&encoded), 11_539_277_311_474_003_906);
+}
+
+#[test]
+fn screenshot_png_encoding_preserves_png_017_bytes() {
+    let pixels = [1, 2, 3, 255, 5, 6, 7, 128, 1, 2, 3, 64, 5, 6, 7, 0];
+    let encoded = encode_screenshot_png(2, 2, &pixels).expect("encode screenshot PNG");
+
+    assert_eq!(encoded.len(), 82);
+    assert_eq!(fnv1a_png_bytes(&encoded), 8_588_350_724_413_462_130);
 }
 
 #[test]
@@ -1575,7 +1601,9 @@ fn retained_gpu_save_thumbnail_matches_cpp_title_extent() {
         .expect("encode retained GPU thumbnail");
     let decoder = png::Decoder::new(io::Cursor::new(encoded));
     let mut reader = decoder.read_info().expect("read thumbnail header");
-    let mut buffer = vec![0; reader.output_buffer_size()];
+    let mut buffer = vec![0; reader
+        .output_buffer_size()
+        .expect("thumbnail buffer size fits usize")];
     let info = reader.next_frame(&mut buffer).expect("decode thumbnail");
 
     assert_eq!(

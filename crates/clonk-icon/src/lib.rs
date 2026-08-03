@@ -36,7 +36,9 @@ const APP_MARK: (u32, u32, u32, u32) = (134, 30, 170, 176);
 /// Padding with a background colour is not an option: the icon has to sit on
 /// whatever the Dock, the taskbar or a file manager puts behind it.
 pub fn square_source(png: &[u8]) -> Option<image::RgbaImage> {
-    let logo = image::load_from_memory(png).ok()?.to_rgba8();
+    let logo = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .ok()?
+        .to_rgba8();
     let mark = app_mark(&logo);
     let side = mark.width().max(mark.height());
     if side == 0 {
@@ -202,7 +204,7 @@ pub fn app_ico_bytes() -> Option<Vec<u8>> {
                 icon.as_raw(),
                 icon.width(),
                 icon.height(),
-                image::ColorType::Rgba8,
+                image::ColorType::Rgba8.into(),
             )
             .ok()
         })
@@ -228,7 +230,7 @@ pub fn png_bytes(icon: &image::RgbaImage) -> Option<Vec<u8>> {
             icon.as_raw(),
             icon.width(),
             icon.height(),
-            image::ColorType::Rgba8,
+            image::ColorType::Rgba8.into(),
         )
         .ok()?;
     Some(bytes)
@@ -270,8 +272,16 @@ mod tests {
     fn png_of(image: &image::RgbaImage) -> Vec<u8> {
         let mut bytes = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(image.clone())
-            .write_to(&mut bytes, image::ImageOutputFormat::Png)
+            .write_to(&mut bytes, image::ImageFormat::Png)
             .expect("an in-memory PNG encode cannot fail");
+        bytes.into_inner()
+    }
+
+    fn jpeg_of(image: &image::RgbImage) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image.clone())
+            .write_to(&mut bytes, image::ImageFormat::Jpeg)
+            .expect("an in-memory JPEG encode cannot fail");
         bytes.into_inner()
     }
 
@@ -511,5 +521,12 @@ mod tests {
     #[test]
     fn a_source_that_is_not_an_image_yields_no_icon() {
         assert!(square_source(b"not a png").is_none());
+    }
+
+    #[test]
+    fn a_non_png_image_yields_no_icon() {
+        let source = image::RgbImage::from_pixel(4, 2, image::Rgb([255, 0, 0]));
+
+        assert!(square_source(&jpeg_of(&source)).is_none());
     }
 }

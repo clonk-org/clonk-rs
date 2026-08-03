@@ -1064,8 +1064,8 @@ pub(in crate::scenario) fn load_legacy_landscape_body(
                 return Ok(Some(landscape));
             }
         }
-        let dynamic =
-            load_from_memory(&bytes).map_err(|source| ScenarioError::LegacyMapDecode { source })?;
+        let dynamic = load_image_from_memory(&bytes)
+            .map_err(|source| ScenarioError::LegacyMapDecode { source })?;
         let rgba = dynamic.to_rgba8();
         let width = rgba.width();
         let height = rgba.height();
@@ -1490,7 +1490,7 @@ fn read_legacy_group_wildcard(group: &Group, pattern: &str) -> LegacySkyEntryMat
 }
 
 fn decode_legacy_sky_surface(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-    load_from_memory(bytes).ok().map(|decoded| {
+    load_image_from_memory(bytes).ok().map(|decoded| {
         let rgba = decoded.to_rgba8();
         let (width, height) = rgba.dimensions();
         (width, height, rgba.into_raw())

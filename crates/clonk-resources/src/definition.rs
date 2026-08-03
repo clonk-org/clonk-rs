@@ -908,7 +908,7 @@ fn decode_definition_image_result(
         return image::RgbaImage::from_raw(bitmap.width, bitmap.height, pixels)
             .ok_or_else(|| "indexed bitmap dimensions do not match its pixel data".to_string());
     }
-    image::load_from_memory_with_format(data, format)
+    crate::load_image_from_memory_with_format(data, format)
         .map(|image| image.into_rgba8())
         .map_err(|error| error.to_string())
 }
@@ -3932,7 +3932,7 @@ Entrance=1,2,,4
 
     #[test]
     fn definition_graphics_names_preserve_legacy_bytes_and_c4maxname() {
-        fn encoded_image(color: [u8; 4], format: image::ImageOutputFormat) -> Vec<u8> {
+        fn encoded_image(color: [u8; 4], format: image::ImageFormat) -> Vec<u8> {
             let image = image::RgbaImage::from_pixel(1, 1, image::Rgba(color));
             let mut bytes = Cursor::new(Vec::new());
             image::DynamicImage::ImageRgba8(image)
@@ -3983,7 +3983,7 @@ Entrance=1,2,,4
         packed
             .add_file_bytes_with_metadata(
                 first_png,
-                encoded_image([11, 22, 33, 255], image::ImageOutputFormat::Png),
+                encoded_image([11, 22, 33, 255], image::ImageFormat::Png),
                 1,
                 false,
             )
@@ -3991,7 +3991,7 @@ Entrance=1,2,,4
         packed
             .add_file_bytes_with_metadata(
                 second_png,
-                encoded_image([44, 55, 66, 255], image::ImageOutputFormat::Png),
+                encoded_image([44, 55, 66, 255], image::ImageFormat::Png),
                 1,
                 false,
             )
@@ -3999,7 +3999,7 @@ Entrance=1,2,,4
         packed
             .add_file_bytes_with_metadata(
                 first_overlay,
-                encoded_image([80, 90, 100, 255], image::ImageOutputFormat::Png),
+                encoded_image([80, 90, 100, 255], image::ImageFormat::Png),
                 1,
                 false,
             )
@@ -4007,7 +4007,7 @@ Entrance=1,2,,4
         packed
             .add_file_bytes_with_metadata(
                 b"Graphics\xfc.png".to_vec(),
-                encoded_image([77, 88, 99, 255], image::ImageOutputFormat::Png),
+                encoded_image([77, 88, 99, 255], image::ImageFormat::Png),
                 1,
                 false,
             )
@@ -4015,7 +4015,7 @@ Entrance=1,2,,4
         packed
             .add_file_bytes_with_metadata(
                 b"Portrait\xf6.bmp".to_vec(),
-                encoded_image([101, 102, 103, 255], image::ImageOutputFormat::Bmp),
+                encoded_image([101, 102, 103, 255], image::ImageFormat::Bmp),
                 1,
                 false,
             )
@@ -4080,7 +4080,7 @@ Entrance=1,2,,4
                     b"First.png".as_slice(),
                 ]
                 .concat(),
-                encoded_image([1, 2, 3, 255], image::ImageOutputFormat::Png),
+                encoded_image([1, 2, 3, 255], image::ImageFormat::Png),
                 1,
                 false,
             )
@@ -4128,7 +4128,7 @@ Entrance=1,2,,4
             let directory = tempdir().expect("physical portrait directory");
             fs::write(
                 directory.path().join(OsStr::from_bytes(PORTRAIT_FILENAME)),
-                encoded_image([121, 122, 123, 255], image::ImageOutputFormat::Bmp),
+                encoded_image([121, 122, 123, 255], image::ImageFormat::Bmp),
             )
             .expect("write physical native-byte portrait");
             let portraits = load_portrait_graphics(

@@ -1440,7 +1440,12 @@ mod save_thumbnail_tests {
         let mut reader = Decoder::new(io::Cursor::new(encoded))
             .read_info()
             .expect("read save thumbnail header");
-        let mut buffer = vec![0; reader.output_buffer_size()];
+        let mut buffer = vec![
+            0;
+            reader
+                .output_buffer_size()
+                .expect("save thumbnail buffer size fits usize")
+        ];
         let info = reader
             .next_frame(&mut buffer)
             .expect("decode save thumbnail");

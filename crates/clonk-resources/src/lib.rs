@@ -4,6 +4,7 @@ pub mod font;
 pub mod graphics;
 pub mod group;
 pub mod group_writer;
+mod image_decode;
 pub mod language;
 mod legacy_paths;
 pub mod material;
@@ -29,6 +30,7 @@ pub use group_writer::{
     c4group_file_crc, compress_c4group_image, MutableGroup, MutableGroupChildMut,
     MutableGroupEntryKind, MutableGroupError,
 };
+pub use image_decode::{load_image_from_memory, load_image_from_memory_with_format, open_image};
 pub use language::{ComponentGroups, LanguageInfo, LanguagePacks, LoadedComponent};
 pub use legacy_paths::{path_from_legacy_bytes, path_to_legacy_bytes};
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};

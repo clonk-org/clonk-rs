@@ -36,7 +36,7 @@ rayon = "1.11.0"
 [dev-dependencies]
 # Same feature set as clonk-engine's image dep: a diverging dev-dep request makes
 # the test graph compile a second 18-codec flavor of image (openexr/webp/tiff).
-image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 # Focused render probes should produce the same engine fingerprint as the
 # workspace test graph, allowing the landing gate to reuse that compilation.
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }

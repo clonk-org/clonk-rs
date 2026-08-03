@@ -20,7 +20,7 @@ build-script = ["dep:embed-resource"]
 # Matches every other consumer's feature set so the shared dependency graph
 # stays unified, plus `ico` for the Windows executable resource — which is
 # itself only `bmp` + `png`, both already requested workspace-wide.
-image = { version = "0.24", default-features = false, features = ["bmp", "ico", "jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "ico", "jpeg", "png"] }
 # Finds `rc.exe` on an MSVC host and `windres` on a mingw one, so the same build
 # script works for the native CI build and a cross build.
 embed-resource = { version = "3", optional = true }

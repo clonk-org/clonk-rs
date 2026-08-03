@@ -2320,6 +2320,9 @@ pub(crate) fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Ve
         let mut encoder = Encoder::new(&mut buffer, width, height);
         encoder.set_color(ColorType::Rgba);
         encoder.set_depth(BitDepth::Eight);
+        // Preserve png 0.17's defaults: these bytes feed save archives and CRCs.
+        encoder.set_compression(png::Compression::Fast);
+        encoder.set_filter(png::Filter::Sub);
         let mut writer = encoder
             .write_header()
             .context("failed to initialise PNG encoder")?;
@@ -2370,6 +2373,9 @@ pub(crate) fn encode_screenshot_png(width: u32, height: u32, rgba: &[u8]) -> Res
         let mut encoder = Encoder::new(&mut buffer, width, height);
         encoder.set_color(ColorType::Rgb);
         encoder.set_depth(BitDepth::Eight);
+        // Preserve png 0.17's defaults and synchronous screenshot latency.
+        encoder.set_compression(png::Compression::Fast);
+        encoder.set_filter(png::Filter::Sub);
         let mut writer = encoder
             .write_header()
             .context("failed to initialise screenshot PNG encoder")?;

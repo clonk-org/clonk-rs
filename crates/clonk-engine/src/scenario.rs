@@ -11,13 +11,13 @@ use clonk_resources::definition::{
     DefinitionGraphicsVariant as ResourceGraphicsVariant,
 };
 use clonk_resources::{
-    decode_legacy_script_text, localize_script_source_with_components,
+    decode_legacy_script_text, load_image_from_memory, localize_script_source_with_components,
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     ComponentGroups, DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
     LanguagePacks, ParticleDefinition as ResourceParticleDefinition, RankNameTable,
     ResourceDefinition as ResourceDefinitionData,
 };
-use image::{load_from_memory, ImageError, ImageFormat};
+use image::{ImageError, ImageFormat};
 use serde::de::Error as _;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
