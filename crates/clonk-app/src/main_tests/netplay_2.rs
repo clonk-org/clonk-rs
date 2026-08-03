@@ -12161,6 +12161,60 @@ fn network_status_overlay_displays_live_protocol_rate_samples() {
     assert_eq!(first, second);
 }
 
+// NetStatsToggle is registered at KEY_Default in the "no default keys
+// assigned" block (src/C4Game.cpp:3456, :3462), so only a custom
+// `[Keys] NetStatsToggle=` binding can reach it. Unlike its
+// `C4GraphicsSystem::ToggleShow*` neighbours, ToggleShowNetStatus has no
+// Game.DebugMode guard and flashes no message
+// (src/C4GraphicsSystem.cpp:811-815).
+#[test]
+fn net_stats_toggle_is_default_unbound_and_a_custom_chord_shows_the_overlay() {
+    let mut app = new_running_sandbox_app();
+    let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+    app.control_clients
+        .replace_snapshot([message_client(0, b"Host")]);
+
+    app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+        .expect("an unconfigured NetStatsToggle stays unbound");
+    assert!(!app.graphics.debug_draw_flags().show_net_status);
+
+    let parsed = parse_runtime_key_config(b"[Keys]\nNetStatsToggle=F8\n")
+        .expect("parse the represented default-unbound net status action");
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parsed))
+        .expect("install net status key registry");
+
+    app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+        .expect("configured NetStatsToggle enables the overlay");
+    assert!(app.graphics.debug_draw_flags().show_net_status);
+    assert!(
+        !app.engine.debug_mode(),
+        "ToggleShowNetStatus has no debug-mode guard"
+    );
+    assert!(
+        app.runtime_flash_message.is_none(),
+        "ToggleShowNetStatus flashes no message"
+    );
+
+    app.update_network_status_overlay();
+    let text = app
+        .graphics
+        .network_status_text()
+        .expect("enabled network status text");
+    assert!(text.contains("Local: Active host Host (ID 0)"), "{text}");
+
+    app.handle_key(VirtualKeyCode::F8, ElementState::Released)
+        .expect("the callback has no Up handler");
+    assert!(app.graphics.debug_draw_flags().show_net_status);
+
+    app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+        .expect("configured NetStatsToggle disables the overlay");
+    assert!(!app.graphics.debug_draw_flags().show_net_status);
+    app.update_network_status_overlay();
+    assert!(app.graphics.network_status_text().is_none());
+}
+
 #[test]
 fn runtime_client_list_maps_native_lifecycle_readiness_and_wait() {
     use clonk_frontend::runtime_client_list::RuntimeClientStatusIcon;

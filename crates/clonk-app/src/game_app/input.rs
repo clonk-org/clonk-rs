@@ -3063,6 +3063,35 @@ impl GameApp {
         true
     }
 
+    /// Runs the default-unbound PRIO_Base NetStatsToggle, the last entry of
+    /// the native "no default keys assigned" block (src/C4Game.cpp:3462).
+    /// Every other PRIO_Base action registered before it — including
+    /// ChartToggle — and the stronger PRIO_PlrControl player bindings own an
+    /// exact duplicate chord first. Unlike its `C4GraphicsSystem::ToggleShow*`
+    /// neighbours, `ToggleShowNetStatus` has no `Game.DebugMode` guard and
+    /// flashes no message (src/C4GraphicsSystem.cpp:811-815).
+    pub(crate) fn handle_runtime_net_stats_toggle_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> bool {
+        if !matches!(self.mode, AppMode::Running)
+            || !self.runtime_keyboard_binding_matches("NetStatsToggle", key, false)
+            || self.runtime_keyboard_binding_matches("ChartToggle", key, false)
+            || self.local_player_key_binding_in_scope(key)
+        {
+            return false;
+        }
+        // The callback has no Up handler, so a release stays unprocessed.
+        if state != ElementState::Pressed {
+            return false;
+        }
+        let mut flags = self.graphics.debug_draw_flags();
+        flags.show_net_status = !flags.show_net_status;
+        self.graphics.set_debug_draw_flags(flags);
+        true
+    }
+
     pub(crate) fn handle_runtime_fullscreen_menu_key(
         &mut self,
         key: VirtualKeyCode,
@@ -4457,6 +4486,9 @@ impl GameApp {
                         None
                     };
                 if self.handle_viewport_player_cycle_key(key, state) {
+                    return Ok(());
+                }
+                if self.handle_runtime_net_stats_toggle_key(key, state) {
                     return Ok(());
                 }
                 if let Some(key) = unsupported_running_shortcut.filter(|_| !denied_debug_callback) {
