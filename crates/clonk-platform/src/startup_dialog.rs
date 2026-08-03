@@ -113,7 +113,7 @@ mod windows_impl {
             // SAFETY: both strings outlive the call, which owns no memory.
             unsafe {
                 MessageBoxA(
-                    0,
+                    std::ptr::null_mut(),
                     message.as_ptr().cast(),
                     caption.as_ptr().cast(),
                     MB_ICONERROR | MB_OK,

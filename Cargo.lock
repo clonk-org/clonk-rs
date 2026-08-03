@@ -840,7 +840,7 @@ dependencies = [
  "rand 0.9.5",
  "tempfile",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1003,7 +1003,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -1121,7 +1121,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "windows 0.62.2",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1141,7 +1141,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "walkdir",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1181,7 +1181,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

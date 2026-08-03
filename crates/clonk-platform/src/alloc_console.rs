@@ -85,7 +85,7 @@ mod windows_impl {
                 std::ptr::null(),
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL,
-                0,
+                std::ptr::null_mut(),
             )
         };
         if handle == INVALID_HANDLE_VALUE {
@@ -184,7 +184,7 @@ mod tests {
                 .zip(observed.expect("attached console handles"))
                 .for_each(|((_, name), (handle, file_type))| {
                     assert!(handle != INVALID_HANDLE_VALUE, "{name} handle is invalid");
-                    assert!(handle != 0, "{name} handle is null");
+                    assert!(!handle.is_null(), "{name} handle is null");
                     assert_eq!(
                         file_type, FILE_TYPE_CHAR,
                         "{name} is not attached to a console device"
