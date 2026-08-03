@@ -11097,10 +11097,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn client_announces_addresses_before_final_scenario_validation_failure() {
-        // HandleJoinData sends known addresses before outer InitClient calls
-        // Parameters.InitNetwork, whose first required resource is Scenario
+        // HandleJoinData accepts known addresses into the nonblocking output
+        // buffer before outer InitClient calls Parameters.InitNetwork, whose
+        // first required resource is Scenario
         // (src/C4Network2.cpp:1620-1622,329-331;
-        // src/C4GameParameters.cpp:539-547).
+        // src/C4GameParameters.cpp:539-547). Fatal teardown may clear a still-
+        // buffered PID_Addr before the peer observes it, so wire receipt is not
+        // asserted (src/C4NetIO.cpp:1348-1399,1461-1472).
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
         snapshot.parameters.scenario = nonloadable_core(1, 8, b"Scenario.c4s");
@@ -11122,10 +11125,6 @@ mod tests {
             Some(&ControlMessage::Request { from_tick: 0 })
         );
         assert!(
-            matches!(messages.get(1), Some(ControlMessage::Address(packet)) if
-            packet.client_id == 0 && packet.address.endpoint == address)
-        );
-        assert!(
             probe.disconnected,
             "C4Network2::InitClient failure must clear the admitted Scenario route"
         );
@@ -11133,11 +11132,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn client_rechecks_failed_game_resource_after_announcing_addresses() {
-        // The early GameRes result is ignored. After addresses, the outer
-        // Parameters.InitNetwork retries GameRes after Scenario and makes the
-        // same missing non-loadable core fatal
+        // The early GameRes result is ignored. After accepting addresses into
+        // the nonblocking output buffer, outer Parameters.InitNetwork retries
+        // GameRes after Scenario and makes the same missing non-loadable core
+        // fatal
         // (src/C4Network2.cpp:1612-1622,329-331;
-        // src/C4GameParameters.cpp:237-247,539-547).
+        // src/C4GameParameters.cpp:237-247,539-547). Fatal teardown may clear a
+        // still-buffered PID_Addr before the peer observes it, so wire receipt
+        // is not asserted (src/C4NetIO.cpp:1348-1399,1461-1472).
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
         snapshot.parameters.game_resources.push(nonloadable_core(
@@ -11161,10 +11163,6 @@ mod tests {
         assert_eq!(
             messages.first(),
             Some(&ControlMessage::Request { from_tick: 0 })
-        );
-        assert!(
-            matches!(messages.get(1), Some(ControlMessage::Address(packet)) if
-            packet.client_id == 0 && packet.address.endpoint == address)
         );
         assert!(
             probe.disconnected,
