@@ -2198,10 +2198,12 @@ fn write_deterministic_zip(
     // unification. Release archives must not depend on that.
     let epoch = zip::DateTime::default();
     let dir_options = SimpleFileOptions::default()
+        .system(zip::System::Unix)
         .compression_method(CompressionMethod::Stored)
         .last_modified_time(epoch)
         .unix_permissions(0o755);
     let file_options = SimpleFileOptions::default()
+        .system(zip::System::Unix)
         .compression_method(CompressionMethod::Deflated)
         .last_modified_time(epoch);
 
@@ -3299,6 +3301,12 @@ mod tests {
                 entry.unix_mode().map(|mode| mode & 0o777),
                 Some(expected_mode),
                 "entry {} changed permissions",
+                entry.name()
+            );
+            assert_eq!(
+                zip::HasZipMetadata::get_metadata(&entry).system,
+                zip::System::Unix,
+                "entry {} inherited host-specific origin metadata",
                 entry.name()
             );
         }
