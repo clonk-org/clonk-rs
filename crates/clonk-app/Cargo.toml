@@ -31,7 +31,7 @@ arboard = { version = "3.3", default-features = false }
 # Global allocator for the shipped binary; see the `global_allocator` comment in
 # main.rs. Default features off keeps the secure/debug modes out of the build.
 mimalloc = { version = "0.1", default-features = false }
-gilrs = "0.10"
+gilrs = "0.11"
 clonk-app-core = { path = "../clonk-app-core" }
 clonk-app-menus = { path = "../clonk-app-menus" }
 clonk-app-netplay = { path = "../clonk-app-netplay" }
@@ -52,7 +52,7 @@ clonk-script = { path = "../clonk-script" }
 clonk-update = { path = "../clonk-update" }
 clonk-update-net = { path = "../clonk-update-net" }
 pixels = "0.17"
-rfd = "0.14"
+rfd = "0.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"
@@ -88,7 +88,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "4.4", default-features = false, features = ["async-io"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Globalization", "Win32_System_Console", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_TextServices"] }
