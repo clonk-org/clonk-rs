@@ -421,6 +421,11 @@ class CiLatencyTests(unittest.TestCase):
             "cargo check --locked --target x86_64-pc-windows-msvc -p pixels",
             workflow,
         )
+        self.assertIn(
+            "cargo check --locked --target x86_64-pc-windows-msvc "
+            "-p clonk-platform",
+            workflow,
+        )
 
     def test_parity_uses_the_lightweight_xtask_dispatcher(self):
         dispatcher = (REPOSITORY / "xtask" / "src" / "dispatcher.rs").read_text(

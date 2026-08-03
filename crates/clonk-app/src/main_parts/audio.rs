@@ -1361,7 +1361,7 @@ fn legacy_virtual_key_from_windows_physical(
     let scancode = physical_key.to_scancode()?;
     let keyboard_layout = unsafe { GetKeyboardLayout(0) };
     let raw_virtual_key =
-        unsafe { MapVirtualKeyExW(scancode, MAPVK_VSC_TO_VK_EX, keyboard_layout) };
+        unsafe { MapVirtualKeyExW(scancode, MAPVK_VSC_TO_VK_EX, Some(keyboard_layout)) };
     (raw_virtual_key != 0)
         .then(|| legacy_virtual_key_from_windows_raw(physical, raw_virtual_key, control_down))
         .flatten()

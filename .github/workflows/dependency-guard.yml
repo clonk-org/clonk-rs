@@ -75,6 +75,11 @@ jobs:
       - name: Check Windows renderer dependencies
         run: cargo check --locked --target x86_64-pc-windows-msvc -p pixels
 
+      # Check clonk-platform separately so pixels cannot mask a missing direct
+      # Windows feature through Cargo's feature unification.
+      - name: Check Windows platform bindings
+        run: cargo check --locked --target x86_64-pc-windows-msvc -p clonk-platform
+
       # Type-checks every library and binary, including the optional release
       # tooling, without optimized codegen. `--locked` additionally fails when
       # a manifest moved without its lockfile, which is the shape a bad

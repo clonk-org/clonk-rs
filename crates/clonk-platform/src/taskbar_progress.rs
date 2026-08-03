@@ -87,7 +87,7 @@ impl Win32TaskbarProgress {
         list.HrInit().ok()?;
         Some(Self {
             list,
-            window: windows::Win32::Foundation::HWND(window),
+            window: windows::Win32::Foundation::HWND(window as *mut core::ffi::c_void),
         })
     }
 }
