@@ -1051,7 +1051,8 @@ fn build_frame_decoration_snapshot(deco_id: &str) -> Option<crate::ObjectMenuFra
         match call_scoped_script_function(Arc::clone(&script), &function, &[]) {
             Some(Ok(value)) => value.as_c4_int().unwrap_or(0),
             Some(Err(error)) => {
-                tracing::debug!(%error, function, "frame-decoration callback failed; using zero");
+                tracing::error!(%error, function, "frame-decoration callback failed; using zero");
+                log_runtime_call_frames("", error.call_frames());
                 0
             }
             None => 0,

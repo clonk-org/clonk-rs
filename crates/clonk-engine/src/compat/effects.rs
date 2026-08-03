@@ -296,7 +296,8 @@ fn fold_effect_callback_fail_safe(
         None => 0,
         Some(Ok(value)) => value_as_i32(&value),
         Some(Err(error)) => {
-            tracing::debug!(%error, "script error in {function}; continuing like C++ fail-safe effect dispatch");
+            tracing::error!(%error, "script error in {function}; continuing like C++ fail-safe effect dispatch");
+            log_runtime_call_frames("", error.call_frames());
             0
         }
     }
@@ -1650,12 +1651,15 @@ pub(crate) fn object_effect_info_lines(target: ObjectId, effects: &[EffectState]
                 returned = value.type_name(),
                 "effect Info callback returned a non-string value"
             ),
-            Err(error) => tracing::debug!(
-                %error,
-                effect = effect.name,
-                number = effect.number,
-                "script error in effect Info callback; continuing like C++ fail-safe dispatch"
-            ),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    effect = effect.name,
+                    number = effect.number,
+                    "script error in effect Info callback; continuing like C++ fail-safe dispatch"
+                );
+                log_runtime_call_frames("", error.call_frames());
+            }
         }
     }
     lines

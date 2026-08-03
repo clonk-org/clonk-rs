@@ -75,6 +75,65 @@ fn run_failing_effect_ticks(recorder: LevelRecorder) {
     });
 }
 
+/// Drive `RemoveEffect`'s synchronous `Fx*Stop`, raising a runtime error inside
+/// it — the callback C4Effect runs with `fPassErrors=false`, so the engine
+/// folds the error to zero and only the log carries it.
+fn run_failing_effect_stop(recorder: LevelRecorder) {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let script = r#"#strict
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+public func Kill() { RemoveEffect("Probe", this()); return(1); }
+func FxProbeStop(pThis, iNumber) { UnknownFn(); return(1); }
+"#;
+    let subscriber = tracing_subscriber::registry().with(recorder);
+    tracing::subscriber::with_default(subscriber, || {
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_script_definition("HOLD", "Holder", script)
+            .expect("definition registers");
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
+            .expect("spawn succeeds");
+        let index = engine.find_object_index(holder).expect("object exists");
+        engine
+            .call_object_function(index, "Boot", Vec::new())
+            .expect("the effect is added");
+        engine
+            .call_object_function(index, "Kill", Vec::new())
+            .expect("RemoveEffect survives the Fx*Stop error");
+    });
+}
+
+#[test]
+fn a_tolerated_effect_stop_error_is_reported_with_its_frames() {
+    // C4Effect's stop/check/add calls run `fPassErrors=false`, so a failing
+    // `Fx*Stop` folds to zero and the round continues (C4Effect.cpp:200-230).
+    // The fold is the *result* policy, not a reason to hide the error: the
+    // player still gets C4AulExec's report and trace.
+    let recorder = LevelRecorder::default();
+    run_failing_effect_stop(recorder.clone());
+
+    let levels = recorder.levels_mentioning("fail-safe");
+    assert!(
+        !levels.is_empty(),
+        "the effect callback failure should be reported: {:?}",
+        recorder.events()
+    );
+    assert!(
+        levels.iter().all(|level| *level == tracing::Level::ERROR),
+        "the tolerated effect error is filtered out by default: {levels:?}"
+    );
+    assert!(
+        recorder
+            .events()
+            .iter()
+            .any(|(_, message)| message.contains(" by: ")),
+        "the effect callback failure was reported without a trace: {:?}",
+        recorder.events()
+    );
+}
+
 /// Drive the creation callbacks `CreateObject` fires, with a `Construction`
 /// that raises a runtime error — the shape whose only diagnostic is the one
 /// the host function itself writes.

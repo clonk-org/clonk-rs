@@ -4129,6 +4129,14 @@ pub(crate) fn log_runtime_call_frames(definition: &str, frames: &[clonk_script::
     }
 }
 
+/// Trace a tolerated engine call whose failure came from script; anything else
+/// the engine folded has no C4Aul context to dump.
+pub(crate) fn log_engine_error_call_frames(error: &EngineError) {
+    if let EngineError::Script { source, .. } = error {
+        log_runtime_call_frames("", source.call_frames());
+    }
+}
+
 pub(crate) fn tolerate_script_error<T>(
     result: Result<T, EngineError>,
 ) -> Result<Option<T>, EngineError> {
