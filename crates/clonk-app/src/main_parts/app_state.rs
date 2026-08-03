@@ -7177,7 +7177,7 @@ fn load_map_folder_image(group: &Group, name: &str) -> Result<ImageData> {
 }
 
 fn decode_map_folder_image(name: &str, bytes: &[u8]) -> Result<ImageData> {
-    let image = image::load_from_memory(bytes)
+    let image = clonk_resources::load_image_from_memory(bytes)
         .with_context(|| format!("decoding FolderMap image `{name}`"))?
         .into_rgba8();
     let (width, height) = image.dimensions();

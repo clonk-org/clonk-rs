@@ -1579,7 +1579,7 @@ fn decode_png(bytes: Vec<u8>) -> Option<ImageData> {
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     decoder.set_transformations(Transformations::EXPAND | Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
-    let mut buffer = vec![0; reader.output_buffer_size()];
+    let mut buffer = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buffer).ok()?;
     let bytes = &buffer[..info.buffer_size()];
     let pixels = match info.color_type {

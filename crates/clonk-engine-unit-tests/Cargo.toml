@@ -28,7 +28,7 @@ path = "../clonk-engine/src/lib.rs"
 
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 indexmap = { version = "2", features = ["serde"] }
 clonk-core = { path = "../clonk-core" }
 # Match clonk-app's test-only engine feature request. The feature only exposes

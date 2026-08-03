@@ -63,8 +63,8 @@ raw-window-handle = "0.6"
 winit = "0.30"
 tracing = "0.1"
 parking_lot = "0.12"
-png = "0.17"
-image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+png = "0.18"
+image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 freetype-rs = { version = "0.38.0", features = ["bundled"] }
 ttf-parser = "0.25.1"

@@ -927,7 +927,7 @@ fn encode_dynamic_png(
 ) -> Result<Vec<u8>, LiveC4PlayerError> {
     let mut cursor = std::io::Cursor::new(Vec::new());
     image
-        .write_to(&mut cursor, image::ImageOutputFormat::Png)
+        .write_to(&mut cursor, image::ImageFormat::Png)
         .map_err(|error| LiveC4PlayerError::ImageEncoding {
             asset,
             detail: error.to_string(),

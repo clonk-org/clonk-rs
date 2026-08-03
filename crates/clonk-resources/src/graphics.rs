@@ -142,7 +142,7 @@ impl GraphicsResource {
 }
 
 fn decode_image(bytes: &[u8]) -> Result<DynamicImage, image::ImageError> {
-    image::load_from_memory(bytes)
+    crate::load_image_from_memory(bytes)
 }
 
 fn fold_ascii_case(name: &[u8]) -> Vec<u8> {
@@ -164,7 +164,7 @@ mod tests {
             DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba(pixel)));
         let mut bytes = Cursor::new(Vec::new());
         image
-            .write_to(&mut bytes, image::ImageOutputFormat::Png)
+            .write_to(&mut bytes, image::ImageFormat::Png)
             .expect("encode PNG");
         bytes.into_inner()
     }

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use clonk_resources::bitmap::{BitmapError, IndexedBitmap};
 use clonk_resources::{Group, GroupError, MutableGroup, MutableGroupEntryKind, MutableGroupError};
 use clonk_script::{C4StringValue, Value};
-use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
+use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use thiserror::Error;
 
 use crate::command::{CommandData, LegacyCommandSave};
@@ -3660,7 +3660,7 @@ fn encode_landscape_png(landscape: &crate::Landscape) -> Result<Vec<u8>, image::
         }
     }
     let mut output = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(image).write_to(&mut output, ImageOutputFormat::Png)?;
+    DynamicImage::ImageRgba8(image).write_to(&mut output, ImageFormat::Png)?;
     Ok(output.into_inner())
 }
 

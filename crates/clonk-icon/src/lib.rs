@@ -202,7 +202,7 @@ pub fn app_ico_bytes() -> Option<Vec<u8>> {
                 icon.as_raw(),
                 icon.width(),
                 icon.height(),
-                image::ColorType::Rgba8,
+                image::ColorType::Rgba8.into(),
             )
             .ok()
         })
@@ -228,7 +228,7 @@ pub fn png_bytes(icon: &image::RgbaImage) -> Option<Vec<u8>> {
             icon.as_raw(),
             icon.width(),
             icon.height(),
-            image::ColorType::Rgba8,
+            image::ColorType::Rgba8.into(),
         )
         .ok()?;
     Some(bytes)
@@ -270,7 +270,7 @@ mod tests {
     fn png_of(image: &image::RgbaImage) -> Vec<u8> {
         let mut bytes = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(image.clone())
-            .write_to(&mut bytes, image::ImageOutputFormat::Png)
+            .write_to(&mut bytes, image::ImageFormat::Png)
             .expect("an in-memory PNG encode cannot fail");
         bytes.into_inner()
     }
