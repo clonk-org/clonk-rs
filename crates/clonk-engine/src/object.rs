@@ -2261,28 +2261,6 @@ impl Object {
         self.fixed_velocity = FixedVec2::from_ints(velocity.x, velocity.y);
     }
 
-    fn set_velocity_preserving_subpixel(&mut self, velocity: Vector2) {
-        fn preserve_axis(fixed: &mut C4Fixed, previous: i32, resolved: i32) {
-            if resolved == previous {
-                return;
-            }
-            if resolved == 0 {
-                *fixed = C4Fixed::ZERO;
-                return;
-            }
-            if previous != 0 && previous.signum() != resolved.signum() {
-                *fixed = -*fixed;
-                return;
-            }
-            *fixed = itofix(resolved);
-        }
-
-        let previous = self.state.velocity;
-        preserve_axis(&mut self.fixed_velocity.x, previous.x, velocity.x);
-        preserve_axis(&mut self.fixed_velocity.y, previous.y, velocity.y);
-        self.refresh_velocity_from_fixed();
-    }
-
     pub(crate) fn refresh_velocity_from_fixed(&mut self) {
         self.state.velocity = self.velocity_pixels();
     }
@@ -3592,23 +3570,6 @@ impl Object {
         *slot = slot.saturating_add(amount);
     }
 
-    pub(crate) fn apply_material_interaction(&mut self, material: &Material) {
-        let friction = material.friction();
-        if friction != 0 {
-            self.fixed_velocity.x =
-                apply_horizontal_friction_fixed(self.fixed_velocity.x, friction);
-            self.refresh_velocity_from_fixed();
-            for vertex in &mut self.state.vertices {
-                vertex.friction = friction;
-            }
-        }
-    }
-
-    pub(crate) fn apply_collision_resolution(&mut self, resolution: &CollisionResolution) {
-        self.set_position(resolution.position);
-        self.set_velocity_preserving_subpixel(resolution.velocity);
-    }
-
     // iIntervall/iTime are stored verbatim (C4Effect.cpp:66-67) - a zero
     // interval means the timer never fires.
     /// C4Effect::New semantics: same-name effects COEXIST; each gets a
@@ -3854,21 +3815,6 @@ impl Object {
                     op.apply(landscape_ref);
                 }
             }
-            if !self.state.vertices.is_empty() {
-                if let Some(landscape_ref) = &mut landscape {
-                    let resolution = (**landscape_ref)
-                        .resolve_collision(self.state.position, self.state.velocity);
-                    if resolution.collided {
-                        self.apply_collision_resolution(&resolution);
-                        if let Some(material_id) = resolution.material {
-                            if let Some(material) = materials.get_by_id(material_id) {
-                                self.apply_material_interaction(material);
-                            }
-                        }
-                    }
-                }
-            }
-
             if outcome.destroy {
                 self.command_queue.clear();
                 break;

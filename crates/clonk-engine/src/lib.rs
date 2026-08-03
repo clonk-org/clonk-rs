@@ -138,9 +138,9 @@ pub use direct_com::MouseWorldCursor;
 pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;
 pub use landscape::{
-    BlastResult, CollisionResolution, Landscape, LandscapeCommand, LandscapeError,
-    LandscapePersistenceError, LiquidColumn, LiquidSegment, LANDSCAPE_MODE_DYNAMIC,
-    LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC, LANDSCAPE_MODE_UNDEFINED,
+    BlastResult, Landscape, LandscapeCommand, LandscapeError, LandscapePersistenceError,
+    LiquidColumn, LiquidSegment, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT,
+    LANDSCAPE_MODE_STATIC, LANDSCAPE_MODE_UNDEFINED,
 };
 pub use live_c4_player::{
     serialize_aggressively_stripped_c4_player, serialize_live_c4_player,
@@ -7953,30 +7953,6 @@ fn com_name(command: ControlCommand, kind: CommandKind) -> Option<String> {
 
 fn control_function_name(command: ControlCommand, kind: CommandKind) -> Option<String> {
     com_name(command, kind).map(|com| format!("Control{com}"))
-}
-
-fn apply_horizontal_friction_fixed(value: C4Fixed, friction: i32) -> C4Fixed {
-    let raw = value.val();
-    if raw == 0 || friction == 0 {
-        return value;
-    }
-    let friction = friction.clamp(0, 100);
-    if friction == 0 {
-        return value;
-    }
-    let magnitude = i64::from(raw).abs();
-    let mut retained = magnitude.saturating_mul(i64::from(100 - friction)) / 100;
-    if retained == magnitude && friction > 0 {
-        retained = magnitude.saturating_sub(1);
-    }
-    let signed = if retained == 0 {
-        0
-    } else if raw > 0 {
-        retained
-    } else {
-        -retained
-    };
-    C4Fixed::from_raw(saturating_i64_to_i32(signed))
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -6308,56 +6308,6 @@ impl Landscape {
 
         None
     }
-
-    pub fn resolve_collision(&self, position: Vector2, velocity: Vector2) -> CollisionResolution {
-        // With the pixel plane there is NO surface snap at all: C++ has no
-        // such mechanism — per-pixel movement contact governs motion, and
-        // embedded objects simply sit (the snap is the column model's
-        // stand-in for fixtures without real terrain).
-        if self.pixels.is_some() {
-            return CollisionResolution {
-                position,
-                velocity,
-                collided: false,
-                material: None,
-            };
-        }
-        // Liquid is not ground: GBackLiquid pixels (density 25..50) never
-        // eject an object to the column surface — classified maps carry
-        // cave rivers BELOW the surface scalar (the surface snap itself is
-        // a column-model stand-in; C++ resolves contact per pixel).
-        if self.is_liquid_at(position.x, position.y) {
-            return CollisionResolution {
-                position,
-                velocity,
-                collided: false,
-                material: None,
-            };
-        }
-        match self.surface_height(position.x) {
-            Some(surface_y) if position.y > surface_y => {
-                let mut new_position = position;
-                let mut new_velocity = velocity;
-                new_position.y = surface_y;
-                if new_velocity.y > 0 {
-                    new_velocity.y = 0;
-                }
-                let material = self.solid_material_at(position.x);
-                CollisionResolution {
-                    position: new_position,
-                    velocity: new_velocity,
-                    collided: true,
-                    material,
-                }
-            }
-            _ => CollisionResolution {
-                position,
-                velocity,
-                collided: false,
-                material: None,
-            },
-        }
-    }
 }
 
 struct EditorMapSurface<'a> {
@@ -7455,14 +7405,6 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.raster_state = data.raster_state;
         Ok(landscape)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CollisionResolution {
-    pub position: Vector2,
-    pub velocity: Vector2,
-    pub collided: bool,
-    pub material: Option<MaterialId>,
 }
 
 #[cfg(test)]
@@ -10312,41 +10254,6 @@ func TransactionThenRaw()
         }
 
         surface
-    }
-
-    #[test]
-    fn resolves_vertical_collision() {
-        let landscape = Landscape::flat(10, 5);
-        let position = Vector2::new(3, 8);
-        let velocity = Vector2::new(0, 3);
-        let resolution = landscape.resolve_collision(position, velocity);
-        assert!(resolution.collided);
-        assert_eq!(resolution.position, Vector2::new(3, 5));
-        assert_eq!(resolution.velocity, Vector2::new(0, 0));
-        assert_eq!(resolution.material, None);
-    }
-
-    #[test]
-    fn ignores_points_above_surface() {
-        let landscape = Landscape::flat(10, 5);
-        let position = Vector2::new(3, 2);
-        let velocity = Vector2::new(0, -1);
-        let resolution = landscape.resolve_collision(position, velocity);
-        assert!(!resolution.collided);
-        assert_eq!(resolution.position, position);
-        assert_eq!(resolution.velocity, velocity);
-        assert_eq!(resolution.material, None);
-    }
-
-    #[test]
-    fn resolves_material_with_default() {
-        let material = MaterialId::new(0).expect("material id");
-        let landscape = Landscape::flat_with_material(8, 12, Some(material));
-        let position = Vector2::new(2, 20);
-        let velocity = Vector2::new(0, 6);
-        let resolution = landscape.resolve_collision(position, velocity);
-        assert!(resolution.collided);
-        assert_eq!(resolution.material, Some(material));
     }
 
     #[test]

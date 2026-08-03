@@ -3872,52 +3872,6 @@ impl Engine {
         }
     }
 
-    #[doc(hidden)]
-    pub fn apply_landscape_at_index(&mut self, idx: usize) {
-        if idx >= self.objects.len() || self.objects[idx].state.vertices.is_empty() {
-            return;
-        }
-
-        let procedure = {
-            let object = &self.objects[idx];
-            let definition_id = object.definition_id.clone();
-            self.definitions
-                .get(&definition_id)
-                .map(|definition| {
-                    definition.action_library().procedure_for_entry(
-                        &object.state.action.name,
-                        object.state.action.act_map_index,
-                    )
-                })
-                .unwrap_or_default()
-        };
-
-        if matches!(procedure, ActionProcedure::Attach) {
-            return;
-        }
-
-        let resolution = match self.landscape.as_ref() {
-            Some(landscape) => {
-                let (position, velocity) = {
-                    let object = &self.objects[idx];
-                    (object.state.position, object.state.velocity)
-                };
-                landscape.resolve_collision(position, velocity)
-            }
-            None => return,
-        };
-        if !resolution.collided {
-            return;
-        }
-        let object = &mut self.objects[idx];
-        object.apply_collision_resolution(&resolution);
-        if let Some(material_id) = resolution.material {
-            if let Some(material) = self.materials.get_by_id(material_id) {
-                object.apply_material_interaction(material);
-            }
-        }
-    }
-
     /// `C4GameObjects::CrossCheck` reverse area check
     /// (C4GameObjects.cpp:140-197), run once per frame after object    /// execution: every frame an OCF_Alive victim takes OCF_HitSpeed2 hits
     /// from C4D_Object projectiles inside its shape; on Tick3 frames

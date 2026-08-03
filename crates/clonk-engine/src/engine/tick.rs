@@ -936,7 +936,6 @@ impl Engine {
             }
 
             dbg_stage(&self.objects[idx], "POSTMOVE");
-            self.apply_landscape_at_index(idx);
             // Masks follow every state change this frame
             // (C4Object::UpdateSolidMask fires from UpdatePos/Enter/
             // Exit/DoCon; the end-of-exec update covers the net state).
@@ -1426,7 +1425,6 @@ impl Engine {
                 continue;
             }
 
-            self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
             let (
                 procedure,
@@ -1799,7 +1797,6 @@ impl Engine {
         id: ObjectId,
         update: ObjectUpdate,
     ) -> Result<(), EngineError> {
-        let landscape = self.landscape.clone();
         let index = self
             .objects
             .iter()
@@ -2188,21 +2185,6 @@ impl Engine {
             }
 
             object.clamp_velocity(&self.physics);
-
-            if !object.state.vertices.is_empty() {
-                if let Some(landscape) = landscape.as_ref() {
-                    let resolution =
-                        landscape.resolve_collision(object.state.position, object.state.velocity);
-                    if resolution.collided {
-                        object.apply_collision_resolution(&resolution);
-                        if let Some(material_id) = resolution.material {
-                            if let Some(material) = self.materials.get_by_id(material_id) {
-                                object.apply_material_interaction(material);
-                            }
-                        }
-                    }
-                }
-            }
 
             (
                 object.id,
