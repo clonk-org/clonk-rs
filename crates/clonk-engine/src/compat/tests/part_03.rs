@@ -468,6 +468,47 @@
     }
 
     #[test]
+    fn sound_and_sound_level_accept_an_empty_name_like_cpp() {
+        // FnSound and FnSoundLevel never validate the name: FnStringPar maps
+        // a null C4String to "", and both forward it unconditionally
+        // (C4Script.cpp:2297-2327,2358-2361). An ActMap action without
+        // `Sound=` yields exactly that empty string through GetActMapVal, so
+        // an omitted and an empty name must behave alike and never abort the
+        // calling script. PrepareFilename resolves both to ".wav", which
+        // matches no sample, so neither reaches playback
+        // (C4SoundSystem.cpp:307-320,361-366).
+        let (result, outcome) = with_object_host_context(|| {
+            assert_eq!(
+                sound(&[Value::String(String::new().into())])?,
+                Value::Bool(true)
+            );
+            assert_eq!(sound(&[])?, Value::Bool(true));
+            let stop = [
+                Value::String(String::new().into()),
+                Value::Bool(false),
+                Value::Nil,
+                Value::Int(100),
+                Value::Int(0),
+                Value::Int(-1),
+            ];
+            assert_eq!(sound(&stop)?, Value::Bool(true));
+            assert_eq!(
+                sound_level(&[Value::String(String::new().into()), Value::Int(50)])?,
+                Value::Nil
+            );
+            assert_eq!(sound_level(&[])?, Value::Nil);
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+
+        result.expect("empty-name sound probes run");
+        assert!(
+            outcome.audio.events.is_empty(),
+            "an empty name resolves no sample; got {:?}",
+            outcome.audio.events
+        );
+    }
+
+    #[test]
     fn sound_emits_pending_requests_for_frontend_dedup_and_negative_level_is_a_noop() {
         let (result, outcome) = with_object_host_context(|| {
             assert_eq!(sound(&[Value::String("Hit".into())])?, Value::Bool(true));

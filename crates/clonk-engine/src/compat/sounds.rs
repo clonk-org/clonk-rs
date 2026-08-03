@@ -55,16 +55,12 @@ pub(crate) fn set_play_list(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub(crate) fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
-    let name = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(value) if !value.is_empty() => value.clone(),
-        Value::Nil => return Ok(Value::Bool(true)),
-        other => {
-            return Err(RuntimeError::new(format!(
-                "Sound: expected string for name, got {}",
-                other.type_name()
-            )));
-        }
-    };
+    // FnSound never inspects the name: FnStringPar turns a null C4String into
+    // "" and StartSoundEffect/StopSoundEffect simply resolve nothing, leaving
+    // the unconditional network-safe `return true` (C4Script.cpp:2297-2327).
+    // An ActMap action without `Sound=` reaches script as exactly that empty
+    // string, so it must not abort the caller.
+    let name = parse_native_c4_string_argument(args.first(), "Sound", "name")?.unwrap_or_default();
 
     let mut index = 1;
     let global = if let Some(arg) = args.get(index) {
@@ -151,6 +147,14 @@ pub(crate) fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(true));
         }
 
+        // PrepareFilename turns an extensionless name into `name.wav`, so an
+        // empty one asks for ".wav" and matches no sample on any client
+        // (C4SoundSystem.cpp:307-320,361-366). Start and stop both find
+        // nothing; only the network-safe `true` is left.
+        if name.is_empty() {
+            return Ok(Value::Bool(true));
+        }
+
         if loop_flag < 0 {
             context.audio_mut().stop_sound(&name, target_id);
             return Ok(Value::Bool(true));
@@ -185,16 +189,11 @@ pub(crate) fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub(crate) fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
-    let name = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(value) if !value.is_empty() => value.clone(),
-        Value::Nil => return Ok(Value::Nil),
-        other => {
-            return Err(RuntimeError::new(format!(
-                "SoundLevel: expected string for name, got {}",
-                other.type_name()
-            )));
-        }
-    };
+    // FnSoundLevel is a bare forward to SoundLevel with no name check
+    // (C4Script.cpp:2358-2361), so an empty name is a lookup that finds
+    // nothing, not an error.
+    let name =
+        parse_native_c4_string_argument(args.first(), "SoundLevel", "name")?.unwrap_or_default();
 
     let level = match args.get(1).unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
@@ -216,7 +215,11 @@ pub(crate) fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
             None
         };
 
-        context.audio_mut().sound_level(&name, target_id, level);
+        // FindInst and NewInstance both resolve ".wav" for an empty name and
+        // match nothing (C4SoundSystem.cpp:271-286,307-320,361-366).
+        if !name.is_empty() {
+            context.audio_mut().sound_level(&name, target_id, level);
+        }
         Ok(Value::Nil)
     })
 }
