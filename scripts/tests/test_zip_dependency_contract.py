@@ -13,14 +13,14 @@ ZIP_CONSUMERS = (
 
 
 class ZipDependencyContractTests(unittest.TestCase):
-    def test_every_direct_consumer_uses_zip_8_with_the_rust_deflate_backend(self):
+    def test_every_direct_consumer_uses_zip_8_1_with_the_rust_deflate_backend(self):
         for relative, section in ZIP_CONSUMERS:
             with self.subTest(manifest=relative):
                 manifest = tomllib.loads(
                     (REPOSITORY / relative).read_text(encoding="utf-8")
                 )
                 dependency = manifest[section]["zip"]
-                self.assertEqual(dependency["version"], "8")
+                self.assertEqual(dependency["version"], "8.1")
                 self.assertFalse(dependency["default-features"])
                 self.assertEqual(dependency["features"], ["deflate-flate2"])
 

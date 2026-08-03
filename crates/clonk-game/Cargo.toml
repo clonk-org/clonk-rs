@@ -29,7 +29,7 @@ clonk-icon = { path = "../clonk-icon", features = ["build-script"] }
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tempfile = "3"
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
