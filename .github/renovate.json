@@ -4,6 +4,7 @@
     "config:recommended",
     ":dependencyDashboard",
     ":semanticCommitTypeAll(chore)",
+    ":semanticCommitScopeDisabled",
     "helpers:pinGitHubActionDigests",
     "schedule:monthly"
   ],
