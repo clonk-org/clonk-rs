@@ -20,7 +20,8 @@
 //!    collision is a property of the archive rather than of the entry that
 //!    happens to arrive second.
 //! 3. Per entry: our own path rules (no `..`, nothing absolute, no `\` or `:`
-//!    smuggling, no empty or `.` segments).
+//!    smuggling, no empty or `.` segments, and no names Windows rewrites or
+//!    reserves).
 //! 4. Per entry: `ZipFile::enclosed_name`, the reader's independent
 //!    containment check, as a backstop for names our rules did not anticipate.
 //! 5. Per entry: no symlinks — the classic way an archive turns a later
@@ -133,6 +134,51 @@ fn fold_case(component: &str) -> String {
         .collect()
 }
 
+/// Device names Win32 resolves instead of creating as ordinary files.
+///
+/// Windows ignores an extension and spaces before it for this purpose, and
+/// recognizes the superscript forms of COM/LPT 1-3 as digits too.
+fn is_windows_reserved_device_name(component: &str) -> bool {
+    let stem = component
+        .split(['.', ':'])
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches(' ');
+    if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"]
+        .into_iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    {
+        return true;
+    }
+
+    stem.get(..3)
+        .zip(stem.get(3..))
+        .is_some_and(|(prefix, suffix)| {
+            (prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT"))
+                && matches!(
+                    suffix,
+                    "1" | "2"
+                        | "3"
+                        | "4"
+                        | "5"
+                        | "6"
+                        | "7"
+                        | "8"
+                        | "9"
+                        | "\u{b9}"
+                        | "\u{b2}"
+                        | "\u{b3}"
+                )
+        })
+}
+
+fn has_windows_illegal_character(component: &str) -> bool {
+    component.chars().any(|character| {
+        ('\u{1}'..='\u{1f}').contains(&character)
+            || matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaimedNodeKind {
     ImplicitDirectory,
@@ -234,11 +280,11 @@ fn safe_entry_path(name: &str) -> Result<PathBuf, EntryFault> {
     if name.starts_with('/') || name.starts_with('\\') {
         return Err(EntryFault::Absolute);
     }
-    let trimmed = name.trim_end_matches('/');
-    if trimmed.is_empty() {
+    let without_directory_marker = name.strip_suffix('/').unwrap_or(name);
+    if without_directory_marker.is_empty() {
         return Err(EntryFault::Malformed);
     }
-    trimmed
+    without_directory_marker
         .split('/')
         .try_fold(PathBuf::new(), |mut path, segment| {
             match segment {
@@ -249,6 +295,14 @@ fn safe_entry_path(name: &str) -> Result<PathBuf, EntryFault> {
                 // both traversal and rooting past a `/`-only reading.
                 _ if segment.contains('\\') => return Err(EntryFault::Traversal),
                 "" | "." => return Err(EntryFault::Malformed),
+                _ if is_windows_reserved_device_name(segment) => return Err(EntryFault::Malformed),
+                _ if has_windows_illegal_character(segment) => return Err(EntryFault::Malformed),
+                _ if segment.starts_with(' ')
+                    || segment.ends_with(' ')
+                    || segment.ends_with('.') =>
+                {
+                    return Err(EntryFault::Malformed);
+                }
                 _ => path.push(segment),
             }
             Ok(path)
@@ -805,11 +859,136 @@ mod tests {
     }
 
     #[test]
+    fn a_windows_reserved_device_name_rejects_before_writing() {
+        for name in [
+            "CON",
+            "con.txt",
+            "CON .txt",
+            "NUL  .txt",
+            "conin$",
+            "CONOUT$.log",
+            "clock$.txt",
+            "safe/PRN.log",
+            "AUX",
+            "NUL.txt",
+            "COM1",
+            "com9.dat",
+            "LPT1",
+            "lpt9.log",
+            "COM\u{b9}.txt",
+            "COM\u{b2}",
+            "COM\u{b3}",
+            "LPT\u{b9}.txt",
+            "LPT\u{b2}",
+            "LPT\u{b3}",
+        ] {
+            let (directory, result) = extract(&with_entry(name), 1024);
+            assert!(
+                matches!(
+                    result,
+                    Err(ExtractError::Unsafe {
+                        fault: EntryFault::Malformed,
+                        ..
+                    })
+                ),
+                "{name:?} should be rejected, got {result:?}"
+            );
+            assert!(!directory.path().join("staged").exists());
+        }
+
+        let directory_entry = archive_of(|writer| {
+            writer
+                .add_directory("NUL/", SimpleFileOptions::default())
+                .expect("add reserved directory");
+        });
+        let (directory, result) = extract(&directory_entry, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Malformed,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn non_device_windows_lookalikes_remain_usable() {
+        let allowed = [
+            "COM0.txt",
+            "COM10.txt",
+            "LPT0",
+            "LPT10",
+            "NULish",
+            "console",
+            ".temp",
+            "COM\u{2074}",
+            "\u{a0}nonbreaking-space.txt",
+        ];
+        let bytes = archive_of(|writer| {
+            for name in allowed {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("start allowed lookalike");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+
+        let (_directory, result) = extract(&bytes, 1024);
+        assert_eq!(
+            result.expect("extract allowed lookalikes").files,
+            allowed.len()
+        );
+    }
+
+    #[test]
+    fn a_windows_illegal_character_rejects_before_writing() {
+        for name in [
+            "evil<name.txt",
+            "evil>name.txt",
+            "evil\"name.txt",
+            "evil|name.txt",
+            "evil?name.txt",
+            "evil*name.txt",
+            "safe/evil\u{1}name.txt",
+            "safe/evil\u{1f}name.txt",
+        ] {
+            let (directory, result) = extract(&with_entry(name), 1024);
+            assert!(
+                matches!(
+                    result,
+                    Err(ExtractError::Unsafe {
+                        fault: EntryFault::Malformed,
+                        ..
+                    })
+                ),
+                "{name:?} should be rejected, got {result:?}"
+            );
+            assert!(!directory.path().join("staged").exists());
+        }
+
+        let directory_entry = archive_of(|writer| {
+            writer
+                .add_directory("evil*/", SimpleFileOptions::default())
+                .expect("add invalid directory");
+        });
+        let (directory, result) = extract(&directory_entry, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Malformed,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
     fn an_entry_name_the_zip_reader_cannot_enclose_rejects_the_archive() {
-        // `enclosed_name` is the reader's own containment check. Ours runs
-        // first and is stricter, but a name it happens to accept — an embedded
-        // NUL, say — must not slip past just because our rules did not name it.
-        let (_directory, result) = extract(&with_entry("evil\0.txt"), 1024);
+        // `enclosed_name` is the reader's independent containment check. NUL
+        // remains its responsibility so this defense-in-depth guard stays
+        // exercised even as our platform-independent rules grow stricter.
+        let (directory, result) = extract(&with_entry("evil\0.txt"), 1024);
         assert!(matches!(
             result,
             Err(ExtractError::Unsafe {
@@ -817,6 +996,65 @@ mod tests {
                 ..
             })
         ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn a_windows_trimmed_component_rejects_before_writing() {
+        for name in [
+            " leading.txt",
+            "trailing.txt ",
+            "trailing.",
+            "safe/ nested.txt",
+            "safe/nested.txt ",
+            "safe/nested.",
+        ] {
+            let (directory, result) = extract(&with_entry(name), 1024);
+            assert!(
+                matches!(
+                    result,
+                    Err(ExtractError::Unsafe {
+                        fault: EntryFault::Malformed,
+                        ..
+                    })
+                ),
+                "{name:?} should be rejected, got {result:?}"
+            );
+            assert!(!directory.path().join("staged").exists());
+        }
+
+        let directory_entry = archive_of(|writer| {
+            writer
+                .add_directory("trailing. /", SimpleFileOptions::default())
+                .expect("add trimmed directory");
+        });
+        let (directory, result) = extract(&directory_entry, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Malformed,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn repeated_directory_separators_reject_before_writing() {
+        let bytes = archive_of(|writer| {
+            writer
+                .add_directory("dir//", SimpleFileOptions::default())
+                .expect("add malformed directory");
+        });
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Malformed,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
     }
 
     #[test]
@@ -1139,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_unicode_path_field_rejects_before_writing() {
+    fn unicode_path_field_with_wrong_crc_rejects_before_writing() {
         let bytes = archive_of(|writer| {
             writer
                 .start_file("plain.txt", unicode_path_options("alias.txt"))
