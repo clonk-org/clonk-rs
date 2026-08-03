@@ -126,8 +126,8 @@ const UNIX_SYMLINK: u32 = 0o120000;
 /// remain distinct there.
 fn fold_case(component: &str) -> String {
     let normalized: String = component.chars().nfd().collect();
-    unicase::UniCase::unicode(normalized)
-        .to_folded_case()
+    icu_casemap::CaseMapper::new()
+        .fold_string(&normalized)
         .chars()
         .nfd()
         .collect()
@@ -920,6 +920,28 @@ mod tests {
     }
 
     #[test]
+    fn three_character_full_fold_aliases_reject_before_writing() {
+        let bytes = archive_of(|writer| {
+            for name in ["\u{fb03}le.txt", "ffile.txt"] {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("start ligature alias");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Collision,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
     fn aliased_directory_prefixes_reject_before_writing() {
         let bytes = archive_of(|writer| {
             for name in ["Dir/a.txt", "dir/b.txt"] {
@@ -943,42 +965,61 @@ mod tests {
 
     #[test]
     fn file_and_directory_nodes_cannot_share_a_path() {
-        let bytes = archive_of(|writer| {
-            writer
-                .start_file("node", SimpleFileOptions::default())
-                .expect("start file");
-            writer.write_all(b"payload").expect("write file");
-            writer
-                .start_file("node/child.txt", SimpleFileOptions::default())
-                .expect("start child under file");
-            writer.write_all(b"payload").expect("write child");
-        });
+        for child_first in [false, true] {
+            let bytes = archive_of(|writer| {
+                let mut file = |name: &str| {
+                    writer
+                        .start_file(name, SimpleFileOptions::default())
+                        .expect("start file");
+                    writer.write_all(b"payload").expect("write file");
+                };
+                if child_first {
+                    file("node/child.txt");
+                    file("node");
+                } else {
+                    file("node");
+                    file("node/child.txt");
+                }
+            });
 
-        let (directory, result) = extract(&bytes, 1024);
-        assert!(matches!(
-            result,
-            Err(ExtractError::Unsafe {
-                fault: EntryFault::Collision,
-                ..
-            })
-        ));
-        assert!(!directory.path().join("staged").exists());
+            let (directory, result) = extract(&bytes, 1024);
+            assert!(matches!(
+                result,
+                Err(ExtractError::Unsafe {
+                    fault: EntryFault::Collision,
+                    ..
+                })
+            ));
+            assert!(!directory.path().join("staged").exists());
+        }
     }
 
     #[test]
     fn an_explicit_directory_can_share_its_exact_path_with_children() {
-        let bytes = archive_of(|writer| {
-            writer
-                .add_directory("node/", SimpleFileOptions::default())
-                .expect("add directory");
-            writer
-                .start_file("node/child.txt", SimpleFileOptions::default())
-                .expect("start child");
-            writer.write_all(b"payload").expect("write child");
-        });
+        for child_first in [false, true] {
+            let bytes = archive_of(|writer| {
+                if child_first {
+                    writer
+                        .start_file("node/child.txt", SimpleFileOptions::default())
+                        .expect("start child");
+                    writer.write_all(b"payload").expect("write child");
+                    writer
+                        .add_directory("node/", SimpleFileOptions::default())
+                        .expect("add directory");
+                } else {
+                    writer
+                        .add_directory("node/", SimpleFileOptions::default())
+                        .expect("add directory");
+                    writer
+                        .start_file("node/child.txt", SimpleFileOptions::default())
+                        .expect("start child");
+                    writer.write_all(b"payload").expect("write child");
+                }
+            });
 
-        let (_directory, result) = extract(&bytes, 1024);
-        assert_eq!(result.expect("extract directory and child").files, 1);
+            let (_directory, result) = extract(&bytes, 1024);
+            assert_eq!(result.expect("extract directory and child").files, 1);
+        }
     }
 
     #[test]
