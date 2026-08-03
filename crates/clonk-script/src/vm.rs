@@ -6563,7 +6563,11 @@ impl<'a> Vm<'a> {
             } else {
                 left
             }),
-            Sub => self.eval_int_op(left, right, |a, b| a - b, "-"),
+            // C++ AB_Sub stores the native C4ValueInt difference directly in
+            // C4Value (`SetInt(lhs - rhs)`, C4AulExec.cpp:546-553), so it wraps
+            // on 32-bit two's-complement overflow rather than trapping. Match
+            // AB_Sum/AB_Mul below instead of panicking in a checked build.
+            Sub => self.eval_int_op(left, right, i32::wrapping_sub, "-"),
             // C++ AB_Mul stores the native C4ValueInt product directly in
             // C4Value (`SetInt(lhs * rhs)`, C4AulExec.cpp:511-518). Preserve
             // that 32-bit two's-complement result instead of panicking in a

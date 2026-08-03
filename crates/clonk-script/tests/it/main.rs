@@ -39,6 +39,7 @@ mod test_increment_decrement_lvalues;
 mod test_increment_nil;
 mod test_inherited;
 mod test_int_coercion;
+mod test_integer_overflow;
 mod test_keyword_parameter_names;
 mod test_keyword_var_names;
 mod test_literal_zero_strictness;
