@@ -4,6 +4,24 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-08-03
+
+### Bug fixes
+
+- Generate admissible dependency pull request titles (#93)
+- Align Windows DX12 dependency types (#92)
+- Remove pixel-less column collision fallback (#85)
+- Preserve mapped UDP destinations on IPv6 sockets (#91)
+- Refresh liquid state after SetPosition (#84)
+- Align AddMessage with C++ append semantics (#83)
+- Update the pixels rendering stack (#86)
+- Correct Mars oxygen alarm behavior (#82)
+- Route effect conversion warnings through debug log (#81)
+
+### Testing
+
+- Stabilize post-join address assertions (#97)
+
 ## [0.6.3] - 2026-08-02
 
 ### Bug fixes
