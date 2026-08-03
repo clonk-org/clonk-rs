@@ -408,6 +408,53 @@
         assert_eq!(round_inverse_angle(-30.5), -30);
     }
 
+    #[test]
+    fn sqrt_reproduces_cpp_correction_steps_including_the_wrapped_product() {
+        // FnSqrt (C4Script.cpp:3240-3247) truncates the double root, then
+        // nudges it up and back down with two `iSqrt * iSqrt` comparisons. On
+        // `C4ValueInt = int32_t` (C4Value.h:62) the second product wraps for
+        // any input above the largest representable square 46340^2, so the
+        // decrement never fires and C++ returns one *more* than floor(sqrt).
+        // Every value in [2147395601, 2147483647] takes that branch.
+        let mut engine = clonk_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                r#"
+                #strict
+                func Probe() {
+                    return [
+                        Sqrt(-100), Sqrt(0), Sqrt(1), Sqrt(2),
+                        Sqrt(15), Sqrt(16), Sqrt(24), Sqrt(25),
+                        Sqrt(2147395599), Sqrt(2147395600),
+                        Sqrt(2147395601), Sqrt(2147450880),
+                        Sqrt(2147483647)
+                    ];
+                }
+                "#,
+            )
+            .expect("Sqrt probe compiles");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("Sqrt runs"),
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(3),
+                Value::Int(4),
+                Value::Int(4),
+                Value::Int(5),
+                Value::Int(46339),
+                Value::Int(46340),
+                Value::Int(46341),
+                Value::Int(46341),
+                Value::Int(46341),
+            ])
+        );
+    }
+
     fn empty_state() -> Value {
         let mut map = ValueMap::new();
         map.insert("effects".into(), Value::Array(Vec::new()));
