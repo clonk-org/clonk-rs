@@ -808,7 +808,7 @@ dependencies = [
  "indexmap",
  "libc",
  "once_cell",
- "rand 0.9.5",
+ "rand 0.10.2",
  "tempfile",
  "tracing",
  "windows-sys 0.61.2",
@@ -828,8 +828,8 @@ dependencies = [
  "indexmap",
  "once_cell",
  "proptest",
- "rand 0.9.5",
- "rand_core 0.6.4",
+ "rand 0.10.2",
+ "rand_core 0.10.1",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -843,7 +843,7 @@ dependencies = [
 name = "clonk-engine-core"
 version = "0.6.3"
 dependencies = [
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "serde",
 ]
 
@@ -863,8 +863,8 @@ dependencies = [
  "memchr",
  "once_cell",
  "proptest",
- "rand 0.9.5",
- "rand_core 0.6.4",
+ "rand 0.10.2",
+ "rand_core 0.10.1",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -893,8 +893,8 @@ dependencies = [
  "memchr",
  "once_cell",
  "proptest",
- "rand 0.9.5",
- "rand_core 0.6.4",
+ "rand 0.10.2",
+ "rand_core 0.10.1",
  "rustc-hash 2.1.3",
  "rustix 1.1.4",
  "serde",
@@ -983,7 +983,7 @@ name = "clonk-graphics"
 version = "0.6.3"
 dependencies = [
  "font8x8",
- "rand 0.9.5",
+ "rand 0.10.2",
  "rusttype",
  "thiserror 2.0.19",
 ]
@@ -3623,12 +3623,6 @@ dependencies = [
  "ppv-lite86",
  "rand_core 0.9.5",
 ]
-
-[[package]]
-name = "rand_core"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
 name = "rand_core"
