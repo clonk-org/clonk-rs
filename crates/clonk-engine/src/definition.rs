@@ -4439,11 +4439,11 @@ impl Definition {
                 None,
             ));
         }
-        // Fx callbacks resolve CODE on the effect command target/id, but
-        // pForObj remains the affected object's real C4Object. Its ActMap,
-        // physicals, OCF metadata and definition id therefore come from the
-        // carrier, never from `self` merely because `self` owns the callback
-        // script (C4Effect.cpp:42-57,128-129,342-345).
+        // The affected object is a real C4Object that C4Effect passes as
+        // pForObj. Its ActMap, physicals, OCF metadata and definition id
+        // therefore come from the carrier, never from `self` merely because
+        // `self` owns the callback script
+        // (C4Effect.cpp:42-57,128-129,342-345).
         let carrier_definition_id = carrier.and_then(|(_, object_id)| {
             world
                 .get(object_id)
@@ -4500,6 +4500,41 @@ impl Definition {
             });
         let context_is_self =
             carrier.is_some_and(|(_, object_id)| context_object == Some(object_id));
+        // `cthr->Obj` is that same command target: C4AulScriptFunc::Exec makes
+        // the object it is handed the calling object (C4AulExec.cpp:1638-1648),
+        // so every native that falls back to the ambient object reads and
+        // writes the command target. The carrier reaches script only as
+        // parameter 1. An absent or id-only command target leaves `cthr->Obj`
+        // null, and those natives return nil (C4Script.cpp:986-991).
+        let ambient_state = (!context_is_self)
+            .then_some(context_object)
+            .flatten()
+            .and_then(|object_id| world.get(object_id))
+            .and_then(|object| object.full_state().cloned());
+        // The engine's own FxFireStart is not script: FnFxFireStart mutates
+        // the explicit pObj parameter it is handed (C4Effect.cpp:557-570), so
+        // nothing on that path can observe `cthr->Obj`. Keep the carrier as
+        // its scope rather than re-materializing the same object foreign.
+        let ambient = if native_fire_start {
+            carrier
+        } else {
+            match (context_object, carrier) {
+                (Some(object_id), Some((state, carrier_id))) if object_id == carrier_id => {
+                    Some((state, carrier_id))
+                }
+                (Some(object_id), _) => ambient_state.as_deref().map(|state| (state, object_id)),
+                (None, _) => None,
+            }
+        };
+        let ambient_definition_id = ambient.and_then(|(_, object_id)| {
+            world
+                .get(object_id)
+                .map(|object| object.definition_id().to_string())
+        });
+        let ambient_metadata = ambient_definition_id
+            .as_deref()
+            .and_then(|id| world.definition_metadata(id))
+            .cloned();
         let context_this = context_object
             .map(compat::object_reference_value)
             .unwrap_or(Value::Nil);
@@ -4537,8 +4572,8 @@ impl Definition {
                     .flatten()
             });
         let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
-            carrier.map(|(state, object_id)| {
-                let carrier_walk_rotation = carrier_metadata
+            ambient.map(|(state, object_id)| {
+                let ambient_walk_rotation = ambient_metadata
                     .as_ref()
                     .map(|metadata| compat::WalkRotationSeed {
                         rotateable: metadata.rotateable,
@@ -4567,7 +4602,7 @@ impl Definition {
                     state.action.time,
                     state.action.data,
                     state.action.phase,
-                    carrier_metadata
+                    ambient_metadata
                         .as_ref()
                         .map(|metadata| metadata.action_library.clone())
                         .unwrap_or_else(|| self.shared_action_library(&world)),
@@ -4578,11 +4613,11 @@ impl Definition {
                     state.action.target2,
                     &state.vertices,
                     state.category,
-                    carrier_metadata
+                    ambient_metadata
                         .as_ref()
                         .map(|metadata| metadata.ocf_base)
                         .unwrap_or(self.ocf_base),
-                    carrier_metadata
+                    ambient_metadata
                         .as_ref()
                         .map(|metadata| metadata.crew_member)
                         .unwrap_or(self.crew_member),
@@ -4591,7 +4626,7 @@ impl Definition {
                 )
                 .with_action_index(state.action.act_map_index)
                 .with_shape_vertices(&state.shape_vertices)
-                .with_definition_id(carrier_definition_id.as_deref().unwrap_or(self.id.as_str()))
+                .with_definition_id(ambient_definition_id.as_deref().unwrap_or(self.id.as_str()))
                 .with_alive(state.alive)
                 .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
@@ -4600,7 +4635,7 @@ impl Definition {
                     state.info_physical,
                     state.temporary_physical,
                     state.physical_changes.clone(),
-                    carrier_metadata
+                    ambient_metadata
                         .as_ref()
                         .map(|metadata| metadata.physical)
                         .unwrap_or(*self.physical()),
@@ -4611,9 +4646,10 @@ impl Definition {
                 // effect callback that writes one overlay leaves the object's
                 // other overlays alone. The scope publishes its WHOLE overlay
                 // list (compat/contexts.rs:8892), so it must start from the
-                // carrier's real overlays or the write deletes the rest.
+                // calling object's real overlays or the write deletes the
+                // rest.
                 .with_graphics_overlays(state.graphics_overlays.clone())
-                .with_walk_rotation(carrier_walk_rotation)
+                .with_walk_rotation(ambient_walk_rotation)
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_script_rotation_velocity(state.script_rotation_velocity)
@@ -4745,6 +4781,22 @@ impl Definition {
         }
         if !physics_delta.is_empty() {
             commands.physics = Some(physics_delta);
+        }
+        // The effect event loop applies the primary outcome channel to the
+        // carrier that owns the effect. When the ambient object is a foreign
+        // command target, every implicit-object write in the callback belongs
+        // to that object instead.
+        let ambient_is_carrier = matches!(
+            (ambient, carrier),
+            (Some((_, ambient_id)), Some((_, carrier_id))) if ambient_id == carrier_id
+        );
+        if !ambient_is_carrier {
+            if let Some((_, ambient_id)) = ambient {
+                retarget_effect_outcome_to_ambient_object(&mut commands, ambient_id);
+            }
+            if let Some((_, carrier_id)) = carrier {
+                adopt_carrier_effect_writes_from_nested(&mut commands, carrier_id);
+            }
         }
         let callback_result = callback_result.map(|(value, updated_locals)| {
             if context_is_self {
