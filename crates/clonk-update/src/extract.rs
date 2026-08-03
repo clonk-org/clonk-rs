@@ -26,7 +26,9 @@
 //!    containment check, as a backstop for names our rules did not anticipate.
 //! 5. Per entry: no symlinks — the classic way an archive turns a later
 //!    innocuous entry into a write outside the destination.
-//! 6. Bytes actually written against the same budget, because a declared size
+//! 6. Every archive-controlled filesystem node is created exclusively. Only
+//!    an exact directory path this extraction already created may be reused.
+//! 7. Bytes actually written against the same budget, because a declared size
 //!    is only a bound if it is honest.
 
 use std::collections::{HashMap, HashSet};
@@ -44,7 +46,8 @@ pub enum EntryFault {
     Absolute,
     /// Rejected by `ZipFile::enclosed_name` — the reader's own check.
     Unenclosed,
-    /// Empty or `.` segments; a publisher never emits them.
+    /// Empty, ambiguous, or platform-reserved components a publisher never
+    /// emits.
     Malformed,
     /// A symbolic link.
     Symlink,
@@ -527,14 +530,21 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
             path: path.clone(),
             source,
         };
+        let creation_error = |source: std::io::Error| {
+            if source.kind() == std::io::ErrorKind::AlreadyExists {
+                unsafe_entry(EntryFault::Collision)
+            } else {
+                write_error(source)
+            }
+        };
         if entry.is_dir() {
-            std::fs::create_dir_all(&path).map_err(write_error)?;
-            record_extracted_directory(&mut directories, destination, &path);
+            create_archive_directories(&mut directories, destination, &path)
+                .map_err(creation_error)?;
             continue;
         }
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(write_error)?;
-            record_extracted_directory(&mut directories, destination, parent);
+            create_archive_directories(&mut directories, destination, parent)
+                .map_err(creation_error)?;
         }
 
         // The declared sizes were only a promise; count what is actually
@@ -543,7 +553,7 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
         // Saturating throughout: an archive is untrusted input and must not be
         // able to reach an arithmetic panic.
         let remaining = unpacked_size.saturating_sub(summary.bytes);
-        let mut file = std::fs::File::create(&path).map_err(write_error)?;
+        let mut file = create_archive_file(&path).map_err(creation_error)?;
         let written = std::io::copy(
             &mut entry.by_ref().take(remaining.saturating_add(1)),
             &mut file,
@@ -567,6 +577,38 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
     Ok(summary)
 }
 
+fn create_archive_directories(
+    directories: &mut HashSet<PathBuf>,
+    destination: &Path,
+    target: &Path,
+) -> Result<(), std::io::Error> {
+    // Recursive creation accepts AlreadyExists at every level, which would
+    // silently merge names through filesystem rules we cannot model (such as
+    // an NTFS 8.3 alias). Reuse only exact paths this extraction recorded.
+    let relative = target
+        .strip_prefix(destination)
+        .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidInput, source))?;
+    let mut path = destination.to_path_buf();
+    for component in relative.components() {
+        path.push(component.as_os_str());
+        if directories.contains(&path) {
+            continue;
+        }
+        std::fs::create_dir(&path)?;
+        directories.insert(path.clone());
+    }
+    Ok(())
+}
+
+fn create_archive_file(path: &Path) -> Result<std::fs::File, std::io::Error> {
+    // `File::create` truncates an existing target. Exclusive creation turns an
+    // unknown filesystem alias or race into a reject-whole-archive failure.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
 fn missing_directories(path: &Path) -> Vec<PathBuf> {
     path.ancestors()
         .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
@@ -582,19 +624,6 @@ fn durability_parent(path: &Path) -> Option<PathBuf> {
             parent.to_path_buf()
         }
     })
-}
-
-fn record_extracted_directory(
-    directories: &mut HashSet<PathBuf>,
-    destination: &Path,
-    directory: &Path,
-) {
-    directories.extend(
-        directory
-            .ancestors()
-            .take_while(|ancestor| ancestor.starts_with(destination))
-            .map(Path::to_path_buf),
-    );
 }
 
 fn sync_extracted_directories_with<E, F>(
@@ -1469,6 +1498,41 @@ mod tests {
             Err(ExtractError::DestinationNotEmpty { .. })
         ));
         assert!(destination.join("stale.txt").exists());
+    }
+
+    #[test]
+    fn archive_directory_creation_rejects_an_unclaimed_existing_path() {
+        let directory = TempDir::new().expect("directory");
+        let destination = directory.path().join("staged");
+        let existing = destination.join("SHORT~1");
+        std::fs::create_dir_all(&existing).expect("create filesystem alias stand-in");
+        let mut claimed = HashSet::from([destination.clone()]);
+
+        let result = create_archive_directories(&mut claimed, &destination, &existing);
+
+        assert_eq!(
+            result.expect_err("reject unclaimed existing path").kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(claimed, HashSet::from([destination]));
+    }
+
+    #[test]
+    fn archive_file_creation_never_truncates_an_existing_path() {
+        let directory = TempDir::new().expect("directory");
+        let existing = directory.path().join("alias.txt");
+        std::fs::write(&existing, b"sentinel").expect("write sentinel");
+
+        let result = create_archive_file(&existing);
+
+        assert_eq!(
+            result.expect_err("reject existing file").kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            std::fs::read(&existing).expect("read sentinel"),
+            b"sentinel"
+        );
     }
 
     #[test]
