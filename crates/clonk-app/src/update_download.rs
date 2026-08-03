@@ -191,7 +191,7 @@ fn clear_standard_handle_inheritance() -> Result<()> {
         // INVALID_HANDLE_VALUE and other unexpected failures.
         unsafe { SetLastError(WIN32_ERROR(0)) };
         handles[index] = match unsafe { GetStdHandle(standard_handle) } {
-            Ok(handle) => handle.0,
+            Ok(handle) => handle.0 as isize,
             Err(error) if error.code().is_ok() => 0,
             Err(error) => {
                 return Err(anyhow::Error::from(error))
@@ -203,8 +203,14 @@ fn clear_standard_handle_inheritance() -> Result<()> {
     clear_standard_handle_inheritance_with(handles, |handle| {
         // SAFETY: invalid sentinel values were filtered above and the handle is
         // used only to clear its inheritance metadata.
-        unsafe { SetHandleInformation(HANDLE(handle), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
-            .map_err(anyhow::Error::from)
+        unsafe {
+            SetHandleInformation(
+                HANDLE(handle as *mut core::ffi::c_void),
+                HANDLE_FLAG_INHERIT.0,
+                HANDLE_FLAGS(0),
+            )
+        }
+        .map_err(anyhow::Error::from)
     })
 }
 

@@ -50,14 +50,12 @@ fn add_optional_portrait_locations(
 fn windows_special_folder(csidl: u32) -> Option<PathBuf> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt as _;
-    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Shell::SHGetSpecialFolderPathW;
 
     let mut path = [0_u16; 260];
     // SAFETY: `path` is the fixed-size writable buffer required by
     // SHGetSpecialFolderPathW, and FALSE asks Windows not to create the folder.
-    let found =
-        unsafe { SHGetSpecialFolderPathW(HWND(0), &mut path, csidl as i32, false) }.as_bool();
+    let found = unsafe { SHGetSpecialFolderPathW(None, &mut path, csidl as i32, false) }.as_bool();
     found
         .then(|| {
             let len = path

@@ -265,7 +265,7 @@ mod backend {
             RegSetValueExW(
                 key.0,
                 w!("DisplayName"),
-                0,
+                None,
                 REG_SZ,
                 Some(display_name_bytes),
             )
