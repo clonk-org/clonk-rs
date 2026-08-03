@@ -17,9 +17,11 @@ pub(crate) enum SocketFamily {
     /// AF_INET6 with `IPV6_V6ONLY` cleared, bound to an address that is not
     /// v4-mapped. Both families reach their peers over it.
     DualStack,
-    /// AF_INET, or AF_INET6 pinned to a v4-mapped address. Linux answers
-    /// `EAFNOSUPPORT` for every IPv6 destination sent over such a socket, so
-    /// callers must not offer it one.
+    /// AF_INET6 pinned to a v4-mapped address. It can reach only IPv4 peers,
+    /// but they must still be passed to `sendto` as mapped IPv6 sockaddrs.
+    MappedIpv4,
+    /// AF_INET. Callers must pass it IPv4 sockaddrs and must not offer it an
+    /// IPv6 destination.
     Ipv4Only,
 }
 
@@ -111,7 +113,8 @@ pub(crate) fn bound_socket_family(local: SocketAddr) -> SocketFamily {
         SocketAddr::V6(address) if address.ip().to_ipv4_mapped().is_none() => {
             SocketFamily::DualStack
         }
-        _ => SocketFamily::Ipv4Only,
+        SocketAddr::V6(_) => SocketFamily::MappedIpv4,
+        SocketAddr::V4(_) => SocketFamily::Ipv4Only,
     }
 }
 
