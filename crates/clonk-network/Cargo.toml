@@ -17,12 +17,12 @@ clonk-core = { path = "../clonk-core" }
 clonk-engine = { path = "../clonk-engine" }
 clonk-resources = { path = "../clonk-resources" }
 serde = { version = "1", features = ["derive"] }
-sha1 = "0.10"
-thiserror = "1"
+sha1 = { version = "0.11", default-features = false }
+thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "gzip", "rustls-tls"] }
 socket2 = { version = "0.6", features = ["all"] }
-xml-rs = "0.8"
+xml = "1"
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", features = ["use_std"] }
 

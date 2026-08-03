@@ -14,7 +14,7 @@ default = []
 
 [dependencies]
 walkdir = "2"
-thiserror = "1"
+thiserror = "2"
 byteorder = "1"
 flate2 = "1"
 libz-sys = "1"
