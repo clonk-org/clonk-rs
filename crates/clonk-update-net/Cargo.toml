@@ -13,11 +13,15 @@ publish.workspace = true
 clonk-update = { path = "../clonk-update" }
 # Requested exactly as `clonk-network` requests it minus the features only the
 # league client needs, so Cargo's feature unification adds no crate to the
-# workspace graph that a networked build did not already compile.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# workspace graph that a networked build did not already compile. The provider
+# and root store stay explicit because reqwest 0.13 otherwise selects platform
+# verification, which would let a modified system store authorize an update.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 thiserror = "2"
 tokio = { version = "1", features = ["net", "rt", "time"] }
 tracing = "0.1"
+webpki-root-certs = "1"
 
 [dev-dependencies]
 tempfile = "3.10"

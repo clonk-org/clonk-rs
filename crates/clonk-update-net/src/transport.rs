@@ -30,6 +30,26 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 const UPDATE_USER_AGENT: &str = concat!("clonk-rs/", env!("CARGO_PKG_VERSION"), " (updater)");
 
+/// Recreates reqwest 0.12's bundled-root policy explicitly. Reqwest 0.13 uses
+/// platform verification by default; selecting rustls alone would therefore
+/// let a modified system trust store authorize an update.
+fn bundled_root_client_builder() -> Result<reqwest::ClientBuilder, reqwest::Error> {
+    // `rustls-no-provider` keeps reqwest from pulling aws-lc-rs. Installing
+    // ring once per process gives all builders the provider reqwest requires;
+    // an embedding application that deliberately installed another provider
+    // first keeps its choice.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|certificate| reqwest::Certificate::from_der(certificate.as_ref()))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|roots| {
+            reqwest::Client::builder()
+                .tls_backend_rustls()
+                .tls_certs_only(roots)
+        })
+}
+
 /// Moving update bytes, expressed so a caller can fake it.
 ///
 /// Synchronous on purpose: every caller — the update dialog and the applying
@@ -78,8 +98,10 @@ impl HttpTransport {
     /// nothing), and timeouts sized for a large download rather than a small
     /// request.
     pub fn new() -> Result<Self, TransportError> {
-        Client::builder()
+        bundled_root_client_builder()
+            .map_err(TransportError::Client)?
             .redirect(reqwest::redirect::Policy::none())
+            .no_gzip()
             .user_agent(UPDATE_USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
@@ -399,6 +421,27 @@ mod tests {
     }
 
     #[test]
+    fn production_transport_never_decodes_server_sent_gzip() {
+        // `clonk-app` also links `clonk-network`, whose reqwest `gzip` feature
+        // is unified into this crate. The updater must still treat response
+        // bytes and Content-Length as the server sent them, even when a server
+        // ignores `Accept-Encoding: identity`.
+        const GZIP_MANIFEST: &[u8] = &[
+            31, 139, 8, 0, 0, 0, 0, 0, 2, 19, 171, 86, 42, 78, 206, 72, 205, 77, 84, 178, 50, 172,
+            5, 0, 140, 193, 251, 137, 12, 0, 0, 0,
+        ];
+        let fixture = serve(vec![Reply::encoded("gzip", GZIP_MANIFEST)]);
+        let transport = fixture.transport();
+
+        assert_eq!(
+            transport
+                .fetch_manifest(&fixture.url("/manifest.json"))
+                .expect("fixture serves the encoded manifest"),
+            GZIP_MANIFEST
+        );
+    }
+
+    #[test]
     fn a_missing_manifest_is_reported_with_its_status() {
         // The updater UI distinguishes "nothing published yet" from a broken
         // connection, so the status has to survive as a number.
@@ -580,7 +623,8 @@ mod tests {
         let elsewhere = serve(vec![Reply::ok(b"{}")]);
         let fixture = serve(vec![Reply::redirect(&elsewhere.url("/manifest.json"))]);
         let transport = HttpTransport::with_client(
-            reqwest::Client::builder()
+            bundled_root_client_builder()
+                .expect("bundled roots parse")
                 .redirect(reqwest::redirect::Policy::limited(10))
                 .build()
                 .expect("build a redirect-following client"),
@@ -841,6 +885,8 @@ mod tests {
     enum Reply {
         /// Status line and body, with the body's true length declared.
         Declared(String, Vec<u8>),
+        /// A declared body carrying an HTTP content encoding.
+        Encoded(String, Vec<u8>),
         /// A `Location` header, relative or absolute.
         Redirect(String),
         /// A body delimited only by end-of-stream.
@@ -856,6 +902,10 @@ mod tests {
 
         fn status(status: &str) -> Self {
             Self::Declared(status.to_owned(), Vec::new())
+        }
+
+        fn encoded(encoding: &str, body: &[u8]) -> Self {
+            Self::Encoded(encoding.to_owned(), body.to_vec())
         }
 
         fn redirect(location: &str) -> Self {
@@ -912,6 +962,16 @@ mod tests {
                 .write_all(
                     format!(
                         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .and_then(|()| stream.write_all(body)),
+            Reply::Encoded(encoding, body) => stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Encoding: {encoding}\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     )
                     .as_bytes(),
