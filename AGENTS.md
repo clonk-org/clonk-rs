@@ -88,6 +88,14 @@ that already landed. On 2026-07-29 `fix: install Pillow for CI script tests` was
 pushed off `main` within the hour by a session that had merged `main` into an
 older branch; it had to be landed twice, with CI red in between.
 
+**Every change ships as a pull request, and landing it is part of the task.** A
+local commit that never opens one is unshipped work: it is invisible to every
+other session, it is not on anyone's review queue, and the worktree it sits in
+is routinely deleted. Do not stop at "committed locally" and do not wait to be
+asked — once the [required gates](#done--all-required-gates-green) pass, open the
+pull request and shepherd it to a merge. The only reasons to hold back are an
+explicit instruction to, or work you know is incomplete; say which one applies.
+
 One pull request per worktree session:
 
 ```sh
@@ -153,6 +161,39 @@ evicted after its pull request first goes green.
 - Pushing straight to `main` is break-glass for a broken queue only. If you take
   it, say so in the pull request or commit that follows.
 
+### Shepherding an entry to landing
+
+`--auto` enqueues the entry; it does not babysit it. Stay with the pull request
+until it merges:
+
+```sh
+gh pr checks <n> --repo clonk-org/clonk-rs --watch     # admission
+gh pr view <n> --repo clonk-org/clonk-rs --json state,mergeStateStatus,autoMergeRequest
+gh run list --repo clonk-org/clonk-rs --branch "gh-readonly-queue/main/pr-<n>-<base-sha>"
+```
+
+Poll on the timings in the table above — admission inside a minute, the queue
+around five. Do not spin on it faster than that.
+
+- **`autoMergeRequest: null` means the entry is *in* the queue, not that it was
+  evicted.** GitHub consumes the auto-merge request when it enqueues, so the null
+  is what success looks like on the way in. Read the `Landing` run on the
+  `gh-readonly-queue/main/pr-<n>-*` branch and a `removed_from_merge_queue` event
+  on the pull request instead; `state: MERGED` is the only thing that means
+  landed.
+- An eviction is yours to fix, and it is urgent — it forces every entry queued
+  behind you to rebuild. Read the failing queue job, reproduce it locally, push
+  the fix, and re-enable `--auto`; the enqueue is not restored automatically. Do
+  **not** merge `main` into the branch to "refresh" it. Hand-rebase only for a
+  conflict the queue cannot resolve itself.
+- A queue failure in code you did not touch is still yours to triage before
+  re-queueing. Establish whether it is your change, a flake, or already broken on
+  `main` — re-queueing blind burns a build slot for everyone.
+- Report where it actually got to. "Opened the pull request" is not "landed", and
+  a green pull request has passed admission, not the landing gate. If you stop
+  before it merges — the queue is jammed, a failure needs a decision that is not
+  yours, the session ends — say so, and say exactly what state you left it in.
+
 ## Rust style
 
 - Prefer functional combinators (`map`/`and_then`/`unwrap_or`/`ok_or`/`filter`)
@@ -184,6 +225,9 @@ them for the revision you are completing; focused tests do not imply the gates
 pass. Engine snapshots and `parity verify` check different things; neither
 replaces the other. `PORT_STATUS.md` lists extra focused gates and the narrow
 accepted skips.
+
+Green gates are what let you *open* the pull request, not the end of the task.
+The change is done when it has [landed](#pull-requests--how-work-lands).
 
 ## Test-runner gotchas
 
