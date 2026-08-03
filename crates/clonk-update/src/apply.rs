@@ -1963,7 +1963,7 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Write};
     use tempfile::TempDir;
-    use zip::write::FileOptions;
+    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
 
     fn write_file(path: &Path, contents: &str) {
@@ -2010,7 +2010,7 @@ mod tests {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         for (entry, contents) in entries {
             writer
-                .start_file(*entry, FileOptions::default())
+                .start_file(*entry, SimpleFileOptions::default())
                 .expect("start file");
             writer
                 .write_all(contents.as_bytes())

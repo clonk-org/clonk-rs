@@ -9,7 +9,7 @@ use clonk_platform::AppPaths;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
 
 pub fn create_support_bundle(
@@ -30,7 +30,7 @@ pub fn create_support_bundle(
     })?;
 
     let mut writer = zip::ZipWriter::new(file);
-    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     let mut entries_written = 0usize;
 
     match add_file_to_bundle(
@@ -199,7 +199,7 @@ pub fn append_support_bundle_report(
 
     let mut writer = zip::ZipWriter::new_append(file)
         .context("failed to prepare support bundle for report append")?;
-    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     let mut report =
         render_support_bundle_report(paths, Some(bundle_path), telemetry_summary).join("\n");
@@ -222,7 +222,7 @@ fn add_file_to_bundle(
     writer: &mut zip::ZipWriter<File>,
     entry_name: &str,
     source: &Path,
-    options: FileOptions,
+    options: SimpleFileOptions,
     role: &str,
 ) -> Result<()> {
     let mut file = File::open(source)

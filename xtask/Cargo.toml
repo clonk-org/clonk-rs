@@ -35,7 +35,7 @@ anyhow = "1"
 # dependency graph stays unified.
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"], optional = true }
 walkdir = { version = "2", optional = true }
-zip = { version = "0.6", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "8", default-features = false, features = ["deflate"], optional = true }
 # Only for `ENGINE_VERSION`, which the update manifest carries so a client can
 # refuse content built for a newer engine.
 clonk-core = { path = "../crates/clonk-core", optional = true }

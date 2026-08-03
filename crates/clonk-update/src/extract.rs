@@ -28,7 +28,7 @@
 //!    is only a bound if it is honest.
 
 use std::collections::HashSet;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
@@ -182,7 +182,7 @@ pub fn extract_archive(
         archive: archive.to_path_buf(),
         source,
     })?;
-    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|source| {
+    let zip = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|source| {
         ExtractError::Malformed {
             archive: archive.to_path_buf(),
             source,
@@ -199,13 +199,74 @@ pub fn extract_archive(
         });
     }
 
-    let result = extract_entries(&mut zip, archive, destination, unpacked_size);
+    // zip 8 indexes entries by their raw name and retains only the last exact
+    // duplicate. Scan the central directory independently so that upgrading
+    // the reader cannot turn our reject-whole-archive collision policy into a
+    // silent last-entry-wins policy.
+    let central_directory_start = zip.central_directory_start();
+    let mut reader = zip.into_inner();
+    let result = match duplicate_central_entry_name(&mut reader, central_directory_start) {
+        Ok(Some(entry)) => Err(ExtractError::Unsafe {
+            archive: archive.to_path_buf(),
+            entry,
+            fault: EntryFault::Collision,
+        }),
+        Ok(None) => zip::ZipArchive::new(reader)
+            .map_err(|source| ExtractError::Malformed {
+                archive: archive.to_path_buf(),
+                source,
+            })
+            .and_then(|mut zip| extract_entries(&mut zip, archive, destination, unpacked_size)),
+        Err(source) => Err(ExtractError::Malformed {
+            archive: archive.to_path_buf(),
+            source,
+        }),
+    };
     if result.is_err() {
         // A half-unpacked component must never be left where an applier could
         // mistake it for a complete one.
         let _ = std::fs::remove_dir_all(destination);
     }
     result
+}
+
+/// Returns an exact duplicate stored name from the central directory.
+///
+/// `ZipArchive` intentionally exposes a name-indexed view, so its public
+/// length cannot reveal duplicate keys. This bounded scanner reads only the
+/// fixed-size central headers and their at-most-`u16::MAX` names; payload bytes
+/// are never loaded.
+fn duplicate_central_entry_name<R: Read + Seek>(
+    reader: &mut R,
+    central_directory_start: u64,
+) -> zip::result::ZipResult<Option<String>> {
+    const CENTRAL_DIRECTORY_HEADER: [u8; 4] = [b'P', b'K', 1, 2];
+    const HEADER_AFTER_SIGNATURE: usize = 42;
+
+    reader.seek(SeekFrom::Start(central_directory_start))?;
+    let mut names = HashSet::new();
+
+    loop {
+        let mut signature = [0u8; 4];
+        reader.read_exact(&mut signature)?;
+        if signature != CENTRAL_DIRECTORY_HEADER {
+            return Ok(None);
+        }
+
+        let mut header = [0u8; HEADER_AFTER_SIGNATURE];
+        reader.read_exact(&mut header)?;
+        let filename_length = u16::from_le_bytes([header[24], header[25]]) as usize;
+        let extra_length = u16::from_le_bytes([header[26], header[27]]) as i64;
+        let comment_length = u16::from_le_bytes([header[28], header[29]]) as i64;
+        let mut name = vec![0u8; filename_length];
+        reader.read_exact(&mut name)?;
+
+        if names.contains(&name) {
+            return Ok(Some(String::from_utf8_lossy(&name).into_owned()));
+        }
+        names.insert(name);
+        reader.seek(SeekFrom::Current(extra_length + comment_length))?;
+    }
 }
 
 fn extract_entries<R: std::io::Read + std::io::Seek>(
@@ -454,7 +515,7 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Write};
     use tempfile::TempDir;
-    use zip::write::FileOptions;
+    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
 
     fn archive_of(build: impl FnOnce(&mut ZipWriter<Cursor<Vec<u8>>>)) -> Vec<u8> {
@@ -466,11 +527,11 @@ mod tests {
     fn plain() -> Vec<u8> {
         archive_of(|writer| {
             writer
-                .start_file("Graphics.c4g/Info.txt", FileOptions::default())
+                .start_file("Graphics.c4g/Info.txt", SimpleFileOptions::default())
                 .expect("start file");
             writer.write_all(b"hello").expect("write file");
             writer
-                .start_file("System.c4g/Nested/Deep.txt", FileOptions::default())
+                .start_file("System.c4g/Nested/Deep.txt", SimpleFileOptions::default())
                 .expect("start nested file");
             writer.write_all(b"deep").expect("write nested file");
         })
@@ -479,7 +540,7 @@ mod tests {
     fn with_entry(name: &str) -> Vec<u8> {
         archive_of(|writer| {
             writer
-                .start_file(name, FileOptions::default())
+                .start_file(name, SimpleFileOptions::default())
                 .expect("start file");
             writer.write_all(b"payload").expect("write file");
         })
@@ -496,6 +557,28 @@ mod tests {
         // Central header layout: signature(4) … compressed size(20)
         // uncompressed size(24).
         bytes[header + 24..header + 28].copy_from_slice(&declared.to_le_bytes());
+    }
+
+    /// Rewrites the last entry's local and central names without changing
+    /// their lengths. Current writers reject duplicate names, while an
+    /// attacker can still put them in an archive directly.
+    fn rename_last_entry(bytes: &mut [u8], replacement: &str) {
+        let local = bytes
+            .windows(4)
+            .rposition(|window| window == [b'P', b'K', 3, 4])
+            .expect("a local file header");
+        let central = bytes
+            .windows(4)
+            .rposition(|window| window == [b'P', b'K', 1, 2])
+            .expect("a central directory header");
+        let local_name_length = u16::from_le_bytes([bytes[local + 26], bytes[local + 27]]) as usize;
+        let central_name_length =
+            u16::from_le_bytes([bytes[central + 28], bytes[central + 29]]) as usize;
+        assert_eq!(local_name_length, replacement.len());
+        assert_eq!(central_name_length, replacement.len());
+        bytes[local + 30..local + 30 + local_name_length].copy_from_slice(replacement.as_bytes());
+        bytes[central + 46..central + 46 + central_name_length]
+            .copy_from_slice(replacement.as_bytes());
     }
 
     fn write_archive(directory: &Path, bytes: &[u8]) -> PathBuf {
@@ -588,7 +671,7 @@ mod tests {
         // one and the whole archive is refused if one appears.
         let bytes = archive_of(|writer| {
             writer
-                .add_symlink("planet/System.c4g", "/etc", FileOptions::default())
+                .add_symlink("planet/System.c4g", "/etc", SimpleFileOptions::default())
                 .expect("add symlink");
         });
         let (_directory, result) = extract(&bytes, 1024);
@@ -610,11 +693,11 @@ mod tests {
         // a publisher's tree cannot contain the pair, an attacker's can.
         let bytes = archive_of(|writer| {
             writer
-                .start_file("Graphics.c4g/Info.txt", FileOptions::default())
+                .start_file("Graphics.c4g/Info.txt", SimpleFileOptions::default())
                 .expect("start file");
             writer.write_all(b"real").expect("write file");
             writer
-                .start_file("graphics.c4g/INFO.TXT", FileOptions::default())
+                .start_file("graphics.c4g/INFO.TXT", SimpleFileOptions::default())
                 .expect("start colliding file");
             writer.write_all(b"shadow").expect("write colliding file");
         });
@@ -637,23 +720,29 @@ mod tests {
     #[test]
     fn a_repeated_entry_name_rejects_the_archive() {
         // The same collision without the case fold: the second entry would
-        // overwrite the first on every filesystem.
-        let bytes = archive_of(|writer| {
-            for _ in 0..2 {
+        // overwrite the first on every filesystem. The writer refuses to
+        // produce such an archive, so emulate the hostile central directory.
+        let first = "planet/System.c4g/Rank-one.txt";
+        let mut bytes = archive_of(|writer| {
+            for name in [first, "planet/System.c4g/Rank-two.txt"] {
                 writer
-                    .start_file("planet/System.c4g/Rank.txt", FileOptions::default())
+                    .start_file(name, SimpleFileOptions::default())
                     .expect("start file");
                 writer.write_all(b"payload").expect("write file");
             }
         });
+        rename_last_entry(&mut bytes, first);
         let (_directory, result) = extract(&bytes, 1024);
-        assert!(matches!(
-            result,
-            Err(ExtractError::Unsafe {
-                fault: EntryFault::Collision,
-                ..
-            })
-        ));
+        assert!(
+            matches!(
+                &result,
+                Err(ExtractError::Unsafe {
+                    fault: EntryFault::Collision,
+                    ..
+                })
+            ),
+            "a repeated name should reject the archive, got {result:?}"
+        );
     }
 
     #[test]
@@ -663,7 +752,7 @@ mod tests {
         let bytes = archive_of(|writer| {
             for name in ["Graphics.c4g/Info.txt", "graphics.c4g/info-2.txt"] {
                 writer
-                    .start_file(name, FileOptions::default())
+                    .start_file(name, SimpleFileOptions::default())
                     .expect("start file");
                 writer.write_all(b"payload").expect("write file");
             }
@@ -684,11 +773,11 @@ mod tests {
         // budget is also counted against the bytes actually written.
         let mut bytes = archive_of(|writer| {
             writer
-                .start_file("keep.txt", FileOptions::default())
+                .start_file("keep.txt", SimpleFileOptions::default())
                 .expect("start file");
             writer.write_all(b"kept").expect("write file");
             writer
-                .start_file("bomb.bin", FileOptions::default())
+                .start_file("bomb.bin", SimpleFileOptions::default())
                 .expect("start bomb");
             writer.write_all(&vec![0u8; 8192]).expect("write bomb");
         });
@@ -705,11 +794,11 @@ mod tests {
         // were complete.
         let mut bytes = archive_of(|writer| {
             writer
-                .start_file("keep.txt", FileOptions::default())
+                .start_file("keep.txt", SimpleFileOptions::default())
                 .expect("start file");
             writer.write_all(b"kept").expect("write file");
             writer
-                .start_file("bomb.bin", FileOptions::default())
+                .start_file("bomb.bin", SimpleFileOptions::default())
                 .expect("start bomb");
             writer.write_all(&vec![0u8; 8192]).expect("write bomb");
         });
@@ -814,7 +903,7 @@ mod tests {
             writer
                 .start_file(
                     "bin/clonk-game",
-                    FileOptions::default().unix_permissions(0o755),
+                    SimpleFileOptions::default().unix_permissions(0o755),
                 )
                 .expect("start file");
             writer.write_all(b"#!/bin/sh\n").expect("write file");

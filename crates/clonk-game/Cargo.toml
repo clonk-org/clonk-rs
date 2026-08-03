@@ -28,7 +28,7 @@ clonk-icon = { path = "../clonk-icon", features = ["build-script"] }
 
 [dev-dependencies]
 tempfile = "3"
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }

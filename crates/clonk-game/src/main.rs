@@ -3130,7 +3130,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
-    use zip::write::FileOptions;
+    use zip::write::SimpleFileOptions;
     use zip::{ZipArchive, ZipWriter};
 
     fn test_logger(dir: &TempDir) -> LauncherLogger {
@@ -3805,7 +3805,7 @@ mod tests {
         let archive_file = File::create(&archive_path).expect("create archive");
         let mut archive = ZipWriter::new(archive_file);
         archive
-            .start_file("new.txt", FileOptions::default())
+            .start_file("new.txt", SimpleFileOptions::default())
             .expect("start archive entry");
         archive.write_all(b"new").expect("write archive entry");
         archive.finish().expect("finish archive");
