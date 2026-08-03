@@ -214,7 +214,7 @@ fn shutdown_requested(shutdown: &mut oneshot::Receiver<()>) -> bool {
 }
 
 fn build_http_client(timeout: Duration) -> UpnpResult<Client> {
-    Ok(Client::builder()
+    Ok(crate::http_backend::bundled_root_client_builder()?
         .no_proxy()
         .connect_timeout(timeout)
         .timeout(timeout)

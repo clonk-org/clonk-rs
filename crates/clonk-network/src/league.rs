@@ -98,7 +98,9 @@ impl LeagueHttpPostTransport {
     /// redirects, keeps no cookies and bounds the whole query at 20 seconds —
     /// see [`crate::HttpBackend`].
     pub fn for_backend(backend: crate::HttpBackend) -> Result<Self, LeagueHttpTransportError> {
-        let client = backend.apply(reqwest::Client::builder()).build()?;
+        let client = backend
+            .apply(crate::http_backend::bundled_root_client_builder()?)
+            .build()?;
         Ok(Self { client })
     }
 

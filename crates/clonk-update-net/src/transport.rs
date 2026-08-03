@@ -30,6 +30,26 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 const UPDATE_USER_AGENT: &str = concat!("clonk-rs/", env!("CARGO_PKG_VERSION"), " (updater)");
 
+/// Recreates reqwest 0.12's bundled-root policy explicitly. Reqwest 0.13 uses
+/// platform verification by default; selecting rustls alone would therefore
+/// let a modified system trust store authorize an update.
+fn bundled_root_client_builder() -> Result<reqwest::ClientBuilder, reqwest::Error> {
+    // `rustls-no-provider` keeps reqwest from pulling aws-lc-rs. Installing
+    // ring once per process gives all builders the provider reqwest requires;
+    // an embedding application that deliberately installed another provider
+    // first keeps its choice.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|certificate| reqwest::Certificate::from_der(certificate.as_ref()))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|roots| {
+            reqwest::Client::builder()
+                .tls_backend_rustls()
+                .tls_certs_only(roots)
+        })
+}
+
 /// Moving update bytes, expressed so a caller can fake it.
 ///
 /// Synchronous on purpose: every caller — the update dialog and the applying
@@ -78,7 +98,8 @@ impl HttpTransport {
     /// nothing), and timeouts sized for a large download rather than a small
     /// request.
     pub fn new() -> Result<Self, TransportError> {
-        Client::builder()
+        bundled_root_client_builder()
+            .map_err(TransportError::Client)?
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(UPDATE_USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
@@ -579,6 +600,7 @@ mod tests {
         // actually came from is checked before its body is read.
         let elsewhere = serve(vec![Reply::ok(b"{}")]);
         let fixture = serve(vec![Reply::redirect(&elsewhere.url("/manifest.json"))]);
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let transport = HttpTransport::with_client(
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::limited(10))

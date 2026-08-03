@@ -38,6 +38,27 @@
 
 use std::time::Duration;
 
+/// Starts every shipped HTTP client with the same bundled Mozilla trust store
+/// that reqwest 0.12's `rustls-tls` feature selected. Reqwest 0.13 defaults to
+/// platform verification instead, so both the backend and exclusive root set
+/// must be selected on the builder rather than inferred from Cargo features.
+pub(crate) fn bundled_root_client_builder() -> Result<reqwest::ClientBuilder, reqwest::Error> {
+    // `rustls-no-provider` keeps reqwest from pulling aws-lc-rs. Installing
+    // ring once per process gives all builders the provider reqwest requires;
+    // an embedding application that deliberately installed another provider
+    // first keeps its choice.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|certificate| reqwest::Certificate::from_der(certificate.as_ref()))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|roots| {
+            reqwest::Client::builder()
+                .tls_backend_rustls()
+                .tls_certs_only(roots)
+        })
+}
+
 /// `C4Network2HTTPQueryTimeout` (`C4Network2Reference.cpp:405`).
 pub const NETIO_QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -149,7 +170,7 @@ mod tests {
         // is sent by the curl handle and written into the NetIO header block.
         for backend in [HttpBackend::Curl, HttpBackend::NetIo] {
             backend
-                .apply(reqwest::Client::builder())
+                .apply(bundled_root_client_builder().expect("bundled roots parse"))
                 .build()
                 .unwrap_or_else(|error| panic!("{backend:?} policy builds: {error}"));
         }

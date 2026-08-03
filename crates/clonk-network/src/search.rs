@@ -1619,14 +1619,18 @@ impl ReferenceRequestPlan {
         }
     }
 
-    fn client_builder(&self, backend: crate::HttpBackend) -> reqwest::ClientBuilder {
+    fn client_builder(
+        &self,
+        backend: crate::HttpBackend,
+    ) -> Result<reqwest::ClientBuilder, reqwest::Error> {
+        let builder = crate::http_backend::bundled_root_client_builder()?;
         let builder = match self.connect_address {
-            Some(address) => reqwest::Client::builder()
+            Some(address) => builder
                 .no_proxy()
                 .resolve(SCOPED_IPV6_REQUEST_HOST, address),
-            None => reqwest::Client::builder(),
+            None => builder,
         };
-        backend.apply(builder)
+        Ok(backend.apply(builder))
     }
 
     fn get(&self, client: &reqwest::Client) -> reqwest::RequestBuilder {
@@ -1657,7 +1661,7 @@ pub async fn fetch_reference_query_endpoint_with_config(
 ) -> Result<ReferenceQueryResponse, ReferenceFetchError> {
     let plan = ReferenceRequestPlan::for_endpoint(endpoint);
     let client = plan
-        .client_builder(config.http_backend)
+        .client_builder(config.http_backend)?
         .user_agent(crate::league::LEAGUE_HTTP_USER_AGENT)
         .gzip(true)
         .timeout(timeout)
@@ -2403,6 +2407,7 @@ Address=TCP:"192.0.2.8:41112"
 
         let client = plan
             .client_builder(crate::HttpBackend::default())
+            .expect("bundled roots parse")
             .build()
             .unwrap();
         let request = plan.get(&client).build().unwrap();
