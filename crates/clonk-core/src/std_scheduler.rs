@@ -5,12 +5,14 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 #[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+#[cfg(windows)]
 use std::ptr;
 #[cfg(all(not(unix), not(windows)))]
 use std::sync::Condvar;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, WAIT_ABANDONED_0, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    HANDLE, WAIT_ABANDONED_0, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
@@ -176,26 +178,30 @@ impl Drop for Unblocker {
 #[cfg(windows)]
 #[derive(Debug)]
 struct Unblocker {
-    handle: HANDLE,
+    handle: OwnedHandle,
 }
 
 #[cfg(windows)]
 impl Unblocker {
     fn new() -> io::Result<Self> {
         let handle = unsafe { CreateEventW(ptr::null_mut(), 0, 0, ptr::null()) };
-        if handle == 0 {
+        if handle.is_null() {
             Err(io::Error::last_os_error())
         } else {
-            Ok(Self { handle })
+            // SAFETY: CreateEventW returned a live owned handle, transferred
+            // exactly once into OwnedHandle for automatic closure.
+            Ok(Self {
+                handle: unsafe { OwnedHandle::from_raw_handle(handle) },
+            })
         }
     }
 
     fn handle(&self) -> HANDLE {
-        self.handle
+        self.handle.as_raw_handle()
     }
 
     fn notify(&self) -> io::Result<()> {
-        let result = unsafe { SetEvent(self.handle) };
+        let result = unsafe { SetEvent(self.handle()) };
         if result == 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -205,15 +211,6 @@ impl Unblocker {
 
     fn reset(&self) -> io::Result<()> {
         Ok(())
-    }
-}
-
-#[cfg(windows)]
-impl Drop for Unblocker {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.handle);
-        }
     }
 }
 

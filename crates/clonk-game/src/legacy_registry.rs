@@ -738,7 +738,7 @@ mod windows_reader {
     }
 
     fn open_key(parent: HKEY, path: *const u8) -> Result<Option<OwnedKey>> {
-        let mut key = 0;
+        let mut key: HKEY = null_mut();
         // SAFETY: path points to a NUL-terminated byte string for the duration of the call,
         // and key is a valid out pointer. KEY_READ intentionally uses the process-default
         // registry view, matching the legacy C++ oracle.

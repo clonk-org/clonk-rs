@@ -280,7 +280,7 @@ mod windows_impl {
         let Ok(name) = name else {
             return false;
         };
-        let mut key: HKEY = 0;
+        let mut key: HKEY = std::ptr::null_mut();
         // SAFETY: `key_name` outlives the call and `key` is a stack out-param.
         let opened = unsafe {
             RegCreateKeyExA(

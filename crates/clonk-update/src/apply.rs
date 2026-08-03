@@ -534,7 +534,7 @@ fn wait_for_process(pid: u32, timeout: Duration) -> Result<(), PlatformError> {
 
     // SAFETY: a plain process-id lookup.
     let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
-    if handle == 0 {
+    if handle.is_null() {
         let code = unsafe { GetLastError() };
         return match classify_windows_open_error(code) {
             WindowsOpenError::ProcessGone => Ok(()),
@@ -586,7 +586,7 @@ fn set_installed_version(version: &str) -> Result<(), PlatformError> {
     use std::ffi::CString;
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExA, RegSetValueExA, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ,
+        RegCloseKey, RegOpenKeyExA, RegSetValueExA, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ,
     };
 
     let failed = |operation: &'static str, status: u32| PlatformError::Io {
@@ -595,7 +595,7 @@ fn set_installed_version(version: &str) -> Result<(), PlatformError> {
         source: std::io::Error::from_raw_os_error(status as i32),
     };
 
-    let mut key = 0;
+    let mut key: HKEY = std::ptr::null_mut();
     // SAFETY: a NUL-terminated subkey and a live out parameter.
     let status = unsafe {
         RegOpenKeyExA(

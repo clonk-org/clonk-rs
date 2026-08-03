@@ -416,7 +416,7 @@ mod windows_impl {
                 std::ptr::null(),
                 CREATE_NEW,
                 FILE_ATTRIBUTE_NORMAL,
-                0,
+                std::ptr::null_mut(),
             )
         };
         if file == INVALID_HANDLE_VALUE {
@@ -488,7 +488,7 @@ mod windows_impl {
         }
         if let Ok(body) = std::ffi::CString::new(artifacts.dialog) {
             MessageBoxA(
-                0,
+                std::ptr::null_mut(),
                 body.as_ptr().cast(),
                 c"LegacyClonk crashed".as_ptr().cast(),
                 MB_ICONERROR,
