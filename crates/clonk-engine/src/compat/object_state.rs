@@ -278,10 +278,11 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     ) {
         Some(Ok(value)) => value.as_bool(),
         Some(Err(error)) => {
-            tracing::debug!(
+            tracing::error!(
                 %error,
                 "script error in QueryCatchBlow; continuing like the C++ fail-safe exec"
             );
+            log_runtime_call_frames("", error.call_frames());
             false
         }
         None => false,
@@ -385,10 +386,11 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
             "CatchBlow",
             &[Value::Int(punch), object_reference_value(attacker)],
         ) {
-            tracing::debug!(
+            tracing::error!(
                 %error,
                 "script error in CatchBlow; continuing like the C++ fail-safe exec"
             );
+            log_runtime_call_frames("", error.call_frames());
         }
     }
     Ok(Value::Bool(true))
@@ -2372,10 +2374,11 @@ pub(crate) fn do_damage_with_cause_override(
         "Damage",
         &[Value::Int(change), Value::Int(caused_by)],
     ) {
-        tracing::debug!(
+        tracing::error!(
             %error,
             "script error in Damage; continuing like the C++ fail-safe exec"
         );
+        log_runtime_call_frames("", error.call_frames());
     }
     Ok(Value::Bool(true))
 }
@@ -2598,11 +2601,12 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         ];
         for (callback, args) in callbacks.into_iter().flatten() {
             if let Some(Err(error)) = call_world_object_script_callback(id, &callback, &args) {
-                tracing::debug!(
+                tracing::error!(
                     %error,
                     callback = callback.function_name(),
                     "SetAction callback error; continuing like the C++ fail-safe exec"
                 );
+                log_runtime_call_frames("", error.call_frames());
             }
             let receiver_is_live = HOST_CONTEXT.with(|cell| {
                 cell.borrow().as_ref().is_some_and(|context| {
@@ -3505,10 +3509,11 @@ pub(crate) fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
     ) {
         Some(Ok(value)) => value_raw_truthy(&value),
         Some(Err(error)) => {
-            tracing::debug!(
+            tracing::error!(
                 %error,
                 "OnActionJump error; continuing like the C++ fail-safe exec"
             );
+            log_runtime_call_frames("", error.call_frames());
             false
         }
         None => false,
@@ -4016,11 +4021,12 @@ pub(crate) fn native_set_action_by_name_with_target(
     };
     if let Some(callback) = start_call {
         if let Some(Err(error)) = call_world_object_script_callback(target, &callback, &[]) {
-            tracing::debug!(
+            tracing::error!(
                 %error,
                 callback = callback.function_name(),
                 "native SetAction callback error; continuing like the C++ fail-safe exec"
             );
+            log_runtime_call_frames("", error.call_frames());
         }
     }
     let callbacks_continue = HOST_CONTEXT.with(|cell| {
@@ -4043,11 +4049,12 @@ pub(crate) fn native_set_action_by_name_with_target(
             if let Some(Err(error)) =
                 call_world_object_script_callback(target, &callback, &[Value::Int(previous_phase)])
             {
-                tracing::debug!(
+                tracing::error!(
                     %error,
                     callback = callback.function_name(),
                     "native SetAction callback error; continuing like the C++ fail-safe exec"
                 );
+                log_runtime_call_frames("", error.call_frames());
             }
         }
     }
@@ -4191,10 +4198,11 @@ pub(crate) fn native_fling(
     ) {
         Some(Ok(value)) => value.as_bool(),
         Some(Err(error)) => {
-            tracing::debug!(
+            tracing::error!(
                 %error,
                 "OnActionJump error; continuing like the C++ fail-safe exec"
             );
+            log_runtime_call_frames("", error.call_frames());
             false
         }
         None => false,

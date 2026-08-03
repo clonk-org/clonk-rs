@@ -471,13 +471,14 @@ pub(crate) fn launch_lightning(args: &[Value]) -> Result<Value, RuntimeError> {
         ];
         if let Some(Err(error)) = call_world_object_own_function(target, "Activate", &activate_args)
         {
-            tracing::debug!(
+            tracing::error!(
                 id = target.as_u64(),
                 definition = "FXL1",
                 function = "Activate",
                 %error,
                 "lightning activation failed; continuing like C++ fail-safe Call"
             );
+            log_runtime_call_frames("", error.call_frames());
         }
     }
     Ok(Value::Int(1))
@@ -525,13 +526,14 @@ pub(crate) fn launch_volcano(args: &[Value]) -> Result<Value, RuntimeError> {
             Value::Int(lava),
         ];
         if let Some(Err(error)) = call_world_object_own_function(target, "Activate", &args) {
-            tracing::debug!(
+            tracing::error!(
                 id = target.as_u64(),
                 definition = "FXV1",
                 function = "Activate",
                 %error,
                 "volcano activation failed; continuing like C++ fail-safe Call"
             );
+            log_runtime_call_frames("", error.call_frames());
         }
     }
     Ok(Value::Int(1))

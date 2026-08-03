@@ -4056,11 +4056,12 @@ fn call_crew_selection_callback(target: ObjectId, unselect: bool, cursor: bool) 
         "CrewSelection",
         &[Value::Bool(unselect), Value::Bool(cursor)],
     ) {
-        tracing::debug!(
+        tracing::error!(
             object = %target,
             error = %error,
             "script error in crew selection callback; continuing like the C++ fail-safe exec"
         );
+        log_runtime_call_frames("", error.call_frames());
     }
 }
 

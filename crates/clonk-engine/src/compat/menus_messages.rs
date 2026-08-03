@@ -901,10 +901,11 @@ fn menu_selection_changed(menu_object: ObjectId, menu: &crate::ObjectMenuState) 
         None
     };
     if let Some(Err(error)) = result {
-        tracing::debug!(
+        tracing::error!(
             %error,
             "script error in OnMenuSelection; continuing like the C++ fail-safe exec"
         );
+        log_runtime_call_frames("", error.call_frames());
     }
 }
 
