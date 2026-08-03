@@ -473,6 +473,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   post-frame/next-`C4Network2::Execute` equivalent; do not infer a guaranteed
   one-second grace from the timer-path test.
 
+- Open: **`CtrlRateDown`, `CtrlRateUp` and `NetAllowJoinToggle` are accepted by
+  the key parser but dispatched nowhere.** All three sit in the same
+  `KEY_Default` "no default keys assigned" block as `ChartToggle`,
+  `NetObsNextPlayer` and `NetStatsToggle` (`src/C4Game.cpp:3456-3462`), and
+  `RUNTIME_REGISTERED_GLOBAL_KEYS` (`crates/clonk-app/src/main_parts/assets.rs`)
+  accepts a `[Keys]` override for each, so a configured chord is stored and then
+  silently ignored. `NetStatsToggle` was closed for issue #117; these three still
+  need their callbacks — `C4GameControl::KeyAdjustControlRate`
+  (`src/C4GameControl.h:124`) and `C4Network2::ToggleAllowJoin`
+  (`src/C4Network2.cpp:799`) — routed at the same PRIO_Base position, after
+  `handle_runtime_chart_toggle_key` and in native registration order.
+
 - Closed 2026-07-30: **Terrain saved under a put SolidMask survives a blast —
   oracle-faithful, not a port gap.** Reported as issue #43: a flint thrown at an
   elevator case parked on stone blows up everything visible, but moving the case
