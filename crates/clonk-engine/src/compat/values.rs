@@ -1515,13 +1515,16 @@ pub(crate) fn async_random(args: &[Value]) -> Result<Value, RuntimeError> {
 
 // Mathematical host functions
 
+/// FnAbs (C4Script.cpp:3197-3200) forwards to the `Abs` template
+/// (C4Math.h:21) `val > 0 ? val : -val`; `wrapping_abs` keeps the
+/// two's-complement negation of INT32_MIN instead of panicking.
 pub(crate) fn abs_func(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() != 1 {
         return Err(RuntimeError::new("Abs expects 1 argument: value"));
     }
 
     match &args[0] {
-        Value::Int(value) => Ok(Value::Int(value.abs())),
+        Value::Int(value) => Ok(Value::Int(value.wrapping_abs())),
         Value::Nil => Ok(Value::Int(0)),
         other => Err(RuntimeError::new(format!(
             "Abs: expected int, got {}",
