@@ -194,6 +194,7 @@ struct C4AulContext
 
 #include "script_fn_GetX.inc"
 #include "script_fn_GetY.inc"
+#include "script_fn_sqrt.inc"
 
 struct C4Value
 {
@@ -2779,6 +2780,26 @@ int main()
         sep();
         printf("{\"deg\":%d,\"sin\":%d,\"cos\":%d}",
                d, fixtoi(Sin(itofix(d)), 0), fixtoi(Cos(itofix(d)), 0));
+    }
+    arr_end();
+    printf(",\n");
+
+    // 4c. FnSqrt over the whole domain shape: negatives, small exact and
+    // inexact roots, and the top of the int32_t range where `iSqrt * iSqrt`
+    // wraps and the correcting decrement is skipped. 2147395600 is 46340^2,
+    // the last input whose result is plain floor(sqrt).
+    arr_begin("script_sqrt");
+    const int sqrt_inputs[] = {
+        -2147483647 - 1, -100, -1, 0, 1, 2, 3, 4, 8, 9, 15, 16, 24, 25,
+        99, 100, 101, 65535, 65536, 1000000, 1073741823,
+        2147395599, 2147395600, 2147395601, 2147450880,
+        2147483646, 2147483647,
+    };
+    for (int v : sqrt_inputs)
+    {
+        sep();
+        printf("{\"value\":%d,\"root\":%d}", v,
+               effect_position_oracle::FnSqrt(nullptr, v));
     }
     arr_end();
     printf(",\n");

@@ -30,7 +30,7 @@ use clonk_resources::Group;
 use clonk_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue, ValueMap};
 use serde_json::Value;
 
-use crate::compat::{cos_func, sin_func, LandscapeOperation};
+use crate::compat::{cos_func, sin_func, sqrt_func, LandscapeOperation};
 use crate::landscape::{Landscape, LandscapeRasterState, PixelGrid};
 use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion, MaterialSet};
 use crate::math::{
@@ -1032,6 +1032,25 @@ fn parity_differential_matches_cpp_golden() {
             "cos",
             i(e, "cos"),
             i64::from(rust_cos),
+        );
+    }
+
+    // 4c. Script FnSqrt: the two correction steps around the truncated double
+    // root, whose `iSqrt * iSqrt` products are C4ValueInt and wrap above
+    // 46340^2 (C4Script.cpp:3240-3247, C4Value.h:62).
+    for (idx, e) in golden["script_sqrt"].as_array().unwrap().iter().enumerate() {
+        let value = i(e, "value") as i32;
+        let ScriptValue::Int(rust_root) =
+            sqrt_func(&[ScriptValue::Int(value)]).expect("script Sqrt oracle input succeeds")
+        else {
+            panic!("script Sqrt did not return int")
+        };
+        expect_eq(
+            "script_sqrt",
+            idx,
+            "root",
+            i(e, "root"),
+            i64::from(rust_root),
         );
     }
 
