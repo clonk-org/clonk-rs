@@ -15,9 +15,10 @@
 //! Guards, in the order they run:
 //!
 //! 1. Declared unpacked size against the caller's budget, before any write.
-//! 2. Entry names that would name the same file once case is folded — also
-//!    before any write, since a collision is a property of the archive rather
-//!    than of the entry that happens to arrive second.
+//! 2. Entry paths whose canonical-caseless components would alias a file or
+//!    directory on a folding filesystem — also before any write, since a
+//!    collision is a property of the archive rather than of the entry that
+//!    happens to arrive second.
 //! 3. Per entry: our own path rules (no `..`, nothing absolute, no `\` or `:`
 //!    smuggling, no empty or `.` segments).
 //! 4. Per entry: `ZipFile::enclosed_name`, the reader's independent
@@ -27,10 +28,11 @@
 //! 6. Bytes actually written against the same budget, because a declared size
 //!    is only a bound if it is honest.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
+use unicode_normalization::UnicodeNormalization;
 
 /// How an entry failed containment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +47,7 @@ pub enum EntryFault {
     Malformed,
     /// A symbolic link.
     Symlink,
-    /// Names another entry already claimed once case is folded.
+    /// Names the same destination path as another entry.
     Collision,
 }
 
@@ -57,7 +59,7 @@ impl EntryFault {
             Self::Unenclosed => "is not enclosed by the destination",
             Self::Malformed => "is not a usable relative path",
             Self::Symlink => "is a symbolic link",
-            Self::Collision => "collides with another entry once case is folded",
+            Self::Collision => "collides with another entry's destination path",
         }
     }
 }
@@ -117,12 +119,110 @@ const UNIX_SYMLINK: u32 = 0o120000;
 
 /// How a filesystem that ignores case would see an entry's path.
 ///
-/// Full Unicode lowercasing rather than ASCII folding: it collapses a superset
-/// of what macOS and Windows collapse, and the asymmetry favours us — refusing
-/// an archive is something a user can retry, whereas letting a collision
-/// through drops a file from a component that then looks complete.
-fn fold_case(relative: &Path) -> String {
-    relative.to_string_lossy().to_lowercase()
+/// Canonical caseless matching follows Unicode's required order: normalize,
+/// fully case-fold, then normalize again. This catches the decomposition and
+/// multi-character aliases used by default macOS filesystems without applying
+/// compatibility normalization to circled or full-width characters that
+/// remain distinct there.
+fn fold_case(component: &str) -> String {
+    let normalized: String = component.chars().nfd().collect();
+    unicase::UniCase::unicode(normalized)
+        .to_folded_case()
+        .chars()
+        .nfd()
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimedNodeKind {
+    ImplicitDirectory,
+    ExplicitDirectory,
+    File,
+}
+
+#[derive(Debug)]
+struct ClaimedNode {
+    spelling: String,
+    kind: ClaimedNodeKind,
+}
+
+/// A component trie for paths the archive would create.
+///
+/// Keying each node by its parent and one canonical-caseless component keeps
+/// the preflight linear in total name bytes. Storing the original spelling is
+/// what rejects two directories that a case-folding filesystem merges even
+/// when their different children leave the complete paths distinct.
+#[derive(Debug, Default)]
+struct ClaimedPaths {
+    children: HashMap<usize, HashMap<String, usize>>,
+    nodes: Vec<ClaimedNode>,
+}
+
+impl ClaimedPaths {
+    const ROOT: usize = usize::MAX;
+
+    fn claim(&mut self, relative: &Path, is_directory: bool) -> bool {
+        let mut components = relative.components().peekable();
+        let mut parent = Self::ROOT;
+
+        while let Some(component) = components.next() {
+            let Component::Normal(component) = component else {
+                return false;
+            };
+            let spelling = component.to_string_lossy().into_owned();
+            let key = fold_case(&spelling);
+            let is_leaf = components.peek().is_none();
+            let kind = if is_leaf {
+                if is_directory {
+                    ClaimedNodeKind::ExplicitDirectory
+                } else {
+                    ClaimedNodeKind::File
+                }
+            } else {
+                ClaimedNodeKind::ImplicitDirectory
+            };
+
+            let existing = self
+                .children
+                .get(&parent)
+                .and_then(|children| children.get(&key))
+                .copied();
+            let node = match existing {
+                Some(node) => {
+                    let claimed = &mut self.nodes[node];
+                    if claimed.spelling != spelling {
+                        return false;
+                    }
+                    match (claimed.kind, kind) {
+                        (
+                            ClaimedNodeKind::ImplicitDirectory,
+                            ClaimedNodeKind::ImplicitDirectory,
+                        )
+                        | (
+                            ClaimedNodeKind::ExplicitDirectory,
+                            ClaimedNodeKind::ImplicitDirectory,
+                        ) => {}
+                        (
+                            ClaimedNodeKind::ImplicitDirectory,
+                            ClaimedNodeKind::ExplicitDirectory,
+                        ) => {
+                            claimed.kind = ClaimedNodeKind::ExplicitDirectory;
+                        }
+                        _ => return false,
+                    }
+                    node
+                }
+                None => {
+                    let node = self.nodes.len();
+                    self.nodes.push(ClaimedNode { spelling, kind });
+                    self.children.entry(parent).or_default().insert(key, node);
+                    node
+                }
+            };
+            parent = node;
+        }
+        parent != Self::ROOT
+    }
 }
 
 /// Applies our own containment rules to a stored entry name.
@@ -212,9 +312,9 @@ pub fn extract_archive(
         central_directory_start,
         indexed_entry_count,
     ) {
-        Ok(Some(entry)) => Err(ExtractError::Unsafe {
+        Ok(Some(_)) => Err(ExtractError::Unsafe {
             archive: archive.to_path_buf(),
-            entry,
+            entry: "<duplicate central-directory name>".to_owned(),
             fault: EntryFault::Collision,
         }),
         Ok(None) => zip::ZipArchive::new(reader)
@@ -236,14 +336,16 @@ pub fn extract_archive(
     result
 }
 
-/// Returns a stored name whose effective name was collapsed by the reader.
+/// Returns the first stored name beyond the reader's indexed cardinality.
 ///
 /// `ZipArchive` intentionally exposes a name-indexed view, so compare its
-/// length with the number of central-directory records. This catches exact
-/// stored-name duplicates and names made identical by a recognized extra
-/// field, without duplicating the reader's name-decoding rules. The bounded
-/// scanner reads only fixed-size central headers and their at-most-`u16::MAX`
-/// names; payload bytes are never loaded.
+/// length with the number of central-directory records. An excess record means
+/// the reader collapsed some effective name, though it does not reveal which
+/// earlier record was replaced. This catches exact stored-name duplicates and
+/// names made identical by a recognized extra field, without duplicating the
+/// reader's name-decoding rules. The bounded scanner reads only fixed-size
+/// central headers and their at-most-`u16::MAX` names; payload bytes are never
+/// loaded.
 fn duplicate_central_entry_name<R: Read + Seek>(
     reader: &mut R,
     central_directory_start: u64,
@@ -259,7 +361,13 @@ fn duplicate_central_entry_name<R: Read + Seek>(
         let mut signature = [0u8; 4];
         reader.read_exact(&mut signature)?;
         if signature != CENTRAL_DIRECTORY_HEADER {
-            return Ok(None);
+            return (record_count == indexed_entry_count)
+                .then_some(None)
+                .ok_or_else(|| {
+                    zip::result::ZipError::InvalidArchive(
+                        "central-directory record count does not match the archive index".into(),
+                    )
+                });
         }
 
         let mut header = [0u8; HEADER_AFTER_SIGNATURE];
@@ -293,7 +401,7 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
     // Cheap pre-pass over the central directory: a bomb that admits its own
     // size, and an archive whose names cannot coexist, are both rejected
     // before a single byte lands on disk.
-    let mut claimed: HashSet<String> = HashSet::new();
+    let mut claimed = ClaimedPaths::default();
     let declared = (0..zip.len()).try_fold(0u64, |total, index| {
         let entry = zip.by_index_raw(index).map_err(|source| {
             tracing::debug!(%index, "component archive entry unreadable");
@@ -308,7 +416,7 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
         // has nothing to collide with here.
         if let Ok(relative) = safe_entry_path(&name) {
             claimed
-                .insert(fold_case(&relative))
+                .claim(&relative, entry.is_dir())
                 .then_some(())
                 .ok_or_else(|| ExtractError::Unsafe {
                     archive: archive.to_path_buf(),
@@ -765,6 +873,174 @@ mod tests {
     }
 
     #[test]
+    fn canonically_equivalent_entry_names_reject_before_writing() {
+        let bytes = archive_of(|writer| {
+            for name in ["Caf\u{e9}.txt", "Cafe\u{301}.txt"] {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("start canonically equivalent file");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(
+            matches!(
+                result,
+                Err(ExtractError::Unsafe {
+                    fault: EntryFault::Collision,
+                    ..
+                })
+            ),
+            "canonical aliases should reject the archive, got {result:?}"
+        );
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn full_case_folded_directory_aliases_reject_before_writing() {
+        let bytes = archive_of(|writer| {
+            for name in ["Stra\u{df}e/a.txt", "STRASSE/b.txt"] {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("start full-fold alias");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Collision,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn aliased_directory_prefixes_reject_before_writing() {
+        let bytes = archive_of(|writer| {
+            for name in ["Dir/a.txt", "dir/b.txt"] {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("start child of aliased directory");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Collision,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn file_and_directory_nodes_cannot_share_a_path() {
+        let bytes = archive_of(|writer| {
+            writer
+                .start_file("node", SimpleFileOptions::default())
+                .expect("start file");
+            writer.write_all(b"payload").expect("write file");
+            writer
+                .start_file("node/child.txt", SimpleFileOptions::default())
+                .expect("start child under file");
+            writer.write_all(b"payload").expect("write child");
+        });
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Collision,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn an_explicit_directory_can_share_its_exact_path_with_children() {
+        let bytes = archive_of(|writer| {
+            writer
+                .add_directory("node/", SimpleFileOptions::default())
+                .expect("add directory");
+            writer
+                .start_file("node/child.txt", SimpleFileOptions::default())
+                .expect("start child");
+            writer.write_all(b"payload").expect("write child");
+        });
+
+        let (_directory, result) = extract(&bytes, 1024);
+        assert_eq!(result.expect("extract directory and child").files, 1);
+    }
+
+    #[test]
+    fn canonical_caseless_key_normalizes_before_case_folding() {
+        let bytes = archive_of(|writer| {
+            for name in ["\u{3b1}\u{345}\u{300}.txt", "\u{3b1}\u{300}\u{345}.txt"] {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("start reordered-mark alias");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Collision,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn unicode_seventeen_case_pair_rejects_before_writing() {
+        let bytes = archive_of(|writer| {
+            for name in ["\u{a7ce}.txt", "\u{a7cf}.txt"] {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("start Unicode 17 case alias");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(matches!(
+            result,
+            Err(ExtractError::Unsafe {
+                fault: EntryFault::Collision,
+                ..
+            })
+        ));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
+    fn compatibility_equivalent_names_remain_distinct() {
+        let bytes = archive_of(|writer| {
+            for name in ["\u{2460}.txt", "1.txt"] {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("start compatibility-distinct file");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+
+        let (_directory, result) = extract(&bytes, 1024);
+        assert_eq!(result.expect("extract distinct names").files, 2);
+    }
+
+    #[test]
     fn a_repeated_entry_name_rejects_the_archive() {
         // The same collision without the case fold: the second entry would
         // overwrite the first on every filesystem. The writer refuses to
@@ -822,11 +1098,25 @@ mod tests {
     }
 
     #[test]
+    fn malformed_unicode_path_field_rejects_before_writing() {
+        let bytes = archive_of(|writer| {
+            writer
+                .start_file("plain.txt", unicode_path_options("alias.txt"))
+                .expect("start file with invalid Unicode Path CRC");
+            writer.write_all(b"payload").expect("write file");
+        });
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(matches!(result, Err(ExtractError::Malformed { .. })));
+        assert!(!directory.path().join("staged").exists());
+    }
+
+    #[test]
     fn names_that_only_share_a_folded_prefix_still_extract() {
-        // The guard folds whole paths, not fragments: `Info.txt` beside
+        // The guard folds complete components, not substrings: `Info.txt` beside
         // `info-2.txt` is an ordinary archive and must not be refused.
         let bytes = archive_of(|writer| {
-            for name in ["Graphics.c4g/Info.txt", "graphics.c4g/info-2.txt"] {
+            for name in ["Graphics.c4g/Info.txt", "Graphics.c4g/info-2.txt"] {
                 writer
                     .start_file(name, SimpleFileOptions::default())
                     .expect("start file");
