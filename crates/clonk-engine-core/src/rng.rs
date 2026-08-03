@@ -111,43 +111,40 @@ impl Default for LcgRng {
     }
 }
 
-// ── rand_core::RngCore impl ──────────────────────────────────────────────────
-// Lets existing `gen_range` / `gen` / `SliceRandom` call-sites in lib.rs
-// continue to compile unchanged.  The implementation advances `hold` by one
-// LCG step and returns the full 32-bit state — different from `random()` which
-// returns only bits 31-16 with modulo.  Non-determinism-critical call-sites
-// (landscape spawn, float jitter) keep working; determinism-critical ones have
-// been migrated to `rng.random(range)`.
+// ── rand_core::TryRng impl ──────────────────────────────────────────────────
+// This adapter advances `hold` by one LCG step and returns the full 32-bit
+// state, preserving the raw-word contract from rand_core 0.6. That is
+// deliberately different from C++ `Random()`, which projects bits 31-16 and
+// applies modulo. Lockstep call-sites must use `random(range)`, never `RngExt`
+// distributions whose rejection sampling may consume a different draw count.
 
-impl rand_core::RngCore for LcgRng {
+impl rand_core::TryRng for LcgRng {
+    type Error = rand_core::Infallible;
+
     #[inline]
-    fn next_u32(&mut self) -> u32 {
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         self.count = self.count.wrapping_add(1);
         self.hold = self.hold.wrapping_mul(214013).wrapping_add(2531011);
-        self.hold
+        Ok(self.hold)
     }
 
     #[inline]
-    fn next_u64(&mut self) -> u64 {
-        let lo = self.next_u32() as u64;
-        let hi = self.next_u32() as u64;
-        lo | (hi << 32)
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let lo = u64::from(self.try_next_u32()?);
+        let hi = u64::from(self.try_next_u32()?);
+        Ok(lo | (hi << 32))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         let mut chunks = dest.chunks_exact_mut(4);
         for chunk in &mut chunks {
-            chunk.copy_from_slice(&self.next_u32().to_le_bytes());
+            chunk.copy_from_slice(&self.try_next_u32()?.to_le_bytes());
         }
         let tail = chunks.into_remainder();
         if !tail.is_empty() {
-            let bytes = self.next_u32().to_le_bytes();
+            let bytes = self.try_next_u32()?.to_le_bytes();
             tail.copy_from_slice(&bytes[..tail.len()]);
         }
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
@@ -210,6 +207,63 @@ mod tests {
         }
         *hold = hold.wrapping_mul(214013).wrapping_add(2531011);
         ((*hold >> 16) % range as u32) as i32
+    }
+
+    /// One state transition from src/C4Random.h:70,77, without C++ Random's
+    /// high-word/modulo projection.
+    fn raw_lcg_step(hold: &mut u32) -> u32 {
+        *hold = hold.wrapping_mul(214013).wrapping_add(2531011);
+        *hold
+    }
+
+    #[test]
+    fn rng_core_next_u64_preserves_word_order_and_draw_count() {
+        use rand_core::Rng as _;
+
+        // The Rust adapter must not hide, repeat, or reorder either underlying
+        // src/C4Random.h:70,77 state transition when rand_core changes traits.
+        let seed = 0x1234_5678;
+        let mut expected_hold = seed;
+        let low = raw_lcg_step(&mut expected_hold);
+        let high = raw_lcg_step(&mut expected_hold);
+
+        let mut rng = LcgRng::new(seed);
+        assert_eq!(rng.next_u64(), u64::from(low) | (u64::from(high) << 32));
+        assert_eq!(rng.count, 2);
+        assert_eq!(rng.hold, expected_hold);
+    }
+
+    #[test]
+    fn rng_core_fill_bytes_preserves_little_endian_tail_and_draw_count() {
+        use rand_core::Rng as _;
+
+        // Each complete or partial four-byte word consumes exactly one
+        // src/C4Random.h:70,77 transition; the partial word keeps its low bytes.
+        let seed = 0x89ab_cdef;
+        let mut expected_hold = seed;
+        let first = raw_lcg_step(&mut expected_hold).to_le_bytes();
+        let second = raw_lcg_step(&mut expected_hold).to_le_bytes();
+        let expected = [
+            first[0], first[1], first[2], first[3], second[0], second[1], second[2],
+        ];
+
+        let mut rng = LcgRng::new(seed);
+        let mut actual = [0; 7];
+        rng.fill_bytes(&mut actual);
+
+        assert_eq!(actual, expected);
+        assert_eq!(rng.count, 2);
+        assert_eq!(rng.hold, expected_hold);
+    }
+
+    #[test]
+    fn rng_core_empty_fill_consumes_no_draw() {
+        use rand_core::Rng as _;
+
+        let mut rng = LcgRng::new(42);
+        rng.fill_bytes(&mut []);
+        assert_eq!(rng.count, 0);
+        assert_eq!(rng.hold, 42);
     }
 
     #[test]

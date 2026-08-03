@@ -1949,7 +1949,7 @@ mod tests {
     use super::*;
     use crate::clonk_font::{CapturedFontImage, ClonkFontRole, TextAlign};
     use crate::color::Color;
-    use rand::{rngs::SmallRng, Rng, SeedableRng};
+    use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
     fn captured_text(clip: Option<Rect>) -> CapturedClonkText {
         CapturedClonkText {

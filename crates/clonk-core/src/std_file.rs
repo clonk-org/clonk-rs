@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::rngs::SmallRng;
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, SeedableRng};
 
 #[cfg(target_os = "windows")]
 const DIRECTORY_SEPARATOR: char = '\\';
@@ -211,7 +211,7 @@ pub fn make_temp_filename(prefix: &str) -> io::Result<PathBuf> {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos(),
-        SmallRng::try_from_os_rng()
+        SmallRng::try_from_rng(&mut rand::rngs::SysRng)
             .map_err(io::Error::other)?
             .next_u64()
     );

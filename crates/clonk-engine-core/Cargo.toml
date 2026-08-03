@@ -10,5 +10,5 @@ readme.workspace = true
 publish.workspace = true
 
 [dependencies]
-rand_core = "0.6"
+rand_core = "0.10"
 serde = { version = "1", features = ["derive"] }

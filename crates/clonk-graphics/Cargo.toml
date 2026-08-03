@@ -18,6 +18,6 @@ font8x8 = "0.3"
 rusttype = "0.9"
 
 [dev-dependencies]
-# std+small_rng matches the union the normal build graph already enables
-# (clonk-engine: std, clonk-core: std+small_rng) so rand keeps one flavor.
-rand = { version = "0.9", default-features = false, features = ["std", "small_rng"] }
+# `SmallRng` is always available in rand 0.10; `std` matches the normal build
+# graph and keeps the focused graphics test graph feature-identical.
+rand = { version = "0.10", default-features = false, features = ["std"] }
