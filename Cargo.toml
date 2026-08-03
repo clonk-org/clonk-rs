@@ -46,7 +46,6 @@ readme = "README.md"
 publish = false
 
 [patch.crates-io]
-block = { path = "third_party/block" }
 pixels = { path = "third_party/pixels" }
 
 # The shipped profile. Thin LTO retains cross-crate optimization for the
