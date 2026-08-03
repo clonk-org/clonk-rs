@@ -414,6 +414,14 @@ class CiLatencyTests(unittest.TestCase):
             workflow,
         )
 
+    def test_dependency_guard_cross_checks_the_windows_renderer_graph(self):
+        workflow = DEPENDENCY_GUARD.read_text(encoding="utf-8")
+        self.assertIn("targets: x86_64-pc-windows-msvc", workflow)
+        self.assertIn(
+            "cargo check --locked --target x86_64-pc-windows-msvc -p pixels",
+            workflow,
+        )
+
     def test_parity_uses_the_lightweight_xtask_dispatcher(self):
         dispatcher = (REPOSITORY / "xtask" / "src" / "dispatcher.rs").read_text(
             encoding="utf-8"
