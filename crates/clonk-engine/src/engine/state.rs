@@ -2016,6 +2016,11 @@ impl Engine {
                     snapshot
                 });
             let snapshot_for_call = owned_snapshot_for_call.as_ref().unwrap_or(&state_snapshot);
+            // A callback whose calling object is not this carrier reaches it
+            // only through a foreign scope materialized from the host world.
+            // C++ has one live C4Object, so that scope must publish the same
+            // in-flight effect list the event loop holds.
+            world.preview_object_effects(object_id, &snapshot_for_call.effects);
             let dispatch_definition = resolve_effect_dispatch_definition(
                 &event.effect,
                 &world,

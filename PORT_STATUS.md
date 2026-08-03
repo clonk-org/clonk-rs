@@ -425,6 +425,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Open: **A `Game.pGlobalEffects` callback still runs with no ambient object
+  even when the effect has a command target.** Object effects now execute on
+  their command target, so `cthr->Obj` — the fallback every implicit-object
+  native uses — is that object (`C4Effect.cpp:129,282,345,392,434`;
+  `C4AulExec.cpp:1638-1648`). `dispatch_global_effect_callback`
+  (`crates/clonk-engine/src/lib.rs`) still passes `None` for the host object
+  context, so `AddEffect("X", 0, prio, iv, this)` reaches a global effect whose
+  `Fx*` callbacks see `this()` but resolve bare `GetAlive`/`GetAction`/`GetX`
+  against nothing. Closing it needs the object-scope builder that
+  `Definition::dispatch_effect_callback_with_parameter_conversion_policy` owns
+  to become reachable without a `Definition` receiver — the global dispatch
+  deliberately has none, because C++ runs System/scenario callbacks in a game
+  with no loaded definitions. `parity verify` does not cover it: the golden has
+  no global effect with a command target.
+
 - Open: **An omitted `content/` entry cannot yet be classified as release-owned
   or user-added.** Component archives are complete snapshots, but installed
   state records only their digest and version, not the top-level names the

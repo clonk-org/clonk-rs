@@ -11126,6 +11126,59 @@ fn append_effect_command_target_locals(
     });
 }
 
+/// Re-key an effect callback's ambient-object outcome onto the command
+/// target it actually ran on. `pFn->Exec(pCommandTarget, ...)` makes the
+/// command target the calling object (C4Effect.cpp:129,282,345,392,434;
+/// C4AulExec.cpp:1638-1648), so every implicit-object write belongs to it —
+/// but the effect event loop applies the primary channel to the carrier that
+/// owns the effect, so a foreign command target travels through the same
+/// foreign-object outcome channel as its locals.
+fn retarget_effect_outcome_to_ambient_object(
+    outcome: &mut EffectContextOutcome,
+    ambient: ObjectId,
+) {
+    let effects = std::mem::take(&mut outcome.object);
+    let update = outcome.object_update.take();
+    let commands = std::mem::take(&mut outcome.object_commands);
+    let command_operations = std::mem::take(&mut outcome.command_operations);
+    let destroy = std::mem::replace(&mut outcome.destroy_object, false);
+    if effects.is_empty()
+        && update.is_none()
+        && commands.is_empty()
+        && command_operations.is_empty()
+        && !destroy
+    {
+        return;
+    }
+    outcome.other_objects.push(compat::NestedObjectOutcome {
+        object_id: ambient,
+        effects,
+        update,
+        commands,
+        command_operations,
+        destroy,
+        assign_death: None,
+        contents_orders: Vec::new(),
+    });
+}
+
+/// Fold the carrier's own effect-list writes back into the primary outcome
+/// channel. With a foreign command target the carrier is reached through the
+/// foreign-object channel, which the effect event loop applies only after the
+/// whole batch — past the Kill/deny bookkeeping C++ performs on the one live
+/// `C4Object` right after `Fx*Stop` returns (C4Effect.cpp:389-402). The rest
+/// of the entry keeps its ordinary foreign-object route.
+fn adopt_carrier_effect_writes_from_nested(outcome: &mut EffectContextOutcome, carrier: ObjectId) {
+    let Some(nested) = outcome
+        .other_objects
+        .iter_mut()
+        .find(|nested| nested.object_id == carrier && !nested.effects.is_empty())
+    else {
+        return;
+    };
+    outcome.object.append(&mut nested.effects);
+}
+
 /// C4Effect invokes script callbacks through the fail-safe C4Aul `Exec`
 /// path: an ordinary runtime error aborts the callback and yields C4VNull,
 /// but mutations performed before the error stay on the live objects

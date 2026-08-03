@@ -2920,8 +2920,15 @@ func Probe(target) {
     fn effect_callbacks_resolve_via_command_target_definition() {
         // C4Effect::GetCallbackScript: Fx* functions live in the command
         // target's def script (here via idCommandTarget — the sixth
-        // AddEffect argument), NOT in the affected object's script. The
-        // spell def's FxBuffTimer drains the host object's energy.
+        // AddEffect argument), NOT in the affected object's script: the
+        // spell def's FxBuffTimer is the only reason the effect survives a
+        // timer interval instead of dying as timerless.
+        //
+        // An id-only command target leaves pCommandTarget null, so that
+        // callback runs with `cthr->Obj == nullptr` (C4Effect.cpp:42-56,345)
+        // and its bare DoEnergy reaches no object, exactly as
+        // `definition_commanded_effect_has_no_implicit_position_receiver`
+        // pins for the bare position natives.
         let host_script = r#"
         global func Initialize(state, random) {
             AddEffect("Buff", this(), 100, 2, 0, SPEL);
@@ -2963,9 +2970,10 @@ func Probe(target) {
              kill it as timerless)"
         );
         assert_eq!(
-            engine.objects[idx].state.energy, 40_000,
-            "FxBuffTimer (DoEnergy(-5) = -5000 raw, C4Object.cpp:1347) ran \
-             in the spell def's script at iTime 2 and 4"
+            engine.objects[idx].state.energy, 50_000,
+            "its bare DoEnergy has no object: FnDoEnergy falls back to the \
+             null cthr->Obj and returns without a change (C4Script.cpp:\
+             1299-1303)"
         );
     }
 

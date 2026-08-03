@@ -3537,6 +3537,22 @@ impl HostWorldContext {
         }
     }
 
+    /// Carry the in-flight effect list of the object whose callbacks are
+    /// running into the threaded preview. C++ mutates the one live
+    /// `C4Object`, so a scope materialized from this world during a callback
+    /// must see the same list the event loop holds — including the victim
+    /// C4Effect::Kill keeps linked across `Fx*Stop` (C4Effect.cpp:365-405).
+    pub(crate) fn preview_object_effects(&mut self, id: ObjectId, effects: &[EffectState]) {
+        let _ = self.get(id);
+        let store = Rc::make_mut(self.object_store.get_mut());
+        let Some(object) = store.objects.get_mut(&id) else {
+            return;
+        };
+        if let Some(state) = object.state.as_mut() {
+            Rc::make_mut(state).effects = effects.to_vec();
+        }
+    }
+
     /// Carry one callback-final raw contents list into the threaded preview
     /// used by a later callback in the same effect batch. C++ mutates these
     /// links synchronously; the copied host world otherwise sees only the
