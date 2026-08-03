@@ -6,8 +6,10 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+use clonk_core::std_markup::Markup;
 use tracing::{Event, Level, Metadata, Subscriber};
-use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::fmt::format::{DefaultFields, Writer};
 use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt, OptionalWriter};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
@@ -144,6 +146,35 @@ pub fn debug_log_reaches_gui(target: &str) -> bool {
     }
 }
 
+/// The default fields, with renderer markup removed.
+///
+/// Content strings keep their `<c ...>` tags because the engine colors them
+/// where it draws them — `Parameters.ScenarioTitle` holds `Title.txt` verbatim
+/// so the upper board can (src/C4Game.cpp:254-256). Nothing renders a log
+/// file, so those tags would reach its reader as text. Stripping once here,
+/// the way C++ formats its payload through `StrippedTextFormatterFlag`
+/// (src/C4Log.cpp:103-135,302-303), leaves the record's data raw for every
+/// other consumer and covers fields no call site thought to strip — including
+/// a title quoted inside an error message.
+///
+/// The GUI sinks are deliberately not wrapped: they carry C4Script `Log()`
+/// output to the message board, whose content is parity-bound.
+#[derive(Default)]
+struct StrippedFields(DefaultFields);
+
+impl<'writer> FormatFields<'writer> for StrippedFields {
+    fn format_fields<R: RecordFields>(
+        &self,
+        mut writer: Writer<'writer>,
+        fields: R,
+    ) -> std::fmt::Result {
+        let mut formatted = String::new();
+        self.0.format_fields(Writer::new(&mut formatted), fields)?;
+        Markup::strip_markup(&mut formatted);
+        writer.write_str(&formatted)
+    }
+}
+
 /// Install the process-wide subscriber. Every event fans out to stderr and the
 /// session log; the developer console and the message board attach only when
 /// the application opened them.
@@ -161,6 +192,7 @@ fn install(
         .with(filter)
         .with(
             fmt::layer()
+                .fmt_fields(StrippedFields::default())
                 // The registry admits `DebugLog` unconditionally for the file
                 // sink's sake; stderr still honours the requested verbosity.
                 .with_writer(io::stderr.with_filter(move |meta: &Metadata<'_>| {
@@ -175,6 +207,7 @@ fn install(
         )
         .with(file.map(|file| {
             fmt::layer()
+                .fmt_fields(StrippedFields::default())
                 .with_writer(Mutex::new(file))
                 .with_ansi(false)
                 .with_target(true)
