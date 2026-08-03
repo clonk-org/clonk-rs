@@ -1565,9 +1565,19 @@ pub(crate) fn sqrt_func(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     }
 
-    // C++ implementation does: sqrt, then adjusts for rounding
-    let result = (value as f64).sqrt() as i32;
-    Ok(Value::Int(result))
+    // FnSqrt (C4Script.cpp:3240-3247) truncates the double root and then
+    // corrects it with two `iSqrt * iSqrt` comparisons. Those products are
+    // `C4ValueInt = int32_t` (C4Value.h:62) and wrap above 46340^2, so for
+    // inputs in [2147395601, 2147483647] the decrement never fires and the
+    // oracle returns floor(sqrt) + 1. `wrapping_mul` reproduces that.
+    let mut root = f64::from(value).sqrt() as i32;
+    if root.wrapping_mul(root) < value {
+        root += 1;
+    }
+    if root.wrapping_mul(root) > value {
+        root -= 1;
+    }
+    Ok(Value::Int(root))
 }
 
 fn inverse_trig_func(

@@ -162,6 +162,17 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4AulExec.cpp" > "$gen/aul_exec_script_context.inc"
 
+# FnSqrt corrects a truncated double root with two `iSqrt * iSqrt`
+# comparisons. Those products are C4ValueInt, so the second one wraps above
+# 46340^2 and the correcting decrement never runs. Lift the body verbatim
+# rather than restating it: the overflow is what the port has to reproduce.
+awk '
+  /^static C4ValueInt FnSqrt\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Script.cpp" > "$gen/script_fn_sqrt.inc"
+
 for host_name in GetX GetY; do
   awk -v host_name="$host_name" '
     $0 ~ "^static std::optional<C4ValueInt> Fn" host_name "\\(" { p = 1 }
