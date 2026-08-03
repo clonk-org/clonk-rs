@@ -9,6 +9,7 @@
     "schedule:daily"
   ],
   "timezone": "America/Chicago",
+  "minimumReleaseAge": "7 days",
   "labels": ["dependencies"],
   "prConcurrentLimit": 5,
   "prHourlyLimit": 0,
@@ -26,7 +27,7 @@
   },
   "osvVulnerabilityAlerts": true,
   "vulnerabilityAlerts": {
-    "description": "A security fix must reach a pull request immediately, so it overrides everything below: the daily schedule, the compatible-update grouping, and the dashboard approval that otherwise holds major and 0.x bumps.",
+    "description": "A security fix must reach a pull request immediately, so it overrides everything below: the daily schedule, the week-long release soak, the compatible-update grouping, and the dashboard approval that otherwise holds major and 0.x bumps.",
     "enabled": true,
     "schedule": [],
     "groupName": null,
