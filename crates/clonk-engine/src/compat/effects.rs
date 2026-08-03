@@ -296,7 +296,8 @@ fn fold_effect_callback_fail_safe(
         None => 0,
         Some(Ok(value)) => value_as_i32(&value),
         Some(Err(error)) => {
-            tracing::debug!(%error, "script error in {function}; continuing like C++ fail-safe effect dispatch");
+            tracing::error!(%error, "script error in {function}; continuing like C++ fail-safe effect dispatch");
+            log_runtime_call_frames("", error.call_frames());
             0
         }
     }
@@ -1650,12 +1651,15 @@ pub(crate) fn object_effect_info_lines(target: ObjectId, effects: &[EffectState]
                 returned = value.type_name(),
                 "effect Info callback returned a non-string value"
             ),
-            Err(error) => tracing::debug!(
-                %error,
-                effect = effect.name,
-                number = effect.number,
-                "script error in effect Info callback; continuing like C++ fail-safe dispatch"
-            ),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    effect = effect.name,
+                    number = effect.number,
+                    "script error in effect Info callback; continuing like C++ fail-safe dispatch"
+                );
+                log_runtime_call_frames("", error.call_frames());
+            }
         }
     }
     lines
@@ -2368,10 +2372,11 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
                 "Damage",
                 &[Value::Int(damage_change), Value::Int(caused_by)],
             ) {
-                tracing::debug!(
+                tracing::error!(
                     %error,
                     "script error in Damage; continuing like the C++ fail-safe exec"
                 );
+                log_runtime_call_frames("", error.call_frames());
             }
         }
     }
@@ -2765,10 +2770,11 @@ fn fire_effect_start_core(
                     "IncinerationEx",
                     &[Value::Int(caused_by)],
                 ) {
-                    tracing::debug!(
+                    tracing::error!(
                         %error,
                         "script error in IncinerationEx; continuing like the C++ fail-safe exec"
                     );
+                    log_runtime_call_frames("", error.call_frames());
                 }
             }
             return Ok(-1);
@@ -2795,10 +2801,11 @@ fn fire_effect_start_core(
     let mode_answer = match call_world_object_own_function(target, "FireMode", &[]) {
         Some(Ok(value)) => value_as_i32(&value),
         Some(Err(error)) => {
-            tracing::debug!(
+            tracing::error!(
                 %error,
                 "script error in FireMode; continuing like the C++ fail-safe exec"
             );
+            log_runtime_call_frames("", error.call_frames());
             0
         }
         _ => 0,
@@ -2860,10 +2867,11 @@ fn fire_effect_start_core(
     if let Some(Err(error)) =
         call_world_object_own_function(target, "Incineration", &[Value::Int(caused_by)])
     {
-        tracing::debug!(
+        tracing::error!(
             %error,
             "script error in Incineration; continuing like the C++ fail-safe exec"
         );
+        log_runtime_call_frames("", error.call_frames());
     }
     Ok(0)
 }

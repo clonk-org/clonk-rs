@@ -300,12 +300,13 @@ pub(crate) fn call_object_own_fail_safe(target: ObjectId, function: &str, args: 
     match call_world_object_own_function(target, function, args) {
         Some(Ok(value)) => value,
         Some(Err(error)) => {
-            tracing::debug!(
+            tracing::error!(
                 %error,
                 object = target.as_u64(),
                 callback = function,
                 "script error in object callback; continuing like C++ fail-safe Call"
             );
+            log_runtime_call_frames("", error.call_frames());
             Value::Nil
         }
         None => Value::Nil,
@@ -323,12 +324,13 @@ pub(crate) fn call_inflight_object_own_fail_safe(
     match call_world_object_own_function_inflight(target, function, args) {
         Some(Ok(value)) => value,
         Some(Err(error)) => {
-            tracing::debug!(
+            tracing::error!(
                 %error,
                 object = target.as_u64(),
                 callback = function,
                 "script error in object callback; continuing like C++ fail-safe Call"
             );
+            log_runtime_call_frames("", error.call_frames());
             Value::Nil
         }
         None => Value::Nil,

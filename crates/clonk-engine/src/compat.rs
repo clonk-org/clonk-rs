@@ -21,6 +21,7 @@ use crate::message::{
     MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_DROP_SPEECH,
     HORIZONTAL_POSITION_FLAGS, MESSAGE_ANY_OWNER, MESSAGE_NO_OWNER, VERTICAL_POSITION_FLAGS,
 };
+use crate::object::log_runtime_call_frames;
 use crate::ocf;
 use crate::rng::LcgRng;
 use crate::scenario::{ScenarioValue, ScenarioValueStore};

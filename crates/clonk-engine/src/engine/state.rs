@@ -2260,7 +2260,7 @@ impl Engine {
                     source,
                     recovery: _,
                 }) => {
-                    tracing::debug!(
+                    tracing::error!(
                         %definition,
                         function,
                         error = %source,

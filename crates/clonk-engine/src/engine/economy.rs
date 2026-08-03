@@ -344,19 +344,22 @@ impl Engine {
         // at zero construction (C4Object::DoCon removal)
         if !no_burn_decay {
             if let Err(error) = self.do_con(idx, -100) {
-                tracing::debug!(%error, "fire DoCon callback failed; continuing");
+                tracing::error!(%error, "fire DoCon callback failed; continuing");
+                crate::object::log_engine_error_call_frames(&error);
             }
         }
         // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
         if frame.is_multiple_of(10) && !no_burn_damage {
             if let Err(error) = self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, caused_by) {
-                tracing::debug!(%error, "fire damage callback failed; continuing");
+                tracing::error!(%error, "fire damage callback failed; continuing");
+                crate::object::log_engine_error_call_frames(&error);
             }
         }
         // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
         if frame.is_multiple_of(5) {
             if let Err(error) = self.change_object_energy(idx, -1, C4FX_CALL_ENG_FIRE, caused_by) {
-                tracing::debug!(%error, "fire energy callback failed; continuing");
+                tracing::error!(%error, "fire energy callback failed; continuing");
+                crate::object::log_engine_error_call_frames(&error);
             }
         }
         // Background effects: Tick5 over valid landscape material

@@ -2149,12 +2149,13 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
         match call_world_object_own_function(target, function, pars) {
             Some(Ok(value)) => value,
             Some(Err(error)) => {
-                tracing::debug!(
+                tracing::error!(
                     %error,
                     object = target.as_u64(),
                     callback = function,
                     "script error in Collect callback; continuing like C++ fail-safe Call"
                 );
+                log_runtime_call_frames("", error.call_frames());
                 Value::Nil
             }
             None => Value::Nil,
@@ -3198,10 +3199,11 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         ) {
             Some(Ok(value)) => value.as_bool(),
             Some(Err(error)) => {
-                tracing::debug!(
+                tracing::error!(
                     %error,
                     "script error in ControlContents; continuing like the C++ fail-safe exec"
                 );
+                log_runtime_call_frames("", error.call_frames());
                 false
             }
             None => false,
@@ -3242,10 +3244,11 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         ) {
             Some(Ok(value)) => value.as_bool(),
             Some(Err(error)) => {
-                tracing::debug!(
+                tracing::error!(
                     %error,
                     "script error in Selection; continuing like the C++ fail-safe exec"
                 );
+                log_runtime_call_frames("", error.call_frames());
                 false
             }
             None => false,
@@ -4994,12 +4997,13 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
     if let Some(Err(error)) = call_world_object_own_function(target, "Construction", &[creator_arg])
     {
-        tracing::debug!(
+        tracing::error!(
             id = target.as_u64(),
             callback = "Construction",
             %error,
             "creation callback failed; continuing like C++ fail-safe Call"
         );
+        log_runtime_call_frames("", error.call_frames());
     }
     let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
     if removed {
@@ -5078,12 +5082,13 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     if crossed_full_con {
         for callback in ["Completion", "Initialize"] {
             if let Some(Err(error)) = call_world_object_own_function(target, callback, &[]) {
-                tracing::debug!(
+                tracing::error!(
                     id = target.as_u64(),
                     callback,
                     %error,
                     "creation callback failed; continuing like C++ fail-safe Call"
                 );
+                log_runtime_call_frames("", error.call_frames());
             }
         }
     }
@@ -5351,12 +5356,13 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(Err(error)) =
             call_world_object_own_function(target, "Construction", &[creator_arg])
         {
-            tracing::debug!(
+            tracing::error!(
                 id = target.as_u64(),
                 callback = "Construction",
                 %error,
                 "creation callback failed; continuing like C++ fail-safe Call"
             );
+            log_runtime_call_frames("", error.call_frames());
         }
         let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
         if removed {
@@ -5414,24 +5420,26 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         });
         if crossed_full_con {
             if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
-                tracing::debug!(
+                tracing::error!(
                     id = target.as_u64(),
                     callback = "Completion",
                     %error,
                     "creation callback failed; continuing like C++ fail-safe Call"
                 );
+                log_runtime_call_frames("", error.call_frames());
             }
             let removed =
                 with_host_context(false, |context| context.nested_object_destroyed(target));
             if !removed {
                 if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[])
                 {
-                    tracing::debug!(
+                    tracing::error!(
                         id = target.as_u64(),
                         callback = "Initialize",
                         %error,
                         "creation callback failed; continuing like C++ fail-safe Call"
                     );
+                    log_runtime_call_frames("", error.call_frames());
                 }
             }
         }
@@ -5695,12 +5703,13 @@ fn finish_placement_object_creation(
 
     if let Some(Err(error)) = call_world_object_own_function(target, "Construction", &[Value::Nil])
     {
-        tracing::debug!(
+        tracing::error!(
             id = target.as_u64(),
             callback = "Construction",
             %error,
             "creation callback failed; continuing like C++ fail-safe Call"
         );
+        log_runtime_call_frames("", error.call_frames());
     }
     let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
     if removed {
@@ -5750,22 +5759,24 @@ fn finish_placement_object_creation(
     });
     if crossed_full_con {
         if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
-            tracing::debug!(
+            tracing::error!(
                 id = target.as_u64(),
                 callback = "Completion",
                 %error,
                 "creation callback failed; continuing like C++ fail-safe Call"
             );
+            log_runtime_call_frames("", error.call_frames());
         }
         let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
         if !removed {
             if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[]) {
-                tracing::debug!(
+                tracing::error!(
                     id = target.as_u64(),
                     callback = "Initialize",
                     %error,
                     "creation callback failed; continuing like C++ fail-safe Call"
                 );
+                log_runtime_call_frames("", error.call_frames());
             }
         }
     }
@@ -6332,12 +6343,13 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
     let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
     if let Some(Err(error)) = call_world_object_own_function(target, "Construction", &[creator_arg])
     {
-        tracing::debug!(
+        tracing::error!(
             id = target.as_u64(),
             callback = "Construction",
             %error,
             "creation callback failed; continuing like C++ fail-safe Call"
         );
+        log_runtime_call_frames("", error.call_frames());
     }
     let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
     if removed {
@@ -6423,12 +6435,13 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
     if crossed_full_con {
         for callback in ["Completion", "Initialize"] {
             if let Some(Err(error)) = call_world_object_own_function(target, callback, &[]) {
-                tracing::debug!(
+                tracing::error!(
                     id = target.as_u64(),
                     callback,
                     %error,
                     "creation callback failed; continuing like C++ fail-safe Call"
                 );
+                log_runtime_call_frames("", error.call_frames());
             }
         }
     }
