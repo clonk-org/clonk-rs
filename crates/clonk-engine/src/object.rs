@@ -4100,6 +4100,15 @@ pub(crate) fn fair_crew_physical_with_script(
     }
 }
 
+/// Dump one ` by: ` line per active script context, innermost first, the way
+/// `C4AulExec::Exec` traces a tolerated runtime error
+/// (`src/C4AulExec.cpp:1335-1346`, `C4AulScriptContext::dump` at info).
+///
+/// The caller reports the error itself *first* and *above* this — `err` in
+/// `C4AulError::show` (`src/C4Aul.cpp:32-37`). That ordering is the contract:
+/// the engine's default filter is `info`, so a message logged below its own
+/// frames is dropped and the trace reads as orphan ` by: ` lines with no error
+/// to explain them.
 pub(crate) fn log_runtime_call_frames(definition: &str, frames: &[clonk_script::RuntimeCallFrame]) {
     for frame in frames {
         if let Some(dump) = frame.direct_exec_display() {
@@ -4133,7 +4142,7 @@ pub(crate) fn tolerate_script_error<T>(
             // errors reaching here without a funnel carry none.
             recovery: _,
         }) => {
-            tracing::debug!(
+            tracing::error!(
                 %definition,
                 function,
                 error = %source,

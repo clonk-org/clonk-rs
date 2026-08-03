@@ -76,14 +76,26 @@ fn run_failing_effect_ticks(recorder: LevelRecorder) {
 }
 
 #[test]
-fn a_fail_safe_callback_failure_is_not_a_warning() {
-    // The fail-safe path is the designed, expected outcome of a script callback
-    // that errors: the engine recovers and keeps ticking. Reporting a designed
-    // outcome at `warn` — at or above the default filter — means one buggy
-    // content script floods every user's log, and it drains `warn` of meaning
-    // for the failures that really are abnormal.
+fn a_tolerated_script_error_outranks_the_frames_that_trace_it() {
+    // C4AulExec's fail-safe unwind reports the error first and its call frames
+    // beneath it: `C4AulError::show` logs the message at `err`
+    // (`src/C4Aul.cpp:32-37`), then every context dumps a " by: " line at info
+    // (`src/C4AulExec.cpp:1335-1346`). Logging the message *below* its own
+    // frames inverts that, and because the default filter is `info` the player
+    // is left with a stack trace and no error to explain it.
     let recorder = LevelRecorder::default();
     run_failing_effect_ticks(recorder.clone());
+
+    let frames = recorder.levels_mentioning(" by: ");
+    assert!(
+        !frames.is_empty(),
+        "the tolerated error should still be traced: {:?}",
+        recorder.events()
+    );
+    assert!(
+        frames.iter().all(|level| *level == tracing::Level::INFO),
+        "call frames reported off info: {frames:?}"
+    );
 
     let levels = recorder.levels_mentioning("fail-safe");
     assert!(
@@ -92,7 +104,7 @@ fn a_fail_safe_callback_failure_is_not_a_warning() {
         recorder.events()
     );
     assert!(
-        levels.iter().all(|level| *level == tracing::Level::DEBUG),
-        "fail-safe recovery reported above debug: {levels:?}"
+        levels.iter().all(|level| *level == tracing::Level::ERROR),
+        "the tolerated error is filtered out below its own frames: {levels:?}"
     );
 }
