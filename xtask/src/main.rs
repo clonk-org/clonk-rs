@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 use xtask::{dev_check, parity};
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 // The authorized classic packs ship inside the content submodule, which is the
@@ -2193,15 +2193,17 @@ fn write_deterministic_zip(
         .with_context(|| format!("unable to create archive {}", archive_path.display()))?;
     let mut zip = ZipWriter::new(file);
 
-    // `FileOptions::default()` reads the wall clock when `zip`'s `time` feature
-    // is enabled, which any dependency could turn on through feature
+    // `SimpleFileOptions::default()` reads the wall clock when `zip`'s `time`
+    // feature is enabled, which any dependency could turn on through feature
     // unification. Release archives must not depend on that.
     let epoch = zip::DateTime::default();
-    let dir_options = FileOptions::default()
+    let dir_options = SimpleFileOptions::default()
+        .system(zip::System::Unix)
         .compression_method(CompressionMethod::Stored)
         .last_modified_time(epoch)
         .unix_permissions(0o755);
-    let file_options = FileOptions::default()
+    let file_options = SimpleFileOptions::default()
+        .system(zip::System::Unix)
         .compression_method(CompressionMethod::Deflated)
         .last_modified_time(epoch);
 
@@ -3222,11 +3224,11 @@ mod tests {
     #[test]
     fn archive_entries_carry_a_pinned_timestamp() {
         // Reproducibility currently rests on `zip`'s `time` feature being off:
-        // `FileOptions::default()` reads the wall clock when it is on, and the
-        // repeatability test above cannot see the difference because DOS
-        // timestamps have two-second granularity. Pin it so a version bump or
-        // feature unification elsewhere in the workspace cannot silently make
-        // releases non-reproducible.
+        // `SimpleFileOptions::default()` reads the wall clock when it is on,
+        // and the repeatability test above cannot see the difference because
+        // DOS timestamps have two-second granularity. Pin it so a version bump
+        // or feature unification elsewhere in the workspace cannot silently
+        // make releases non-reproducible.
         let (_temp, paths) = package_fixture();
         let package_dir = assemble_package_layout(&paths).expect("assemble package");
         let archive = create_archive(&paths, &package_dir).expect("create archive");
@@ -3236,7 +3238,9 @@ mod tests {
         let epoch = zip::DateTime::default();
         for index in 0..zip.len() {
             let entry = zip.by_index(index).expect("read zip entry");
-            let stamp = entry.last_modified();
+            let stamp = entry
+                .last_modified()
+                .expect("deterministic archive entry timestamp");
             assert_eq!(
                 (
                     stamp.year(),
@@ -3255,6 +3259,54 @@ mod tests {
                     epoch.second()
                 ),
                 "entry {} carries a wall-clock timestamp",
+                entry.name()
+            );
+        }
+    }
+
+    #[test]
+    fn archive_entries_preserve_release_compression_and_permissions() {
+        // Component digests name the update payloads, while the executable
+        // modes determine whether an extracted engine can start. Keep both
+        // writer choices explicit across zip crate migrations.
+        let (_temp, paths) = package_fixture();
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+        let archive = create_archive(&paths, &package_dir).expect("create archive");
+
+        let file = File::open(&archive).expect("open archive");
+        let mut zip = zip::ZipArchive::new(file).expect("open zip");
+        for index in 0..zip.len() {
+            let entry = zip.by_index(index).expect("read zip entry");
+            let expected_mode = if entry.is_dir()
+                || entry.name().contains("/bin/")
+                || entry.name().contains("/Contents/MacOS/")
+            {
+                0o755
+            } else {
+                0o644
+            };
+            let expected_compression = if entry.is_dir() {
+                CompressionMethod::Stored
+            } else {
+                CompressionMethod::Deflated
+            };
+
+            assert_eq!(
+                entry.compression(),
+                expected_compression,
+                "entry {} changed compression",
+                entry.name()
+            );
+            assert_eq!(
+                entry.unix_mode().map(|mode| mode & 0o777),
+                Some(expected_mode),
+                "entry {} changed permissions",
+                entry.name()
+            );
+            assert_eq!(
+                zip::HasZipMetadata::get_metadata(&entry).system,
+                zip::System::Unix,
+                "entry {} inherited host-specific origin metadata",
                 entry.name()
             );
         }
