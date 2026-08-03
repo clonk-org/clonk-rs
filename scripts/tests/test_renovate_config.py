@@ -19,6 +19,12 @@ class RenovateConfigTests(unittest.TestCase):
         self.assertIn(":semanticCommitTypeAll(chore)", config["extends"])
         self.assertIn(":semanticCommitScopeDisabled", config["extends"])
 
+    def test_updates_are_looked_for_daily(self):
+        config = load_config()
+
+        self.assertIn("schedule:daily", config["extends"])
+        self.assertNotIn("schedule:monthly", config["extends"])
+
     def test_lock_file_maintenance_states_its_own_cadence(self):
         # Renovate defaults `lockFileMaintenance.schedule` to
         # ["before 4am on monday"], and a child object's own schedule wins over

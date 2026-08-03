@@ -6,7 +6,7 @@
     ":semanticCommitTypeAll(chore)",
     ":semanticCommitScopeDisabled",
     "helpers:pinGitHubActionDigests",
-    "schedule:monthly"
+    "schedule:daily"
   ],
   "timezone": "America/Chicago",
   "labels": ["dependencies"],
@@ -26,7 +26,7 @@
   },
   "osvVulnerabilityAlerts": true,
   "vulnerabilityAlerts": {
-    "description": "A security fix must reach a pull request immediately, so it overrides everything below: the monthly schedule, the compatible-update grouping, and the dashboard approval that otherwise holds major and 0.x bumps.",
+    "description": "A security fix must reach a pull request immediately, so it overrides everything below: the daily schedule, the compatible-update grouping, and the dashboard approval that otherwise holds major and 0.x bumps.",
     "enabled": true,
     "schedule": [],
     "groupName": null,
