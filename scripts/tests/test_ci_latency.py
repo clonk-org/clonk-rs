@@ -8,9 +8,15 @@ from pathlib import Path
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-LANDING = REPOSITORY / ".github" / "workflows" / "landing.yml"
-MAIN = REPOSITORY / ".github" / "workflows" / "rust.yml"
-DEPENDENCY_GUARD = REPOSITORY / ".github" / "workflows" / "dependency-guard.yml"
+WORKFLOWS = REPOSITORY / ".github" / "workflows"
+LANDING = WORKFLOWS / "landing.yml"
+MAIN = WORKFLOWS / "rust.yml"
+DEPENDENCY_GUARD = WORKFLOWS / "dependency-guard.yml"
+
+# One step, from its first key to the next step's. `actions/cache/restore` is
+# deliberately not matched: only the save halves can consume the budget.
+STEP = re.compile(r"(?ms)^      - (?:name|uses|id):.*?(?=^      - (?:name|uses|id):|\Z)")
+CACHE_WRITER = re.compile(r"Swatinem/rust-cache@|actions/cache(?:/save)?@")
 
 
 def matrix_entry(workflow, name):
@@ -19,6 +25,17 @@ def matrix_entry(workflow, name):
     start = workflow.index(marker)
     end = workflow.find("\n          - name: ", start + len(marker))
     return workflow[start : end if end >= 0 else len(workflow)]
+
+
+def cache_steps(workflow):
+    """Return every step that can publish an Actions cache entry."""
+    return [step for step in STEP.findall(workflow) if CACHE_WRITER.search(step)]
+
+
+def fires_on_a_non_default_ref(workflow):
+    """Report whether an event can run this workflow off the default branch."""
+    triggers = re.search(r"(?ms)^on:\n(.*?)^(?=[a-z])", workflow).group(1)
+    return "pull_request:" in triggers or "merge_group:" in triggers
 
 
 class CiLatencyTests(unittest.TestCase):
@@ -58,6 +75,37 @@ class CiLatencyTests(unittest.TestCase):
         windows_producer = main[main.index("  windows-release-tools:") :]
         self.assertIn("shared-key: windows-runtime-msvc", windows_producer)
         self.assertNotIn("cache-on-failure:", windows_producer)
+
+    def test_no_workflow_publishes_a_cache_only_its_own_ref_can_restore(self):
+        # GitHub restores a cache from the current branch or the default one,
+        # so an entry saved from `refs/pull/N/merge` or a merge-queue ref is
+        # dead on arrival: nothing outside that one ref can ever read it, while
+        # it still spends the repository's 10 GiB budget and evicts by LRU the
+        # entries the merge queue and the shipped Windows build need.
+        producers = set()
+        consumers = {}
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            workflow = path.read_text(encoding="utf-8")
+            ref_scoped = fires_on_a_non_default_ref(workflow)
+            for step in cache_steps(workflow):
+                scope = re.search(r"shared-key: (\S+)", step)
+                scope = scope.group(1) if scope else path.name
+                with self.subTest(workflow=path.name, scope=scope):
+                    if "save-if: false" in step:
+                        consumers.setdefault(scope, path.name)
+                        continue
+                    self.assertFalse(
+                        ref_scoped,
+                        f"{path.name} saves a cache from a ref only its own "
+                        "re-runs can restore; add `save-if: false`",
+                    )
+                    producers.add(scope)
+
+        # A restore-only scope with no producer is the same waste read from the
+        # other end: a step that can only ever miss.
+        for scope, workflow in consumers.items():
+            with self.subTest(workflow=workflow, scope=scope):
+                self.assertIn(scope, producers)
 
     def test_cache_producers_finish_while_obsolete_diagnostics_cancel(self):
         main = MAIN.read_text(encoding="utf-8")
