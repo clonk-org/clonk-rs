@@ -980,8 +980,10 @@ pub(crate) fn draw_upper_board_with_initialized_text_width(
         );
     }
     if mode != UpperBoardMode::Mini {
+        // TextOut leaves fDoMarkup at its default (src/C4UpperBoard.cpp:89-90,
+        // src/StdDDraw2.h:363), so the title's `<c ...>` tags color it.
         let title_y = upper_board_output_height(mode, hud) / 2 - font.line_height() / 2;
-        font.draw_with_gamma(
+        font.draw_markup_with_gamma(
             surface,
             10,
             title_y,
@@ -4021,6 +4023,76 @@ mod tests {
         assert_eq!(
             disabled.get_pixel(274, text_y),
             Some(Color::opaque(120, 80, 40))
+        );
+    }
+
+    #[test]
+    fn upper_board_scenario_title_draws_markup() {
+        // C4UpperBoard::Draw passes no fDoMarkup to TextOut
+        // (src/C4UpperBoard.cpp:89-90) and the parameter defaults to true
+        // (src/StdDDraw2.h:363), so StringOut never sets STDFONT_NOMARKUP
+        // (src/StdDDraw2.cpp:1094): Melees.c4f/Queron3.c4s's title colors
+        // "3.41" instead of drawing its tags as literal text.
+        let mut font = clonk_graphics::clonk_font::ClonkFont::new(3);
+        for character in "Queron<cf2843.1>/".chars() {
+            font.add_glyph(
+                character,
+                clonk_graphics::clonk_font::GlyphCell {
+                    width: 4,
+                    pixels: vec![Color::opaque(255, 255, 255); 4 * 4],
+                },
+            );
+        }
+        font.add_glyph(
+            ' ',
+            clonk_graphics::clonk_font::GlyphCell {
+                width: 4,
+                pixels: vec![Color::transparent(); 4 * 4],
+            },
+        );
+        let font = HudFont::Clonk(&font);
+        let hud = HudGraphics {
+            upper_board: Some(solid_image(8, 55, [120, 80, 40, 255])),
+            ..HudGraphics::default()
+        };
+        let mut target = surface(400, 60);
+        draw_upper_board(
+            &mut target,
+            &font,
+            &hud,
+            UpperBoardMode::Full,
+            "Queron <c ff2c28>3.41</c>",
+            0,
+        );
+
+        // Glyphs advance by width + iHSpace = 3 from x = 10, so glyph n owns
+        // columns 10+3n..10+3n+3 before the next cell overlaps it.
+        let title_row = 27;
+        assert_eq!(
+            target.get_pixel(10, title_row),
+            Some(MESSAGE_COLOR),
+            "'Q' keeps dwFCol"
+        );
+        assert_eq!(
+            target.get_pixel(25, title_row),
+            Some(MESSAGE_COLOR),
+            "'n' keeps dwFCol"
+        );
+        let tag_color = clonk_graphics::clonk_font::markup_blit_color([0xff, 0x2c, 0x28]);
+        assert_eq!(
+            target.get_pixel(31, title_row),
+            Some(Color::opaque(tag_color[0], tag_color[1], tag_color[2])),
+            "'3' takes the <c ff2c28> tag color"
+        );
+        assert_eq!(
+            target.get_pixel(42, title_row),
+            Some(Color::opaque(tag_color[0], tag_color[1], tag_color[2])),
+            "'1' still inside the tag"
+        );
+        assert_eq!(
+            target.get_pixel(60, title_row),
+            Some(Color::opaque(120, 80, 40)),
+            "the 25-character raw string would still be drawing here"
         );
     }
 
