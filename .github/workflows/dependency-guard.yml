@@ -60,12 +60,20 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          targets: x86_64-pc-windows-msvc
 
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: dependency-guard
           cache-on-failure: true
+
+      # Pixels is the smallest package that enables wgpu's DX12 allocator.
+      # Cross-check it because incompatible `windows` crate identities compile
+      # on Linux but fail when Direct3D types cross the allocator boundary.
+      - name: Check Windows renderer dependencies
+        run: cargo check --locked --target x86_64-pc-windows-msvc -p pixels
 
       # Type-checks every library and binary, including the optional release
       # tooling, without optimized codegen. `--locked` additionally fails when
