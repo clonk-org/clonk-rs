@@ -336,6 +336,24 @@
     }
 
     #[test]
+    fn abs_wraps_int_min_like_the_cpp_twos_complement_negation() {
+        // FnAbs (C4Script.cpp:3197-3200) forwards to the `Abs` template
+        // (C4Math.h:21) `val > 0 ? val : -val`, so negating INT32_MIN wraps
+        // back to INT32_MIN and the engine keeps running. Rust's checked
+        // `i32::abs` instead panics under the overflow checks `dev`, `test`
+        // and the live-gameplay `play` profile enable.
+        let mut engine = ScriptEngine::new();
+        register_host_functions(&mut engine);
+
+        assert_eq!(
+            engine
+                .call("Abs", &[Value::Int(i32::MIN)])
+                .expect("Abs mirrors the C++ two's-complement negation"),
+            Value::Int(i32::MIN)
+        );
+    }
+
+    #[test]
     fn cpp_native_registration_kinds_are_exhaustively_partitioned() {
         let cpp_backed = crate::native_function_parameters::native_function_parameter_entries()
             .filter(|(name, _)| {
