@@ -199,13 +199,19 @@ pub fn extract_archive(
         });
     }
 
-    // zip 8 indexes entries by their raw name and retains only the last exact
+    // zip 8 indexes entries by their effective name and retains only the last
     // duplicate. Scan the central directory independently so that upgrading
     // the reader cannot turn our reject-whole-archive collision policy into a
-    // silent last-entry-wins policy.
+    // silent last-entry-wins policy. Comparing record counts also catches
+    // names rewritten by extra fields before they enter the index.
     let central_directory_start = zip.central_directory_start();
+    let indexed_entry_count = zip.len();
     let mut reader = zip.into_inner();
-    let result = match duplicate_central_entry_name(&mut reader, central_directory_start) {
+    let result = match duplicate_central_entry_name(
+        &mut reader,
+        central_directory_start,
+        indexed_entry_count,
+    ) {
         Ok(Some(entry)) => Err(ExtractError::Unsafe {
             archive: archive.to_path_buf(),
             entry,
@@ -230,21 +236,24 @@ pub fn extract_archive(
     result
 }
 
-/// Returns an exact duplicate stored name from the central directory.
+/// Returns a stored name whose effective name was collapsed by the reader.
 ///
-/// `ZipArchive` intentionally exposes a name-indexed view, so its public
-/// length cannot reveal duplicate keys. This bounded scanner reads only the
-/// fixed-size central headers and their at-most-`u16::MAX` names; payload bytes
-/// are never loaded.
+/// `ZipArchive` intentionally exposes a name-indexed view, so compare its
+/// length with the number of central-directory records. This catches exact
+/// stored-name duplicates and names made identical by a recognized extra
+/// field, without duplicating the reader's name-decoding rules. The bounded
+/// scanner reads only fixed-size central headers and their at-most-`u16::MAX`
+/// names; payload bytes are never loaded.
 fn duplicate_central_entry_name<R: Read + Seek>(
     reader: &mut R,
     central_directory_start: u64,
+    indexed_entry_count: usize,
 ) -> zip::result::ZipResult<Option<String>> {
     const CENTRAL_DIRECTORY_HEADER: [u8; 4] = [b'P', b'K', 1, 2];
     const HEADER_AFTER_SIGNATURE: usize = 42;
 
     reader.seek(SeekFrom::Start(central_directory_start))?;
-    let mut names = HashSet::new();
+    let mut record_count = 0usize;
 
     loop {
         let mut signature = [0u8; 4];
@@ -261,10 +270,10 @@ fn duplicate_central_entry_name<R: Read + Seek>(
         let mut name = vec![0u8; filename_length];
         reader.read_exact(&mut name)?;
 
-        if names.contains(&name) {
+        if record_count == indexed_entry_count {
             return Ok(Some(String::from_utf8_lossy(&name).into_owned()));
         }
-        names.insert(name);
+        record_count += 1;
         reader.seek(SeekFrom::Current(extra_length + comment_length))?;
     }
 }
@@ -515,7 +524,7 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Write};
     use tempfile::TempDir;
-    use zip::write::SimpleFileOptions;
+    use zip::write::{FullFileOptions, SimpleFileOptions};
     use zip::ZipWriter;
 
     fn archive_of(build: impl FnOnce(&mut ZipWriter<Cursor<Vec<u8>>>)) -> Vec<u8> {
@@ -579,6 +588,44 @@ mod tests {
         bytes[local + 30..local + 30 + local_name_length].copy_from_slice(replacement.as_bytes());
         bytes[central + 46..central + 46 + central_name_length]
             .copy_from_slice(replacement.as_bytes());
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        !bytes.iter().fold(!0u32, |crc, byte| {
+            (0..8).fold(crc ^ u32::from(*byte), |crc, _| {
+                (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1))
+            })
+        })
+    }
+
+    fn unicode_path_options(unicode_name: &str) -> FullFileOptions<'static> {
+        let mut data = Vec::with_capacity(5 + unicode_name.len());
+        data.push(1);
+        // The writer validates custom fields before it knows the entry name,
+        // so start with the CRC of its empty placeholder and repair it once
+        // the central directory has been written.
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(unicode_name.as_bytes());
+        let mut options = FullFileOptions::default();
+        options
+            .add_extra_data(0x7075, data, true)
+            .expect("add Unicode Path extra field");
+        options
+    }
+
+    fn repair_unicode_path_crcs(bytes: &mut [u8]) {
+        let central_headers: Vec<_> = bytes
+            .windows(4)
+            .enumerate()
+            .filter_map(|(offset, signature)| (signature == [b'P', b'K', 1, 2]).then_some(offset))
+            .collect();
+        for header in central_headers {
+            let name_length = u16::from_le_bytes([bytes[header + 28], bytes[header + 29]]) as usize;
+            let extra = header + 46 + name_length;
+            assert_eq!(&bytes[extra..extra + 2], &0x7075u16.to_le_bytes());
+            let name = bytes[header + 46..header + 46 + name_length].to_vec();
+            bytes[extra + 5..extra + 9].copy_from_slice(&crc32(&name).to_le_bytes());
+        }
     }
 
     fn write_archive(directory: &Path, bytes: &[u8]) -> PathBuf {
@@ -743,6 +790,35 @@ mod tests {
             ),
             "a repeated name should reject the archive, got {result:?}"
         );
+    }
+
+    #[test]
+    fn unicode_path_aliases_reject_the_archive_before_writing() {
+        // Info-ZIP Unicode Path fields can replace different stored names with
+        // the same effective name. zip 8 indexes that effective name and keeps
+        // only the last entry, so extraction must detect the collapsed record.
+        let mut bytes = archive_of(|writer| {
+            for raw_name in ["first.txt", "other.txt"] {
+                writer
+                    .start_file(raw_name, unicode_path_options("shared.txt"))
+                    .expect("start aliased file");
+                writer.write_all(b"payload").expect("write file");
+            }
+        });
+        repair_unicode_path_crcs(&mut bytes);
+
+        let (directory, result) = extract(&bytes, 1024);
+        assert!(
+            matches!(
+                result,
+                Err(ExtractError::Unsafe {
+                    fault: EntryFault::Collision,
+                    ..
+                })
+            ),
+            "Unicode Path aliases should reject the archive, got {result:?}"
+        );
+        assert!(!directory.path().join("staged").exists());
     }
 
     #[test]
