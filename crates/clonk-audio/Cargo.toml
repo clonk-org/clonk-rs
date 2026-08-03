@@ -13,10 +13,10 @@ publish.workspace = true
 default = ["cpal"]
 
 [dependencies]
-thiserror = "1"
+thiserror = "2"
 hound = "3"
 lewton = "0.10"
-libloading = "0.8"
+libloading = "0.9"
 midly = { version = "=0.5.3", default-features = false, features = ["std", "strict"] }
 symphonia-bundle-mp3 = "0.6"
 symphonia-core = "0.6"

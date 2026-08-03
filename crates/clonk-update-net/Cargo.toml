@@ -15,7 +15,7 @@ clonk-update = { path = "../clonk-update" }
 # league client needs, so Cargo's feature unification adds no crate to the
 # workspace graph that a networked build did not already compile.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-thiserror = "1.0"
+thiserror = "2"
 tokio = { version = "1", features = ["net", "rt", "time"] }
 tracing = "0.1"
 
