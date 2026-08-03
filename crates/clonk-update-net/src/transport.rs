@@ -622,9 +622,9 @@ mod tests {
         // actually came from is checked before its body is read.
         let elsewhere = serve(vec![Reply::ok(b"{}")]);
         let fixture = serve(vec![Reply::redirect(&elsewhere.url("/manifest.json"))]);
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let transport = HttpTransport::with_client(
-            reqwest::Client::builder()
+            bundled_root_client_builder()
+                .expect("bundled roots parse")
                 .redirect(reqwest::redirect::Policy::limited(10))
                 .build()
                 .expect("build a redirect-following client"),

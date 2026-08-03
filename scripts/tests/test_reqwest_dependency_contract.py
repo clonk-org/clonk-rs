@@ -8,6 +8,10 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 NETWORK = REPOSITORY / "crates" / "clonk-network"
 UPDATER = REPOSITORY / "crates" / "clonk-update-net"
 PIXELS = REPOSITORY / "third_party" / "pixels"
+HTTP_CLIENT_CONSTRUCTOR = re.compile(
+    r"(?<![A-Za-z0-9_:])(?:(?:reqwest::)?"
+    r"Client::(?:builder|new|default)\(\)|reqwest::(?:blocking::)?get\()"
+)
 
 
 def manifest(crate: Path) -> dict:
@@ -29,17 +33,26 @@ def dependency_tables(contents: dict):
             yield f"target.{target_name}.{table_name}", target.get(table_name, {})
 
 
+def declared_package(alias: str, requirement, workspace_dependencies: dict) -> str:
+    if isinstance(requirement, dict) and requirement.get("workspace"):
+        requirement = workspace_dependencies.get(alias, requirement)
+    return (
+        requirement.get("package", alias)
+        if isinstance(requirement, dict)
+        else alias
+    )
+
+
 def workspace_dependency_declarations(package: str) -> dict:
     declarations = {}
+    workspace_dependencies = manifest(REPOSITORY)["workspace"].get("dependencies", {})
+    for alias, requirement in workspace_dependencies.items():
+        if declared_package(alias, requirement, workspace_dependencies) == package:
+            declarations[(".", "workspace.dependencies", alias)] = requirement
     for member in workspace_members():
         for table_name, dependencies in dependency_tables(manifest(member)):
             for alias, requirement in dependencies.items():
-                declared_package = (
-                    requirement.get("package", alias)
-                    if isinstance(requirement, dict)
-                    else alias
-                )
-                if declared_package == package:
+                if declared_package(alias, requirement, workspace_dependencies) == package:
                     location = (
                         member.relative_to(REPOSITORY).as_posix(),
                         table_name,
@@ -49,7 +62,38 @@ def workspace_dependency_declarations(package: str) -> dict:
     return declarations
 
 
+def http_client_constructors(source: str) -> list[str]:
+    return HTTP_CLIENT_CONSTRUCTOR.findall(source)
+
+
+def crate_http_client_constructors(crate: Path) -> list[tuple[str, str]]:
+    return [
+        (path.relative_to(crate).as_posix(), constructor)
+        for path in sorted((crate / "src").rglob("*.rs"))
+        for constructor in http_client_constructors(path.read_text(encoding="utf-8"))
+    ]
+
+
 class ReqwestDependencyContractTests(unittest.TestCase):
+    def test_source_scan_keeps_code_after_test_gates_and_finds_every_constructor(self):
+        source = """
+            reqwest::Client::builder();
+            #[cfg(test)]
+            use test_support::Fixture;
+            Client::new();
+            Client::default();
+            reqwest::get("https://example.invalid");
+        """
+        self.assertEqual(
+            http_client_constructors(source),
+            [
+                "reqwest::Client::builder()",
+                "Client::new()",
+                "Client::default()",
+                "reqwest::get(",
+            ],
+        )
+
     def test_contract_covers_all_31_workspace_members_including_vendored_pixels(self):
         covered_members = set(workspace_members())
         self.assertEqual((len(covered_members), PIXELS in covered_members), (31, True))
@@ -115,18 +159,15 @@ class ReqwestDependencyContractTests(unittest.TestCase):
                 self.assertIn(".tls_backend_rustls()", implementation)
                 self.assertIn(".tls_certs_only(", implementation)
 
-                production_sources = "\n".join(
-                    path.read_text(encoding="utf-8").split("#[cfg(test)]", 1)[0]
-                    for path in (crate / "src").rglob("*.rs")
-                )
-                raw_builders = re.findall(
-                    r"(?<![A-Za-z_])(?:reqwest::)?Client::builder\(\)",
-                    production_sources,
-                )
                 self.assertEqual(
-                    raw_builders,
-                    ["reqwest::Client::builder()"],
-                    "production clients must start from the bundled-root helper",
+                    crate_http_client_constructors(crate),
+                    [
+                        (
+                            source.relative_to(crate).as_posix(),
+                            "reqwest::Client::builder()",
+                        )
+                    ],
+                    "every client constructor must be the bundled-root helper",
                 )
 
 
