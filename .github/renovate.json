@@ -13,8 +13,9 @@
   "prConcurrentLimit": 5,
   "prHourlyLimit": 0,
   "lockFileMaintenance": {
-    "description": "Workspace builds use --locked, so a stale Cargo.lock is a build input like any other; refresh it on the same monthly cadence.",
-    "enabled": true
+    "description": "Workspace builds use --locked, so a stale Cargo.lock is a build input like any other. Renovate gives this object its own default schedule that wins over the repository one, so the weekly cadence is spelled out here rather than inherited.",
+    "enabled": true,
+    "schedule": ["before 4am on monday"]
   },
   "ignorePaths": [
     "third_party/**"
