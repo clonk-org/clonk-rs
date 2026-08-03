@@ -6,6 +6,23 @@ import unittest
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 
 
+def manifest(relative_path):
+    return tomllib.loads((REPOSITORY / relative_path).read_text(encoding="utf-8"))
+
+
+def dependency_declarations(cargo_manifest, dependency_name):
+    declarations = []
+    dependency_sections = ("dependencies", "dev-dependencies", "build-dependencies")
+    for section in dependency_sections:
+        if dependency_name in cargo_manifest.get(section, {}):
+            declarations.append(cargo_manifest[section][dependency_name])
+    for target in cargo_manifest.get("target", {}).values():
+        for section in dependency_sections:
+            if dependency_name in target.get(section, {}):
+                declarations.append(target[section][dependency_name])
+    return declarations
+
+
 class ImageDependencyContractTests(unittest.TestCase):
     def test_direct_image_dependencies_use_current_codec_versions(self):
         expected_image_manifests = {
@@ -20,43 +37,35 @@ class ImageDependencyContractTests(unittest.TestCase):
             "crates/clonk-resources/Cargo.toml",
             "xtask/Cargo.toml",
         }
-        workspace_manifests = [REPOSITORY / "Cargo.toml", REPOSITORY / "xtask/Cargo.toml"]
-        workspace_manifests.extend((REPOSITORY / "crates").glob("*/Cargo.toml"))
+        workspace_manifests = [
+            pathlib.Path(member) / "Cargo.toml"
+            for member in manifest("Cargo.toml")["workspace"]["members"]
+        ]
+        self.assertIn(
+            pathlib.Path("third_party/pixels/Cargo.toml"), workspace_manifests
+        )
 
-        def dependency_versions(manifest, dependency_name):
-            dependency_tables = [
-                manifest.get(table_name, {})
-                for table_name in ("dependencies", "dev-dependencies", "build-dependencies")
-            ]
-            dependency_tables.extend(
-                dependencies
-                for target in manifest.get("target", {}).values()
-                for table_name in ("dependencies", "dev-dependencies", "build-dependencies")
-                if (dependencies := target.get(table_name)) is not None
-            )
-            declarations = [
-                dependencies[dependency_name]
-                for dependencies in dependency_tables
-                if dependency_name in dependencies
-            ]
+        def dependency_versions(cargo_manifest, dependency_name):
             return [
                 declaration
                 if isinstance(declaration, str)
                 else declaration["version"]
-                for declaration in declarations
+                for declaration in dependency_declarations(
+                    cargo_manifest, dependency_name
+                )
             ]
 
         image_versions = {}
         png_versions = {}
         jpeg_decoder_versions = {}
-        for path in workspace_manifests:
-            manifest = tomllib.loads(path.read_text(encoding="utf-8"))
-            relative_path = str(path.relative_to(REPOSITORY))
-            if versions := dependency_versions(manifest, "image"):
+        for relative_path in workspace_manifests:
+            cargo_manifest = manifest(relative_path)
+            relative_path = relative_path.as_posix()
+            if versions := dependency_versions(cargo_manifest, "image"):
                 image_versions[relative_path] = versions
-            if versions := dependency_versions(manifest, "png"):
+            if versions := dependency_versions(cargo_manifest, "png"):
                 png_versions[relative_path] = versions
-            if versions := dependency_versions(manifest, "jpeg-decoder"):
+            if versions := dependency_versions(cargo_manifest, "jpeg-decoder"):
                 jpeg_decoder_versions[relative_path] = versions
 
         self.assertEqual(set(image_versions), expected_image_manifests)
@@ -69,18 +78,12 @@ class ImageDependencyContractTests(unittest.TestCase):
             jpeg_decoder_versions,
             {"crates/clonk-resources/Cargo.toml": ["0.3"]},
         )
-        resources_manifest = tomllib.loads(
-            (REPOSITORY / "crates/clonk-resources/Cargo.toml").read_text(
-                encoding="utf-8"
-            )
-        )
+        resources_manifest = manifest("crates/clonk-resources/Cargo.toml")
         jpeg_decoder_dependency = resources_manifest["dependencies"]["jpeg-decoder"]
         self.assertFalse(jpeg_decoder_dependency["default-features"])
         self.assertNotIn("features", jpeg_decoder_dependency)
 
-        cargo_lock = tomllib.loads(
-            (REPOSITORY / "Cargo.lock").read_text(encoding="utf-8")
-        )
+        cargo_lock = manifest("Cargo.lock")
         for package_name, version_prefix in (
             ("image", "0.25."),
             ("png", "0.18."),
