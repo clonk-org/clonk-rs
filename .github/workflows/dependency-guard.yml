@@ -63,11 +63,21 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: dependency-guard
-          cache-on-failure: true
+      # No build cache. A pull request restores only from its own ref or from
+      # main, and this workflow never runs on main, so the 466 MB entry it used
+      # to publish was unrestorable by construction: every live copy carried
+      # `last_accessed_at` equal to `created_at`, saved and never once read. It
+      # still spent the repository's 10 GiB budget and evicted, by LRU, the
+      # `full-parity` and `shipped-msvc-runtime-v1` entries the merge queue and
+      # the shipped Windows build do restore.
+      #
+      # Borrowing a scope that has a main producer would not warm this job
+      # either: the cost here is codegen, not fetching (crates download in ~2 s
+      # of a ~280 s run), and `full-parity` holds host build-mode units, which
+      # `cargo check --target x86_64-pc-windows-msvc` cannot reuse. A warm
+      # guard needs a producer on main of its own — another ~466 MB plus a
+      # main-branch job — which the budget has no room for while the queue is
+      # the workflow missing its latency target.
 
       # Pixels is the smallest package that enables wgpu's DX12 allocator.
       # Cross-check it because incompatible `windows` crate identities compile
