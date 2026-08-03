@@ -26,16 +26,18 @@ class WindowsSysDependencyGraphTests(unittest.TestCase):
                 ]
                 self.assertEqual(dependency["version"], "0.61")
 
-    def test_platform_declares_the_security_feature_its_win32_calls_require(self):
-        manifest = tomllib.loads(
-            (REPOSITORY / "crates" / "clonk-platform" / "Cargo.toml").read_text(
-                encoding="utf-8"
-            )
-        )
-        dependency = manifest["target"]["cfg(windows)"]["dependencies"][
-            "windows-sys"
-        ]
-        self.assertIn("Win32_Security", dependency["features"])
+    def test_consumers_declare_the_security_feature_their_win32_calls_require(self):
+        for crate in ("clonk-core", "clonk-platform"):
+            with self.subTest(crate=crate):
+                manifest = tomllib.loads(
+                    (REPOSITORY / "crates" / crate / "Cargo.toml").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                dependency = manifest["target"]["cfg(windows)"]["dependencies"][
+                    "windows-sys"
+                ]
+                self.assertIn("Win32_Security", dependency["features"])
 
 
 if __name__ == "__main__":
