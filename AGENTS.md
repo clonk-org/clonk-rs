@@ -79,6 +79,48 @@ that directory and install into it instead of `.git/hooks`.
 Hooks are advisory (`--no-verify` exists, and agents drive git
 non-interactively). CI remains the gate.
 
+## Issues — claim one before you work it
+
+When the task is a GitHub issue, claim it on GitHub *before* you start. At ~150
+commits a day from parallel worktree sessions the alternative is two sessions
+fixing the same bug, and one of them throwing the work away.
+
+```sh
+gh issue view <n> --repo clonk-org/clonk-rs --json assignees,state
+gh pr list --repo clonk-org/clonk-rs --state open --search "<n>"  # already claimed?
+gh issue edit <n> --repo clonk-org/clonk-rs --add-assignee @me
+```
+
+Then write `Fixes #<n>` in the **pull request body** — not in a commit, whose
+subject-only rule leaves no room for a footer. That registers a closing
+reference, so the issue lists the pull request under Development and GitHub
+closes it when the queue lands the branch. Confirm it took with `gh pr view
+<pr> --repo clonk-org/clonk-rs --json closingIssuesReferences`; the close runs
+off that link, not off commit text, which matters because the queue squashes
+and the pull request body never reaches `main`.
+
+Assignee plus linked pull request is the whole mechanism. The two things that
+look like alternatives are not available here:
+
+- **Projects.** Its status field is the GitHub-native "In Progress", but the
+  `gh` token in these sessions carries only `gist, read:org, repo`, and
+  `projectsV2` needs `read:project` — it fails `INSUFFICIENT_SCOPES` on reads
+  as well as writes. An agent cannot drive a board here.
+- **A `status: in progress` label.** The repo has only GitHub's defaults plus
+  the dependabot labels. A new one buys a second source of truth that must be
+  cleared by hand and says less than the linked pull request already does.
+
+Every session authenticates as the same account, so the assignee does **not**
+tell two sessions apart — the linked pull request and its branch do. Read a
+claim that way: assigned *with* an open linked pull request is someone working
+now; assigned with no linked pull request and no recent branch is stale, and is
+yours to take.
+
+**Release a claim you are not finishing.** A worktree deleted mid-task leaves
+the issue assigned forever and the next session skips it. If you stop without
+landing, say so on the issue and `gh issue edit <n> --repo clonk-org/clonk-rs
+--remove-assignee @me`.
+
 ## Pull requests — how work lands
 
 `main` is protected and lands through a **merge queue**. Do not push to `main`.
