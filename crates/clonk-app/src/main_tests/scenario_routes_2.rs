@@ -200,7 +200,7 @@
             .press(VirtualKeyCode::KeyX)
             .expect("hold physical X to tension CATA");
         AppVirtualKeyboard::new(&mut app)
-            .repeat(VirtualKeyCode::KeyX)
+            .press(VirtualKeyCode::KeyX)
             .expect("OS repeat while physical X remains held");
         assert!(
             app.engine.object_snapshot(valley).is_some_and(|object| {
