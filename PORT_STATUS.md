@@ -198,9 +198,9 @@ tests fail on missing oracle content and look like code faults. A host that
 refuses `IPV6_JOIN_GROUP` on the default interface (`EADDRNOTAVAIL`) no longer
 fails `startup_lan_reference_query_reports_address_lifecycle`,
 `disabled_reference_server_keeps_discovery_only_advertiser_clean` or
-`selected_network_scenario_installs_prepared_host_before_admission`: issue #107
-made the join non-fatal, so those three are once again ordinary regressions
-wherever they fail. Separately,
+`selected_network_scenario_installs_prepared_host_before_admission`:
+clonk-org/clonk-rs#107 made the join non-fatal, so those three are once again
+ordinary regressions wherever they fail. Separately,
 `synchronized_tick::inactive_joined_client_does_not_block_host_lockstep`, plus
 `clonk-app`'s `real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running`
 (a 480-attempt timeout), are load-sensitive and pass in isolation. Re-run the
@@ -540,18 +540,19 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `NetObsNextPlayer` and `NetStatsToggle` (`src/C4Game.cpp:3456-3462`), and
   `RUNTIME_REGISTERED_GLOBAL_KEYS` (`crates/clonk-app/src/main_parts/assets.rs`)
   accepts a `[Keys]` override for each, so a configured chord is stored and then
-  silently ignored. `NetStatsToggle` was closed for issue #117; these three still
-  need their callbacks — `C4GameControl::KeyAdjustControlRate`
+  silently ignored. `NetStatsToggle` was closed for clonk-org/clonk-rs#117;
+  these three still need their callbacks — `C4GameControl::KeyAdjustControlRate`
   (`src/C4GameControl.h:124`) and `C4Network2::ToggleAllowJoin`
   (`src/C4Network2.cpp:799`) — routed at the same PRIO_Base position, after
   `handle_runtime_chart_toggle_key` and in native registration order.
 
 - Closed 2026-07-30: **Terrain saved under a put SolidMask survives a blast —
-  oracle-faithful, not a port gap.** Reported as issue #43: a flint thrown at an
-  elevator case parked on stone blows up everything visible, but moving the case
-  reveals untouched stone under its floor. C++ does the same. `C4Game::Explosion`
-  reaches `C4Landscape::BlastFree` directly (`C4Effect.cpp:919`), and unlike
-  `ClearRect` (`C4Landscape.cpp:2171-2181`) `BlastFree` carries no
+  oracle-faithful, not a port gap.** Reported as clonk-org/clonk-rs#43: a flint
+  thrown at an elevator case parked on stone blows up everything visible, but
+  moving the case reveals untouched stone under its floor. C++ does the same.
+  `C4Game::Explosion` reaches `C4Landscape::BlastFree` directly
+  (`C4Effect.cpp:919`), and unlike `ClearRect`
+  (`C4Landscape.cpp:2171-2181`) `BlastFree` carries no
   `PrepareChange`/`FinishChange` bracket (`C4Landscape.cpp:1022-1062`), so it
   scans the *masked* Surface8. Every put mask pixel reads `MCVehic`, i.e.
   material `MVehic`, and `BlastFreePix` clears only when
@@ -2576,8 +2577,8 @@ an ordered-map model gap.
   joins** (`join_discovery_multicast`, `multicast_targets`,
   `multicast_interface_indices`, `crates/clonk-network/src/search.rs`; no key;
   C++ `C4NetIOSimpleUDP::InitBroadcast`, LegacyClonk 7d43b47
-  src/C4NetIO.cpp:1620-1631). Approved 2026-08-03, issue #107. C++ joins
-  `ff02::1` with `ipv6mr_interface = 0` and sends to the group with the
+  src/C4NetIO.cpp:1620-1631). Approved 2026-08-03, clonk-org/clonk-rs#107. C++
+  joins `ff02::1` with `ipv6mr_interface = 0` and sends to the group with the
   destination scope unset, under an acknowledged `// TODO: do multicast on all
   interfaces?` (src/C4NetIO.cpp:1623); where the kernel's default multicast
   route has no IPv6-capable interface — a Mac whose only LAN NIC has IPv6
@@ -2614,12 +2615,13 @@ an ordered-map model gap.
 - **An explicit refresh rebuilds a discovery socket that reached no group**
   (`discovery_needs_rebuild`, `crates/clonk-network/src/search.rs`; no key; C++
   `C4StartupNetDlg::DoRefresh`, LegacyClonk 7d43b47
-  src/C4StartupNetDlg.cpp:1093-1105). Approved 2026-08-03, issue #107. C++
-  builds `DiscoverClient` once in the dialog constructor and discards the result
-  (src/C4StartupNetDlg.cpp:737); `DoRefresh` only re-sends the probe byte, so a
-  machine that had no network when the dialog opened stays blind until the
-  dialog is reopened. The port re-runs socket construction on an explicit
-  refresh, and only when the existing socket joined nothing at all — a socket
+  src/C4StartupNetDlg.cpp:1093-1105). Approved 2026-08-03,
+  clonk-org/clonk-rs#107. C++ builds `DiscoverClient` once in the dialog
+  constructor and discards the result (src/C4StartupNetDlg.cpp:737);
+  `DoRefresh` only re-sends the probe byte, so a machine that had no network
+  when the dialog opened stays blind until the dialog is reopened. The port
+  re-runs socket construction on an explicit refresh, and only when the
+  existing socket joined nothing at all — a socket
   that reached a group keeps its buffered replies exactly as C++ does. This is
   matchmaking state outside the lockstep simulation and cannot desync. Pinned by
   `only_an_unusable_discovery_socket_is_rebuilt_on_refresh`.
@@ -2627,14 +2629,15 @@ an ordered-map model gap.
 - **Earned mission access is written when it is earned**
   (`GameApp::persist_mission_access_if_changed`,
   `crates/clonk-app/src/game_app/config.rs`; no key). Approved 2026-07-31,
-  issue #50. C++ mutates `Config.General.MissionAccess` in memory at both of its
-  sites — `FnGainMissionAccess` (`C4Script.cpp:2368-2373`) and the cheat-code
-  add/remove (`C4StartupScenSelDlg.cpp:1828-1839`) — and writes it only when the
-  whole config is saved, on a clean quit (`C4Application.cpp:367`); a round that
-  ends any other way silently relocks the mission the player just finished. The
-  reporter hit exactly that. Unlike the runtime toggles that share the deferral,
-  a password is earned progress, not a preference, so the port writes it as soon
-  as the shared list changes: the event loop compares the store against the
+  clonk-org/clonk-rs#50. C++ mutates `Config.General.MissionAccess` in memory
+  at both of its sites — `FnGainMissionAccess` (`C4Script.cpp:2368-2373`) and
+  the cheat-code add/remove (`C4StartupScenSelDlg.cpp:1828-1839`) — and writes
+  it only when the whole config is saved, on a clean quit
+  (`C4Application.cpp:367`); a round that ends any other way silently relocks
+  the mission the player just finished. The reporter hit exactly that. Unlike
+  the runtime toggles that share the deferral, a password is earned progress,
+  not a preference, so the port writes it as soon as the shared list changes:
+  the event loop compares the store against the
   value on disk once per iteration, ahead of every early exit. Nothing
   simulation-facing reads the timing — script sees the same in-memory list
   either way — so this cannot desync. The value is written in C++'s escaped
@@ -3140,8 +3143,8 @@ an ordered-map model gap.
   twenty or worse, and because the port coalesces several simulation frames into
   one pass, consecutive passes can each decide to draw nothing at all. A
   recovering client then shows a completely static picture — the same "is it
-  hung?" symptom a silent control stall produces, and the reason LegacyClonk
-  issue #28 reads the way it does.
+  hung?" symptom a silent control stall produces, and the reason
+  legacyclonk/LegacyClonk#28 reads the way it does.
   A pass that would draw nothing draws anyway once 18 simulation frames have
   gone by undrawn: 2 Hz at the 28 ms in-game tick, which is the floor Spring
   pins while fast-forwarding rather than giving the simulation everything.

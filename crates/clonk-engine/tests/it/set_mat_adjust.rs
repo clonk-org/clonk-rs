@@ -153,9 +153,11 @@ pub(super) fn gold_rush_global_fade_timer_reaches_its_completion_check(
     assert!(engine.debug_global_has_function("GlobalFadeTo"));
     assert!(engine.debug_global_has_function("FxIntGlobalClrModTimer"));
 
-    // GetMatAdjust is tracked separately by CLO-163. This narrow shim lets
-    // the shipped fade save its initial value so this CLO-159 regression can
-    // isolate the later SetMatAdjust call and completion check.
+    // The native GetMatAdjust reads the live landscape modulation
+    // (C4Script.cpp:4638-4642). A script-level global shadows a host function
+    // (`Vm::invoke_engine_raw`), so this narrow shim pins the value the
+    // shipped fade saves at the engine default and keeps the regression on
+    // the later SetMatAdjust call and its completion check.
     engine
         .register_definition(
             Definition::from_script(

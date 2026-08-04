@@ -1250,9 +1250,9 @@ impl GameApp {
     /// How long the game may sit on an unarrived control tick before saying so.
     ///
     /// Long enough that ordinary jitter never trips it, short enough that a
-    /// player does not conclude the game has crashed. LegacyClonk issue #28's
-    /// reporter proposed 100 ms; that is well inside normal stall duration on a
-    /// bad link and would flash constantly.
+    /// player does not conclude the game has crashed. The reporter of
+    /// legacyclonk/LegacyClonk#28 proposed 100 ms; that is well inside normal
+    /// stall duration on a bad link and would flash constantly.
     const NETWORK_STALL_NOTICE_AFTER: Duration = Duration::from_millis(1_500);
 
     /// Says once, per stall, that the session is waiting on the network.

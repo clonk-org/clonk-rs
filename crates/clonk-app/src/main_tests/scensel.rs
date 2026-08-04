@@ -3193,9 +3193,9 @@
 
     #[test]
     fn earned_mission_access_survives_an_aborted_session() {
-        // The reported failure (#50): a mission unlocked during a round was
-        // locked again on the next start, because nothing had written
-        // `Config.General.MissionAccess` before the process ended.
+        // The reported failure (clonk-org/clonk-rs#50): a mission unlocked
+        // during a round was locked again on the next start, because nothing
+        // had written `Config.General.MissionAccess` before the process ended.
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated mission access user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);

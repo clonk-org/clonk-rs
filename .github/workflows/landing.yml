@@ -125,6 +125,15 @@ jobs:
               rustfmt --version || failed=1
               cargo fmt --all -- --check || failed=1
               git fetch --no-tags --depth=1 origin 7d43b47b7d789b533f32d005e64596e0a07019cd || failed=1
+              # Issue references must name their repository: this one is public,
+              # and a bare "#28" collides across clonk-rs and LegacyClonk. The
+              # CLO- tracker is not resolvable from this repository at all.
+              # Deliberately NOT a general bare-#N check -- object and definition
+              # numbers (WIPF #564, KING #5129) use the same spelling.
+              if git grep -nIE 'CLO-[0-9]+|(issue|task|ticket)s? #[0-9]+'; then
+                echo "::error::write issue references as owner/repo#N (e.g. clonk-org/clonk-rs#50, legacyclonk/LegacyClonk#28)"
+                failed=1
+              fi
               python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py' || failed=1
               cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings || failed=1
               exit "$failed"
