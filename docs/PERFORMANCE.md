@@ -924,6 +924,15 @@ FPS, 5.794ms average and 9.202ms maximum graphics-pass time, with zero
 automatic graphics skips. This is a passing native-tick-budget reference, not
 a claim that the current path sustains 60 FPS.
 
+### HarpoonRace 24-player process benchmark
+
+The other opt-in end-to-end benchmark starts a real classic
+`/network /lobby /console` host and a 24-client rendered fleet, then measures
+every client against a per-player mesh and frame-cadence contract.
+`scripts/HARPOONRACE_24_PLAYER_BENCHMARK.md` documents the route, the
+acceptance gates, and the overrides; it needs an interactive desktop session on
+otherwise idle hardware.
+
 ## Reproducing render measurements
 
 Render one explicit replay snapshot:
