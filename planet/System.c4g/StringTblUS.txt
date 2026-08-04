@@ -5,3 +5,5 @@ MenuRangeFixed=Currently %d.
 MenuDone=Finished
 MenuBack=Back
 MenuUndo=Undo: %s
+MarsOrderTooExpensive=That order costs %d clunkers. You have %d.
+MarsOrderSent=Capsule called: %d goods for %d clunkers.

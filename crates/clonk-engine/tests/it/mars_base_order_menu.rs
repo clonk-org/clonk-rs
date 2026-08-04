@@ -233,6 +233,94 @@ fn mars_order_arrows_still_navigate_off_a_product_row() {
     );
 }
 
+/// Step the first product to `quantity`, return to the Call Capsule page and
+/// activate its commit row.
+fn order_and_commit(engine: &mut Engine, player: i32, clonk: ObjectId, quantity: usize) {
+    for _ in 0..quantity {
+        engine
+            .player_in_com(player, clonk_engine::COM_MENU_RIGHT, 0)
+            .expect("stepping the first product");
+    }
+    let select = |engine: &mut Engine, row: i32| {
+        let index = engine.find_object_index(clonk).expect("clonk remains live");
+        engine.objects[index]
+            .state
+            .menu
+            .as_mut()
+            .expect("a page is open")
+            .selection = row;
+    };
+    let last_row =
+        |engine: &Engine| i32::try_from(items(engine, clonk).len()).expect("row count fits") - 1;
+    select(engine, last_row(engine));
+    engine.menu_user_enter(clonk, false).expect("Back");
+    select(engine, last_row(engine));
+    engine.menu_user_enter(clonk, false).expect("commit");
+}
+
+/// Fossae already has a capsule standing on the map at scenario start, so a
+/// delivery is a change in the count rather than the first one to exist.
+fn capsule_count(engine: &Engine) -> usize {
+    engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "CPSL")
+        .count()
+}
+
+#[test]
+fn an_order_over_the_players_wealth_is_refused_whole() {
+    // The shipped commit calls Buy without fShowErrors, so C4Player::Buy
+    // suppresses IDS_PLR_NOWEALTH and its Error sound (C4Player.cpp:849-853),
+    // then `return true` on the first unaffordable item abandons the rest of
+    // the order (Base.c4d/Script.c:148-151). The capsule was already created,
+    // so the player silently gets a part-load in hash-bucket order and has
+    // spent the allowance. Fossae starts at Wealth=30 against 186 clunkers of
+    // stock, so this is the ordinary outcome, not an edge case.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+    let wealth = engine.player(player).expect("player").wealth();
+    assert_eq!(wealth, 30, "Fossae's starting clunkers");
+
+    let capsules = capsule_count(&engine);
+
+    // Six construction kits at 10 each is twice what the player has.
+    order_and_commit(&mut engine, player, clonk, 6);
+
+    assert_eq!(
+        engine.player(player).expect("player").wealth(),
+        wealth,
+        "an order that cannot be paid for buys nothing at all"
+    );
+    assert_eq!(
+        capsule_count(&engine),
+        capsules,
+        "and does not spend the one-capsule allowance either"
+    );
+}
+
+#[test]
+fn an_affordable_order_is_delivered() {
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+    let capsules = capsule_count(&engine);
+
+    // Two construction kits at 10 each, against 30 clunkers.
+    order_and_commit(&mut engine, player, clonk, 2);
+
+    assert_eq!(
+        engine.player(player).expect("player").wealth(),
+        10,
+        "the order is paid for"
+    );
+    assert_eq!(
+        capsule_count(&engine),
+        capsules + 1,
+        "and the capsule is on its way"
+    );
+}
+
 #[test]
 fn every_product_shows_its_quantity_even_at_zero() {
     // C4Script.cpp:1726 turns a zero count into C4MN_Item_NoCount, so an
@@ -304,6 +392,32 @@ fn the_order_page_offers_undo_only_once_there_is_something_to_undo() {
         undone.len(),
         untouched.len(),
         "and the row leaves with the history it described"
+    );
+}
+
+#[test]
+fn the_undo_row_stays_on_the_page_its_change_belongs_to() {
+    // It names a product row, so it would be meaningless on the page above.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+    engine
+        .player_in_com(player, clonk_engine::COM_MENU_RIGHT, 0)
+        .expect("ordering one construction kit");
+    assert_eq!(items(&engine, clonk).len(), 7, "products, undo, Back");
+
+    let index = engine.find_object_index(clonk).expect("clonk remains live");
+    engine.objects[index]
+        .state
+        .menu
+        .as_mut()
+        .expect("the order page is open")
+        .selection = 6;
+    engine.menu_user_enter(clonk, false).expect("Back");
+
+    assert_eq!(
+        items(&engine, clonk).len(),
+        4,
+        "the Call Capsule page is unchanged by an order-page undo"
     );
 }
 

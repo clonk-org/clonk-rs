@@ -5,3 +5,5 @@ MenuRangeFixed=Aktuell %d.
 MenuDone=Fertig
 MenuBack=Zurück
 MenuUndo=Rückgängig: %s
+MarsOrderTooExpensive=Diese Bestellung kostet %d Clunker. Du hast %d.
+MarsOrderSent=Kapsel gerufen: %d Waren für %d Clunker.

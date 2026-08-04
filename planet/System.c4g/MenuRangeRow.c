@@ -112,6 +112,10 @@ private func ShowUndoRow(&i)
   if (!GetLength(adjust_history))
     return;
   var entry = adjust_history[GetLength(adjust_history) - 1];
+  // Only on the page the change was made on: an undo row on the page above
+  // would name a row the player cannot see.
+  if (entry[0] != CopyPath(aCurrentPath))
+    return;
   var szCaption = Format("$MenuUndo$", entry[3]);
   AddMenuItem(szCaption, Format("Undo(%d)", i++), MS4C, pMenuObject, 0, 0,
     szCaption, 2, 2);
