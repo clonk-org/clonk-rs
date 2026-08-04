@@ -1444,21 +1444,22 @@ fn multicast_send_interface(target: &SocketAddrV6) -> Option<u32> {
 /// discovery object, building the reference server afterwards
 /// (src/C4Network2IO.cpp:86-89, :151-161).
 pub(crate) fn join_discovery_multicast(socket: &Socket) -> Vec<u32> {
-    joined_discovery_interfaces(&multicast_interface_indices(), &|interface| {
+    joined_discovery_interfaces(&multicast_interface_indices, &|interface| {
         socket.join_multicast_v6(&DISCOVERY_MULTICAST, interface)
     })
 }
 
+/// `candidates` stays unevaluated until the default interface has refused the
+/// join, so a host that behaves like C++ never enumerates anything.
 fn joined_discovery_interfaces(
-    candidates: &[u32],
+    candidates: &dyn Fn() -> Vec<u32>,
     join: &dyn Fn(u32) -> io::Result<()>,
 ) -> Vec<u32> {
     if join(DEFAULT_MULTICAST_INTERFACE).is_ok() {
         return vec![DEFAULT_MULTICAST_INTERFACE];
     }
-    candidates
-        .iter()
-        .copied()
+    candidates()
+        .into_iter()
         .filter(|interface| *interface != DEFAULT_MULTICAST_INTERFACE && join(*interface).is_ok())
         .collect()
 }
@@ -2859,8 +2860,30 @@ Title=Empty\n",
         };
 
         assert_eq!(
-            joined_discovery_interfaces(&[3, 7, 11], &refuses_the_default),
+            joined_discovery_interfaces(&|| vec![3, 7, 11], &refuses_the_default),
             vec![3, 11]
+        );
+    }
+
+    #[test]
+    fn an_accepted_default_multicast_join_enumerates_no_interfaces() {
+        // The whole fallback is invisible wherever C++ works: the port must not
+        // even ask the kernel for an interface list, so a host that behaves
+        // like the oracle issues exactly the one join the oracle issues
+        // (pinned oracle src/C4NetIO.cpp:1627-1631).
+        let enumerated = std::cell::Cell::new(false);
+        let joined = joined_discovery_interfaces(
+            &|| {
+                enumerated.set(true);
+                vec![3, 11]
+            },
+            &|_| Ok(()),
+        );
+
+        assert_eq!(joined, vec![DEFAULT_MULTICAST_INTERFACE]);
+        assert!(
+            !enumerated.get(),
+            "the C++ path must not enumerate interfaces"
         );
     }
 

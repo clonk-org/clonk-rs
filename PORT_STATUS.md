@@ -2485,10 +2485,17 @@ an ordered-map model gap.
   needs the fallback, probes reach interfaces that cannot carry a reply and
   those queries expire through the ordinary reference-query timeout, and a host
   and client on the *same* such machine list one game once per shared interface,
-  because the host rewrites its advertised addresses per source scope. Windows
-  keeps the C++ behaviour unchanged — enumerating there needs
+  because the host rewrites its advertised addresses per source scope. That
+  second case also loops each announce back once per shared interface: measured
+  at 49 of the 64 `MAX_LAN_DISCOVERS` slots on the reporter's 22-interface Mac,
+  so a machine with nine or more loopback-capable joined interfaces could spend
+  the cap on itself — bounded, reset at each 30 s probe, and only reachable by
+  running a host and the network dialog as two processes on one such machine,
+  which the app itself never does because every host path drops the searcher
+  first. Windows keeps the C++ behaviour unchanged — enumerating there needs
   `GetAdaptersAddresses`, which no required gate compiles for this crate. Pinned
   by `discovery_multicast_target_uses_cpp_default_interface`,
+  `an_accepted_default_multicast_join_enumerates_no_interfaces`,
   `a_refused_default_multicast_join_keeps_every_joinable_interface`,
   `a_scoped_join_set_sends_one_probe_per_joined_interface`,
   `an_unjoinable_host_still_probes_the_cpp_default_interface`,
