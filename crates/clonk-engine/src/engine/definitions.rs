@@ -559,6 +559,49 @@ impl Engine {
         self.distribute_global_script_functions(table, function_order);
         self.definition_metadata_cache.borrow_mut().take();
         self.solid_mask_metadata_cache.borrow_mut().take();
+        self.report_unresolved_inherited();
+    }
+
+    /// `C4AulScript::Parse` reports a hard `inherited` with no overload target
+    /// once, at link time, and counts it into `Game.ScriptEngine.errCnt`
+    /// (`C4AulParse.cpp:2799`, `:3563-3586`). The call still raises when it
+    /// runs — C++ leaves the function with an `AB_ERR` chunk — so this adds
+    /// the load-time report the port was missing, not a new failure mode.
+    fn report_unresolved_inherited(&self) {
+        // ":3566 — do not show errors for System.c4g scripts that appear to be
+        // pure #appendto scripts" (`if (Fn->Owner->Def || Fn->Owner->Appends.empty())`).
+        let definition_reports = self.definitions.iter().flat_map(|(id, definition)| {
+            definition
+                .script
+                .unresolved_inherited_diagnostics()
+                .into_iter()
+                .map(move |diagnostic| (id.to_string(), diagnostic))
+        });
+        let script_reports = self
+            .script_link_sources
+            .iter()
+            .filter_map(|source| match source {
+                ScriptLinkSource::Script {
+                    name,
+                    base_script,
+                    script,
+                } => base_script
+                    .appends()
+                    .is_empty()
+                    .then(|| (name.clone(), script.unresolved_inherited_diagnostics())),
+                // Definitions are covered above; the scenario script carries
+                // no separate host here.
+                ScriptLinkSource::Definition(_) | ScriptLinkSource::Scenario => None,
+            })
+            .flat_map(|(name, diagnostics)| {
+                diagnostics
+                    .into_iter()
+                    .map(move |diagnostic| (name.clone(), diagnostic))
+            });
+
+        for (host, diagnostic) in definition_reports.chain(script_reports) {
+            tracing::error!(%host, %diagnostic, "script link error");
+        }
     }
 
     /// Rebuilds the complete script tree from its preparsed hosts. Shared

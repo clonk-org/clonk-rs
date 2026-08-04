@@ -43,6 +43,9 @@ pub struct Parser<'a> {
     /// Active loop bodies in the current function. C4Aul only emits control
     /// flow for `break`/`continue` while a loop parse context exists.
     loop_depth: usize,
+    /// Site of the first hard `inherited(...)` in the function being parsed,
+    /// carried onto that `Function` for the link-time check.
+    hard_inherited_line: Option<usize>,
 }
 
 impl<'a> Parser<'a> {
@@ -60,6 +63,7 @@ impl<'a> Parser<'a> {
             parsing_old_style_function: false,
             non_fatal_diagnostics: Vec::new(),
             loop_depth: 0,
+            hard_inherited_line: None,
         }
     }
 
@@ -298,6 +302,7 @@ impl<'a> Parser<'a> {
             global_link_host: None,
             // Linked when a later script or an #include overload collides.
             overloaded: None,
+            hard_inherited_line: self.hard_inherited_line.take(),
         })
     }
 
@@ -366,6 +371,7 @@ impl<'a> Parser<'a> {
                 source_name: None,
                 global_link_host: None,
                 overloaded: None,
+                hard_inherited_line: self.hard_inherited_line.take(),
             },
             error,
         ))
@@ -408,6 +414,7 @@ impl<'a> Parser<'a> {
             source_name: None,
             global_link_host: None,
             overloaded: None,
+            hard_inherited_line: self.hard_inherited_line.take(),
         })
     }
 
@@ -485,6 +492,7 @@ impl<'a> Parser<'a> {
                 source_name: None,
                 global_link_host: None,
                 overloaded: None,
+                hard_inherited_line: self.hard_inherited_line.take(),
             },
             error,
         ))
@@ -2212,6 +2220,13 @@ impl<'a> Parser<'a> {
                         token.line,
                         token.column,
                     ));
+                }
+                // Record the hard spelling's site for the link-time check that
+                // mirrors `C4AulParse.cpp:2799`. C4Aul reaches this identifier
+                // only in the inherited-call form (`:2785` shifts straight into
+                // Parse_Params), so identifier position is the call site.
+                if name == "inherited" {
+                    self.hard_inherited_line.get_or_insert(token.line);
                 }
                 Ok(Expr::Variable(name))
             }

@@ -1097,6 +1097,35 @@ pub struct Engine {
     static_const_link_errors: Vec<StaticConstLinkError>,
 }
 
+/// A hard `inherited(...)` left without an overload target once linking
+/// finished. C4Aul reports the equivalent at load time and leaves the function
+/// raising when called (`C4AulParse.cpp:2799`, `:3563-3586`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedInherited {
+    /// Name of the function whose body holds the call.
+    pub function: String,
+    /// Declaring script, when the host knows one.
+    pub script_name: Option<String>,
+    /// One-based source line of the `inherited` call.
+    pub line: usize,
+}
+
+impl std::fmt::Display for UnresolvedInherited {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // C4Aul's own wording (C4AulParse.cpp:2799), with the location C4Aul
+        // prints through C4AulParseError's script/line context.
+        write!(
+            formatter,
+            "inherited function not found, use _inherited to call failsafe (in {}",
+            self.function
+        )?;
+        if let Some(script_name) = &self.script_name {
+            write!(formatter, ", {script_name}")?;
+        }
+        write!(formatter, ":{})", self.line)
+    }
+}
+
 /// Ownership scope of a resolved script function. A global function is
 /// owned by the script engine even when its local FnLink lives on a
 /// definition host. Ownership alone does not determine execution `Obj` or
@@ -1581,6 +1610,61 @@ impl Engine {
         }
         self.functions.insert(name.to_string(), function);
         true
+    }
+
+    /// Functions whose hard `inherited(...)` has no overload target now that
+    /// the func tables are built.
+    ///
+    /// C4Aul binds `inherited` while parsing bodies, which happens only after
+    /// every table exists (`C4AulParse.cpp:1406`, "all func tables are built
+    /// now"), and throws `"inherited function not found, use _inherited to
+    /// call failsafe"` when `Fn->OwnerOverloaded` is null
+    /// (`C4AulParse.cpp:2799`). `C4AulScript::Parse` catches that, reports it
+    /// and counts it into `errCnt` (`C4AulParse.cpp:3563-3586`), so an author
+    /// learns at load time rather than when the call first executes. The port
+    /// parses before linking, so the equivalent check runs here.
+    ///
+    /// Resolution deliberately mirrors the VM exactly — own-owner list, then
+    /// C4Aul's owner hop into the engine table, then the same-name native.
+    /// A narrower oracle would report functions that resolve perfectly well.
+    pub fn unresolved_inherited_diagnostics(&self) -> Vec<UnresolvedInherited> {
+        let mut unresolved = self
+            .functions
+            .values()
+            .filter_map(|function| {
+                let line = function.hard_inherited_line?;
+                let resolved = function.owner_overloaded().is_some()
+                    || self.inherited_engine_hop_exists(function)
+                    || self.host_functions.contains_key(&function.name)
+                    || self.host_reference_functions.contains_key(&function.name);
+                (!resolved).then(|| UnresolvedInherited {
+                    function: function.name.clone(),
+                    script_name: function
+                        .source_name
+                        .clone()
+                        .or_else(|| self.script_name.clone()),
+                    line,
+                })
+            })
+            .collect::<Vec<_>>();
+        // `functions` is an FxHashMap, whose iteration order is unspecified.
+        // Reporting has to be deterministic: replay and record comparisons in
+        // this port have been fed by log text before.
+        unresolved
+            .sort_by(|left, right| (&left.function, left.line).cmp(&(&right.function, right.line)));
+        unresolved
+    }
+
+    /// Whether `GetOverloadedFunc`'s owner hop (`C4Aul.cpp:281-288`) finds an
+    /// engine-owned target for this function. Engine-owned functions never
+    /// hop: the engine has no owner above it.
+    fn inherited_engine_hop_exists(&self, function: &Function) -> bool {
+        function.access != crate::ast::AccessLevel::Global
+            && self
+                .global_functions
+                .as_deref()
+                .and_then(|table| table.get(&function.name))
+                .is_some_and(|found| found.access == crate::ast::AccessLevel::Global)
     }
 
     pub fn function_count(&self) -> usize {
@@ -3162,6 +3246,88 @@ mod tests {
             tail_mutates_source(&hopped),
             expected,
             "the hopped target's result copies exactly like the chain target's"
+        );
+    }
+
+    #[test]
+    fn link_reports_a_hard_inherited_with_no_overload_target() {
+        // C4Aul binds `inherited` after every func table is built
+        // (C4AulParse.cpp:1406) and throws "inherited function not found, use
+        // _inherited to call failsafe" when there is no OwnerOverloaded
+        // (C4AulParse.cpp:2799); C4AulScript::Parse reports and counts it
+        // (C4AulParse.cpp:3563-3586) rather than deferring to the first call.
+        let mut orphan = Engine::new();
+        orphan
+            .load_script("#strict\nfunc Orphan() { return inherited(); }")
+            .expect("script compiles");
+        let diagnostics = orphan.unresolved_inherited_diagnostics();
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].function, "Orphan");
+        assert_eq!(diagnostics[0].line, 2);
+
+        // The failsafe spelling is silent — C4Aul only raises for the hard
+        // one, and discards the parameters instead (C4AulParse.cpp:2801-2806).
+        let mut failsafe = Engine::new();
+        failsafe
+            .load_script("#strict\nfunc Safe() { return _inherited(); }")
+            .expect("script compiles");
+        assert!(failsafe.unresolved_inherited_diagnostics().is_empty());
+
+        // So is a resolvable one.
+        let mut chained = Engine::new();
+        chained
+            .load_script("func Base() { return 1; }")
+            .expect("base compiles");
+        chained
+            .load_script("#strict\nfunc Base() { return inherited() + 1; }")
+            .expect("overload compiles");
+        assert!(chained.unresolved_inherited_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn link_does_not_report_an_inherited_that_resolves_off_the_chain() {
+        // The oracle has to be the VM's, not a chain walk. Both of these
+        // resolve at run time — one through C4Aul's owner hop into the engine
+        // table (C4Aul.cpp:281-288), one through the same-name native that
+        // overloading a host function reaches — so neither may be reported.
+        // A chain-only oracle would report both, and shipped content carries
+        // ~99 hard `inherited()` sites that lean on exactly these two routes.
+        let mut provider = Engine::new();
+        provider
+            .load_script("global func Hop() { return 1; }")
+            .expect("global compiles");
+        let globals = provider
+            .global_access_functions()
+            .map(|(name, function)| (name.clone(), function.clone()))
+            .collect::<FxHashMap<_, _>>();
+
+        let mut hopping = Engine::new();
+        hopping
+            .load_script("#strict\nfunc Hop() { return inherited() + 10; }")
+            .expect("definition compiles");
+        hopping.set_global_functions(Some(Arc::new(globals)));
+        assert!(
+            hopping.unresolved_inherited_diagnostics().is_empty(),
+            "the engine hop resolves it: {:?}",
+            hopping.unresolved_inherited_diagnostics()
+        );
+        assert_eq!(
+            hopping.call("Hop", &[]).expect("call succeeds"),
+            Value::Int(11)
+        );
+
+        let mut native = Engine::new();
+        native.register_host_function("Native", |_| Ok(Value::Int(5)));
+        native
+            .load_script("#strict\nfunc Native() { return inherited() + 1; }")
+            .expect("override compiles");
+        assert!(
+            native.unresolved_inherited_diagnostics().is_empty(),
+            "the same-name native resolves it"
+        );
+        assert_eq!(
+            native.call("Native", &[]).expect("call succeeds"),
+            Value::Int(6)
         );
     }
 

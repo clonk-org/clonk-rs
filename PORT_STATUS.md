@@ -436,26 +436,30 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   during parsing. No shipped content depends on it. `parity verify` does not
   cover it: the golden has no `global func`.
 
-- Open: **`inherited()` with no overload target is reported only when the call
-  executes, where C4Aul reports it once at link time.** `C4AulParse.cpp:2799`
-  throws under `Type == PARSER`; `C4AulScript::Parse` catches it, logs it,
-  counts it into `Game.ScriptEngine.errCnt`, truncates that function's bytecode
-  at the offending token and appends `AB_ERR` (`C4AulParse.cpp:3563-3586`), so
-  the function still raises when called. The port raises the equivalent runtime
-  error (`crates/clonk-script/src/vm.rs`) but never reports at load, has no
-  `errCnt` summary (`C4AulLink.cpp:299-301`), and cannot reproduce the
-  statement-granular truncation without expression spans. Closing it needs a
-  link-time pass whose "no target" oracle is the same resolver the VM uses —
-  a chain-only oracle would falsely poison the ~99 shipped functions that carry
-  a hard `inherited()` and resolve through the engine hop or a native. C++ also
-  suppresses the *log* for a pure `#appendto` System.c4g host
-  (`C4AulParse.cpp:3566`), which several shipped scripts are.
+- Open: **An unresolvable hard `inherited()` is reported at link time but does
+  not truncate the function, and there is no `errCnt` summary.**
+  `C4AulParse.cpp:2799` throws under `Type == PARSER`; `C4AulScript::Parse`
+  catches it, logs it, counts it into `Game.ScriptEngine.errCnt`, truncates
+  that function's bytecode *at the offending token*, redirects every unresolved
+  forward jump there and appends `AB_ERR` (`C4AulParse.cpp:3563-3586`). The
+  port now reports the same condition once at link time
+  (`Engine::unresolved_inherited_diagnostics`, logged by
+  `report_unresolved_inherited`, with C++'s pure-`#appendto` log suppression
+  from `C4AulParse.cpp:3566`), and the call still raises when it runs — but the
+  statements *before* the offending token continue to execute, where C++ would
+  have discarded them with the rest of the body. Reproducing that needs
+  expression spans and a partial-body AST node the parser does not carry.
+  `C4AulScriptEngine::Link`'s `"linked - N errors"` summary
+  (`C4AulLink.cpp:299-301`) has no port either.
 
   Survey trap: `content/` scripts are latin-1, so plain `grep -rn`/`grep -rI`
   classifies them as binary and silently skips them — use
-  `--binary-files=text`, or an earlier survey's "8 hits" becomes 100.
+  `--binary-files=text`, or an earlier survey's "8 hits" becomes 100. The ~99
+  shipped functions carrying a hard `inherited()` are exactly why the link
+  check resolves through the same rule the VM uses (own-owner list, then the
+  engine hop, then the same-name native) rather than a chain walk.
 
-  `parity verify` covers neither: the golden has no `global func`.
+  `parity verify` covers none of it: the golden has no `global func`.
 
 - Open: **A `Game.pGlobalEffects` callback still runs with no ambient object
   even when the effect has a command target.** Object effects now execute on
