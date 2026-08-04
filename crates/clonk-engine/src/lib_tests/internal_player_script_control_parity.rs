@@ -233,7 +233,7 @@ fn activate_game_goal_menu_builtin_rejects_missing_player_and_queues_valid_local
         engine
             .direct_exec_script_control_global(
                 "ActivateGameGoalMenu(99)",
-                "L004 missing player",
+                "missing player",
                 Some(3),
             )
             .expect("missing player call executes"),
@@ -245,11 +245,7 @@ fn activate_game_goal_menu_builtin_rejects_missing_player_and_queues_valid_local
     engine.set_local_players([3]);
     assert_eq!(
         engine
-            .direct_exec_script_control_global(
-                "ActivateGameGoalMenu(3)",
-                "L004 valid player",
-                Some(3),
-            )
+            .direct_exec_script_control_global("ActivateGameGoalMenu(3)", "valid player", Some(3),)
             .expect("valid player call executes"),
         Value::Int(1)
     );

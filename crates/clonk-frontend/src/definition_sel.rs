@@ -2105,7 +2105,7 @@ mod tests {
     }
 
     #[test]
-    fn l080_caption_tooltips_expose_title_and_localized_close_resource() {
+    fn caption_tooltips_expose_title_and_localized_close_resource() {
         let fonts = endeavour_font_set();
         let mut controller = DefinitionSelController::new("/Definitions", Vec::new(), Vec::new());
         let layout = controller.layout(1280, 720, &fonts.text);
@@ -2134,7 +2134,7 @@ mod tests {
     }
 
     #[test]
-    fn l080_caption_autoscroll_advances_per_frame_and_dwells_at_both_ends() {
+    fn caption_autoscroll_advances_per_frame_and_dwells_at_both_ends() {
         const CAPTION_WIDTH: i32 = 300;
         const TARGET_TEXT_WIDTH: usize = 278;
         let fixed_characters = "Select Object Definitions []".chars().count();

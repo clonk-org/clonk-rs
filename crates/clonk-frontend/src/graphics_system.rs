@@ -7600,7 +7600,8 @@ impl GraphicsSystem {
         // C4GraphicsOverlay always passes a local C4DrawTransform pointer,
         // including for a logically identity overlay. It is therefore always
         // non-exact in PerformBlt. Retain the established straight rasterizer
-        // for a logical identity; its half-pixel geometry is tracked by L030.
+        // for a logical identity; its half-pixel geometry is tracked with the
+        // DrawXFloat inward-bounds work in `PORT_STATUS.md`.
         // The ActMap facet stays in unscaled coordinates, so the source
         // rectangle carries the source graphics' Scale exactly like every
         // other facet-drawn overlay mode (C4DefGraphics.cpp:826).

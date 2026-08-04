@@ -2354,7 +2354,7 @@ mod headless_tests {
     }
 
     #[test]
-    fn l014_headless_override_preserves_native_adaptation() {
+    fn headless_override_preserves_native_adaptation() {
         let _guard = EnvGuard::set(&[
             (FORCE_WINDOW_ENV, Some("1")),
             (FORCE_FULLSCREEN_ENV, None),
@@ -4199,7 +4199,7 @@ mod tests {
     }
 
     #[test]
-    fn l004_runtime_asset_copy_materialises_a_group_directory() {
+    fn runtime_asset_copy_materialises_a_group_directory() {
         // `planet/System.c4g` is a C4Group *directory*, not a file. Windows can
         // neither hard link a directory nor reach the `#[cfg(unix)]` symlink
         // arm, so the terminal copy fallback is the only path it has — and
@@ -4228,7 +4228,7 @@ mod tests {
     }
 
     #[test]
-    fn l005_prepare_config_and_app_paths_use_the_same_override_file() {
+    fn prepare_config_and_app_paths_use_the_same_override_file() {
         let install_dir = TempDir::new().unwrap();
         let planet_dir = install_dir.path().join("planet");
         fs::create_dir_all(&planet_dir).unwrap();
@@ -4266,7 +4266,7 @@ mod tests {
     }
 
     #[test]
-    fn l025_default_config_imports_windows_registry_once() {
+    fn default_config_imports_windows_registry_once() {
         fn value(name: &str, data: LegacyRegistryData) -> LegacyRegistryValue {
             LegacyRegistryValue {
                 name: name.to_string(),
@@ -4448,7 +4448,7 @@ mod tests {
     }
 
     #[test]
-    fn l014_prepare_config_applies_classic_version_347_migrations() {
+    fn prepare_config_applies_classic_version_347_migrations() {
         let install_dir = TempDir::new().unwrap();
         let planet_dir = install_dir.path().join("planet");
         fs::create_dir_all(&planet_dir).unwrap();
@@ -4534,7 +4534,7 @@ mod tests {
     }
 
     #[test]
-    fn l014_config_migrations_keep_cpp_exact_version_gates() {
+    fn config_migrations_keep_cpp_exact_version_gates() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("config.cfg");
         let logger = test_logger(&temp);
@@ -4604,7 +4604,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn l014_macos_version_349_disables_preloading() {
+    fn macos_version_349_disables_preloading() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("config.cfg");
         fs::write(&config_path, "[General]\nVersion=349\nPreloading=true\n").unwrap();
@@ -4619,7 +4619,7 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn l016_migrated_config_user_path_applies_before_runtime_launch() {
+    fn migrated_config_user_path_applies_before_runtime_launch() {
         let install_dir = TempDir::new().unwrap();
         let planet_dir = install_dir.path().join("planet");
         fs::create_dir_all(&planet_dir).unwrap();

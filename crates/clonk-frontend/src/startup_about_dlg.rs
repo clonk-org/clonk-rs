@@ -1997,7 +1997,7 @@ mod tests {
     }
 
     #[test]
-    fn l056_license_text_track_jumps_drags_and_applies_release_position() {
+    fn license_text_track_jumps_drags_and_applies_release_position() {
         let fonts = crate::test_support::endeavour_font_set();
         let layout = about_layout(320, 240);
         let mut state = AboutDlgState::new();
@@ -2039,7 +2039,7 @@ mod tests {
     }
 
     #[test]
-    fn l056_held_arrow_repeats_by_thumb_pixel_and_clamps() {
+    fn held_arrow_repeats_by_thumb_pixel_and_clamps() {
         let fonts = crate::test_support::endeavour_font_set();
         let layout = about_layout(1280, 720);
         let mut state = AboutDlgState::new();
@@ -2107,7 +2107,7 @@ mod tests {
     }
 
     #[test]
-    fn l056_hidden_and_disabled_bars_are_inert_and_wheel_uses_viewport() {
+    fn hidden_and_disabled_bars_are_inert_and_wheel_uses_viewport() {
         let fonts = crate::test_support::endeavour_font_set();
         let wide_layout = about_layout(1280, 720);
         let mut wide = AboutDlgState::new();
@@ -2148,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn l056_pointer_reentry_rearms_held_arrow_from_physical_button_state() {
+    fn pointer_reentry_rearms_held_arrow_from_physical_button_state() {
         let fonts = crate::test_support::endeavour_font_set();
         let layout = about_layout(1280, 720);
         let mut state = AboutDlgState::new();
@@ -2174,7 +2174,7 @@ mod tests {
     }
 
     #[test]
-    fn l059_listbox_focus_and_captured_drag_follow_native_child_routing() {
+    fn listbox_focus_and_captured_drag_follow_native_child_routing() {
         let fonts = crate::test_support::endeavour_font_set();
         let layout = about_layout(1280, 720);
         let mut state = AboutDlgState::new();
@@ -2222,7 +2222,7 @@ mod tests {
     }
 
     #[test]
-    fn l059_overlaps_route_to_later_added_children() {
+    fn overlaps_route_to_later_added_children() {
         let fonts = crate::test_support::endeavour_font_set();
         let mut state = AboutDlgState::new();
         state.resize(1280, 720, &fonts);
@@ -2538,7 +2538,7 @@ mod tests {
     }
 
     #[test]
-    fn l046_about_mnemonics_follow_visible_caption_markers() {
+    fn about_mnemonics_follow_visible_caption_markers() {
         let mut state = AboutDlgState::new();
         assert_eq!(
             state.handle_hotkey('u'),
@@ -2612,7 +2612,7 @@ mod tests {
     }
 
     #[test]
-    fn l073_about_buttons_render_released_pressed_and_highlight_transitions() {
+    fn about_buttons_render_released_pressed_and_highlight_transitions() {
         use crate::test_support::{endeavour_font_set, load_graphics_png};
         use clonk_graphics::{Color, PixelFormat};
 

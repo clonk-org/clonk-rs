@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_axis_uses_cpp_strict_dead_zone_without_hysteresis() {
+    fn axis_uses_cpp_strict_dead_zone_without_hysteresis() {
         let slot = GamepadSlot::new(0);
         let mut manager = GamepadManager::disabled();
         let mut output = Vec::new();
@@ -1149,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn l034_cpp_axis_calibration_uses_strict_integer_boundaries_and_first_sample() {
+    fn cpp_axis_calibration_uses_strict_integer_boundaries_and_first_sample() {
         let mut calibration = GamepadAxisCalibration::new(0, 600, true);
         assert_eq!(
             calibrated_axis_position(&mut calibration, 199),
@@ -1184,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn l034_loaded_calibration_changes_windows_axis_threshold_but_not_hat_threshold() {
+    fn loaded_calibration_changes_windows_axis_threshold_but_not_hat_threshold() {
         use clonk_core::std_config::Config;
 
         use crate::input::GamepadBindings;
@@ -1224,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn l034_runtime_extrema_copy_back_to_cpp_config_keys() {
+    fn runtime_extrema_copy_back_to_cpp_config_keys() {
         use clonk_core::std_config::Config;
 
         use crate::input::GamepadBindings;
@@ -1255,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_gilrs_axes_map_to_cpp_axis_zero_through_hat_zero() {
+    fn gilrs_axes_map_to_cpp_axis_zero_through_hat_zero() {
         let slot = GamepadSlot::new(0);
         let mut manager = GamepadManager::disabled();
         let mut output = Vec::new();
@@ -1293,7 +1293,7 @@ mod tests {
     }
 
     #[test]
-    fn l163_raw_hats_and_balls_use_the_classic_magic_axis_numbers() {
+    fn raw_hats_and_balls_use_the_classic_magic_axis_numbers() {
         // C4GamePadCon.cpp:339-375 turns every hat into the two synthetic axes
         // `hat * 2 + 6` and every ball into `ball * 2 + 12`, amplified just
         // past the dead zone. Ball 0 deliberately shares hat 3's axis pair.
@@ -1345,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn l163_axis_extents_outside_the_classic_key_range_are_dropped() {
+    fn axis_extents_outside_the_classic_key_range_are_dropped() {
         // `Key_IsGamepadAxis` accepts KEY_JOY_Axis1Min..=KEY_JOY_AxisMax only
         // (src/C4KeyboardInput.h:67-68,105-109), and that same test gates the
         // synthetic Left/Up/Right/Down alias in DoInput
@@ -1397,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn l163_hat_amplification_matches_the_cpp_dead_zone_boundary() {
+    fn hat_amplification_matches_the_cpp_dead_zone_boundary() {
         // `amplify` (C4GamePadCon.cpp:325-332) returns exactly deadZone + 1, so
         // a hat deflection is the smallest value the axis branch accepts.
         assert_eq!(amplify(-1), -(LEGACY_AXIS_DEAD_ZONE_RAW + 1));
@@ -1409,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn l163_unrecognised_hat_bitmasks_centre_both_axes() {
+    fn unrecognised_hat_bitmasks_centre_both_axes() {
         // The C++ switch only lists the eight composite SDL_HAT_* values; any
         // other bitmask leaves both fake axis values at zero
         // (C4GamePadCon.cpp:348-358).
@@ -1441,7 +1441,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_dpad_buttons_share_hat_axis_state_with_raw_dpad_axes() {
+    fn dpad_buttons_share_hat_axis_state_with_raw_dpad_axes() {
         let slot = GamepadSlot::new(0);
         let mut manager = GamepadManager::disabled();
         let mut output = Vec::new();
@@ -1502,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_stick_and_hat_share_the_semantic_direction_state() {
+    fn stick_and_hat_share_the_semantic_direction_state() {
         let slot = GamepadSlot::new(0);
         let mut manager = GamepadManager::disabled();
         let mut output = Vec::new();
@@ -1544,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_raw_axis_precedes_its_ui_alias_in_one_source_cluster() {
+    fn raw_axis_precedes_its_ui_alias_in_one_source_cluster() {
         let slot = GamepadSlot::new(0);
         let events = [
             GamepadEvent::Axis {

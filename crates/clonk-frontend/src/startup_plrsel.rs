@@ -3949,7 +3949,7 @@ mod tests {
     }
 
     #[test]
-    fn l046_player_buttons_do_not_invent_absent_cpp_mnemonics() {
+    fn player_buttons_do_not_invent_absent_cpp_mnemonics() {
         let mut controller = PlrSelController::new(1);
         for character in ['N', 'A', 'D', 'P', 'C'] {
             assert_eq!(
@@ -4020,7 +4020,7 @@ mod tests {
     }
 
     #[test]
-    fn l047_typeahead_cycles_matching_rows_and_requires_list_focus() {
+    fn typeahead_cycles_matching_rows_and_requires_list_focus() {
         let names = ["Thomas", "Ada", "tina", "Tori"];
         let mut controller = PlrSelController::new(names.len());
         controller.resize(1280, 720);
@@ -4052,7 +4052,7 @@ mod tests {
     }
 
     #[test]
-    fn l047_keyboard_context_target_is_selected_row_center_not_pointer() {
+    fn keyboard_context_target_is_selected_row_center_not_pointer() {
         let layout = plrsel_layout(1280, 720);
         let mut controller = PlrSelController::new(4);
         controller.resize(1280, 720);
@@ -4073,7 +4073,7 @@ mod tests {
     }
 
     #[test]
-    fn l021_overflow_wheel_scrollbar_and_scrolled_hits_reach_every_row() {
+    fn overflow_wheel_scrollbar_and_scrolled_hits_reach_every_row() {
         let layout = plrsel_layout(1280, 720);
         let mut controller = PlrSelController::new(20);
         controller.resize(1280, 720);
@@ -4149,7 +4149,7 @@ mod tests {
     }
 
     #[test]
-    fn l021_keyboard_selection_scrolls_each_row_into_view() {
+    fn keyboard_selection_scrolls_each_row_into_view() {
         let layout = plrsel_layout(1280, 720);
         let mut controller = PlrSelController::new(20);
         controller.resize(1280, 720);
@@ -4194,7 +4194,7 @@ mod tests {
     }
 
     #[test]
-    fn l057_home_end_and_pages_use_fully_visible_player_rows() {
+    fn home_end_and_pages_use_fully_visible_player_rows() {
         let mut controller = PlrSelController::new(20);
         controller.resize(1280, 720);
 
@@ -4257,7 +4257,7 @@ mod tests {
     }
 
     #[test]
-    fn l021_scrolled_rows_and_selection_are_clipped_to_list_viewport() {
+    fn scrolled_rows_and_selection_are_clipped_to_list_viewport() {
         use clonk_graphics::PixelFormat;
 
         let assets = PlrSelAssets {
@@ -4511,7 +4511,7 @@ mod tests {
     }
 
     #[test]
-    fn l061_list_and_checkbox_sounds_follow_the_user_input_source() {
+    fn list_and_checkbox_sounds_follow_the_user_input_source() {
         let layout = plrsel_layout(1280, 720);
         let mut controller = PlrSelController::new(2);
         controller.resize(1280, 720);
@@ -4579,7 +4579,7 @@ mod tests {
     }
 
     #[test]
-    fn l061_button_sounds_follow_down_cancel_reentry_and_keyboard_paths() {
+    fn button_sounds_follow_down_cancel_reentry_and_keyboard_paths() {
         let layout = plrsel_layout(1280, 720);
         let back = center(layout.buttons[0]);
         let outside = crate::GuiPoint::new(0.0, 0.0);

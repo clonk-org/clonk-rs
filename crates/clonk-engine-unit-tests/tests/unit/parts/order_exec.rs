@@ -5690,7 +5690,7 @@ protected func RejectCollect(object_id, pObject) { return(1); }
     }
 
     #[test]
-    fn l111_acquire_preserves_walk_trajectory_across_frames() {
+    fn acquire_preserves_walk_trajectory_across_frames() {
         let script = "#strict 2";
         let mut walker =
             Definition::from_script("L111", "L111 walker", script).expect("definition compiles");

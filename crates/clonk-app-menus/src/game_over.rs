@@ -2718,7 +2718,7 @@ mod tests {
     // which the score label's right edge is measured
     // (src/C4PlayerInfoListBox.cpp:94-95,199-206,352,439-456).
     #[test]
-    fn l183_league_rank_icons_claim_their_own_column_and_move_the_score_edge() {
+    fn league_rank_icons_claim_their_own_column_and_move_the_score_edge() {
         let player = EvaluationPlayer {
             player_info_id: 1,
             team_id: None,
@@ -2781,7 +2781,7 @@ mod tests {
     }
 
     #[test]
-    fn l183_two_team_evaluation_lists_lead_with_one_native_team_header() {
+    fn two_team_evaluation_lists_lead_with_one_native_team_header() {
         let player = |info_id: i32, team_id: i32, won: bool| EvaluationPlayer {
             player_info_id: info_id,
             team_id: Some(team_id),
@@ -2851,7 +2851,7 @@ mod tests {
     }
 
     #[test]
-    fn l183_joined_savegame_crew_overlay_uses_the_native_half_size_geometry() {
+    fn joined_savegame_crew_overlay_uses_the_native_half_size_geometry() {
         // The C++ arithmetic, isolated: iSizeMax = max(Wdt, Hgt),
         // iCrewClrHgt = iSizeMax / 2, then Hgt -= iCrewClrHgt, Y += iCrewClrHgt
         // and Wdt = iSizeMax / 2.
@@ -2922,7 +2922,7 @@ mod tests {
     }
 
     #[test]
-    fn l183_overflowing_custom_evaluation_text_reserves_and_travels_the_native_scrollbar() {
+    fn overflowing_custom_evaluation_text_reserves_and_travels_the_native_scrollbar() {
         let short = ClassicEvaluationTextLayout {
             area: IntRect {
                 x: 0,
@@ -2998,7 +2998,7 @@ mod tests {
     }
 
     #[test]
-    fn l183_evaluation_score_label_matches_the_native_league_and_settlement_variants() {
+    fn evaluation_score_label_matches_the_native_league_and_settlement_variants() {
         let base = EvaluationPlayer {
             player_info_id: 1,
             team_id: None,

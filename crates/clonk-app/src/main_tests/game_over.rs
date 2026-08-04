@@ -2,7 +2,7 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
 #[test]
-fn l028_console_lobby_start_is_host_only_and_restarts_countdown() {
+fn console_lobby_start_is_host_only_and_restarts_countdown() {
     let _lock = env_lock().lock();
     let user_data = tempdir().expect("isolated console lobby config");
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -307,7 +307,7 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
 }
 
 #[test]
-fn l148_restart_diagnostics_bound_order_deduplicate_and_reset() {
+fn restart_diagnostics_bound_order_deduplicate_and_reset() {
     let mut diagnostics = StartupRestartDiagnostics::default();
     diagnostics.mark_quit_with_error();
     for index in 0..=STARTUP_RESTART_LOG_CAPACITY {
@@ -342,7 +342,7 @@ fn l148_restart_diagnostics_bound_order_deduplicate_and_reset() {
 }
 
 #[test]
-fn l148_disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
+fn disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
     let mut app = new_real_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
     let (sender, receiver) =
@@ -391,7 +391,7 @@ fn l148_disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
 }
 
 #[test]
-fn l148_restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
+fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
     let mut app = new_real_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
     app.startup_network_dialog
@@ -474,7 +474,7 @@ fn l148_restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
 }
 
 #[test]
-fn l148_empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
+fn empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
     let mut app = new_real_classic_menu_app(800, 600);
     app.open_network_game_dialog();
     app.open_network_host_scenario_browser();
@@ -507,7 +507,7 @@ fn l148_empty_restart_log_uses_regular_error_modal_over_restored_host_selector()
 }
 
 #[test]
-fn l074_restart_restore_team_submits_full_player_packet_on_roster_construction() {
+fn restart_restore_team_submits_full_player_packet_on_roster_construction() {
     let mut app = new_menu_app(640, 480);
     let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
     chooser.forced_name =
@@ -608,7 +608,7 @@ fn l074_restart_restore_team_submits_full_player_packet_on_roster_construction()
 }
 
 #[test]
-fn l074_host_round_restart_returns_to_network_lobby_staging() {
+fn host_round_restart_returns_to_network_lobby_staging() {
     let mut app = new_running_sandbox_app();
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
     app.engine
@@ -664,7 +664,7 @@ fn host_round_restart_announces_itself_before_tearing_the_session_down() {
 }
 
 #[test]
-fn l074_restart_restore_team_obeys_mask_user_and_equal_team_guards() {
+fn restart_restore_team_obeys_mask_user_and_equal_team_guards() {
     let submitted = |mask: i32, player_type: u8, live_team: i32, restore_team: i32| {
         let mut app = new_menu_app(640, 480);
         let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
@@ -1112,7 +1112,7 @@ fn running_global_gui_guard_precedes_scoreboard_and_root_overlay_pixels() {
 }
 
 #[test]
-fn l002_abort_action_opens_confirmation_with_control_host_restart() {
+fn abort_action_opens_confirmation_with_control_host_restart() {
     let mut app = new_menu_app(320, 200);
     app.start_sandbox_scenario(FrontendScenario::fallback())
         .expect("start explicit test sandbox");
@@ -1135,30 +1135,30 @@ fn l002_abort_action_opens_confirmation_with_control_host_restart() {
 }
 
 #[test]
-fn l038_local_round_abort_and_evaluation_end_restore_fresh_browser() {
-    let mut aborted = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
+fn local_round_abort_and_evaluation_end_restore_fresh_browser() {
+    let mut aborted = running_browser_sandbox(ScenarioSelectorMode::Local);
     confirm_abort_dialog(&mut aborted);
     assert_l038_browser_return(&aborted, ScenarioSelectorMode::Local);
 
-    let mut evaluated = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
+    let mut evaluated = running_browser_sandbox(ScenarioSelectorMode::Local);
     evaluated
         .handle_game_over()
-        .expect("open local L038 evaluation dialog");
+        .expect("open local evaluation dialog");
     assert!(evaluated.game_over_dialog.is_some());
     evaluated
         .handle_game_over_action(GameOverAction::End)
-        .expect("end evaluated local L038 round");
+        .expect("end evaluated local round");
     assert_l038_browser_return(&evaluated, ScenarioSelectorMode::Local);
 }
 
 #[test]
-fn l027_reload_button_and_f5_restart_and_repopulate_search() {
+fn reload_button_and_f5_restart_and_repopulate_search() {
     fn exercise(use_f5: bool, title: &str) {
         let listener = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
-            .expect("bind L027 masterserver fixture");
+            .expect("bind masterserver fixture");
         listener
             .set_nonblocking(true)
-            .expect("make L027 fixture bounded");
+            .expect("make fixture bounded");
         let master_address = listener.local_addr().expect("fixture address");
 
         let discovery_port = std::net::UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, 0))
@@ -1191,7 +1191,7 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
                 master_server_url: format!("http://{master_address}/"),
                 discovery_port,
             })
-            .expect("start L027 network search"),
+            .expect("start network search"),
         );
         app.startup_game_references = vec![clonk_network::NetworkGameReference {
             title: "Stale game".to_string(),
@@ -1228,7 +1228,7 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
                             }
                             thread::sleep(Duration::from_millis(5));
                         }
-                        Err(error) => panic!("accept L027 masterserver request: {error}"),
+                        Err(error) => panic!("accept masterserver request: {error}"),
                     }
                 };
                 stream
@@ -1305,8 +1305,8 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
             app.poll_startup_game_search()
                 .expect("apply restarted search event");
             // Hosts without a usable multicast route report the explicit
-            // LAN probe failure in a modal. L070 freezes the queued
-            // masterserver result until that native prompt is dismissed.
+            // LAN probe failure in a modal, and the modal's Sec1 timer freeze
+            // holds the queued masterserver result until it is dismissed.
             if app
                 .message_dialogs
                 .last()
@@ -1319,7 +1319,7 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(server.join().expect("L027 masterserver fixture thread"));
+        assert!(server.join().expect("masterserver fixture thread"));
         assert_eq!(
             app.startup_game_references
                 .iter()
@@ -1344,10 +1344,10 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
 }
 
 #[test]
-fn l027_subsecond_refresh_only_plays_error_and_preserves_rows() {
-    let sound_root = tempdir().expect("L027 sound fixture");
+fn subsecond_refresh_only_plays_error_and_preserves_rows() {
+    let sound_root = tempdir().expect("sound fixture");
     let scenario = sound_root.path().join("Cooldown.c4s");
-    fs::create_dir(&scenario).expect("create L027 sound fixture");
+    fs::create_dir(&scenario).expect("create sound fixture");
     fs::write(scenario.join("Error.wav"), silent_pcm_wav(1_000))
         .expect("write Error sound fixture");
 
@@ -1487,7 +1487,7 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
 }
 
 #[test]
-fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
+fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
     let config = parse_runtime_key_config(
                 b"[Keys]\nChatOpen=G,Joy2A\nScoreboardToggle=H\nGameAbort=B\nFullscreenMenuDown=J\nKbd1Key1=Shift+T\nKbd1Key2=\\x0042000a\n",
             )
@@ -6136,7 +6136,7 @@ fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
 }
 
 #[test]
-fn l002_abort_confirmation_declines_confirms_and_restarts() {
+fn abort_confirmation_declines_confirms_and_restarts() {
     let mut declined = new_running_sandbox_app();
     declined.update().expect("advance round before declining");
     let declined_frame = declined.engine.frame();
@@ -6208,7 +6208,7 @@ fn l002_abort_confirmation_declines_confirms_and_restarts() {
 }
 
 #[test]
-fn l002_restart_is_control_host_only_and_game_over_suppresses_abort() {
+fn restart_is_control_host_only_and_game_over_suppresses_abort() {
     let mut client = new_running_sandbox_app();
     client.engine.set_control_host(false);
     client

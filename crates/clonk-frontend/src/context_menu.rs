@@ -1969,7 +1969,7 @@ mod tests {
     }
 
     #[test]
-    fn l018_context_tooltip_draw_and_layer_signal_share_one_timestamp() {
+    fn context_tooltip_draw_and_layer_signal_share_one_timestamp() {
         let entries = vec![ContextMenuEntry::new("Entry").with_tooltip("Delayed tip")];
         let (mut menu, _) = ClassicContextMenu::<()>::open(
             entries,

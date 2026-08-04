@@ -609,7 +609,7 @@ fn unusable_classic_record_stream_exits_without_showing_startup() {
 }
 
 #[test]
-fn l042_save_description_language_preserves_an_explicit_empty_first_segment() {
+fn save_description_language_preserves_an_explicit_empty_first_segment() {
     let _lock = env_lock().lock();
     assert_eq!(
         materialized_save_description_language(b"[General]\nLanguage=,DE\n"),
@@ -626,7 +626,7 @@ fn l042_save_description_language_preserves_an_explicit_empty_first_segment() {
 }
 
 #[test]
-fn l032_default_bad_safety_restores_and_saves_defaults() {
+fn default_bad_safety_restores_and_saves_defaults() {
     let dir = tempdir().expect("config root");
     let path = dir.path().join("clonk-rust.config");
     fs::write(
@@ -653,7 +653,7 @@ fn l032_default_bad_safety_restores_and_saves_defaults() {
 }
 
 #[test]
-fn l032_default_zero_resolution_restores_and_saves_defaults() {
+fn default_zero_resolution_restores_and_saves_defaults() {
     let dir = tempdir().expect("config root");
     let path = dir.path().join("clonk-rust.config");
     fs::write(
@@ -1874,7 +1874,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
 }
 
 #[test]
-fn l141_screenshot_failures_keep_localized_path_for_both_capture_kinds() {
+fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
     let install = tempdir().expect("screenshot install root");
     let user_data = tempdir().expect("screenshot user data");
     fs::create_dir_all(install.path().join("planet/System.c4g")).expect("fixture System group");
@@ -1987,7 +1987,7 @@ fn definition_root_vector_font_files_are_ignored_by_loader_and_saved_target() {
 }
 
 #[test]
-fn l048_advanced_options_click_save_and_cancel_round_trip_typed_config() {
+fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     use clonk_frontend::message_dialog::{
         MessageDialogButton, MessageDialogButtons, MessageDialogResult,
     };
@@ -2509,7 +2509,7 @@ fn l048_advanced_options_click_save_and_cancel_round_trip_typed_config() {
 }
 
 #[test]
-fn l026_options_gamepad_capture_records_the_exact_axis_key() {
+fn options_gamepad_capture_records_the_exact_axis_key() {
     use clonk_frontend::startup_options_controls::{ControlCaptureTarget, ControlDevice};
     use clonk_frontend::startup_options_dlg::OptionsDlgAction;
 
@@ -2807,7 +2807,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
 }
 
 #[test]
-fn l026_axis_binding_routes_to_configured_set_not_physical_slot() {
+fn axis_binding_routes_to_configured_set_not_physical_slot() {
     let mut config = Config::new();
     config.set_in(
         Some("Gamepad0"),
@@ -3727,7 +3727,7 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
 }
 
 #[test]
-fn l051_viewport_player_cycle_matches_film_and_observer_end_states() {
+fn viewport_player_cycle_matches_film_and_observer_end_states() {
     let mut app = new_running_sandbox_app();
     let first = app.local_owner;
     let second = first + 1;
@@ -3801,7 +3801,7 @@ fn l051_viewport_player_cycle_matches_film_and_observer_end_states() {
 }
 
 #[test]
-fn l066_film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
+fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
     let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
@@ -3957,7 +3957,7 @@ fn l066_film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
 }
 
 #[test]
-fn l051_bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
+fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     let mut app = new_running_sandbox_app();
     let first = app.local_owner;
     let second = first + 1;
@@ -4202,7 +4202,7 @@ fn focusless_owned_slot_renders_in_normal_cursor_mode() {
 }
 
 #[test]
-fn l052_close_effect_uses_displayed_film_owners_not_local_assignments() {
+fn close_effect_uses_displayed_film_owners_not_local_assignments() {
     assert_eq!(
         physical_viewport_close_effect(&[10, 11], Some(11), 11),
         PhysicalViewportCloseEffect {
@@ -4230,7 +4230,7 @@ fn l052_close_effect_uses_displayed_film_owners_not_local_assignments() {
 }
 
 #[test]
-fn l052_view_offset_and_film_view_share_one_physical_request_order() {
+fn view_offset_and_film_view_share_one_physical_request_order() {
     for (offset_after_film_view, expected_offset) in
         [(true, Vector2::new(41, 43)), (false, Vector2::ZERO)]
     {
@@ -4271,7 +4271,7 @@ fn l052_view_offset_and_film_view_share_one_physical_request_order() {
 }
 
 #[test]
-fn l052_film_assigned_ownerless_offset_is_consumed_after_one_draw() {
+fn film_assigned_ownerless_offset_is_consumed_after_one_draw() {
     let mut app = new_lightweight_running_sandbox_app();
     let target = app.local_owner;
     app.local_controls = LocalControlRegistry::default();
@@ -4307,7 +4307,7 @@ fn l052_film_assigned_ownerless_offset_is_consumed_after_one_draw() {
 }
 
 #[test]
-fn l052_recalculation_does_not_reapply_a_stale_scalar_film_target() {
+fn recalculation_does_not_reapply_a_stale_scalar_film_target() {
     let mut app = new_lightweight_running_sandbox_app();
     let lower_layout = app.local_owner + 1;
     let high_layout_target = app.local_owner + 2;
@@ -4360,7 +4360,7 @@ fn l052_recalculation_does_not_reapply_a_stale_scalar_film_target() {
 }
 
 #[test]
-fn l052_remote_film_close_does_not_resurrect_the_original_primary() {
+fn remote_film_close_does_not_resurrect_the_original_primary() {
     let mut app = new_lightweight_running_sandbox_app();
     let primary = app.local_owner;
     let secondary = primary + 1;
@@ -4408,7 +4408,7 @@ fn l052_remote_film_close_does_not_resurrect_the_original_primary() {
 }
 
 #[test]
-fn l052_replay_film_startup_and_late_player_follow_viewport_check() {
+fn replay_film_startup_and_late_player_follow_viewport_check() {
     let mut app = new_lightweight_running_sandbox_app();
     let first = app.local_owner;
     let mut state = app.engine.capture_state();
@@ -4490,7 +4490,7 @@ fn l052_replay_film_startup_and_late_player_follow_viewport_check() {
 }
 
 #[test]
-fn l052_removing_a_remote_film_target_closes_its_physical_viewport_once() {
+fn removing_a_remote_film_target_closes_its_physical_viewport_once() {
     let mut app = new_lightweight_running_sandbox_app();
     let film_player = app.local_owner + 1;
     app.engine
@@ -4515,7 +4515,7 @@ fn l052_removing_a_remote_film_target_closes_its_physical_viewport_once() {
 }
 
 #[test]
-fn l052_film_target_removal_recreates_the_first_player_viewport() {
+fn film_target_removal_recreates_the_first_player_viewport() {
     let mut app = new_lightweight_running_sandbox_app();
     let local_player = app.local_owner;
     let film_player = local_player + 1;
@@ -4763,7 +4763,7 @@ fn saved_game_skips_removed_current_player_without_deleting_objects() {
 }
 
 #[test]
-fn l031_always_debug_survives_rust_saves_and_rearms_restored_rounds() {
+fn always_debug_survives_rust_saves_and_rearms_restored_rounds() {
     for (config, expected) in [
         (&b""[..], false),
         (&b"[General]\nDebugMode=true\n"[..], true),
@@ -5057,7 +5057,7 @@ fn savegame_slot_probe_uses_c4group_validity() {
 }
 
 #[test]
-fn l016_save_demo_folder_controls_recording_directory() {
+fn save_demo_folder_controls_recording_directory() {
     let fixture = tempdir().expect("recording path fixture");
     let user_data = fixture.path().join("user-data");
     let absolute_records = fixture.path().join("Absolute Records.c4f");
@@ -5102,7 +5102,7 @@ fn l016_save_demo_folder_controls_recording_directory() {
 }
 
 #[test]
-fn l016_game_app_uses_selected_user_root_for_scenario_discovery() {
+fn game_app_uses_selected_user_root_for_scenario_discovery() {
     let fixture = tempdir().expect("selected user-root fixture");
     let selected_user = fixture.path().join("selected-user");
     let ambient_user = fixture.path().join("ambient-user");

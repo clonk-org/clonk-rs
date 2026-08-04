@@ -55,7 +55,7 @@ fn install_l067_context_stack(
         .engine
         .crew_cursor(owner)
         .and_then(|cursor| app.engine.object_snapshot(cursor))
-        .expect("L067 sandbox cursor remains live");
+        .expect("sandbox cursor remains live");
     let position = Vector2::new(cursor.position.x - 60, cursor.position.y);
     let layer = cursor.layer;
     let mut registered = Vec::new();
@@ -64,7 +64,7 @@ fn install_l067_context_stack(
             continue;
         }
         let mut definition = Definition::from_script(*definition_id, *definition_id, "#strict\n")
-            .expect("L067 context definition compiles");
+            .expect("context definition compiles");
         definition.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-5, -5, 10, 10)));
         match *definition_id {
             "WWNG" => {
@@ -90,11 +90,11 @@ fn install_l067_context_stack(
                 definition.set_category(clonk_engine::CATEGORY_STRUCTURE);
                 definition.set_closed_container(1);
             }
-            unexpected => panic!("unexpected L067 definition {unexpected}"),
+            unexpected => panic!("unexpected definition {unexpected}"),
         }
         app.engine
             .register_definition(definition)
-            .expect("register L067 context definition");
+            .expect("register context definition");
         registered.push(*definition_id);
     }
 
@@ -110,11 +110,11 @@ fn install_l067_context_stack(
                 .unwrap_or_else(|| SpawnConfig::new(*definition_id).with_position(position));
             app.engine
                 .spawn_object(spawn)
-                .expect("spawn L067 context object")
+                .expect("spawn context object")
         })
         .collect::<Vec<_>>();
     render_mouse_test_app(app);
-    let front = *objects.last().expect("L067 stack is nonempty");
+    let front = *objects.last().expect("stack is nonempty");
     let point = mouse_test_object_point(app, owner, front);
     assert_eq!(
         app.ingame_primary_mouse_target(owner, point),
@@ -129,7 +129,7 @@ fn install_l067_context_stack(
 }
 
 #[test]
-fn l067_right_click_wwng_targets_the_closed_container_behind_it() {
+fn right_click_wwng_targets_the_closed_container_behind_it() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let (objects, point) = install_l067_context_stack(&mut app, &["M67C", "WWNG"], false);
@@ -154,7 +154,7 @@ fn l067_right_click_wwng_targets_the_closed_container_behind_it() {
 }
 
 #[test]
-fn l067_right_click_lone_wwng_falls_through_to_select_next() {
+fn right_click_lone_wwng_falls_through_to_select_next() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let (_objects, point) = install_l067_context_stack(&mut app, &["WWNG"], false);
@@ -180,7 +180,7 @@ fn l067_right_click_lone_wwng_falls_through_to_select_next() {
 }
 
 #[test]
-fn l067_right_click_excludes_only_the_front_wwng() {
+fn right_click_excludes_only_the_front_wwng() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let (objects, point) = install_l067_context_stack(&mut app, &["WWNG", "WWNG"], false);
@@ -203,7 +203,7 @@ fn l067_right_click_excludes_only_the_front_wwng() {
 }
 
 #[test]
-fn l067_selectable_wwng_selects_before_falling_through_to_select_next() {
+fn selectable_wwng_selects_before_falling_through_to_select_next() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let (objects, point) = install_l067_context_stack(&mut app, &["WWNG"], true);
@@ -229,7 +229,7 @@ fn l067_selectable_wwng_selects_before_falling_through_to_select_next() {
 }
 
 #[test]
-fn l053_help_click_describes_ocf_all_target_without_commands_or_drag() {
+fn help_click_describes_ocf_all_target_without_commands_or_drag() {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
     let (target, point) =
@@ -360,7 +360,7 @@ fn l053_help_click_describes_ocf_all_target_without_commands_or_drag() {
 }
 
 #[test]
-fn l053_help_caption_uses_name_only_and_cpp_move_lifetime() {
+fn help_caption_uses_name_only_and_cpp_move_lifetime() {
     let mut app = new_running_sandbox_app();
     let raw_name = clonk_script::c4_string_from_bytes(b"Ren\xe9X");
     let (_target, point) = install_mouse_help_target(&mut app, "HLP2", &raw_name, None);
@@ -439,7 +439,7 @@ fn l053_help_caption_uses_name_only_and_cpp_move_lifetime() {
 }
 
 #[test]
-fn l043_shift_left_clicks_append_and_sample_release_modifiers() {
+fn shift_left_clicks_append_and_sample_release_modifiers() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
@@ -538,7 +538,7 @@ fn l043_shift_left_clicks_append_and_sample_release_modifiers() {
 }
 
 #[test]
-fn l043_shift_double_get_samples_the_second_press_event() {
+fn shift_double_get_samples_the_second_press_event() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
@@ -786,7 +786,7 @@ fn mouse_fog_keeps_ignore_fow_target_clickable() {
 }
 
 #[test]
-fn l054_fog_keeps_ignore_fow_target_and_jump_captions() {
+fn fog_keeps_ignore_fow_target_and_jump_captions() {
     let mut app = new_running_sandbox_app();
     let (owner, _cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 0);
     let target = spawn_mouse_fog_target(
@@ -1878,7 +1878,7 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
 }
 
 #[test]
-fn l054_mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
+fn mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let crew = app
@@ -1957,7 +1957,7 @@ fn l054_mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
 }
 
 #[test]
-fn l054_inventory_hover_caption_is_immediate_and_anchored_to_region_top() {
+fn inventory_hover_caption_is_immediate_and_anchored_to_region_top() {
     let (mut app, owner, _crew, _first, target, region_point) = inventory_region_fixture();
     let viewport = app
         .graphics
@@ -1994,7 +1994,7 @@ fn l054_inventory_hover_caption_is_immediate_and_anchored_to_region_top() {
 }
 
 #[test]
-fn l054_ctrl_region_drags_show_put_and_vehicle_put_captions() {
+fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
     for vehicle_drag in [false, true] {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
@@ -2146,7 +2146,7 @@ fn l054_ctrl_region_drags_show_put_and_vehicle_put_captions() {
 }
 
 #[test]
-fn l054_group_put_caption_uses_remaining_live_selection() {
+fn group_put_caption_uses_remaining_live_selection() {
     let (mut app, owner, crew, _first, _second, region_point) = inventory_region_fixture();
     let newest = app
         .engine
@@ -2227,7 +2227,7 @@ fn l054_group_put_caption_uses_remaining_live_selection() {
 }
 
 #[test]
-fn l054_world_origin_put_caption_uses_dragged_object_name() {
+fn world_origin_put_caption_uses_dragged_object_name() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
@@ -2586,7 +2586,7 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
 }
 
 #[test]
-fn l054_command_region_caption_is_immediate_and_anchored_to_region_top() {
+fn command_region_caption_is_immediate_and_anchored_to_region_top() {
     let (mut app, owner, points) = command_bar_fixture(false);
     let point = points
         .iter()
@@ -2618,7 +2618,7 @@ fn l054_command_region_caption_is_immediate_and_anchored_to_region_top() {
 }
 
 #[test]
-fn l054_help_cursor_gets_the_delayed_red_help_caption() {
+fn help_cursor_gets_the_delayed_red_help_caption() {
     let mut app = new_running_sandbox_app();
     let (_target, point) = install_mouse_help_target(&mut app, "M54H", "Help hover target", None);
     app.ingame_mouse_help = true;
@@ -3711,11 +3711,11 @@ fn missing_scenario_bootstrap_asset_precedes_generic_fallback() {
 }
 
 #[test]
-fn l018_production_bootstrap_rejects_a_partial_cursor_resolution_set() {
+fn production_bootstrap_rejects_a_partial_cursor_resolution_set() {
     let mut app = new_menu_app(320, 200);
     let assets = Arc::get_mut(&mut app.assets).expect("focused fixture owns its assets");
     assets.classic_hud_resources_required = true;
-    assets.cursor_atlas = l018_cursor_atlas();
+    assets.cursor_atlas = drag_cursor_atlas();
     assert_eq!(
         assets
             .require_classic_global_gui_bootstrap_resources(&HashMap::new())
@@ -3729,7 +3729,7 @@ fn l018_production_bootstrap_rejects_a_partial_cursor_resolution_set() {
 }
 
 #[test]
-fn l018_ingame_cursor_kinds_map_to_cpp_phases_and_add_rules() {
+fn ingame_cursor_kinds_map_to_cpp_phases_and_add_rules() {
     let landing = Vector2::new(73, 41);
     let cases = [
         (IngameMouseCursorKind::Region, MouseCursorPhase::Region),
@@ -3817,7 +3817,7 @@ fn l018_ingame_cursor_kinds_map_to_cpp_phases_and_add_rules() {
 }
 
 #[test]
-fn l094_scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
+fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
     // C4PortraitSelDlg is inserted above C4StartupPlrPropertiesDlg by
     // ShowModalDlg, so Window::Draw finishes every parent element before
     // drawing the selector and its opaque thumbnails/chrome. Screen::Draw
@@ -3920,7 +3920,7 @@ fn l094_scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order(
 }
 
 #[test]
-fn l094_picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon() {
+fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon() {
     let _lock = env_lock().lock();
     let program_data = tempdir().expect("portrait program data");
     let user_data = tempdir().expect("portrait user data");
@@ -4167,7 +4167,7 @@ fn l094_picture_button_opens_progressive_selector_and_none_preserves_unchecked_i
 }
 
 #[test]
-fn l094_first_portrait_selector_open_extracts_stock_portraits_once() {
+fn first_portrait_selector_open_extracts_stock_portraits_once() {
     let _lock = env_lock().lock();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -4234,7 +4234,7 @@ fn l094_first_portrait_selector_open_extracts_stock_portraits_once() {
 }
 
 #[test]
-fn l094_portrait_selector_consumes_the_gamepad_select_alias_cluster() {
+fn portrait_selector_consumes_the_gamepad_select_alias_cluster() {
     let mut app = new_classic_menu_app(640, 480);
     app.open_new_startup_player_properties();
     let pending = app
@@ -4330,7 +4330,7 @@ fn l094_portrait_selector_consumes_the_gamepad_select_alias_cluster() {
 }
 
 #[test]
-fn l094_properties_high_cluster_does_not_cancel_the_parent_screen() {
+fn properties_high_cluster_does_not_cancel_the_parent_screen() {
     // Dialog's AnyHighButton binding owns the complete physical input,
     // including Button::Select's abstract MenuToggle alias
     // (`C4GuiDialogs.cpp:364-375`, `C4GamePadCon.cpp:216-241`).
@@ -4360,7 +4360,7 @@ fn l094_properties_high_cluster_does_not_cancel_the_parent_screen() {
 }
 
 #[test]
-fn l094_portrait_selector_honors_exact_keyboard_modifiers() {
+fn portrait_selector_honors_exact_keyboard_modifiers() {
     let mut app = new_classic_menu_app(640, 480);
     app.open_new_startup_player_properties();
     app.startup_player_properties_dialog
@@ -4430,7 +4430,7 @@ fn l094_portrait_selector_honors_exact_keyboard_modifiers() {
 }
 
 #[test]
-fn l094_portrait_selector_alt_o_activates_the_native_ok_hotkey() {
+fn portrait_selector_alt_o_activates_the_native_ok_hotkey() {
     // LanguageUS gives the standard OK button the `&OK` mnemonic, and
     // Dialog routes Alt plus that alphanumeric to Button::OnHotkey
     // (`LanguageUS.txt:531`, `C4GuiButton.cpp:54-77`,
@@ -4465,7 +4465,7 @@ fn l094_portrait_selector_alt_o_activates_the_native_ok_hotkey() {
 
 #[test]
 #[cfg(not(target_os = "windows"))]
-fn l094_portrait_selector_does_not_bind_keypad_enter_as_return() {
+fn portrait_selector_does_not_bind_keypad_enter_as_return() {
     // FileSel registers K_RETURN. X11 and SDL define that as the main
     // Return key/scancode, distinct from keypad Enter
     // (`C4FileSelDlg.cpp:118-123`, `StdApp.h:107,159`).
@@ -4498,7 +4498,7 @@ fn l094_portrait_selector_does_not_bind_keypad_enter_as_return() {
 }
 
 #[test]
-fn l094_portrait_selector_outside_right_down_aborts_the_location_popup() {
+fn portrait_selector_outside_right_down_aborts_the_location_popup() {
     // Screen aborts a ContextMenu on outside RightDown before routing the
     // underlying event (`C4Gui.cpp:766-776`).
     let mut app = new_classic_menu_app(640, 480);
@@ -4540,7 +4540,7 @@ fn l094_portrait_selector_outside_right_down_aborts_the_location_popup() {
 }
 
 #[test]
-fn l094_portrait_selector_f5_requires_dialog_keyboard_activation() {
+fn portrait_selector_f5_requires_dialog_keyboard_activation() {
     // FileSel binds F5 through DlgKeyCB. The binding requires the active
     // dialog and is suppressed while Screen owns a ContextMenu
     // (`C4FileSelDlg.cpp:119-123`, `C4Gui.h:1616-1629`,
@@ -4621,7 +4621,7 @@ fn l094_portrait_selector_f5_requires_dialog_keyboard_activation() {
 }
 
 #[test]
-fn l094_portrait_selector_errors_use_screen_owned_modals() {
+fn portrait_selector_errors_use_screen_owned_modals() {
     let mut missing = new_real_classic_menu_app(640, 480);
     missing.open_new_startup_player_properties();
     missing
@@ -4694,7 +4694,7 @@ fn l094_portrait_selector_errors_use_screen_owned_modals() {
 }
 
 #[test]
-fn l094_initial_portrait_location_scan_failure_is_silent() {
+fn initial_portrait_location_scan_failure_is_silent() {
     // DirectoryIterator failure yields no file entries; UpdateFileList
     // still appends the null tile and displays no error
     // (`C4FileSelDlg.cpp:251-274`, `StdFile.cpp:712-847`).
@@ -4735,7 +4735,7 @@ fn l094_initial_portrait_location_scan_failure_is_silent() {
 }
 
 #[test]
-fn l094_portrait_selector_gamepad_low_toggles_the_focused_checkbox_once() {
+fn portrait_selector_gamepad_low_toggles_the_focused_checkbox_once() {
     let mut app = new_classic_menu_app(640, 480);
     app.open_new_startup_player_properties();
     let pending = app
@@ -4899,7 +4899,7 @@ fn production_gamepad_batch_navigates_main_menu_then_options_sheet() {
 }
 
 #[test]
-fn l020_gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
+fn gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
     let user_data = tempdir().expect("isolated gamepad config");
@@ -4948,7 +4948,7 @@ fn l020_gamepad_enabled_defaults_true_and_captures_false_before_config_writes() 
 }
 
 #[test]
-fn l020_global_gamepad_disable_drops_events_before_dispatch() {
+fn global_gamepad_disable_drops_events_before_dispatch() {
     let mut app = new_real_classic_menu_app(640, 480);
     let mut initial = vec![0_u8; 640 * 480 * 4];
     app.render(&mut initial).expect("render main menu");
@@ -4984,7 +4984,7 @@ fn l020_global_gamepad_disable_drops_events_before_dispatch() {
 }
 
 #[test]
-fn l132_about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
+fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
     use clonk_frontend::startup_about_dlg::{AboutFocusTarget, AboutPage};
 
     let open_about = |gamepad_gui_control| {
@@ -5138,7 +5138,7 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
 }
 
 #[test]
-fn l097_options_gamepad_device_claim_switches_and_releases() {
+fn options_gamepad_device_claim_switches_and_releases() {
     use clonk_frontend::startup_options_controls::ControlDevice;
     use clonk_frontend::startup_options_dlg::{OptionsDlgAction, OptionsSheet};
 
@@ -5543,7 +5543,7 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
 }
 
 #[test]
-fn l017_false_startup_config_never_polls_gamepad_manager() {
+fn false_startup_config_never_polls_gamepad_manager() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
     let user_data = tempdir().expect("isolated gamepad config");
@@ -5592,7 +5592,7 @@ fn l017_false_startup_config_never_polls_gamepad_manager() {
 }
 
 #[test]
-fn l017_disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
+fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
     let mut app = new_running_sandbox_app();
     let original_owner = app.local_owner;
     app.local_controls = LocalControlRegistry::default();
@@ -5801,7 +5801,7 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
 }
 
 #[test]
-fn l143_chart_gamepad_high_close_respects_player_control_priority() {
+fn chart_gamepad_high_close_respects_player_control_priority() {
     let slot = GamepadSlot::new(0);
     let mut chart = new_running_sandbox_app();
     chart.toggle_network_chart();
@@ -6008,7 +6008,7 @@ fn mouse_option_phase(app: &GameApp, player: i32) -> Option<u8> {
 }
 
 #[test]
-fn l075_options_mouse_entry_is_on_for_requesting_holder() {
+fn options_mouse_entry_is_on_for_requesting_holder() {
     let mut app = new_running_sandbox_app();
     let holder = app.local_owner;
 
@@ -6029,7 +6029,7 @@ fn l075_options_mouse_entry_is_on_for_requesting_holder() {
 }
 
 #[test]
-fn l075_options_mouse_entry_is_hidden_for_non_holder_while_taken() {
+fn options_mouse_entry_is_hidden_for_non_holder_while_taken() {
     let mut app = new_running_sandbox_app();
     let holder = app.local_owner;
     let other = add_secondary_local_player_for_mouse_option_test(&mut app);
@@ -6057,7 +6057,7 @@ fn l075_options_mouse_entry_is_hidden_for_non_holder_while_taken() {
 }
 
 #[test]
-fn l075_unclaimed_mouse_entry_is_off_for_each_local_player() {
+fn unclaimed_mouse_entry_is_off_for_each_local_player() {
     let mut app = new_running_sandbox_app();
     let primary = app.local_owner;
     let secondary = add_secondary_local_player_for_mouse_option_test(&mut app);
@@ -6482,7 +6482,7 @@ fn gameplay_wheel_routes_to_assigned_secondary_mouse_owner() {
 }
 
 #[test]
-fn l051_assigned_observer_key_uses_production_dispatch_and_physical_gate() {
+fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     let parsed = parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=Alt+N,Right,F5,F6,F7,None\n")
         .expect("parse the represented global observer binding");
     assert_eq!(
@@ -6602,7 +6602,7 @@ fn l051_assigned_observer_key_uses_production_dispatch_and_physical_gate() {
 }
 
 #[test]
-fn l052_reused_player_number_gets_a_distinct_physical_camera_identity() {
+fn reused_player_number_gets_a_distinct_physical_camera_identity() {
     let mut app = new_lightweight_running_sandbox_app();
     let original = app.local_owner;
     let film_target = original + 1;
@@ -7060,7 +7060,7 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
 }
 
 #[test]
-fn l128_running_f4_only_stronger_escape_owns_keyboard_input() {
+fn running_f4_only_stronger_escape_owns_keyboard_input() {
     let mut app = new_classic_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients

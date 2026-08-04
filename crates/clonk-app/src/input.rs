@@ -1721,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn l027_apple_languages_german_selects_iso_player_menu_without_locale_environment() {
+    fn apple_languages_german_selects_iso_player_menu_without_locale_environment() {
         let german_system = german_system_from_sources(Some("de"), None);
         assert!(german_system);
         assert_eq!(
@@ -1742,14 +1742,14 @@ mod tests {
     }
 
     #[test]
-    fn l027_environment_locale_remains_german_system_fallback() {
+    fn environment_locale_remains_german_system_fallback() {
         assert!(german_system_from_sources(None, Some("de_DE.UTF-8")));
         assert!(!german_system_from_sources(None, Some("en_US.UTF-8")));
         assert!(!german_system_from_sources(None, None));
     }
 
     #[test]
-    fn l032_windows_language_uses_the_primary_lang_id() {
+    fn windows_language_uses_the_primary_lang_id() {
         assert!(german_system_from_windows_lang_id(0x0407));
         assert!(german_system_from_windows_lang_id(0x0807));
         assert!(!german_system_from_windows_lang_id(0x0409));
@@ -1854,7 +1854,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_legacy_axis_and_hat_keycodes_match_cpp_encoding() {
+    fn legacy_axis_and_hat_keycodes_match_cpp_encoding() {
         assert_eq!(legacy_gamepad_axis_key(0, 0, false), Some(0x0042_0030));
         assert_eq!(legacy_gamepad_axis_key(0, 0, true), Some(0x0042_0031));
         assert_eq!(legacy_gamepad_axis_key(0, 1, false), Some(0x0042_0032));
@@ -1885,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_unconfigured_axis_registers_no_gameplay_candidates() {
+    fn unconfigured_axis_registers_no_gameplay_candidates() {
         let bindings = GamepadBindings::from_config(&Config::new());
         assert_eq!(
             bindings
@@ -1902,7 +1902,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_axis_key_bound_to_left_routes_the_configured_logical_control() {
+    fn axis_key_bound_to_left_routes_the_configured_logical_control() {
         let mut config = Config::new();
         config.set_in(Some("Gamepad0"), "Button7", "0x00420030");
         let bindings = GamepadBindings::from_config(&config);
@@ -1922,7 +1922,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_axis_key_can_route_a_non_direction_logical_control() {
+    fn axis_key_can_route_a_non_direction_logical_control() {
         let mut config = Config::new();
         config.set_in(Some("Gamepad0"), "Button6", "0x00420032");
         let bindings = GamepadBindings::from_config(&config);
@@ -1954,7 +1954,7 @@ mod tests {
     }
 
     #[test]
-    fn l026_axis_candidates_keep_exact_range_before_synthetic_alias() {
+    fn axis_candidates_keep_exact_range_before_synthetic_alias() {
         let mut config = Config::new();
         // Registration order alone would put Button1 first. DoInput instead
         // exhausts the exact 0x30 range before the generic Left range.
@@ -2120,7 +2120,7 @@ mod tests {
     }
 
     #[test]
-    fn l034_native_byte_config_loads_axis_calibration_without_utf8() {
+    fn native_byte_config_loads_axis_calibration_without_utf8() {
         let config = b"[General]\nName=Andr\xe9\n[Gamepad1]\nAxis2Min=0x10\nAxis2Max=4294967295\nAxis2Calibrated=1\n";
         let mut bindings = GamepadBindings::default();
         bindings.load_axis_calibrations_from_native_config(config);

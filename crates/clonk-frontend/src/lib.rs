@@ -3576,7 +3576,7 @@ mod tests {
     }
 
     #[test]
-    fn l140_debug_vertex_marks_are_flag_gated() {
+    fn debug_vertex_marks_are_flag_gated() {
         let mut snapshot = make_snapshot();
         let object = &mut snapshot.objects[0];
         object.position = Vector2::new(16, 16);
@@ -3602,7 +3602,7 @@ mod tests {
             32,
             32,
             32,
-            "L140 vertex overlay",
+            "vertex overlay",
             test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("TestObject", None),
@@ -3672,11 +3672,11 @@ mod tests {
     }
 
     #[test]
-    fn l140_network_status_text_is_flag_gated_per_viewport() {
+    fn network_status_text_is_flag_gated_per_viewport() {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(80, 60);
         let render = |show_net_status| {
-            let mut graphics = test_graphics(180, 110, 120, "L140 network status");
+            let mut graphics = test_graphics(180, 110, 120, "network status");
             graphics.set_debug_draw_flags(DebugDrawFlags {
                 show_net_status,
                 ..DebugDrawFlags::default()
@@ -3721,7 +3721,7 @@ mod tests {
     }
 
     #[test]
-    fn l140_solid_mask_mode_uses_surface8_and_suppresses_the_object_sprite() {
+    fn solid_mask_mode_uses_surface8_and_suppresses_the_object_sprite() {
         let mut snapshot = make_snapshot();
         let object = &mut snapshot.objects[0];
         object.position = Vector2::new(12, 12);
@@ -3743,7 +3743,7 @@ mod tests {
             24,
             24,
             24,
-            "L140 solid masks",
+            "solid masks",
             test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("TestObject", None),
@@ -9848,7 +9848,7 @@ mod tests {
     }
 
     #[test]
-    fn l066_foreground_parallax_split_straddles_cursor_marks_like_cpp() {
+    fn foreground_parallax_split_straddles_cursor_marks_like_cpp() {
         // ForeObjects.DrawIfCategory(... C4D_Parallax, true) draws the
         // non-parallax foreground before Game.DrawCursors; the false pass
         // draws parallax/custom-GUI objects afterwards
@@ -10099,7 +10099,7 @@ mod tests {
     }
 
     #[test]
-    fn l120_message_board_mode_recalculates_viewport_bottom_border() {
+    fn message_board_mode_recalculates_viewport_bottom_border() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
         let board = ImageData::new(4, 55, vec![120; 4 * 55 * 4]);
@@ -10366,7 +10366,7 @@ mod tests {
     }
 
     #[test]
-    fn l049_fixed_item_visibility_combines_global_and_script_requests() {
+    fn fixed_item_visibility_combines_global_and_script_requests() {
         assert_eq!(
             player_fixed_item_visibility(false, false, false),
             (false, false, false)
@@ -10450,7 +10450,7 @@ mod tests {
     }
 
     #[test]
-    fn l049_disabled_splitscreen_dividers_remove_four_pixel_layout_gaps() {
+    fn disabled_splitscreen_dividers_remove_four_pixel_layout_gaps() {
         assert_eq!(
             viewport_layout_with_dividers(800, 600, 2, false),
             vec![
@@ -12241,7 +12241,7 @@ mod tests {
     }
 
     #[test]
-    fn l049_disabling_extended_fire_particles_keeps_simple_fire_facet() {
+    fn disabling_extended_fire_particles_keeps_simple_fire_facet() {
         // FireParticles gates automatic emission only; the simple object
         // Fire.png facet and script-created registry particles remain visible.
         let mut object = make_snapshot().objects.remove(0);
@@ -14041,7 +14041,7 @@ mod tests {
     }
 
     #[test]
-    fn l018_all_cursor_phases_use_cpp_cells_and_hotspots() {
+    fn all_cursor_phases_use_cpp_cells_and_hotspots() {
         assert_eq!(MouseCursorPhase::Down.hotspot(15), (7, 14));
         assert_eq!(MouseCursorPhase::Right.hotspot(15), (14, 7));
         assert_eq!(MouseCursorPhase::DownRight.hotspot(15), (14, 14));
@@ -14130,7 +14130,7 @@ mod tests {
     }
 
     #[test]
-    fn l018_world_cursor_is_clipped_to_its_viewport() {
+    fn world_cursor_is_clipped_to_its_viewport() {
         let cell = 4u32;
         let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
         for _y in 0..cell {
@@ -14169,7 +14169,7 @@ mod tests {
     }
 
     #[test]
-    fn l018_old_style_cursor_uses_cpp_thirteen_pixel_hotspots() {
+    fn old_style_cursor_uses_cpp_thirteen_pixel_hotspots() {
         let cell = 13u32;
         let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
         for _y in 0..cell {
@@ -14230,7 +14230,7 @@ mod tests {
     }
 
     #[test]
-    fn l018_gui_help_cursor_offsets_second_cell_in_native_pixels() {
+    fn gui_help_cursor_offsets_second_cell_in_native_pixels() {
         let cell = 4u32;
         let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
         for _y in 0..cell {
@@ -14874,7 +14874,7 @@ mod tests {
     }
 
     #[test]
-    fn l066_film_replay_hides_player_hud_and_world_cursor_marks() {
+    fn film_replay_hides_player_hud_and_world_cursor_marks() {
         let (snapshot, mut graphics) = cursor_label_fixture(Some("Joe"));
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         let cursor_color = standard_gamma_color(Color::opaque(0, 200, 0));

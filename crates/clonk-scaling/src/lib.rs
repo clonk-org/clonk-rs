@@ -1223,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn l008_subunit_scale_uses_exact_logical_size_and_input_conversion() {
+    fn subunit_scale_uses_exact_logical_size_and_input_conversion() {
         let presenter = FramePresenter::new(0.5, 400, 300);
         assert_eq!(presenter.physical_size(), (400, 300));
         assert_eq!(presenter.logical_size(), (800, 600));

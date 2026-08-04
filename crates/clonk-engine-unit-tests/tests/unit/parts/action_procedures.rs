@@ -2950,7 +2950,7 @@ func Construction(object creator)
         assert_eq!(object.direction, Direction::Left);
     }
 
-    fn l067_builder_definition(
+    fn construction_builder_definition(
         id: &str,
         script: &str,
         no_other_action: bool,
@@ -2983,7 +2983,7 @@ func Construction(object creator)
         definition
     }
 
-    fn l067_target_definition(script: &str) -> Definition {
+    fn construction_target_definition(script: &str) -> Definition {
         let mut definition =
             Definition::from_script("BTGT", "Build target", script).expect("target compiles");
         definition.set_category(CATEGORY_STRUCTURE);
@@ -2993,7 +2993,7 @@ func Construction(object creator)
     }
 
     #[test]
-    fn l067_build_contained_target_requires_live_powered_build_container() {
+    fn build_contained_target_requires_live_powered_build_container() {
         // DFA_BUILD's first target guard requires a contained target's live
         // container to be building without NeedEnergy (C4Object.cpp:5016-5020).
         // It precedes the full-target check and returns without stopping.
@@ -3006,13 +3006,13 @@ func Construction(object creator)
         ] {
             let mut engine = Engine::with_seed(67);
             engine
-                .register_definition(l067_builder_definition("BLDR", "", false))
+                .register_definition(construction_builder_definition("BLDR", "", false))
                 .expect("builder registers");
             engine
-                .register_definition(l067_builder_definition("BCON", "", false))
+                .register_definition(construction_builder_definition("BCON", "", false))
                 .expect("container registers");
             engine
-                .register_definition(l067_target_definition(""))
+                .register_definition(construction_target_definition(""))
                 .expect("target registers");
 
             let container = engine
@@ -3093,7 +3093,7 @@ func Construction(object creator)
     }
 
     #[test]
-    fn l067_build_area_uses_live_shape_and_inclusive_vertical_margin() {
+    fn build_area_uses_live_shape_and_inclusive_vertical_margin() {
         // DFA_BUILD compares the builder against the target's live Shape and
         // uses inclusive Inside bounds, including Wdt and Hgt+16
         // (C4Object.cpp:5027-5032).
@@ -3106,14 +3106,14 @@ func Construction(object creator)
         ] {
             let mut engine = Engine::with_seed(67);
             engine
-                .register_definition(l067_builder_definition(
+                .register_definition(construction_builder_definition(
                     "BLDR",
                     "",
                     no_other_action,
                 ))
                 .expect("builder registers");
             engine
-                .register_definition(l067_target_definition(""))
+                .register_definition(construction_target_definition(""))
                 .expect("target registers");
             let target = engine
                 .spawn_object(
@@ -3189,10 +3189,10 @@ func Construction(object creator)
         // not receive SetCommand(Exit).
         let mut engine = Engine::with_seed(68);
         engine
-            .register_definition(l067_builder_definition("BLDR", "", false))
+            .register_definition(construction_builder_definition("BLDR", "", false))
             .expect("builder registers");
         engine
-            .register_definition(l067_target_definition(""))
+            .register_definition(construction_target_definition(""))
             .expect("target registers");
         let builder = engine
             .spawn_object(
@@ -3246,7 +3246,7 @@ func Construction(object creator)
     }
 
     #[test]
-    fn l067_build_completed_internal_target_replaces_stack_with_base_exit() {
+    fn build_completed_internal_target_replaces_stack_with_base_exit() {
         // Target::Build returns true on the FullCon crossing. The next BUILD
         // tick stops, then calls plain SetCommand(Exit) on an internal target
         // (C4Object.cpp:5033-5043; SetCommand :3937-3985).
@@ -3256,10 +3256,10 @@ protected func ControlCommand() { own_control_calls++; return 1; }
 "#;
         let mut engine = Engine::with_seed(67);
         engine
-            .register_definition(l067_builder_definition("BLDR", "", false))
+            .register_definition(construction_builder_definition("BLDR", "", false))
             .expect("builder registers");
         engine
-            .register_definition(l067_target_definition(target_script))
+            .register_definition(construction_target_definition(target_script))
             .expect("target registers");
         let builder = engine
             .spawn_object(
@@ -3335,7 +3335,7 @@ protected func ControlCommand() { own_control_calls++; return 1; }
     }
 
     #[test]
-    fn l067_build_completed_internal_target_honors_inside_vehicle_control() {
+    fn build_completed_internal_target_honors_inside_vehicle_control() {
         let builder_script = r#"#strict
 local control_calls, control_command, control_by, control_action;
 protected func ControlCommand(command, target, tx, ty, target2, data, by)
@@ -3351,14 +3351,14 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
 local own_control_calls;
 protected func ControlCommand() { own_control_calls++; return 1; }
 "#;
-        let mut builder_definition = l067_builder_definition("BLDR", builder_script, false);
+        let mut builder_definition = construction_builder_definition("BLDR", builder_script, false);
         builder_definition.set_vehicle_control(VEHICLE_CONTROL_INSIDE);
         let mut engine = Engine::with_seed(67);
         engine
             .register_definition(builder_definition)
             .expect("builder registers");
         engine
-            .register_definition(l067_target_definition(target_script))
+            .register_definition(construction_target_definition(target_script))
             .expect("target registers");
         let builder = engine
             .spawn_object(
@@ -4939,7 +4939,7 @@ protected func TurnStart()
     }
 
     #[test]
-    fn l073_pull_without_target_stops_in_walk_with_silent_wait() {
+    fn pull_without_target_stops_in_walk_with_silent_wait() {
         let script = r#"
         global func Initialize(state, random) {
             return 0;
@@ -5000,7 +5000,7 @@ protected func TurnStart()
         assert_eq!(stack["commands"][0]["update_interval"], serde_json::json!(50));
     }
 
-    fn l073_pull_failure_engine() -> Engine {
+    fn pull_failure_engine() -> Engine {
         let mut puller = Definition::from_script("L73P", "Puller", "#strict")
             .expect("puller compiles");
         puller.set_category(CATEGORY_OBJECT);
@@ -5064,7 +5064,7 @@ protected func GrabLost()
         engine
     }
 
-    fn l073_spawn_puller(
+    fn spawn_puller(
         engine: &mut Engine,
         target: ObjectId,
         position: Vector2,
@@ -5134,7 +5134,7 @@ protected func GrabLost()
     }
 
     #[test]
-    fn l073_physical_pull_target_failures_stop_in_walk_with_silent_wait() {
+    fn physical_pull_target_failures_stop_in_walk_with_silent_wait() {
         #[derive(Clone, Copy)]
         enum Failure {
             InsideTarget,
@@ -5147,7 +5147,7 @@ protected func GrabLost()
             ("target contained", Failure::TargetContained),
             ("target Push rejected", Failure::PushRejected),
         ] {
-            let mut engine = l073_pull_failure_engine();
+            let mut engine = pull_failure_engine();
             let containing = matches!(failure, Failure::TargetContained)
                 .then(|| {
                     engine
@@ -5170,7 +5170,7 @@ protected func GrabLost()
                 .spawn_object(target_config)
                 .expect("pull target spawns");
             let puller_container = matches!(failure, Failure::InsideTarget).then_some(target);
-            let puller = l073_spawn_puller(
+            let puller = spawn_puller(
                 &mut engine,
                 target,
                 Vector2::ZERO,
@@ -5188,8 +5188,8 @@ protected func GrabLost()
     }
 
     #[test]
-    fn l073_horse_like_pull_range_loss_stops_before_grab_lost() {
-        let mut engine = l073_pull_failure_engine();
+    fn horse_like_pull_range_loss_stops_before_grab_lost() {
+        let mut engine = pull_failure_engine();
         let wagon = engine
             .spawn_object(
                 SpawnConfig::new("L73W")
@@ -5198,7 +5198,7 @@ protected func GrabLost()
                     .with_controller(3),
             )
             .expect("wagon spawns");
-        let horse = l073_spawn_puller(
+        let horse = spawn_puller(
             &mut engine,
             wagon,
             Vector2::new(100, 0),
@@ -5238,8 +5238,8 @@ protected func GrabLost()
     }
 
     #[test]
-    fn l080_pull_range_loss_clears_back_to_push_to() {
-        let mut engine = l073_pull_failure_engine();
+    fn pull_range_loss_clears_back_to_push_to() {
+        let mut engine = pull_failure_engine();
         let wagon = engine
             .spawn_object(
                 SpawnConfig::new("L73W")
@@ -5248,7 +5248,7 @@ protected func GrabLost()
                     .with_controller(3),
             )
             .expect("wagon spawns");
-        let horse = l073_spawn_puller(
+        let horse = spawn_puller(
             &mut engine,
             wagon,
             Vector2::new(100, 0),
@@ -5412,7 +5412,7 @@ protected func GrabLost()
         );
     }
 
-    fn l073_fight_failure_engine() -> Engine {
+    fn fight_failure_engine() -> Engine {
         let mut fighter = Definition::from_script("L73F", "Fighter", "#strict")
             .expect("fighter compiles");
         fighter.set_category(CATEGORY_OBJECT);
@@ -5487,7 +5487,7 @@ protected func GrabLost()
         engine
     }
 
-    fn l073_spawn_fighter(
+    fn spawn_fighter(
         engine: &mut Engine,
         target: Option<ObjectId>,
         container: Option<ObjectId>,
@@ -5532,9 +5532,9 @@ protected func GrabLost()
     }
 
     #[test]
-    fn l073_fight_without_target_stands_in_walk_without_wait() {
-        let mut engine = l073_fight_failure_engine();
-        let fighter = l073_spawn_fighter(&mut engine, None, None);
+    fn fight_without_target_stands_in_walk_without_wait() {
+        let mut engine = fight_failure_engine();
+        let fighter = spawn_fighter(&mut engine, None, None);
         let index = engine.find_object_index(fighter).expect("fighter exists");
 
         assert!(
@@ -5547,7 +5547,7 @@ protected func GrabLost()
     }
 
     #[test]
-    fn l073_fight_target_door_and_range_failures_stand_without_wait() {
+    fn fight_target_door_and_range_failures_stand_without_wait() {
         #[derive(Clone, Copy)]
         enum Failure {
             TargetNotFighting,
@@ -5568,7 +5568,7 @@ protected func GrabLost()
             ),
             ("fight target out of range", Failure::OutOfRange),
         ] {
-            let mut engine = l073_fight_failure_engine();
+            let mut engine = fight_failure_engine();
             let closed_container = matches!(
                 failure,
                 Failure::FighterBehindClosedDoor | Failure::TargetBehindClosedDoor
@@ -5611,7 +5611,7 @@ protected func GrabLost()
             } else {
                 None
             };
-            let fighter = l073_spawn_fighter(&mut engine, Some(target), fighter_container);
+            let fighter = spawn_fighter(&mut engine, Some(target), fighter_container);
             let index = engine.find_object_index(fighter).expect("fighter exists");
 
             let _ = engine
@@ -5623,7 +5623,7 @@ protected func GrabLost()
     }
 
     #[test]
-    fn l078_fight_continues_through_open_container_mismatches() {
+    fn fight_continues_through_open_container_mismatches() {
         #[derive(Clone, Copy)]
         enum ContainerCase {
             FighterInside,
@@ -5644,7 +5644,7 @@ protected func GrabLost()
                 ContainerCase::BothInsideSameClosed,
             ),
         ] {
-            let mut engine = l073_fight_failure_engine();
+            let mut engine = fight_failure_engine();
             let spawn_container = |engine: &mut Engine, entrance_status| {
                 engine
                     .spawn_object(
@@ -5681,7 +5681,7 @@ protected func GrabLost()
             let target = engine
                 .spawn_object(target_config)
                 .expect("fight target spawns");
-            let fighter = l073_spawn_fighter(&mut engine, Some(target), fighter_container);
+            let fighter = spawn_fighter(&mut engine, Some(target), fighter_container);
             let index = engine.find_object_index(fighter).expect("fighter exists");
 
             assert!(
@@ -5698,7 +5698,7 @@ protected func GrabLost()
 
     #[test]
     fn fight_procedure_retains_inactive_action_target_like_cpp() {
-        let mut engine = l073_fight_failure_engine();
+        let mut engine = fight_failure_engine();
         let target = engine
             .spawn_object(
                 SpawnConfig::new("L73O")
@@ -5709,7 +5709,7 @@ protected func GrabLost()
             .expect("fight target spawns");
         let target_index = engine.find_object_index(target).expect("target exists");
         engine.objects[target_index].state.status = ObjectStatus::Inactive;
-        let fighter = l073_spawn_fighter(&mut engine, Some(target), None);
+        let fighter = spawn_fighter(&mut engine, Some(target), None);
         let fighter_index = engine.find_object_index(fighter).expect("fighter exists");
 
         assert!(
@@ -5725,8 +5725,8 @@ protected func GrabLost()
         );
     }
 
-    fn l074_wide_vertex_fight_pair(separation: i32) -> (Engine, ObjectId, ObjectId) {
-        let mut engine = l073_fight_failure_engine();
+    fn wide_vertex_fight_pair(separation: i32) -> (Engine, ObjectId, ObjectId) {
+        let mut engine = fight_failure_engine();
         // Deliberately disagree with the 16px shape rect. DFA_FIGHT uses the
         // live Shape.Wdt for both its approach point and give-up distance,
         // never the span of the contact vertices.
@@ -5760,8 +5760,8 @@ protected func GrabLost()
     }
 
     #[test]
-    fn l074_fight_approach_uses_target_shape_rect_width() {
-        let (mut engine, fighter, target) = l074_wide_vertex_fight_pair(10);
+    fn fight_approach_uses_target_shape_rect_width() {
+        let (mut engine, fighter, target) = wide_vertex_fight_pair(10);
         let fighter_idx = engine.find_object_index(fighter).expect("fighter exists");
         let target_idx = engine.find_object_index(target).expect("target exists");
         engine.objects[fighter_idx].state.shape_override =
@@ -5797,14 +5797,14 @@ protected func GrabLost()
     }
 
     #[test]
-    fn l074_fight_give_up_uses_inclusive_own_shape_rect_width() {
+    fn fight_give_up_uses_inclusive_own_shape_rect_width() {
         for (target_width, separation, expected_action) in [
             (16, 16, "Fight"),
             (16, 17, "Walk"),
             (32, 16, "Fight"),
             (32, 17, "Walk"),
         ] {
-            let (mut engine, fighter, target) = l074_wide_vertex_fight_pair(separation);
+            let (mut engine, fighter, target) = wide_vertex_fight_pair(separation);
             let fighter_idx = engine.find_object_index(fighter).expect("fighter exists");
             let target_idx = engine.find_object_index(target).expect("target exists");
             engine.objects[target_idx].state.shape_override = Some(DefinitionRect::new(
@@ -5845,7 +5845,7 @@ protected func GrabLost()
         }
     }
 
-    fn l075_attach_actor_definition(
+    fn attach_actor_definition(
         id: &str,
         script: &str,
         abort_call: Option<&str>,
@@ -5869,7 +5869,7 @@ protected func GrabLost()
         definition
     }
 
-    fn l075_point_definition(id: &str, script: &str) -> Definition {
+    fn point_definition(id: &str, script: &str) -> Definition {
         let mut definition = Definition::from_script(id, id, script).expect("point compiles");
         definition.set_category(CATEGORY_OBJECT);
         definition.set_c4_callback_convention(true);
@@ -5878,7 +5878,7 @@ protected func GrabLost()
     }
 
     #[test]
-    fn l075_attach_lost_target_sets_idle_before_lost_callback() {
+    fn attach_lost_target_sets_idle_before_lost_callback() {
         let script = r#"#strict 2
 local callback_order, abort_action, lost_action;
 
@@ -5899,7 +5899,7 @@ protected func AttachTargetLost()
 "#;
         let mut engine = Engine::with_seed(75);
         engine
-            .register_definition(l075_attach_actor_definition(
+            .register_definition(attach_actor_definition(
                 "L75A",
                 script,
                 Some("AttachAbort"),
@@ -5942,19 +5942,19 @@ protected func AttachTargetLost()
     }
 
     #[test]
-    fn l075_attach_incomplete_target_respects_incomplete_activity() {
+    fn attach_incomplete_target_respects_incomplete_activity() {
         let actor_script = r#"#strict 2
 local lost_calls;
 protected func AttachTargetLost() { lost_calls += 1; return 1; }
 "#;
-        let mut blocked = l075_point_definition("L75N", "#strict 2");
+        let mut blocked = point_definition("L75N", "#strict 2");
         blocked.set_incomplete_activity(false);
-        let mut allowed = l075_point_definition("L75Y", "#strict 2");
+        let mut allowed = point_definition("L75Y", "#strict 2");
         allowed.set_incomplete_activity(true);
 
         let mut engine = Engine::with_seed(75);
         engine
-            .register_definition(l075_attach_actor_definition("L75I", actor_script, None))
+            .register_definition(attach_actor_definition("L75I", actor_script, None))
             .expect("actor registers");
         engine
             .register_definition(blocked)
@@ -6015,7 +6015,7 @@ protected func AttachTargetLost() { lost_calls += 1; return 1; }
     }
 
     #[test]
-    fn l075_attach_forced_enter_callbacks_recheck_cleared_target() {
+    fn attach_forced_enter_callbacks_recheck_cleared_target() {
         let actor_script = r#"#strict 2
 local callback_order, lost_action;
 
@@ -6050,13 +6050,13 @@ protected func Collection2(object item) { item->Mark(2); return 1; }
 "#;
         let mut engine = Engine::with_seed(75);
         engine
-            .register_definition(l075_attach_actor_definition("L75E", actor_script, None))
+            .register_definition(attach_actor_definition("L75E", actor_script, None))
             .expect("actor registers");
         engine
-            .register_definition(l075_point_definition("L75C", container_script))
+            .register_definition(point_definition("L75C", container_script))
             .expect("container registers");
         engine
-            .register_definition(l075_point_definition("L75T", "#strict 2"))
+            .register_definition(point_definition("L75T", "#strict 2"))
             .expect("target registers");
 
         let container = engine
@@ -6110,7 +6110,7 @@ protected func Collection2(object item) { item->Mark(2); return 1; }
     }
 
     #[test]
-    fn l075_attach_forced_exit_runs_ejection_and_departure() {
+    fn attach_forced_exit_runs_ejection_and_departure() {
         let actor_script = r#"#strict 2
 local callback_order;
 public func Mark(int step) { callback_order = callback_order * 10 + step; return 1; }
@@ -6121,13 +6121,13 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
 "#;
         let mut engine = Engine::with_seed(75);
         engine
-            .register_definition(l075_attach_actor_definition("L75X", actor_script, None))
+            .register_definition(attach_actor_definition("L75X", actor_script, None))
             .expect("actor registers");
         engine
-            .register_definition(l075_point_definition("L75O", container_script))
+            .register_definition(point_definition("L75O", container_script))
             .expect("old container registers");
         engine
-            .register_definition(l075_point_definition("L75U", "#strict 2"))
+            .register_definition(point_definition("L75U", "#strict 2"))
             .expect("target registers");
 
         let old_container = engine

@@ -2626,8 +2626,8 @@ func Probe(target) {
         }
 
         global func FxGUpperStart(target, int number, int temp) {
-            // Start(2) for an inactive-effect kill belongs to L026; this
-            // test only rejects the stale ordinary temp readd Start(1).
+            // Start(2) for an inactive-effect kill is a separate regression;
+            // this test only rejects the stale ordinary temp readd Start(1).
             if (temp == 1) {
                 iOrder = iOrder * 10 + 8;
                 ++iStaleReadds;

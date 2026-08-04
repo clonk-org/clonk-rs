@@ -854,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn l025_serializes_typed_values_and_nested_logging_like_cpp() {
+    fn serializes_typed_values_and_nested_logging_like_cpp() {
         let config = LegacyRegistryConfig {
             keys: vec![
                 key(
@@ -920,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn l025_preserves_signed_and_unsigned_registry_bit_patterns() {
+    fn preserves_signed_and_unsigned_registry_bit_patterns() {
         let all_ones_dword = u32::MAX.to_le_bytes().to_vec();
         let all_ones_qword = u64::MAX.to_le_bytes().to_vec();
         let config = LegacyRegistryConfig {
@@ -962,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn l025_rejects_malformed_expected_integer_sizes_and_ignores_wrong_types() {
+    fn rejects_malformed_expected_integer_sizes_and_ignores_wrong_types() {
         let malformed = LegacyRegistryConfig {
             keys: vec![key(
                 &["General"],

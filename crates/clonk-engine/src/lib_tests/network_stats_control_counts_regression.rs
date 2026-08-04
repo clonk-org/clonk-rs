@@ -2,7 +2,7 @@ use super::*;
 use crate::player::CountedControlType;
 
 #[test]
-fn l143_control_counts_drain_without_resetting_action_deduplication() {
+fn control_counts_drain_without_resetting_action_deduplication() {
     let mut engine = Engine::new();
     engine
         .register_player(PlayerConfig::new(5, "First"))

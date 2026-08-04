@@ -12,7 +12,7 @@ const DEBUG_MARKER: &str = "l029 session debug marker";
 const GPU_TEXTURE_MARKER: &str = "l029 wgpu texture allocation marker";
 
 #[test]
-fn l029_session_log_is_overwritten_and_verbose_tees_to_stderr() {
+fn session_log_is_overwritten_and_verbose_tees_to_stderr() {
     if let Ok(mode) = env::var(CHILD_MODE) {
         let log_path = PathBuf::from(env::var_os(CHILD_LOG_PATH).expect("child log path"));
         clonk_logging::init_verbose_with_file(mode == "verbose", &log_path)
@@ -47,7 +47,7 @@ fn l029_session_log_is_overwritten_and_verbose_tees_to_stderr() {
         let output = Command::new(env::current_exe().expect("integration-test executable"))
             .args([
                 "--exact",
-                "l029_session_log_is_overwritten_and_verbose_tees_to_stderr",
+                "session_log_is_overwritten_and_verbose_tees_to_stderr",
                 "--nocapture",
             ])
             .env(CHILD_MODE, mode)

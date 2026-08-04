@@ -2,7 +2,7 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
 #[test]
-fn m10_l046_completion_matches_win32_and_gtk_function_layout() {
+fn completion_matches_win32_and_gtk_function_layout() {
     let mut engine = Engine::new();
     assert_eq!(
         engine.install_global_scripts(&[(
@@ -81,7 +81,7 @@ fn m10_l046_completion_matches_win32_and_gtk_function_layout() {
 }
 
 #[test]
-fn m10_l046_nonhost_console_packet_uses_console_active_policy() {
+fn nonhost_console_packet_uses_console_active_policy() {
     let packet = || {
         NetworkControl::Script(clonk_engine::ScriptControlData {
             target_object: clonk_engine::SCRIPT_SCOPE_CONSOLE,
@@ -183,7 +183,7 @@ fn client_resource_timeout_closes_progress_and_shows_fatal_error_log() {
 }
 
 #[test]
-fn l126_headless_client_join_tracks_slow_resource_then_cancel_aborts() {
+fn headless_client_join_tracks_slow_resource_then_cancel_aborts() {
     let mut app = new_menu_app(800, 600);
     let (manager, event_tx, _commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
@@ -446,7 +446,7 @@ fn failed_client_start_resource_aborts_instead_of_stalling_silently() {
 }
 
 #[test]
-fn l007_fresh_install_shutdown_persists_fullscreen_default() {
+fn fresh_install_shutdown_persists_fullscreen_default() {
     let install = tempdir().expect("install root");
     let user_data = tempdir().expect("user data");
     fs::create_dir_all(install.path().join("planet")).expect("planet directory");
@@ -577,7 +577,7 @@ fn message_dialog_buttons_use_active_language_resources() {
 }
 
 #[test]
-fn l016_plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
+fn plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let fred = clonk_engine::ControlPlayerInfoEntry {
@@ -723,7 +723,7 @@ fn generic_client_resource_save_hit_target_emits_the_resource_id() {
 }
 
 #[test]
-fn l098_takeover_selection_submits_full_local_packet_with_savegame_association() {
+fn takeover_selection_submits_full_local_packet_with_savegame_association() {
     let mut app = new_menu_app(640, 480);
     install_test_free_savegame_player_row(&mut app, 50);
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
@@ -812,7 +812,7 @@ fn l098_takeover_selection_submits_full_local_packet_with_savegame_association()
 }
 
 #[test]
-fn l081_new_color_resets_only_current_color_in_full_packet() {
+fn new_color_resets_only_current_color_in_full_packet() {
     let mut app = new_menu_app(640, 480);
     let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
     chooser.color = 0x00ab_cdef;
@@ -1191,7 +1191,7 @@ fn startup_tooltip_app_uses_the_shared_cmouse_clock_and_runtime_resources() {
 }
 
 #[test]
-fn l080_dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
+fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     use clonk_frontend::startup_options_advanced::{
         AdvancedConfigController, AdvancedConfigLabels,
     };
@@ -1697,7 +1697,7 @@ fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
 }
 
 #[test]
-fn l021_accepted_loading_reaches_100_only_after_successful_activation() {
+fn accepted_loading_reaches_100_only_after_successful_activation() {
     let _lock = env_lock().lock();
     let user_data = tempdir().expect("isolated accepted-refresh user data");
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -1856,7 +1856,7 @@ fn visible_ingame_menu_without_exact_resources_fails_before_rendering() {
 }
 
 #[test]
-fn l016_screenshot_folder_override_falls_back_to_install_root() {
+fn screenshot_folder_override_falls_back_to_install_root() {
     let install = tempdir().expect("screenshot install root");
     let user_data = tempdir().expect("screenshot user data");
     fs::create_dir_all(install.path().join("planet/System.c4g")).expect("fixture System group");
@@ -2407,7 +2407,7 @@ fn adaptive_presend_uses_live_target_and_emits_the_exact_classic_flash() {
 }
 
 #[test]
-fn l036_console_script_strictness_matches_native_tokens_and_reaches_packets() {
+fn console_script_strictness_matches_native_tokens_and_reaches_packets() {
     use clonk_engine::ScriptStrictness::{NonStrict, Strict1, Strict2, Strict3};
 
     for (config, expected) in [

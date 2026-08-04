@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn l143_native_tab_order_only_includes_pings_for_network_games() {
+    fn native_tab_order_only_includes_pings_for_network_games() {
         assert_eq!(
             NetworkChartDialog::new(false).tab_names(),
             ["oc", "FPS", "NetIO", "Control", "APM"]
@@ -1031,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn l143_live_snapshot_replacement_makes_a_tab_nonempty() {
+    fn live_snapshot_replacement_makes_a_tab_nonempty() {
         let mut dialog = NetworkChartDialog::new(false);
         let series =
             NetworkChartSeriesSnapshot::new("Object count", 0x7fff_0000, 11, vec![3.0, 4.0, 5.0]);
@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn l143_empty_registered_series_still_affects_scale_and_legend_membership() {
+    fn empty_registered_series_still_affects_scale_and_legend_membership() {
         let waiting = NetworkChartSeriesSnapshot::new("Waiting", 0x0000_ff00, 3, Vec::new());
         let sampled =
             NetworkChartSeriesSnapshot::new("Sampled", 0x00ff_0000, 5, vec![4.0, 8.0, 6.0]);
@@ -1062,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn l143_only_stronger_escape_is_active_in_the_shared_running_screen() {
+    fn only_stronger_escape_is_active_in_the_shared_running_screen() {
         let mut dialog = NetworkChartDialog::new(false);
         assert_eq!(
             dialog.handle_key(KeyCode::Tab, true),

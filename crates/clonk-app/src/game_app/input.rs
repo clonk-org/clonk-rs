@@ -9350,7 +9350,8 @@ impl GameApp {
                     let cursor = drag.motion.region_drag_cursor;
                     return self.finish_ingame_region_drag(drag.motion, selected, cursor);
                 }
-                // L018 owns world-origin and landscape-frame moving drags.
+                // The over-world left-button drag path owns world-origin and
+                // landscape-frame moving drags.
                 // HUD-origin eligibility was latched at threshold above and
                 // must never be reclassified from the live release cursor.
                 if !drag.down_region && self.finish_ingame_moved_drag(drag, true)? {

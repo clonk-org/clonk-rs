@@ -2,7 +2,7 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
     #[test]
-    fn l028_console_quit_is_global_and_headless_loop_exits_cleanly() {
+    fn console_quit_is_global_and_headless_loop_exits_cleanly() {
         let mut app = new_state_only_menu_app(320, 200);
         for mode in [AppMode::Menu, AppMode::Loading, AppMode::Running] {
             app.mode = mode;
@@ -1934,7 +1934,7 @@
     }
 
     #[test]
-    fn l052_viewport_feedback_coalesces_global_sample_and_uses_initial_sound_gate() {
+    fn viewport_feedback_coalesces_global_sample_and_uses_initial_sound_gate() {
         let dir = tempdir().expect("viewport feedback fixture");
         let scenario = dir.path().join("Audio.c4s");
         fs::create_dir_all(&scenario).expect("create scenario group");
@@ -3169,7 +3169,7 @@
     }
 
     #[test]
-    fn l100_name_conflicts_use_cpp_raw_byte_case_folding() {
+    fn name_conflicts_use_cpp_raw_byte_case_folding() {
         let configured = LegacyCString::from_bytes(b"\xe4lpha".to_vec()).unwrap();
         let active = [b"\xc4LPHA".as_slice()];
         let mut ranges = Vec::new();
@@ -3183,7 +3183,7 @@
     }
 
     #[test]
-    fn l100_random_color_wraps_cpp_channel_256_after_clamping() {
+    fn random_color_wraps_cpp_channel_256_after_clamping() {
         let draws = [256, 301, 255];
         let mut draw = 0;
         let mut ranges = Vec::new();
@@ -3199,8 +3199,8 @@
     }
 
     #[test]
-    fn l100_each_script_player_add_draws_three_fresh_random_color_channels() {
-        let (mut app, mut commands) = l100_script_player_add_fixture(b"Solo", &[], 2);
+    fn each_script_player_add_draws_three_fresh_random_color_channels() {
+        let (mut app, mut commands) = script_player_add_fixture(b"Solo", &[], 2);
         let draws = [1, 2, 3, 4, 5, 6];
         let mut draw = 0;
         let mut ranges = Vec::new();
@@ -4550,7 +4550,7 @@
     }
 
     #[test]
-    fn l056_about_scrollbar_sounds_and_repeat_run_through_production_paths() {
+    fn about_scrollbar_sounds_and_repeat_run_through_production_paths() {
         let mut app = new_real_classic_menu_app(320, 240);
         enter_about_licenses(&mut app);
         app.ui_sound_log.clear();

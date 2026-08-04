@@ -5413,7 +5413,8 @@ pub struct EngineState {
     #[doc(hidden)]
     pub scenario_values: Option<scenario::ScenarioValueStore>,
     /// Saved BASEFUNC_RejectEntrance projection. None keeps the scenario
-    /// value already installed when restoring states written before L051.
+    /// value already installed when restoring states written before this
+    /// field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_reject_entrance_enabled: Option<bool>,
     #[serde(default)]
@@ -12699,8 +12700,8 @@ fn value_to_liquid_segments(
 mod control_message_say_regression;
 
 #[cfg(test)]
-#[path = "lib_tests/l049_scenario_value_gain_regression.rs"]
-mod l049_scenario_value_gain_regression;
+#[path = "lib_tests/scenario_value_gain_regression.rs"]
+mod scenario_value_gain_regression;
 
 #[cfg(test)]
 #[path = "lib_tests/legacy_contents_order_regression.rs"]

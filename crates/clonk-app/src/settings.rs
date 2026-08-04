@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn l040_audio_options_read_prefer_linear_resampling() {
+    fn audio_options_read_prefer_linear_resampling() {
         let mut config = Config::new();
         config.set_in(Some("Sound"), "PreferLinearResampling", "true");
         let mut options = AudioOptions::default();
@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn l007_display_mode_default_override_and_numeric_persistence_match_cpp() {
+    fn display_mode_default_override_and_numeric_persistence_match_cpp() {
         let mut missing_mode = DisplayOptions::default();
         assert_eq!(missing_mode.mode, DisplayMode::Fullscreen);
         missing_mode.apply_config(&Config::new());
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn l008_scale_fifty_uses_half_size_and_survives_resize_round_trip() {
+    fn scale_fifty_uses_half_size_and_survives_resize_round_trip() {
         let mut config = Config::new();
         config.set_in(Some("Graphics"), "ResolutionX", "800");
         config.set_in(Some("Graphics"), "ResolutionY", "600");

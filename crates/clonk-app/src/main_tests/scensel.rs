@@ -3786,7 +3786,7 @@
     }
 
     #[test]
-    fn l057_scensel_typeahead_cycles_only_with_list_focus() {
+    fn scensel_typeahead_cycles_only_with_list_focus() {
         let scenarios = ["Thomas", "Ada", "tina", "Tori"]
             .into_iter()
             .enumerate()
@@ -3840,7 +3840,7 @@
     }
 
     #[test]
-    fn l057_window_keys_map_to_shared_list_navigation_codes() {
+    fn window_keys_map_to_shared_list_navigation_codes() {
         for (window_key, gui_key) in [
             (VirtualKeyCode::Home, KeyCode::Home),
             (VirtualKeyCode::End, KeyCode::End),

@@ -46,7 +46,7 @@ fn eliminated_player_mouse_menu_keeps_new_player_reentry_surface() {
 }
 
 #[test]
-fn l053_help_suppresses_open_ingame_menu_and_right_up_exits() {
+fn help_suppresses_open_ingame_menu_and_right_up_exits() {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
     app.activate_ingame_main_menu_for_player(owner)
@@ -98,7 +98,7 @@ fn l053_help_suppresses_open_ingame_menu_and_right_up_exits() {
 }
 
 #[test]
-fn l053_help_right_up_exits_without_context_or_crew_cycle() {
+fn help_right_up_exits_without_context_or_crew_cycle() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let (_target, point) = install_mouse_help_target(&mut app, "HLP3", "Right target", None);
@@ -629,7 +629,7 @@ fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
 }
 
 #[test]
-fn l040_audio_context_selects_configured_linear_resampling() {
+fn audio_context_selects_configured_linear_resampling() {
     let audio = AudioContext::try_new(AudioOptions {
         prefer_linear_resampling: true,
         ..AudioOptions::default()
@@ -1693,7 +1693,7 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
 }
 
 #[test]
-fn l098_takeover_submenu_lists_only_local_unissued_unassociated_players() {
+fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
     let mut app = new_menu_app(640, 480);
     install_test_free_savegame_player_row(&mut app, 50);
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
@@ -2254,7 +2254,7 @@ fn takeover_submenu_fills_live_at_open() {
 }
 
 #[test]
-fn l081_player_context_root_matches_cpp_entry_gates() {
+fn player_context_root_matches_cpp_entry_gates() {
     let mut app = new_menu_app(640, 480);
     let (mut chooser, _) = install_test_classic_host_team_lobby(&mut app);
     chooser.color = 0x00ab_cdef;
@@ -2493,7 +2493,7 @@ fn l081_player_context_root_matches_cpp_entry_gates() {
 }
 
 #[test]
-fn l037_context_menu_matches_edit_predicates_and_order() {
+fn context_menu_matches_edit_predicates_and_order() {
     let view = LobbyChatEditView {
         text: "selected text".into(),
         caret: 8,
@@ -2551,7 +2551,7 @@ fn l037_context_menu_matches_edit_predicates_and_order() {
 }
 
 #[test]
-fn l037_classic_context_menu_dispatches_to_the_live_edit() {
+fn classic_context_menu_dispatches_to_the_live_edit() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
     app.classic_host_lobby
@@ -2753,7 +2753,7 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
 }
 
 #[test]
-fn l018_menu_cursor_moves_and_clears_on_leave() {
+fn menu_cursor_moves_and_clears_on_leave() {
     let mut app = new_menu_app(64, 48);
     install_l018_cursor_atlas(&mut app);
     let background = Color::opaque(9, 10, 11);
@@ -2782,7 +2782,7 @@ fn l018_menu_cursor_moves_and_clears_on_leave() {
 }
 
 #[test]
-fn l018_loading_dialog_renders_gui_cursor_between_body_and_tooltip_passes() {
+fn loading_dialog_renders_gui_cursor_between_body_and_tooltip_passes() {
     let mut app = new_menu_app(320, 200);
     install_l018_cursor_atlas(&mut app);
     let fonts = app
@@ -2828,7 +2828,7 @@ fn l018_loading_dialog_renders_gui_cursor_between_body_and_tooltip_passes() {
 }
 
 #[test]
-fn l018_running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
+fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
     let mut app = new_synthetic_running_sandbox_app();
     install_l018_cursor_atlas(&mut app);
     let (width, height) = {
@@ -3078,7 +3078,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
 }
 
 #[test]
-fn l046_dialog_hotkeys_use_the_first_sdl_key_name_character() {
+fn dialog_hotkeys_use_the_first_sdl_key_name_character() {
     for (key, expected) in [
         (VirtualKeyCode::KeyA, Some('A')),
         (VirtualKeyCode::Digit7, Some('7')),
@@ -3172,7 +3172,7 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
 }
 
 #[test]
-fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
+fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     let mut app = new_real_classic_menu_app(640, 480);
 
     app.handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::ALT)
@@ -3274,7 +3274,7 @@ fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
 }
 
 #[test]
-fn l047_player_typeahead_stays_behind_rename_and_modal_dialogs() {
+fn player_typeahead_stays_behind_rename_and_modal_dialogs() {
     let mut app = new_classic_menu_app(640, 480);
     app.startup_player_models = ["Thomas", "tina"]
         .map(|name| clonk_frontend::startup_plrsel::PlrSelPlayer {
@@ -3345,7 +3345,7 @@ fn l047_player_typeahead_stays_behind_rename_and_modal_dialogs() {
 }
 
 #[test]
-fn l071_crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
+fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     let directory = tempdir().expect("crew rename fixture root");
     let player_path = directory.path().join("Ada.c4p");
     fs::create_dir(&player_path).expect("create player group");
@@ -4387,7 +4387,7 @@ fn global_gui_guard_is_first_at_every_external_ui_ingress() {
 }
 
 #[test]
-fn l002_ingame_menu_abort_routes_to_the_same_confirmation() {
+fn ingame_menu_abort_routes_to_the_same_confirmation() {
     let mut app = new_menu_app(320, 200);
     app.start_sandbox_scenario(FrontendScenario::fallback())
         .expect("start explicit test sandbox");

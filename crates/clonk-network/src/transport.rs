@@ -3208,7 +3208,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn l143_tcp_transport_statistics_record_successful_wire_reads_and_writes() {
+    async fn tcp_transport_statistics_record_successful_wire_reads_and_writes() {
         let statistics = crate::NetworkIoStatistics::new(0);
         let recorder = statistics.open_connection(17, NetworkProtocol::Tcp);
         let key = recorder.key();
@@ -3242,7 +3242,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn l143_transport_drop_closes_statistics_route() {
+    async fn transport_drop_closes_statistics_route() {
         let statistics = crate::NetworkIoStatistics::new(0);
         let recorder = statistics.open_connection(23, NetworkProtocol::Tcp);
         let key = recorder.key();

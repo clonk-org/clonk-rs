@@ -284,8 +284,9 @@ impl ScrollingInfoDialog {
         self.scroll_by(delta.saturating_neg(), geometry);
     }
 
-    /// Keyboard scrolling is an L144 accessibility requirement. Native
-    /// TextWindow itself has no focus element and only handles pointer input.
+    /// Keyboard scrolling is an accessibility requirement of the scrolling-info
+    /// chassis, not a port of C++: native TextWindow has no focus element and
+    /// only handles pointer input.
     pub fn handle_key(&self, key: KeyCode, geometry: &ScrollingInfoGeometry) -> bool {
         match key {
             KeyCode::Up => self.scroll_by(-geometry.line_height, geometry),
@@ -406,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn l144_scrolling_info_reaches_every_line_with_wheel_and_keyboard() {
+    fn scrolling_info_reaches_every_line_with_wheel_and_keyboard() {
         let mut dialog = ScrollingInfoDialog::new("Information", 10, true);
         assert_eq!(dialog.requested_line_count(), 10);
         dialog.reset_lines((0..17).map(|index| format!("line-{index:02}")).collect());
@@ -441,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn l144_scrolling_info_refresh_preserves_absolute_offset_then_clamps() {
+    fn scrolling_info_refresh_preserves_absolute_offset_then_clamps() {
         let mut dialog = ScrollingInfoDialog::new("Information", 10, true);
         dialog.reset_lines((0..20).map(|index| format!("old-{index:02}")).collect());
         let geometry = geometry(&dialog);

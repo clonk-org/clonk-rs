@@ -2921,7 +2921,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l143_socket_driver_drop_closes_statistics_route() {
+    async fn socket_driver_drop_closes_statistics_route() {
         let statistics = crate::NetworkIoStatistics::new(0);
         let key = crate::ConnectionStatisticsKey::new(17, crate::NetworkProtocol::Udp);
         let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
@@ -2943,7 +2943,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l143_socket_driver_statistics_count_physical_udp_datagrams() {
+    async fn socket_driver_statistics_count_physical_udp_datagrams() {
         let statistics = crate::NetworkIoStatistics::new(0);
         let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
         let mut driver =

@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn l140_retains_the_latest_search_graph_for_viewport_debug_drawing() {
+    fn retains_the_latest_search_graph_for_viewport_debug_drawing() {
         let landscape = Landscape::flat(32, 40);
         let mut finder = PathFinder::new(&landscape, &[]);
         finder

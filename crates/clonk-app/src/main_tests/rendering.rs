@@ -562,7 +562,7 @@ fn selection_drag_entering_hud_region_is_cancelled() {
 }
 
 #[test]
-fn l013_full_speed_runs_unpaced_skips_requested_renders_and_slow_restores_timer() {
+fn full_speed_runs_unpaced_skips_requested_renders_and_slow_restores_timer() {
     let mut app = new_running_sandbox_app();
     let mut schedule = frame_schedule_for_mode(
         app.mode,
@@ -1594,7 +1594,7 @@ fn live_temporary_physicals_feed_all_integer_hud_bar_ranges() {
 }
 
 #[test]
-fn l049_player_overlay_projects_transient_hud_flags() {
+fn player_overlay_projects_transient_hud_flags() {
     let mut app = new_lightweight_running_sandbox_app();
     let owner = app.local_owner;
     let player = app
@@ -1939,7 +1939,7 @@ fn script_text_spec_icons_use_the_exact_classic_facets() {
 }
 
 #[test]
-fn l018_running_render_draws_resolved_world_cursor() {
+fn running_render_draws_resolved_world_cursor() {
     let mut app = new_synthetic_running_sandbox_app();
     install_l018_cursor_atlas(&mut app);
     let (width, height) = {
@@ -2004,7 +2004,7 @@ fn l018_running_render_draws_resolved_world_cursor() {
 }
 
 #[test]
-fn l018_passive_observer_renders_region_cursor() {
+fn passive_observer_renders_region_cursor() {
     let mut app = new_synthetic_running_sandbox_app();
     install_l018_cursor_atlas(&mut app);
     app.engine.set_local_players([]);
@@ -2055,7 +2055,7 @@ fn l018_passive_observer_renders_region_cursor() {
 }
 
 #[test]
-fn l018_running_render_draws_throw_point_and_shift_add_marker() {
+fn running_render_draws_throw_point_and_shift_add_marker() {
     let mut app = new_synthetic_running_sandbox_app();
     install_l018_cursor_atlas(&mut app);
     let (width, height) = {
@@ -2486,7 +2486,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
 }
 
 #[test]
-fn m06_l033_startup_fade_modulates_retained_draws_and_text_like_cpp() {
+fn startup_fade_modulates_retained_draws_and_text_like_cpp() {
     let source = [200_u8, 100, 50, 128];
     let faded_batch = |opacity| {
         let mut surface = Surface::new(2, 2, PixelFormat::Rgba8888);
@@ -2566,7 +2566,7 @@ fn m06_l033_startup_fade_modulates_retained_draws_and_text_like_cpp() {
 }
 
 #[test]
-fn m06_l033_pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
+fn pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
     // The local Pixels patch bounds outdated/suboptimal retries, returns a
     // successful skipped outcome for timeout/occlusion, and surfaces Lost so
     // the app can rebuild Pixels. Other escaping errors remain fatal.
@@ -2692,7 +2692,7 @@ impl system_fonts::SystemFontProvider for FakeSystemFontProvider {
 }
 
 #[test]
-fn l091_system_family_fallback_preserves_precedence_and_failure_boundary() {
+fn system_family_fallback_preserves_precedence_and_failure_boundary() {
     let _lock = env_lock().lock();
     let root = tempdir().expect("system font fixture");
     install_global_gui_and_loader_test_root(root.path());
@@ -3473,7 +3473,7 @@ fn real_app_constructor_and_system_font_sources_follow_global_order() {
 }
 
 #[test]
-fn l008_scale_fifty_options_close_and_rejected_test_preserve_raw_value() {
+fn scale_fifty_options_close_and_rejected_test_preserve_raw_value() {
     use clonk_frontend::message_dialog::MessageDialogResult;
     use clonk_frontend::startup_options_dlg::OptionsDlgAction;
 
@@ -3735,7 +3735,7 @@ fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
 }
 
 #[test]
-fn l091_options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
+fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
     let _lock = env_lock().lock();
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -3854,7 +3854,7 @@ fn l091_options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
 }
 
 #[test]
-fn l072_options_scale_enter_submit_times_out_reverts_and_yes_commits() {
+fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     use clonk_frontend::message_dialog::MessageDialogResult;
     use clonk_frontend::startup_options_dlg::OptionsDlgAction;
     use clonk_frontend::startup_options_graphics::GraphicsSheetAction;
@@ -4013,7 +4013,7 @@ fn set_test_scenario_value_gain(app: &mut GameApp, value_gain: i32) {
 }
 
 #[test]
-fn l120_msgboard_command_reaches_continuous_multiline_render() {
+fn msgboard_command_reaches_continuous_multiline_render() {
     let mut app = new_classic_running_sandbox_app();
     app.clear_message_board_log();
     app.process_running_chat_text("/msgboard 3");
@@ -4854,7 +4854,7 @@ fn focusless_scrolling_player_uses_anchor_free_owned_viewport() {
 }
 
 #[test]
-fn l052_automatic_retirement_closes_viewport_and_releases_local_control() {
+fn automatic_retirement_closes_viewport_and_releases_local_control() {
     // C4Player::Execute decrements RetireDelay for 60 frames, then
     // C4PlayerList::Retire takes the same viewport-close path as an
     // explicit CID_RemovePlr (C4Player.cpp:2015-2021, 930-970).
@@ -5016,7 +5016,7 @@ fn construction_drop_uses_cached_last_phase_without_release_recheck() {
 }
 
 #[test]
-fn l065_title_drag_is_captured_exactly_and_resize_resets_location() {
+fn title_drag_is_captured_exactly_and_resize_resets_location() {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
     let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
@@ -5295,7 +5295,7 @@ fn runtime_help_and_flash_resolve_fontregular_images() {
 }
 
 #[test]
-fn l031_debug_keys_toggle_render_flags_and_exact_flashes() {
+fn debug_keys_toggle_render_flags_and_exact_flashes() {
     let names = RuntimeFlashProducerBoundary::ALL.map(|producer| match producer {
         RuntimeFlashProducerBoundary::ObserverPrompt => "ObserverPrompt",
         RuntimeFlashProducerBoundary::ObserverClear => "ObserverClear",
@@ -5555,7 +5555,7 @@ fn runtime_f1_help_toggles_on_each_down_renders_and_release_falls_through() {
 }
 
 #[test]
-fn l002_ownerless_escape_opens_fullscreen_abort_confirmation() {
+fn ownerless_escape_opens_fullscreen_abort_confirmation() {
     let mut app = new_running_sandbox_app();
     let removed_owner = app.local_owner;
     app.engine

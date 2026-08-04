@@ -7390,7 +7390,7 @@ mod tests {
     }
 
     #[test]
-    fn l085_core_option_rows_follow_host_client_gates_and_choices() {
+    fn core_option_rows_follow_host_client_gates_and_choices() {
         let labels = LobbyOptionLabels {
             select_template: "Choose %s".into(),
             ..LobbyOptionLabels::default()
@@ -7443,7 +7443,7 @@ mod tests {
     }
 
     #[test]
-    fn l128_runtime_option_rows_follow_control_and_network_host_gates() {
+    fn runtime_option_rows_follow_control_and_network_host_gates() {
         let labels = LobbyOptionLabels::default();
         let host = core_runtime_option_rows(true, true, false, &labels, 1, 4, true);
         assert_eq!(
@@ -7501,7 +7501,7 @@ mod tests {
     }
 
     #[test]
-    fn l134_team_option_rows_follow_scenario_role_and_choice_gates() {
+    fn team_option_rows_follow_scenario_role_and_choice_gates() {
         let labels = LobbyOptionLabels::default();
         let mut state = LobbyTeamOptionState {
             active: false,
@@ -7553,7 +7553,7 @@ mod tests {
     }
 
     #[test]
-    fn l134_random_team_count_row_tracks_both_random_modes_and_native_ranges() {
+    fn random_team_count_row_tracks_both_random_modes_and_native_ranges() {
         let labels = LobbyOptionLabels::default();
         let mut state = LobbyTeamOptionState {
             active: true,
@@ -7620,7 +7620,7 @@ mod tests {
     }
 
     #[test]
-    fn l085_options_sheet_uses_stacked_scrollable_layout() {
+    fn options_sheet_uses_stacked_scrollable_layout() {
         let fonts = endeavour_font_set();
         let mut empty = lobby(LobbyRole::Host, vec![]);
         empty.set_active_sheet(LobbySheet::Options);
@@ -7701,7 +7701,7 @@ mod tests {
     }
 
     #[test]
-    fn l085_option_combo_pointer_keyboard_gamepad_and_open_presentation() {
+    fn option_combo_pointer_keyboard_gamepad_and_open_presentation() {
         let fonts = endeavour_font_set();
         let labels = LobbyOptionLabels::default();
         let mut lobby = lobby(LobbyRole::Host, vec![]);
@@ -7884,7 +7884,7 @@ mod tests {
     }
 
     #[test]
-    fn l108_scenario_sheet_uses_text_window_geometry_and_scrolls_overflow() {
+    fn scenario_sheet_uses_text_window_geometry_and_scrolls_overflow() {
         let fonts = endeavour_font_set();
         let mut lobby = lobby(LobbyRole::Host, vec![]);
         lobby.set_active_sheet(LobbySheet::Scenario);

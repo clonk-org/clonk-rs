@@ -14743,7 +14743,7 @@ func Enable() {
     }
 
     #[test]
-    fn l068_periodic_context_refill_preserves_location_and_live_shell() {
+    fn periodic_context_refill_preserves_location_and_live_shell() {
         // DoRefillInternal clears only the rows. The old selection and every
         // other menu property stay live while conditions run; a condition's
         // own SelectMenuItem then feeds the final AdjustSelection pass
@@ -16399,7 +16399,7 @@ public func GetCustomComponents(object builder)
     }
 
     #[test]
-    fn l068_mouse_context_command_keeps_viewport_location_and_zero_axis_sentinel() {
+    fn mouse_context_command_keeps_viewport_location_and_zero_axis_sentinel() {
         // C4MouseControl passes the clicked object as Target2 with Add mode;
         // self-targeting must not exclude the cursor as ordinary Target does.
         // C4Command::Context then installs non-permanent C4MN_Context and
@@ -18780,7 +18780,7 @@ protected func ControlContents(idTarget) { return(1); }
     }
 
     #[test]
-    fn l018_mouse_carryable_cursor_preserves_throw_direction_and_point() {
+    fn mouse_carryable_cursor_preserves_throw_direction_and_point() {
         // DragMoving selects Drop within five pixels of ground, no moving
         // command in solid, and Throw when FindThrowingPosition reaches a
         // free-air target (C4MouseControl.cpp:849-878).
