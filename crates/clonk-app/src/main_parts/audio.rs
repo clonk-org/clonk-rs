@@ -3423,7 +3423,14 @@ impl AudioContext {
             .missing_sounds
             .insert(format!("request::{request_key}"))
         {
-            tracing::warn!(sound = %name, "missing sound asset; skipping playback");
+            // C4SoundSystem::NewInstance returns nullptr here without logging
+            // (src/C4SoundSystem.cpp:301-337): an unresolved name is a content
+            // authoring slip, not an engine fault, and shipped packs carry
+            // several — ClonkMars' `Sound=metaldoor` names an asset that never
+            // shipped while its door script plays `Door_Metal`. Warning about
+            // them in a player-visible log invites bug reports against working
+            // content and dilutes the warnings that do mean the engine broke.
+            tracing::debug!(sound = %name, "missing sound asset; skipping playback");
         }
         Ok(None)
     }

@@ -447,6 +447,81 @@
     }
 
     #[test]
+    fn unresolvable_sound_name_logs_at_debug_but_a_broken_asset_still_warns() {
+        // C4SoundSystem::NewInstance returns nullptr for a name no sample
+        // matches and logs nothing on the way out (src/C4SoundSystem.cpp:301-337).
+        // Its only log sites are the absent audio system (:85) and a sample
+        // that fails to decode (:132, spdlog::level::err). Shipped content
+        // carries stale ActMap names — ClonkMars' `Sound=metaldoor` against the
+        // `Door_Metal.wav` it actually ships — so warning on an unresolved name
+        // reports a third-party authoring slip as an engine fault. The decode
+        // failure keeps its warning, because C++ reports that one too.
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Sound.c4g");
+        fs::create_dir_all(&global).expect("global sound group");
+        fs::write(global.join("Door_Metal.wav"), silent_pcm_wav(500))
+            .expect("the sample ClonkMars really ships");
+        fs::write(global.join("Broken.wav"), b"not an audio stream")
+            .expect("undecodable sample fixture");
+
+        let capture = clonk_logging::ConsoleLogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+
+        let mut audio = empty_test_audio_context();
+        tracing::subscriber::with_default(subscriber, || {
+            audio.resolver.global = collect_sound_libraries_for_path(&global);
+            audio.refresh_sound_catalog();
+            for _ in 0..2 {
+                assert!(
+                    audio
+                        .ensure_sound_with_key("metaldoor")
+                        .expect("validated catalog lookup")
+                        .is_none(),
+                    "the stale ActMap name resolves to nothing, exactly as in C++"
+                );
+            }
+            assert!(
+                audio
+                    .ensure_sound_with_key("Door_Metal")
+                    .expect("validated catalog lookup")
+                    .is_some(),
+                "the sample the door script really plays still resolves"
+            );
+        });
+
+        let logged = capture.take();
+        let name_lines = logged
+            .lines()
+            .filter(|line| line.contains("missing sound asset"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            name_lines.len(),
+            1,
+            "the unresolved name is reported once, deduplicated: {logged}"
+        );
+        assert!(
+            name_lines[0].contains("DEBUG"),
+            "an unresolvable name is a content defect, not an engine fault: {}",
+            name_lines[0]
+        );
+        assert!(
+            logged
+                .lines()
+                .filter(|line| line.contains("sound candidate"))
+                .all(|line| line.contains("WARN")),
+            "a sample that fails to decode keeps C++'s error report: {logged}"
+        );
+        assert!(
+            audio.missing_sounds.contains("request::metaldoor"),
+            "the unresolved name stays in diagnostics whatever level it logged at"
+        );
+    }
+
+    #[test]
     fn undecodable_speech_sample_does_not_suppress_text_fallback() {
         let dir = tempdir().expect("tempdir");
         let scenario = dir.path().join("Speech.c4s");
