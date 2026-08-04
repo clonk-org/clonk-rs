@@ -127,7 +127,7 @@ fn mars_order_row_offers_both_steps_on_the_product_row() {
 
     let row = items(&engine, clonk).swap_remove(0);
     assert_eq!(
-        row.caption, "Construction kit - 10{{GOLD}} (+1/<c 888888>-1</c>)",
+        row.caption, "Construction kit - 10{{GOLD}} (+1/<c 888888>-1</c>)      ",
         "the row advertises both steps from the first frame, the one its limits \
          forbid greyed rather than dropped — colour markup has no width, so the \
          row cannot change size as the value moves"
@@ -152,7 +152,7 @@ fn mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one() {
     let ordered = items(&engine, clonk).swap_remove(0);
     assert_eq!(ordered.count, 1, "one construction kit is on the order");
     assert_eq!(
-        ordered.caption, "Construction kit - 10{{GOLD}} (+1/-1)",
+        ordered.caption, "Construction kit - 10{{GOLD}} (+1/-1)      ",
         "away from both limits neither step is greyed"
     );
     assert_eq!(
@@ -166,7 +166,7 @@ fn mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one() {
     let cleared = items(&engine, clonk).swap_remove(0);
     assert_eq!(cleared.count, 0, "the order is empty again");
     assert_eq!(
-        cleared.caption, "Construction kit - 10{{GOLD}} (+1/<c 888888>-1</c>)",
+        cleared.caption, "Construction kit - 10{{GOLD}} (+1/<c 888888>-1</c>)      ",
         "back on the minimum the decrease greys out again"
     );
 }
@@ -318,6 +318,99 @@ fn an_affordable_order_is_delivered() {
         capsule_count(&engine),
         capsules + 1,
         "and the capsule is on its way"
+    );
+}
+
+#[test]
+fn a_product_row_reserves_the_column_its_quantity_is_drawn_in() {
+    // C4Menu sizes a Context row from its caption and symbol only
+    // (C4Menu.cpp:648-662) but draws the count right-aligned at the row's
+    // right edge anyway (C4Menu.cpp:198-207), so the widest caption on the
+    // page ends exactly where its own count starts and the two overprint.
+    // Only the caption is measured, so only the caption can reserve the room.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (_player, clonk) = open_order_page(&mut engine);
+    let rows = items(&engine, clonk);
+
+    // Construction kits stock 6 — one digit — and metal 10, which is two.
+    assert!(
+        rows[0].caption.ends_with("(+1/<c 888888>-1</c>)      "),
+        "one digit reserves six spaces: {:?}",
+        rows[0].caption
+    );
+    assert!(
+        rows[2].caption.ends_with("(+1/<c 888888>-1</c>)         "),
+        "two digits reserve nine: {:?}",
+        rows[2].caption
+    );
+}
+
+#[test]
+fn the_order_page_shows_what_it_will_cost() {
+    // Menu2 passes iExtra = 0 to CreateMenu, opting out of the one footer the
+    // engine has for money: C4MN_Extra_Value draws a figure beside the wealth
+    // symbol and arms the player's wealth HUD for the duration
+    // (C4Menu.cpp:898-906). Without it the player composes an order with no
+    // idea what it costs or what they can afford — and Fossae's stock is worth
+    // six times its starting clunkers.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+
+    let menu = engine
+        .debug_object_menu(clonk.as_u64())
+        .flatten()
+        .expect("the order page is open");
+    assert_eq!(
+        menu.extra,
+        clonk_engine::ObjectMenuExtra::Value,
+        "the page reserves the value footer"
+    );
+    assert!(
+        menu.items.iter().all(|item| item.value == Some(0)),
+        "an untouched order costs nothing, on whichever row is selected"
+    );
+
+    // Two construction kits at 10 clunkers each.
+    for _ in 0..2 {
+        engine
+            .player_in_com(player, clonk_engine::COM_MENU_RIGHT, 0)
+            .expect("stepping the first product");
+    }
+
+    let priced = engine
+        .debug_object_menu(clonk.as_u64())
+        .flatten()
+        .expect("the order page is rebuilt");
+    assert!(
+        priced.items.iter().all(|item| item.value == Some(20)),
+        "the running total tracks the order: {:?}",
+        priced
+            .items
+            .iter()
+            .map(|item| item.value)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_menu_whose_owner_prices_nothing_keeps_the_shipped_footer() {
+    // ShowRange is Menu2's generic widget and its other client is a viewport
+    // size chooser, which has no money in it. The footer must stay off there.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let cursor = open_viewport_menu(&mut engine);
+
+    let menu = engine
+        .debug_object_menu(cursor.as_u64())
+        .flatten()
+        .expect("the viewport chooser is open");
+    assert_eq!(
+        menu.extra,
+        clonk_engine::ObjectMenuExtra::None,
+        "no owner-supplied total, no footer"
+    );
+    assert!(
+        menu.items.iter().all(|item| item.value.is_none()),
+        "and no rows carry one"
     );
 }
 
@@ -528,7 +621,7 @@ fn mars_order_row_stops_offering_a_step_it_cannot_take() {
     let full = items(&engine, clonk).swap_remove(0);
     assert_eq!(full.count, 6, "the whole stock is on the order");
     assert_eq!(
-        full.caption, "Construction kit - 10{{GOLD}} (<c 888888>+1</c>/-1)",
+        full.caption, "Construction kit - 10{{GOLD}} (<c 888888>+1</c>/-1)      ",
         "on the maximum the increase greys out instead of vanishing"
     );
     assert_eq!(
