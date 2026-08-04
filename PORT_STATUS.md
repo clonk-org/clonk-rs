@@ -2548,6 +2548,28 @@ same-seed landscape coverage remains incomplete. Component order is replay-
 hashed but not exported by the C++ bridge; unequal-count duplicate IDs remain
 an ordered-map model gap.
 
+- Open: **A `!`-led expression loses any lexer error found past its unary
+  operand, and `!Foo(<oversized literal>)` compiles.** `Parser::parse_unary`
+  (`crates/clonk-script/src/parser.rs`) runs a speculative full-precedence pass
+  whose AST is discarded, keeping only its error as a fallback for the narrow
+  operand parse that follows. A lexer error never becomes a token, so
+  `reset_speculative` has nothing to replay for the text the preflight already
+  scanned past, and the lexer cursor stays beyond it. Measured on
+  `func T() { return !Foo(99999999999999999999999); }`: with the preflight the
+  script compiles as though the argument were absent; without it the parse
+  fails with `integer literal out of range` at column 24. `!x = <oversized>`
+  and `!x && <oversized>` likewise degrade to `unexpected token in expression`
+  at the wrong column. Deleting the preflight restored the correct error and
+  column in every probed shape with the whole `clonk-script` suite still green,
+  but that is not the close: C++ never raises this error at all —
+  `C4AulParse.cpp:704-744` scans literals through `%SCNdPTR`/`%SCNxPTR` and
+  truncates at the `AB_INT` push — so what the oracle does with a literal wider
+  than 64 bits has to be established before choosing between deleting the
+  preflight and widening the truncation. Latent for shipped content: across the
+  2,132 `.c` files under `content/` the widest literals are 10 decimal digits
+  and 8 hex digits, none overflowing the lexer's `i64`/`u64` scan. Not covered
+  by `parity verify`, whose golden compiles no such script.
+
 ## Deliberate divergences from the oracle
 
 - **A refused default-interface multicast join falls back to per-interface
