@@ -292,7 +292,7 @@ pub(crate) fn selected_puncher_addresses(addresses: &[SocketAddr]) -> Vec<Socket
         .collect()
 }
 
-enum ClientDialStream {
+pub(crate) enum ClientDialStream {
     Tcp(TcpStream),
     Udp(crate::ReliableUdpPeerStream),
 }
@@ -302,6 +302,7 @@ type ClientConnectFuture =
 
 pub(crate) struct ClientDialAttempt {
     pub(crate) index: usize,
+    address: crate::NetworkAddress,
     future: Option<ClientConnectFuture>,
     result: Option<Result<ClientDialStream, io::Error>>,
 }
@@ -349,6 +350,7 @@ impl ClientDialRace {
                     };
                     Some(ClientDialAttempt {
                         index,
+                        address,
                         future: Some(future),
                         result: None,
                     })
@@ -362,7 +364,25 @@ impl ClientDialRace {
         self.attempts.is_empty()
     }
 
-    async fn next(&mut self) -> Option<(usize, Result<ClientDialStream, io::Error>)> {
+    /// Abandons every attempt still open at the dial deadline, leaving each
+    /// one holding its own timeout so no open address goes unreported.
+    pub(crate) fn expire(&mut self) {
+        for attempt in &mut self.attempts {
+            attempt.future = None;
+            attempt.result = Some(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "connection attempt timed out",
+            )));
+        }
+    }
+
+    pub(crate) async fn next(
+        &mut self,
+    ) -> Option<(
+        usize,
+        crate::NetworkAddress,
+        Result<ClientDialStream, io::Error>,
+    )> {
         if self.attempts.is_empty() {
             return None;
         }
@@ -397,18 +417,16 @@ impl ClientDialRace {
         match ready {
             Ok((position, result)) => {
                 let attempt = self.attempts.remove(position);
-                Some((attempt.index, result))
+                Some((attempt.index, attempt.address, result))
             }
             Err(_) => {
-                let index = self.attempts[0].index;
-                self.attempts.clear();
-                Some((
-                    index,
-                    Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "connection attempt timed out",
-                    )),
-                ))
+                self.expire();
+                let mut attempt = self.attempts.remove(0);
+                let result = attempt
+                    .result
+                    .take()
+                    .expect("an expired attempt holds its timeout");
+                Some((attempt.index, attempt.address, result))
             }
         }
     }
@@ -894,11 +912,11 @@ pub async fn connect_client_addresses(
     }
     let mut failures = Vec::new();
     let mut wrong_password: Option<(usize, ClientError)> = None;
-    while let Some((index, result)) = dials.next().await {
+    while let Some((index, address, result)) = dials.next().await {
         let stream = match result {
             Ok(stream) => stream,
             Err(error) => {
-                failures.push((index, ClientError::Connect(error)));
+                failures.push((index, address, ClientError::Connect(error)));
                 continue;
             }
         };
@@ -940,7 +958,7 @@ pub async fn connect_client_addresses(
         };
         match admission {
             Ok(client) => return Ok(client),
-            Err(ClientAttemptError::Retryable(error)) => failures.push((index, error)),
+            Err(ClientAttemptError::Retryable(error)) => failures.push((index, address, error)),
             Err(ClientAttemptError::WrongPassword(error)) => {
                 if wrong_password
                     .as_ref()
@@ -955,12 +973,65 @@ pub async fn connect_client_addresses(
     if let Some((_, error)) = wrong_password {
         return Err(error);
     }
-    failures.sort_by_key(|(index, _)| *index);
-    Err(failures
-        .into_iter()
-        .next()
-        .expect("a completed dial race retains its failure")
-        .1)
+    Err(dial_race_failure(failures))
+}
+
+/// Renders the failure of a dial race in which no address reached admission.
+///
+/// A reference lists its IPv6 endpoints first, so reporting only the
+/// lowest-indexed dial hides whatever went wrong on the address the client
+/// actually needed. Naming every endpoint keeps that diagnosis available; a
+/// lone failure — what a direct join by address produces — is reported
+/// unchanged.
+fn dial_race_failure(
+    mut failures: Vec<(usize, crate::NetworkAddress, ClientError)>,
+) -> ClientError {
+    failures.sort_by_key(|(index, ..)| *index);
+    if failures.len() < 2 {
+        return failures
+            .pop()
+            .expect("a completed dial race retains its failure")
+            .2;
+    }
+    let kind = failures
+        .iter()
+        .map(|(_, _, error)| match error {
+            ClientError::Connect(cause) => cause.kind(),
+            _ => io::ErrorKind::Other,
+        })
+        .reduce(|left, right| {
+            if left == right {
+                left
+            } else {
+                io::ErrorKind::Other
+            }
+        })
+        .unwrap_or(io::ErrorKind::Other);
+    let detail = failures
+        .iter()
+        .map(|(_, address, error)| {
+            format!("{}: {}", dial_address_label(*address), dial_cause(error))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    ClientError::Connect(io::Error::new(kind, detail))
+}
+
+fn dial_address_label(address: crate::NetworkAddress) -> String {
+    match address.protocol {
+        crate::NetworkProtocol::Tcp => format!("TCP {}", address.endpoint),
+        crate::NetworkProtocol::Udp => format!("UDP {}", address.endpoint),
+        _ => address.endpoint.to_string(),
+    }
+}
+
+/// Strips the caption `ClientError::Connect` carries so the aggregate does not
+/// repeat it once per endpoint.
+fn dial_cause(error: &ClientError) -> String {
+    match error {
+        ClientError::Connect(cause) => cause.to_string(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]

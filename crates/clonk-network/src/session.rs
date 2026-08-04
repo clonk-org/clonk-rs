@@ -9087,6 +9087,77 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_join_names_every_refused_address() {
+        // Reference address lists put the IPv6 endpoints first, so reporting
+        // only the lowest-indexed dial hides whatever went wrong on the
+        // address the client actually needed (clonk-org/clonk-rs#109).
+        //
+        // Both ports sit below every platform's ephemeral range, so no
+        // concurrent test in this binary can be bound to one of them. Dialling
+        // a just-released ephemeral port instead would let a listener opened
+        // elsewhere in the suite answer this join.
+        let first_address = SocketAddr::from(([127, 0, 0, 1], 31_116));
+        let second_address = SocketAddr::from(([127, 0, 0, 1], 31_117));
+
+        let error = connect_client_addresses(
+            [
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, first_address),
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, second_address),
+            ],
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect_err("no listener remains on either address");
+
+        // The refusal text is the platform's own, so only the endpoint labels
+        // and their dial order are asserted here.
+        let rendered = error.to_string();
+        let first_label = rendered
+            .find(&format!("TCP {first_address}: "))
+            .unwrap_or_else(|| panic!("the first endpoint is missing from {rendered:?}"));
+        let second_label = rendered
+            .find(&format!("TCP {second_address}: "))
+            .unwrap_or_else(|| panic!("the second endpoint is missing from {rendered:?}"));
+        assert!(
+            first_label < second_label,
+            "the endpoints are out of dial order in {rendered:?}"
+        );
+        assert!(
+            rendered.starts_with("failed to connect to host: TCP "),
+            "the caption is not carried once by {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_dial_race_times_out_every_open_address() {
+        // The deadline abandons every attempt that is still open, so each of
+        // them owes its own timeout; reporting one and dropping the rest
+        // leaves those endpoints out of the join failure
+        // (clonk-org/clonk-rs#109).
+        let first = crate::NetworkAddress::new(
+            crate::NetworkProtocol::Tcp,
+            SocketAddr::from(([127, 0, 0, 1], 31_114)),
+        );
+        let second = crate::NetworkAddress::new(
+            crate::NetworkProtocol::Tcp,
+            SocketAddr::from(([127, 0, 0, 1], 31_115)),
+        );
+        let mut race = ClientDialRace::new([first, second], true, None);
+
+        race.expire();
+
+        let mut reported = Vec::new();
+        while let Some((_, address, result)) = race.next().await {
+            assert_eq!(
+                result.err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::TimedOut)
+            );
+            reported.push(address);
+        }
+        assert_eq!(reported, vec![first, second]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn exclusive_join_defers_welcome_until_the_active_route_fails() {
         // InitClient opens every prepared route together, but exclusive mode
         // permits only one outstanding PID_Conn. OnDisconn promotes the next
