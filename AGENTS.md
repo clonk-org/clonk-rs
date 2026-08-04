@@ -257,7 +257,7 @@ cargo xtask parity verify
 ```
 
 `.github/workflows/landing.yml` additionally runs `cargo fmt --all -- --check`,
-`python3 -m unittest discover -s scripts/tests -p 'test_*.py'`, and `cargo test
+`python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py'`, and `cargo test
 -p xtask --features engine-tools --bin xtask-engine-tools --locked`. Run all
 three yourself: they first report against the merge-group tree, where any
 failure rejects the `Landing gate` and evicts the entry.

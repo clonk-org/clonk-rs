@@ -70,13 +70,12 @@ class PublicScriptPortabilityTests(unittest.TestCase):
         self.assertIn("${TMPDIR:-/tmp}", benchmark)
 
     def test_public_shell_scripts_pass_bash_syntax_validation(self):
+        scripts = [
+            REPOSITORY / "parity/oracle/gen_golden.sh",
+            *sorted(REPOSITORY.glob("scripts/*.sh")),
+        ]
         subprocess.run(
-            [
-                "bash",
-                "-n",
-                str(REPOSITORY / "parity/oracle/gen_golden.sh"),
-                str(REPOSITORY / "scripts/run-deep-sea-gpu-benchmark.sh"),
-            ],
+            ["bash", "-n", *map(str, scripts)],
             check=True,
         )
 

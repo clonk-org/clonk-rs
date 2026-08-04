@@ -104,7 +104,7 @@ def reflow_auxiliary_sheet(source, target, strips, rect_map, scale):
     truly high-resolution -- but it lines up, which is the difference between
     "not remastered yet" and "renders garbage".
     """
-    from PIL import Image  # imported lazily: CI runs the tests without Pillow
+    from PIL import Image  # imported lazily: local runs may lack Pillow (CI installs python3-pil)
 
     old = Image.open(source).convert("RGBA")
     canvas = Image.new("RGBA", target[1], (0, 0, 0, 0))

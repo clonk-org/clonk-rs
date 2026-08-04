@@ -1,10 +1,6 @@
 import pathlib
+import tomllib
 import unittest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    import tomli as tomllib
 
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
