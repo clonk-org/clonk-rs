@@ -55,7 +55,7 @@ fn install_l067_context_stack(
         .engine
         .crew_cursor(owner)
         .and_then(|cursor| app.engine.object_snapshot(cursor))
-        .expect("L067 sandbox cursor remains live");
+        .expect("sandbox cursor remains live");
     let position = Vector2::new(cursor.position.x - 60, cursor.position.y);
     let layer = cursor.layer;
     let mut registered = Vec::new();
@@ -64,7 +64,7 @@ fn install_l067_context_stack(
             continue;
         }
         let mut definition = Definition::from_script(*definition_id, *definition_id, "#strict\n")
-            .expect("L067 context definition compiles");
+            .expect("context definition compiles");
         definition.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-5, -5, 10, 10)));
         match *definition_id {
             "WWNG" => {
@@ -90,11 +90,11 @@ fn install_l067_context_stack(
                 definition.set_category(clonk_engine::CATEGORY_STRUCTURE);
                 definition.set_closed_container(1);
             }
-            unexpected => panic!("unexpected L067 definition {unexpected}"),
+            unexpected => panic!("unexpected definition {unexpected}"),
         }
         app.engine
             .register_definition(definition)
-            .expect("register L067 context definition");
+            .expect("register context definition");
         registered.push(*definition_id);
     }
 
@@ -110,11 +110,11 @@ fn install_l067_context_stack(
                 .unwrap_or_else(|| SpawnConfig::new(*definition_id).with_position(position));
             app.engine
                 .spawn_object(spawn)
-                .expect("spawn L067 context object")
+                .expect("spawn context object")
         })
         .collect::<Vec<_>>();
     render_mouse_test_app(app);
-    let front = *objects.last().expect("L067 stack is nonempty");
+    let front = *objects.last().expect("stack is nonempty");
     let point = mouse_test_object_point(app, owner, front);
     assert_eq!(
         app.ingame_primary_mouse_target(owner, point),

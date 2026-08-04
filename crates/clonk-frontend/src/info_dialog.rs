@@ -284,8 +284,9 @@ impl ScrollingInfoDialog {
         self.scroll_by(delta.saturating_neg(), geometry);
     }
 
-    /// Keyboard scrolling is an L144 accessibility requirement. Native
-    /// TextWindow itself has no focus element and only handles pointer input.
+    /// Keyboard scrolling is an accessibility requirement of the scrolling-info
+    /// chassis, not a port of C++: native TextWindow has no focus element and
+    /// only handles pointer input.
     pub fn handle_key(&self, key: KeyCode, geometry: &ScrollingInfoGeometry) -> bool {
         match key {
             KeyCode::Up => self.scroll_by(-geometry.line_height, geometry),

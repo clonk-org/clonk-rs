@@ -4699,7 +4699,7 @@ EnergyUsage=10
         // Definition::from_resource's older conversion seam does not yet
         // carry InLiquidAction. Add that pre-existing field synthetically so
         // this regression can pin the EnergyUsage ordering without expanding
-        // L011 into the unrelated conversion gap.
+        // into the unrelated conversion gap.
         let mut specs = definition.action_library().specs().clone();
         let work = specs
             .remove("Work")

@@ -1023,14 +1023,14 @@ fn l040_masterserver_redirect_decline_latches_and_accept_persists() {
         .parent()
         .and_then(Path::parent)
         .expect("repository root");
-    let user_data = tempdir().expect("L040 user data");
+    let user_data = tempdir().expect("user data");
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover L040 paths");
-    paths.ensure_user_dirs().expect("create L040 user dirs");
-    persist_config_value(&paths, "General", "LanguageEx", "US").expect("configure L040 language");
+    let paths = AppPaths::discover().expect("discover paths");
+    paths.ensure_user_dirs().expect("create user dirs");
+    persist_config_value(&paths, "General", "LanguageEx", "US").expect("configure language");
     persist_config_value(&paths, "Network", "MasterServerSignUp", "0")
         .expect("disable live masterserver query");
     persist_config_value(&paths, "Network", "ServerAddress", "https://old.example")

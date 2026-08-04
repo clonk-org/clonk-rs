@@ -3602,7 +3602,7 @@ mod tests {
             32,
             32,
             32,
-            "L140 vertex overlay",
+            "vertex overlay",
             test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("TestObject", None),
@@ -3676,7 +3676,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(80, 60);
         let render = |show_net_status| {
-            let mut graphics = test_graphics(180, 110, 120, "L140 network status");
+            let mut graphics = test_graphics(180, 110, 120, "network status");
             graphics.set_debug_draw_flags(DebugDrawFlags {
                 show_net_status,
                 ..DebugDrawFlags::default()
@@ -3743,7 +3743,7 @@ mod tests {
             24,
             24,
             24,
-            "L140 solid masks",
+            "solid masks",
             test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("TestObject", None),

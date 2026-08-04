@@ -8489,7 +8489,7 @@ fn l038_network_lobby_does_not_displace_join_or_host_startup_dialog() {
     joined.open_network_lobby();
     joined
         .start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start joined L038 sandbox round");
+        .expect("start joined sandbox round");
     confirm_abort_dialog(&mut joined);
     assert!(matches!(joined.mode, AppMode::Menu));
     assert_eq!(joined.startup_view, StartupView::NetworkGame);

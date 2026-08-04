@@ -1628,10 +1628,10 @@ fn l038_back_history_and_fresh_app_match_native_dialog_memory() {
     assert_eq!(fresh.last_startup_dialog, StartupDialog::MainMenu);
     fresh
         .start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start fresh-session L038 sandbox round");
+        .expect("start fresh-session sandbox round");
     fresh
         .handle_game_over_action(GameOverAction::End)
-        .expect("end fresh-session L038 round");
+        .expect("end fresh-session round");
     assert_eq!(fresh.startup_view, StartupView::MainMenu);
     assert_eq!(fresh.last_startup_dialog, StartupDialog::MainMenu);
 }
@@ -1642,10 +1642,10 @@ fn l038_immediate_relaunch_retains_destination_without_background_discovery() {
     app.open_network_game_dialog();
     app.open_network_lobby();
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start network-origin L038 relaunch probe");
+        .expect("start network-origin relaunch probe");
 
     app.restart_current_scenario()
-        .expect("restart network-origin L038 probe");
+        .expect("restart network-origin probe");
 
     assert!(matches!(app.mode, AppMode::Running));
     assert_eq!(app.last_startup_dialog, StartupDialog::NetworkGame);
@@ -2101,7 +2101,7 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
         .expect("direct TCP transport sends its handshake to the stalled host");
 
     // Cancel and Escape use this same continuation and are retained in
-    // the adjacent L084 input-route regressions.
+    // the adjacent raw-connect progress-dialog input-route regressions.
     let close = app
         .top_message_dialog_layout()
         .expect("direct join progress layout")

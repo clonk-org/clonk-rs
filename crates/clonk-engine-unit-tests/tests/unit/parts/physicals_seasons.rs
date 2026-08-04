@@ -272,7 +272,8 @@ func Death(by) { death_by = by; return 1; }
 
         // The current command port executes Exit on frame 11; C++ spends
         // that frame on InitEvaluation and exits on frame 12. Checking after
-        // both command phases accepts either timing without pinning L120.
+        // both command phases accepts either timing without pinning the
+        // InitEvaluation frame.
         engine.tick_without_snapshot().expect("first Exit command phase runs");
         engine.tick_without_snapshot().expect("second Exit command phase runs");
         assert_eq!(engine.frame, 12);

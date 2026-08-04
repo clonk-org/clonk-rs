@@ -910,7 +910,8 @@ graphics-pass time is at most the native 28ms game tick, and
 content revision, display size, hardware, OS, and power state; do not compare
 runs with different fingerprints.
 
-Reference run for the L023 retained-GPU landing candidate on 2026-07-21:
+Reference run for the retained-GPU scene-composition landing candidate on
+2026-07-21:
 
 - content revision `67a54d0e662bda3aa0202134efc065d7bc420872`;
 - Apple M4 Max, Metal, arm64, 128 GiB memory;

@@ -1143,11 +1143,11 @@ fn l038_local_round_abort_and_evaluation_end_restore_fresh_browser() {
     let mut evaluated = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
     evaluated
         .handle_game_over()
-        .expect("open local L038 evaluation dialog");
+        .expect("open local evaluation dialog");
     assert!(evaluated.game_over_dialog.is_some());
     evaluated
         .handle_game_over_action(GameOverAction::End)
-        .expect("end evaluated local L038 round");
+        .expect("end evaluated local round");
     assert_l038_browser_return(&evaluated, ScenarioSelectorMode::Local);
 }
 
@@ -1155,10 +1155,10 @@ fn l038_local_round_abort_and_evaluation_end_restore_fresh_browser() {
 fn l027_reload_button_and_f5_restart_and_repopulate_search() {
     fn exercise(use_f5: bool, title: &str) {
         let listener = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
-            .expect("bind L027 masterserver fixture");
+            .expect("bind masterserver fixture");
         listener
             .set_nonblocking(true)
-            .expect("make L027 fixture bounded");
+            .expect("make fixture bounded");
         let master_address = listener.local_addr().expect("fixture address");
 
         let discovery_port = std::net::UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, 0))
@@ -1191,7 +1191,7 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
                 master_server_url: format!("http://{master_address}/"),
                 discovery_port,
             })
-            .expect("start L027 network search"),
+            .expect("start network search"),
         );
         app.startup_game_references = vec![clonk_network::NetworkGameReference {
             title: "Stale game".to_string(),
@@ -1228,7 +1228,7 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
                             }
                             thread::sleep(Duration::from_millis(5));
                         }
-                        Err(error) => panic!("accept L027 masterserver request: {error}"),
+                        Err(error) => panic!("accept masterserver request: {error}"),
                     }
                 };
                 stream
@@ -1305,8 +1305,8 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
             app.poll_startup_game_search()
                 .expect("apply restarted search event");
             // Hosts without a usable multicast route report the explicit
-            // LAN probe failure in a modal. L070 freezes the queued
-            // masterserver result until that native prompt is dismissed.
+            // LAN probe failure in a modal, and the modal's Sec1 timer freeze
+            // holds the queued masterserver result until it is dismissed.
             if app
                 .message_dialogs
                 .last()
@@ -1319,7 +1319,7 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(server.join().expect("L027 masterserver fixture thread"));
+        assert!(server.join().expect("masterserver fixture thread"));
         assert_eq!(
             app.startup_game_references
                 .iter()
@@ -1345,9 +1345,9 @@ fn l027_reload_button_and_f5_restart_and_repopulate_search() {
 
 #[test]
 fn l027_subsecond_refresh_only_plays_error_and_preserves_rows() {
-    let sound_root = tempdir().expect("L027 sound fixture");
+    let sound_root = tempdir().expect("sound fixture");
     let scenario = sound_root.path().join("Cooldown.c4s");
-    fs::create_dir(&scenario).expect("create L027 sound fixture");
+    fs::create_dir(&scenario).expect("create sound fixture");
     fs::write(scenario.join("Error.wav"), silent_pcm_wav(1_000))
         .expect("write Error sound fixture");
 

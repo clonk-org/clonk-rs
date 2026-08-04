@@ -597,7 +597,7 @@ impl PreparedRealInstalledScenario {
             // Their movement timings predate live Game.Parameters and were
             // recorded against the former engine-wide fair-crew default.
             // Pin that round option explicitly; normal-crew activation and
-            // player-file physicals have dedicated L061 regressions.
+            // player-file physicals have their own dedicated regressions.
             let mut options = app.scenario_game_options.values().clone();
             options.fair_crew = true;
             options.fair_crew_strength = 1_000;
@@ -2385,7 +2385,7 @@ fn loader_origin_fixture_paths(root: &Path) -> (EnvGuard, AppPaths, PathBuf) {
 fn l038_running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp {
     let scenarios = sample_scenarios();
     let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
-        .expect("build L038 scenario menu");
+        .expect("build scenario menu");
     let mut app = new_real_menu_app(640, 480);
     app.menu_state = MenuState::new(menu, scenarios.clone());
     app.scenario_catalog = build_scenario_catalog(&scenarios);
@@ -2402,13 +2402,13 @@ fn l038_running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp 
                 },
             )]
         })
-        .expect("start L038 round through the scenario browser");
+        .expect("start round through the scenario browser");
     } else {
         // A pathless fixture cannot enter the real prepared-host pipeline;
         // this branch isolates the startup-dialog memory across the
         // otherwise transient lobby view.
         app.start_sandbox_scenario(FrontendScenario::fallback())
-            .expect("start hosted L038 state probe");
+            .expect("start hosted state probe");
     }
     wait_for_running(&mut app);
     app
@@ -2571,7 +2571,8 @@ enum SandboxFixtureAssets {
 fn hold_message_board_for_frame_comparison(app: &mut GameApp) {
     // Pixel-composition tests compare consecutive presentations. Keep the
     // seeded join line in C4MessageBoard's stable single-line delay phase;
-    // the L120 regressions exercise the animated transitions explicitly.
+    // the message-board fader regressions exercise the animated transitions
+    // explicitly.
     app.message_board.back_scroll = 0;
     app.message_board.empty = false;
     app.message_board.fader = 0;

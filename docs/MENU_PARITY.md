@@ -299,10 +299,10 @@ the enum. Buy/Sell/Contents/Info/Context were already engine-owned.
 | `GetMaterialVal` compiled-core reflection | `C4Script.cpp:3936-4068,4131-4147,4283-4300`; `C4Material.cpp:170-226` | **Complete** | `GetMaterialVal` reflects exact compile names from the compiled `C4MaterialCore`, including post-load/default values and native int/bool/string/C4ID types. `Color` and `ColorX` share the final overridden color array, fixed arrays expose one compiled primitive per nonnegative index through their last nonzero element, and negative/out-of-range indices or unknown names return nil (`get_material_val_reflects_compiled_material_core`). |
 | Normal style | `C4Menu.cpp:359-365,642-753`; `C4Script.cpp:1420-1450,1465-1727` | **Complete** | Grid geometry, selection, scrolling, clipping, wheel/title drag, images, decoration, progressive text, failure and callbacks are covered by `engine_script_normal_menu_uses_cpp_grid_geometry_and_selection_color`, `normal_menu_render_rejects_an_unresolved_non_textspec_item_picture` and `engine_script_menu_pointer_selects_enters_and_closes_like_cpp`. |
 | Context style | `C4Menu.cpp:359-365,642-753`; `C4Script.cpp:1465-1727` | **Partial** | Layout, command strip, anchor, scrolling, wheel/title drag, targeting, image recipes, TextSpec and object/scenario callbacks are covered. Remaining: ObjectRank snapshots use fixed 35px symbols instead of the Context menu's live item height. |
-| Info style | `C4MN_Style_Info` | **Partial** | Classic geometry, retained multi-row scrolling, pictures, markup-aware wrapping, complete TextSpec grammar, pointer targeting, no highlight/tooltip and close-only footer render in production; unresolved pictures fail typed. All shipped paths create one row; active-scenario GUI sheet/font overrides reach the shared menu resources through the rebound process-global set (L192). Remaining: exact italic transforms. |
+| Info style | `C4MN_Style_Info` | **Partial** | Classic geometry, retained multi-row scrolling, pictures, markup-aware wrapping, complete TextSpec grammar, pointer targeting, no highlight/tooltip and close-only footer render in production; unresolved pictures fail typed. All shipped paths create one row; active-scenario GUI sheet/font overrides reach the shared menu resources through the rebound process-global set. Remaining: exact italic transforms. |
 | Dialog style | `C4Menu.cpp:363-424,642-753`; `C4Script.cpp:1420-1450,1465-1727` | **Complete** | Variable-height layout, portrait column, selection, decoration, TextSpec, images, callbacks and crew portraits render without fallback. Covered by `dialog_layout_matches_cpp_portrait_and_variable_row_geometry`, `real_last_will_assets_render_a_decorated_progressive_dialog` and `get_portrait_distinguishes_permanent_and_requires_info`. |
 | EqualItemHeight flag | `C4MN_Style_EqualItemHeight` | **Complete** | The raw style bit is preserved independently of base style and Dialog symbol rows use the C++ equalization/restacking rule. |
-| Rank/Indexed/ObjRank/Object/TextSpec/Color symbols | `C4Script.cpp:1598-1727`; `C4Game.cpp` text-image resolver | **Partial** | Definition, indexed/color, rank, object snapshots and TextSpec recipes are implemented, including current/permanent portraits and shipped corpus. Active-scenario GUI sheets and fonts now resolve through the rebound process-global set and the active HUD bundle (L192). A Context `ObjectRank` row is sized by the menu's resolved `GetItemHeight()` rather than the add-time `GetSymbolSize()`, keeping the native `H * 2` by `H` facet with the object left and the rank right; every other style still uses the square add-time size, and the add-time object/rank visual state is untouched (`context_object_rank_snapshot_uses_runtime_item_height`). |
+| Rank/Indexed/ObjRank/Object/TextSpec/Color symbols | `C4Script.cpp:1598-1727`; `C4Game.cpp` text-image resolver | **Partial** | Definition, indexed/color, rank, object snapshots and TextSpec recipes are implemented, including current/permanent portraits and shipped corpus. Active-scenario GUI sheets and fonts now resolve through the rebound process-global set and the active HUD bundle. A Context `ObjectRank` row is sized by the menu's resolved `GetItemHeight()` rather than the add-time `GetSymbolSize()`, keeping the native `H * 2` by `H` facet with the object left and the rank right; every other style still uses the square add-time size, and the add-time object/rank visual state is untouched (`context_object_rank_snapshot_uses_runtime_item_height`). |
 | TextSpec grammar/corpus | `C4Game::DrawTextSpecImage`, `C4DefList::GetFontImage` | **Complete** | Parser tables cover C scanf prefixes, raw portrait IDs/colors, case rules and icon prefixes; recursive shipped team census covers 39 `IconSpec` values in 19 files. Keep the Goldrush Context render/hit-test regression current. |
 | Footer extras (`C4MN_Extra_*`) | `C4Menu.cpp:823-930` | **Complete** | All variants and blank Info/unknown strips are covered by `engine_buy_menu_draws_cpp_title_symbol_and_value_footer`, `menu_value_footer_runs_shipped_tendon_calc_def_value`, `engine_magic_menu_draws_cpp_spell_cost_and_available_energy_footer` and `engine_components_menu_draws_cached_requirements_right_to_left`. |
 | Explicit size/permanence/alignment | `C4Menu.cpp:298-319,516-523,635-640,713-721,755-780`; `C4Script.cpp:1420-1450,4483-4491` | **Partial** | Alignment, Context anchors, clamping, drag, resize reset, permanence and close-before-command are covered. `SetMenuSize` stores both axes; the column count has always driven the grid, and the row count now does too, with the native lifetime: `SetSize` assigns `Lines` and reruns only `InitSize`, which applies no viewport clamp, while `InitLocation` recomputes `Lines` from the item count whenever it runs. A row count set before the menu's first draw is therefore discarded by that draw, exactly as in C++, and one issued while the menu is on screen constrains the client height, the scrollbar, `VisibleCount` and item hit geometry (`set_menu_size_rows_control_visible_grid_and_scrollbar`). Remaining: `LocationSet` is not yet invalidated on a refill that grows the item count, so an explicit row count survives a growth that C++ would recompute away. |
@@ -420,9 +420,9 @@ Yes/No ordering; title-close; active-only stacked focus; keyboard, Alt hotkeys,
 mouse, touch and legacy low/high gamepad routing; GUI sounds; no-scrim rendering;
 continued underlying timers; fail-fast asset validation; and the localized-label
 capable “don't show again” checkbox are implemented. Caption drag, the 3 s
-bounce auto-scroll and the title tooltip now ship for `message_dialog.rs`
-(L055), the F4 client list and its independently draggable info child,
-Advanced Options, and the definition selector (L080). Each close button shares
+bounce auto-scroll and the title tooltip now ship for `message_dialog.rs`,
+the F4 client list and its independently draggable info child,
+Advanced Options, and the definition selector. Each close button shares
 the same 500ms process-global tooltip clock. Startup/menu pointer routing now
 also matches the exclusive C++ screen: movement and retained press–move–release
 stay with the active message dialog, so OK and title-close activate without
@@ -435,12 +435,12 @@ Active-scenario `Graphics.c4g` and font overrides remain.
   alternate-server/reset/advanced warnings, and the runtime league
   vote/surrender and lobby ready-check flows. Active-scenario
   `Graphics.c4g` sheet and font overrides now rebind the shared dialog
-  resources at the GraphicsResource refresh and restore at teardown, L192);
+  resources at the GraphicsResource refresh and restore at teardown);
 - Yes/No and multi-button confirmation (**Partial**: beyond player deletion,
   Yes/No confirmations now gate startup player/crew/scenario deletion, league
   vote/surrender prompts, and the 15 s lobby ready-check and
   graphics-scale-revert timed prompts. The shared active-scenario resource
-  override now applies through the rebound process-global sheet set, L192);
+  override now applies through the rebound process-global sheet set);
 - “don't show again” checkbox (**Partial**: exact component exists; the
   alternate-league-server warning (`HideMsgNoOfficialLeague`) is now a wired
   caller; remaining `HideMsg*` config-bound callers are M10);
@@ -448,8 +448,7 @@ Active-scenario `Graphics.c4g` and font overrides remain.
   the resource-validating classic controller/renderer; network-selector
   Password/Comment, the lobby host Password/Comment, the network-join password
   challenge and the crew death-message editor are app-wired; active-scenario
-  sheet/font overrides now apply through the rebound process-global set,
-  L192);
+  sheet/font overrides now apply through the rebound process-global set);
 - timed confirmation (**Complete**: the lobby ready-check prompt (15 s,
   `tick_lobby_ready_check_prompt`) and the graphics scale-test prompt (12 s,
   `tick_options_scale_test_prompt`) both match C++'s per-second text update and

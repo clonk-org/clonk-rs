@@ -205,8 +205,8 @@ pub struct DefinitionDebugGeometry {
     pub solid_mask: Option<DefinitionTargetRect>,
 }
 
-/// Process-local `C4GraphicsSystem::Show*` flags. L140 owns the rendering
-/// consumers and clonk-app's L031 key callbacks own their native mutations.
+/// Process-local `C4GraphicsSystem::Show*` flags. The debug-draw renderers own
+/// the consumers; `clonk-app`'s debug-mode key callbacks own the mutations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DebugDrawFlags {
     pub show_vertices: bool,

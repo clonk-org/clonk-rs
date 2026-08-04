@@ -4145,7 +4145,8 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     app.handle_key(VirtualKeyCode::Space, ElementState::Released)
         .expect("Space release inside the cooldown");
 
-    // Roster focus keeps L167's confirm-key eating (a different arm).
+    // Roster focus keeps the joined-lobby roster's confirm-key eating (a
+    // different arm).
     let mut app = joined_app();
     tab_to(&mut app, LobbyControl::Roster);
     app.ui_sound_log.clear();
@@ -6304,11 +6305,11 @@ fn l008_scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
         app.loader_screen
             .as_mut()
             .expect("loader")
-            .update(LoaderUpdate::SetTitle("L008 scale-fifty loader".into()));
+            .update(LoaderUpdate::SetTitle("scale-fifty loader".into()));
         app.loader_screen
             .as_mut()
             .expect("loader")
-            .update(LoaderUpdate::ReplaceLog(vec!["L008 process".into()]));
+            .update(LoaderUpdate::ReplaceLog(vec!["process".into()]));
         app.loader_screen
             .as_mut()
             .expect("loader")
@@ -6334,8 +6335,8 @@ fn l008_scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
                 .expect("show reached client wait");
             app.push_message_dialog(
                 clonk_frontend::message_dialog::MessageDialogState::regular_ok(
-                    "L008 upper message",
-                    "L008 upper caption",
+                    "upper message",
+                    "upper caption",
                     clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY,
                 ),
                 MessageDialogContinuation::None,
@@ -6380,7 +6381,7 @@ fn l008_scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
         assert!(wait_batch > loader_batch);
         assert!(plan.batches[wait_batch].logical_layer.is_some());
         if client {
-            let upper_batch = command_batch("L008 upper message");
+            let upper_batch = command_batch("upper message");
             assert!(upper_batch > wait_batch);
             assert!(plan.batches[upper_batch].logical_layer.is_some());
         }
@@ -6405,11 +6406,11 @@ fn l149_scale_three_host_start_wait_renders_after_native_loader_text() {
     app.loader_screen
         .as_mut()
         .expect("loader")
-        .update(LoaderUpdate::SetTitle("L149|host loader".into()));
+        .update(LoaderUpdate::SetTitle("Session|host loader".into()));
     app.loader_screen
         .as_mut()
         .expect("loader")
-        .update(LoaderUpdate::ReplaceLog(vec!["L149 process".into()]));
+        .update(LoaderUpdate::ReplaceLog(vec!["process".into()]));
     app.loader_screen
         .as_mut()
         .expect("loader")
@@ -6484,7 +6485,7 @@ fn l149_fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
     app.loader_screen
         .as_mut()
         .expect("loader")
-        .update(LoaderUpdate::SetTitle("L149 client loader".into()));
+        .update(LoaderUpdate::SetTitle("client loader".into()));
     let resources = app
         .loader_screen
         .as_ref()
@@ -6505,8 +6506,8 @@ fn l149_fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         .expect("show reached client wait");
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
-            "L149 upper message",
-            "L149 upper caption",
+            "upper message",
+            "upper caption",
             clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY,
         ),
         MessageDialogContinuation::None,
@@ -6559,7 +6560,7 @@ fn l149_fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         .position(|batch| batch.native_loader_text)
         .expect("loader keeps its dedicated native renderer");
     let client_wait_batch = command_batch("Waiting for start...");
-    let upper_batch = command_batch("L149 upper message");
+    let upper_batch = command_batch("upper message");
     assert_eq!(loader_batch, 0);
     assert!(client_wait_batch > loader_batch);
     assert!(upper_batch > client_wait_batch);
@@ -6573,7 +6574,7 @@ fn l149_fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
             batch
                 .text
                 .iter()
-                .any(|command| command.text == "L149 upper caption")
+                .any(|command| command.text == "upper caption")
                 .then_some(index)
         })
         .collect::<Vec<_>>();

@@ -276,7 +276,8 @@ mod tests {
             "ceil, not round: 400*1.01 = 404.0 and 250*1.01 = 252.5 -> 253"
         );
 
-        // Input routes by cursor mode; concrete edit behaviour is L043's.
+        // Input routes by cursor mode; the concrete edit behaviour belongs to
+        // the edit cursor's selection/drag/context-menu work.
         assert_eq!(
             route_viewport_event(CursorMode::Play),
             ViewportEventRoute::MouseControl

@@ -5413,7 +5413,8 @@ pub struct EngineState {
     #[doc(hidden)]
     pub scenario_values: Option<scenario::ScenarioValueStore>,
     /// Saved BASEFUNC_RejectEntrance projection. None keeps the scenario
-    /// value already installed when restoring states written before L051.
+    /// value already installed when restoring states written before this
+    /// field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_reject_entrance_enabled: Option<bool>,
     #[serde(default)]
