@@ -228,11 +228,12 @@ presentations, 5.794 ms average and 9.202 ms maximum graphics-pass time, with no
 automatic graphics skips. This is a fingerprinted reference, not a universal
 60 FPS claim.
 
-## Menu frame rasterization verified against a real C++ GL capture (M06-P3-L034)
+## Menu frame rasterization verified against a real C++ GL capture
 
-The L033 residue — whether the CPU menu-frame bytes match native
-`DrawFrameDw`/`DrawFrame` line output — was settled on 2026-07-21 against a
-live C++ capture and the CPU paths were corrected to line-accurate coverage.
+The one question the retained-GPU work left open — whether the CPU menu-frame
+bytes match native `DrawFrameDw`/`DrawFrame` line output — was settled on
+2026-07-21 against a live C++ capture, and the CPU paths were corrected to
+line-accurate coverage.
 
 Capture procedure (reproducible in ~2 minutes):
 

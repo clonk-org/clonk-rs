@@ -7,8 +7,8 @@
 //! locals and effects, each section emitted only when it has something to say.
 //!
 //! The section *values* (locals, effects, contents names) are supplied by the
-//! caller so this stays independent of the engine's value formatting, which is
-//! tracked separately as M10-P4-L085.
+//! caller so this stays independent of the engine's value formatting, which the
+//! ordered object-inspection read model supplies (`developer_inspection`).
 
 /// The resolved resource strings the panel needs. Kept as owned text so the
 /// caller resolves them through the active language table.

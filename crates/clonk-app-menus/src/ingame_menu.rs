@@ -2952,7 +2952,7 @@ mod tests {
         }
     }
 
-    // C++ GL capture oracle (M06-P3-L034, 2026-07-21, Drachenfels choice-menu
+    // C++ GL capture oracle (2026-07-21, Drachenfels choice-menu
     // tooltip at (942,580) 182x26 in Screenshot001.png): every frame pixel
     // over the opaque #F1EA78 fill — corners (942,580)/(1123,580) included —
     // reads (121,117,60): exactly one DrawLineDw blend of 0x7f000000 with GL
@@ -2988,7 +2988,7 @@ mod tests {
         assert_eq!(surface.get_pixel(3, 3), Some(Color::opaque(241, 234, 120)));
     }
 
-    // C++ GL capture oracle (M06-P3-L034, 2026-07-21, Drachenfels extra-bar
+    // C++ GL capture oracle (2026-07-21, Drachenfels extra-bar
     // divider (1032,647)-(1208,662) in Screenshot001.png): palette color 80
     // renders (68,1,1) — black-floored — on the top and left edges and the
     // three reachable corners, while the bottom-right corner (1208,662)

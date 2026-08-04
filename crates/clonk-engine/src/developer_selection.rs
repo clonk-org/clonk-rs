@@ -10,7 +10,8 @@
 //!
 //! This module owns identity, ordering, mutation, pruning and notification
 //! only. Pointer hit testing, editor gestures, overlays and dialog content stay
-//! out (M10-P4-L082/L045).
+//! out: pointer projection lives in `clonk-frontend::viewport_projection`, and
+//! the property and object-list surfaces are tracked in `PORT_STATUS.md`.
 
 use crate::ObjectId;
 

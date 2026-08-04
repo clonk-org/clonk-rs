@@ -10,7 +10,8 @@
 //! Exact mode.
 //!
 //! This module is the read side only — dialog state, rendering, shortcuts and
-//! `EMDrawTool` emission stay out (tracked separately as M10-P4-L044).
+//! `EMDrawTool` emission stay out — they belong to the Tools/draw dialog
+//! (`C4ToolsDlg`), tracked in `PORT_STATUS.md`.
 
 /// `C4TLS_MatSky` (`C4ToolsDlg.h:43`): the sky pseudo-material heading the
 /// material list, and the picker's answer for an empty pixel.

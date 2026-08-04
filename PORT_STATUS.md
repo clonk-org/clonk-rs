@@ -746,10 +746,11 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   (type, owner, contents, action, locals, effects), and the `fFirstLocal`-style
   headers that appear **once** before their first entry and not at all when the
   section is empty. Section *values* are supplied by the caller, so this is
-  independent of the value formatting, which M10-P4-L085 supplies. Pinned by
+  independent of the value formatting, which the object-inspection read model
+  supplies. Pinned by
   `object_list_and_property_dialog_share_edit_cursor_selection_order`.
-  **Still open:** the panel and object-list surfaces (which need the developer
-  window host, M10-P4-L081), the script input's `EMMO_Script` fan-out, and the
+  **Still open:** the panel and object-list surfaces (which need the keyed
+  developer window host), the script input's `EMMO_Script` fan-out, and the
   refresh cadence.
 
 - **Object-inspection read model landed; the windows that consume it are open.**
@@ -780,9 +781,9 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `developer_object_inspection_preserves_master_contents_local_and_effect_order`,
   `developer_object_inspection_exposes_data_strings_and_public_def_functions`
   and `locals_split_into_indexed_then_named_like_the_property_panel`.
-  **Still open:** the tree and property windows themselves (M10-P4-L045 and the
-  window host M10-P4-L081), and wiring the engine's live function tables into
-  `completion_functions`.
+  **Still open:** the tree and property windows themselves (the property and
+  object-list dialogs, plus the keyed developer window host), and wiring the
+  engine's live function tables into `completion_functions`.
 
 - **The watcher itself landed.** `clonk-platform::file_monitor::DirectoryMonitor`
   is the reference backend's behaviour, not a richer one. `C4FileMonitor`'s
@@ -818,9 +819,10 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   through the failure arm.
   The dependency this note previously recorded was real and is now discharged: `C4Def::Load` registers
   `Filename`, the group's own full name (`C4Def.cpp:547-560`), which is exactly
-  the source provenance **M10-P4-L086** exists to retain: the port resolves a
-  definition group to a `Group`, builds the runtime definition and drops the
-  path. So the watcher's registration genuinely blocks on L086, unlike the
+  the source provenance the **source-backed definition and script reload core**
+  exists to retain: the port resolves a definition group to a `Group`, builds
+  the runtime definition and drops the path. So the watcher's registration
+  genuinely blocks on that reload core, unlike the
   particle half above, whose stated dependency on it was false. Do the
   provenance thread first and registration becomes a two-line consequence of
   it; do the wiring first and there is nothing to register.
@@ -841,8 +843,8 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `console_auto_file_reload_watches_unpacked_sources_and_dispatches_paths` and
   `external_reload_trigger_validates_path_and_reload_particle_is_name_based`.
   **Still open:** the watcher itself, its app-thread delivery, and
-  `ReloadParticle` — the last of which needs the definition reload from
-  M10-P4-L086.
+  `ReloadParticle` — the last of which needs the definition reload from the
+  source-backed reload core.
   Which definitions get registered once it is armed is ported too
   (`C4Def.cpp:547-560`): only **unpacked** groups — a packed `.c4d` has no
   directory to observe — and only a **new** location, so reloading from the path
@@ -993,7 +995,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   renders two same-owner viewports, swaps their layout order, and checks the
   indices move while the identities do not.
 
-- **Identity-addressed detached rendering landed (M10-P4-L082 is complete).**
+- **Identity-addressed detached rendering landed, and is complete.**
   `GraphicsSystem::render_detached_viewport` draws exactly one physical
   identity into a window-sized target and hands back the pixels plus the
   `ActiveViewportProjection` they were drawn with, the way `C4Viewport::Execute`
@@ -1022,7 +1024,8 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `detached_viewport_window_is_never_capped_or_centred_on_a_small_map`.
   `ActiveViewportProjection::pointer_projection` closes the loop: the frame a
   window drew is the frame its pointer input converts through.
-  **Still open:** the OS windows that would consume it (M10-P4-L047).
+  **Still open:** the OS windows that would consume it (console viewports
+  materialised as detached windows).
 
 - **Per-viewport pointer projection landed.**
   `clonk-frontend::viewport_projection` ports `C4Viewport`'s local-to-world
@@ -1035,7 +1038,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   than a wild coordinate. Pinned by
   `detached_viewport_pointer_projection_uses_window_identity_and_scale`.
 
-- **Console viewport windows now open (M10-P4-L047 criteria 1-3).** The
+- **Console viewport windows now open (creation, reconciliation, teardown).** The
   console's Viewport menu already created the *logical* physical viewport; it
   now materialises as a real OS window. `clonk-app::console_viewport_windows`
   reconciles the open windows against the physical list each pass and
@@ -1079,7 +1082,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `ActiveViewportProjection::pointer_projection` converts them, but nothing
   consumes them yet — see the next entry.
 
-- **Clicking inside a console viewport window now selects (M10-P4-L043's
+- **Clicking inside a console viewport window now selects (the edit-cursor
   gesture, reached from a real window).** `GameApp::console_viewport_press`
   joins the four pieces: a window-local pointer converted through *that*
   viewport's own `ViewX`/`ViewY` (`C4Viewport.cpp:181`), the target picked by
@@ -1171,11 +1174,11 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   page rather than a rendered one. On the control side only `EMMO_Script` is
   wired (`clonk-app::main.rs`, the console's script input); `EMMO_Move`,
   `EMMO_Enter` and `EMMO_Remove` have no emitter.
-  This is not a gap in any one card — each ported the behaviour its card
-  named, and each is pinned by tests. The missing piece is the *caller*, and
+  This is not a gap in any one piece — each ported the behaviour it was scoped
+  for, and each is pinned by tests. The missing piece is the *caller*, and
   there is exactly one reason there is no caller: a console viewport window is
-  where all of it would be driven from, and no such window is ever created
-  (M10-P4-L047's criteria 1-3). Closing that card is what turns this group
+  where all of it would be driven from, and no such window is ever created.
+  Materialising those windows is what turns this group
   from a tested library into a working editor; nothing else in the group is
   blocked on anything but it.
   The window half is now done, so what remains is the bridge. Two concrete
@@ -1252,10 +1255,10 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `position_subkey` and `store_size` therefore describe **Windows-only**
   behaviour — wiring them to config on macOS would be a divergence, not parity.
 
-- **`ReloadParticle`'s engine half landed (M10-P4-L048's particle steps).**
-  `Engine::reload_particle` ports `C4Game::ReloadParticle`
-  (`C4Game.cpp:2369-2394`), and the ticket's claim that it depends on
-  M10-P4-L086 is false — `C4ParticleDef::Reload` needs only `Filename` plus
+- **`ReloadParticle`'s engine half landed (the particle steps of dev-mode
+  reload).** `Engine::reload_particle` ports `C4Game::ReloadParticle`
+  (`C4Game.cpp:2369-2394`). It was recorded as depending on the source-backed
+  definition reload core; that is false — `C4ParticleDef::Reload` needs only `Filename` plus
   `C4Group::Open` and `Load` (`C4Particles.cpp:194-205`), all of which existed.
   What was missing was the filename: `ParticleDef` now carries a `source_path`,
   set by `register_resource_from`.
@@ -1355,7 +1358,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   backup's destructor resets every graphic to default, and `Clear` deliberately
   keeps the filename, which is what lets the reload re-open the group it came
   from. Pinned by `definition_reload_relinks_before_restoring_graphics`.
-  **Source provenance is retained now (M10-P4-L086's step 1).** `Definition`
+  **Source provenance is retained now (the reload core's first step).** `Definition`
   carries a `source_path`, set at the install site from the
   `ScenarioDefinition::resource_group` the loader already held — the group's
   own root, which is what `C4Def::Load` stores as `Filename` (`C4Def.cpp:550`).
@@ -1419,7 +1422,8 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   definition; and an object that can do neither is removed rather than left
   holding a name nothing supplies — leaving a dangling name is the divergence.
   It runs *before* the face refresh so the refresh sees settled graphics.
-  With that, **M10-P4-L086 is complete**: provenance, the rebuild through the
+  With that, **the source-backed definition and script reload core is
+  complete**: provenance, the rebuild through the
   production loader, removal, the failure sweep, the success sweep and the
   graphics re-resolution. Historical notes on where the work started:
   `UpdateFace(true)` has no callable primitive — but its pieces are not
@@ -1514,12 +1518,12 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `GrpContentsCRC1`/`GrpContentsCRC2`, leaving fifty uninitialised words in
   `AutoUpdate.txt`; `Check` compares against them and only works by falling
   through to its `GrpChks1` comparison.
-  Two consequences for M10-P4-L087, both of which overturn an earlier note in
-  that ticket. **Byte-identical output cannot be the acceptance criterion** —
-  three runs of C++ `-g` over identical inputs produce three different files,
-  because the garbage differs per run. And writing a correct manifest is a
-  **fix**, not a divergence needing justification: an update package is not
-  simulation state, so it cannot affect determinism.
+  Two consequences for the `c4group` CLI port, both of which overturn an
+  earlier note on it. **Byte-identical output cannot be the acceptance
+  criterion** — three runs of C++ `-g` over identical inputs produce three
+  different files, because the garbage differs per run. And writing a correct
+  manifest is a **fix**, not a divergence needing justification: an update
+  package is not simulation state, so it cannot affect determinism.
   `clonk-c4group::update_entries` writes the manifest `MkUp` intends and reads
   the corrupted form tolerantly, since C++-produced packages exist in the wild.
   `clonk-c4group::update_core` does the same for `AutoUpdate.txt`, checked
@@ -1668,10 +1672,9 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   what makes them addressable by id. The event loop destructures the record once
   per event, so the per-site borrows are unchanged. This is deliberately pure
   indirection today: with one window it changes no behaviour, and it pays off
-  when the console opens its second (M10-P4-L047). **Still open:** the
-  feature-specific surfaces themselves — the Tools/Property toolbox
-  (M10-P4-L044's criterion 7), the property and object-list windows
-  (M10-P4-L045) and console viewports (M10-P4-L047).
+  when the console opens its second. **Still open:** the feature-specific
+  surfaces themselves — the Tools/Property toolbox, the property and
+  object-list windows, and console viewports.
 
 - **The reference C++ build has no console dialog windows at all.** Worth
   stating plainly, because it reframes the whole console-surface group.
@@ -1688,11 +1691,11 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   in `clonk-engine::developer_tools` (`open`, `clear`, `active`, `material`,
   `texture`), pinned by
   `console_draw_mode_routes_pointer_gestures_through_tools_state`.
-  So M10-P4-L044's "native separate-window/notebook behavior" describes the
-  Win32 and GTK builds, neither of which is the reference build — and against the
-  reference build the ported state *is* the dialog. The same reading applies to
-  M10-P4-L045's property and object-list surfaces. Whether those cards close on
-  that basis is a scoping decision for the queue owner, not a worker's.
+  So the "native separate-window/notebook behavior" the Tools-dialog scope asks
+  for describes the Win32 and GTK builds, neither of which is the reference
+  build — and against the reference build the ported state *is* the dialog. The
+  same reading applies to the property and object-list surfaces. Whether those
+  count as done on that basis is a scoping decision, not a worker's call.
 
 - **The toolbox notebook landed; its rendered controls are open.**
   `C4DevmodeDlg` (`C4DevmodeDlg.cpp:28-121`) is one shared utility window
@@ -1749,8 +1752,8 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   re-confirmed. Pinned by
   `console_draw_mode_routes_pointer_gestures_through_tools_state`. The material
   and texture catalogue and the picker itself already exist in
-  `developer_landscape` (M10-P4-L084). **Still open:** the dialog chrome and its
-  window host, gated on M10-P4-L081.
+  `developer_landscape`. **Still open:** the dialog chrome and its window host,
+  gated on the keyed developer window-host registry.
 
 - Closed 2026-07-29: **Options control sheets draw the classic facets.**
   `C4StartupOptionsDlg` draws the Keyboard/Gamepad pages from facets, not text
@@ -1908,7 +1911,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   **There is no periodic refresh to pair with it.** `PropertyDlg::Update` has
   exactly five callers in the pinned source and every one is selection-driven;
   `Tick35` never appears near the console (only `C4Viewport` and `C4Object`
-  use it). M10-P4-L045's criterion 5 asks for a "Windows-only Tick35 periodic
+  use it). The property-dialog scope asks for a "Windows-only Tick35 periodic
   refresh" that does not exist — adding one would be an invention. Pinned by
   `script_input_fans_out_over_the_selection_and_refresh_is_coalesced`.
   Hit testing, gestures and dialog content stay out by design; the parity row
@@ -1932,7 +1935,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   sky. Pinned by `developer_landscape_tool_catalog_partitions_valid_pairs` and
   `developer_landscape_picker_reads_static_mapzoom_and_exact_ift`. Dialog state,
   rendering, shortcuts and `EMDrawTool` emission remain out of scope by design
-  (M10-P4-L044); the parity row flips when that lands.
+  (they belong to the Tools/draw dialog); the parity row flips when that lands.
 
 - Closed 2026-07-29: **Windows file associations and the `clonk:` protocol.**
   The runtime accepted classic launch arguments but nothing registered the
