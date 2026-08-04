@@ -4,3 +4,4 @@ MenuRangeDown=Aktuell %d (Maximum). Rechtsklick: -%d.
 MenuRangeFixed=Aktuell %d.
 MenuDone=Fertig
 MenuBack=Zurück
+MenuUndo=Rückgängig: %s

@@ -237,6 +237,60 @@ fn mars_order_arrows_still_navigate_off_a_product_row() {
 }
 
 #[test]
+fn the_order_page_offers_undo_only_once_there_is_something_to_undo() {
+    // Arrows cover the keyboard, but a mouse row is a single click target, so
+    // -1 is still only on the right button there. One visible row that walks
+    // the last change back means no part of composing an order is reachable
+    // *only* through an input nothing on screen names.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+
+    let untouched = items(&engine, clonk);
+    assert!(
+        !untouched
+            .iter()
+            .any(|item| item.caption.starts_with("Undo")),
+        "nothing has been ordered, so there is nothing to undo"
+    );
+
+    engine
+        .player_in_com(player, clonk_engine::COM_MENU_RIGHT, 0)
+        .expect("ordering one construction kit");
+
+    let with_history = items(&engine, clonk);
+    assert_eq!(
+        with_history.len(),
+        untouched.len() + 1,
+        "the undo row appears above the closing row"
+    );
+    let undo_row = with_history.len() - 2;
+    assert_eq!(
+        with_history[undo_row].caption, "Undo: Construction kit - 10{{GOLD}}",
+        "and names what it will take back"
+    );
+
+    let index = engine.find_object_index(clonk).expect("clonk remains live");
+    engine.objects[index]
+        .state
+        .menu
+        .as_mut()
+        .expect("the order page is open")
+        .selection = i32::try_from(undo_row).expect("row index fits");
+    engine.menu_user_enter(clonk, false).expect("undo runs");
+
+    let undone = items(&engine, clonk);
+    assert_eq!(
+        undone[0].count, 12_345_678,
+        "the construction kit is off the order again"
+    );
+    assert_eq!(
+        undone.len(),
+        untouched.len(),
+        "and the row leaves with the history it described"
+    );
+}
+
+#[test]
 fn the_closing_row_says_which_of_its_two_jobs_it_is_doing() {
     // Shipped Menu2 captions the last row "Finished" on every page, but it
     // steps back out of a submenu and commits the whole template at the root
@@ -355,10 +409,11 @@ fn mars_order_row_moves_only_its_own_product_and_keeps_the_selection() {
         menu.selection, metal_row,
         "the rebuilt page keeps pointing at the row that was activated"
     );
-    let counts: Vec<i32> = menu.items.iter().map(|item| item.count).collect();
+    // Five products, then the undo row the change just earned, then Back.
+    let counts: Vec<i32> = menu.items.iter().take(5).map(|item| item.count).collect();
     assert_eq!(
         counts,
-        vec![12_345_678, 12_345_678, 1, 12_345_678, 12_345_678, 12_345_678],
+        vec![12_345_678, 12_345_678, 1, 12_345_678, 12_345_678],
         "only metal was ordered"
     );
     assert_eq!(

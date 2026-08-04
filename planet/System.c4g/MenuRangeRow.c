@@ -54,6 +54,14 @@ local row_keys;
 // still open, so it does.
 local menu_rendering;
 
+// Row index -> the caption its range showed, so an undo entry can name what
+// it will take back.
+local row_names;
+
+// One entry per adjustment that actually moved a value:
+// [path, key, value before, row caption, row index].
+local adjust_history;
+
 // ShowMenu, rebuilt rather than inherited so the closing row can say which of
 // its two jobs it is doing. Mirrors Menu.c4d/Script.c:27-56 exactly otherwise.
 // The MS4C_* index constants live in Menu2's own System.c4g, which is not
@@ -63,6 +71,10 @@ local menu_rendering;
 // Submenu 3 (Menu.c:5-8).
 private func ShowMenu(int iSelection)
 {
+  // PushBack writes through a reference (Menu2 System.c4g/Helpers.c:6-9), so
+  // the history has to be an array before the first adjustment reaches it.
+  if (!adjust_history)
+    adjust_history = CreateArray();
   var currentMenu;
   if (aCurrentPath && aCurrentPath != [])
     currentMenu = GetSubmenu(aMenu, aCurrentPath);
@@ -72,6 +84,7 @@ private func ShowMenu(int iSelection)
   CreateMenu(currentMenu[0], pMenuObject, this, 0, currentMenu[1], 0, 1);
   menu_rendering = false;
   row_keys = CreateArray();
+  row_names = CreateArray();
   var i = 0;
   for (var Key in currentMenu[3])
   {
@@ -86,8 +99,22 @@ private func ShowMenu(int iSelection)
     else if (type == 3)
       ShowSubmenu(Key, value[1], value[2], value[3], value[4], i);
   }
+  ShowUndoRow(i);
   ShowClosingRow(i);
   SelectMenuItem(iSelection, pMenuObject);
+}
+
+// A step control and a right mouse button are both invisible until someone
+// tells you about them. This row is neither: it is on screen from the first
+// change, it names what it will take back, and a plain activation runs it.
+private func ShowUndoRow(&i)
+{
+  if (!GetLength(adjust_history))
+    return;
+  var entry = adjust_history[GetLength(adjust_history) - 1];
+  var szCaption = Format("$MenuUndo$", entry[3]);
+  AddMenuItem(szCaption, Format("Undo(%d)", i++), MS4C, pMenuObject, 0, 0,
+    szCaption, 2, 2);
 }
 
 // The shipped page ends in one row captioned "Finished" whichever of its two
@@ -148,6 +175,7 @@ private func ShowRange(Key, array aCond, string szName, id idItem, data, &i)
   // keeps the engine's right-aligned "Nx" on the row it belongs to
   // (C4Menu.cpp:198-207).
   row_keys[i] = Key;
+  row_names[i] = szName;
   AddMenuItem(Format("%s%s", szName, szSteps), Format("Adjust(%%d,%d,%%d)", i++),
     idItem, pMenuObject, iValue, Key, szInfo);
 }
@@ -185,10 +213,44 @@ public func MenuQueryCancel()
 }
 
 // Reached as the menu command on the MS4C helper itself, which ShowMenu passes
-// to CreateMenu as pCommandObj (Menu.c4d/Script.c:34-35).
+// to CreateMenu as pCommandObj (Menu.c4d/Script.c:34-35). Increase and
+// Decrease keep the shipped BoundBy clamp, so a step that saturates changes
+// nothing and must not become an undo entry.
 protected func Adjust(Key, int iSelection, int fRight)
 {
+  var szName = row_names[iSelection];
+  var aPath = CopyPath(aCurrentPath);
+  var iBefore = MenuGet(aMenu, aCurrentPath, Key)[4][3];
+  // The shipped step arithmetic, minus its re-render: the history entry has
+  // to exist before the page is drawn or the undo row appears one activation
+  // late (Increase/Decrease at Menu.c4d/Script.c:178-198 render immediately).
   if (fRight)
-    return Decrease(Key, iSelection);
-  return Increase(Key, iSelection);
+    DecreaseRange(MenuGet(aMenu, aCurrentPath, Key)[4]);
+  else
+    IncreaseRange(MenuGet(aMenu, aCurrentPath, Key)[4]);
+  if (MenuGet(aMenu, aPath, Key)[4][3] != iBefore)
+    PushBack([aPath, Key, iBefore, szName, iSelection], adjust_history);
+  return ShowMenu(iSelection);
+}
+
+protected func Undo(int iSelection)
+{
+  if (!GetLength(adjust_history))
+    return ShowMenu(iSelection);
+  var entry = adjust_history[GetLength(adjust_history) - 1];
+  DeleteLast(adjust_history);
+  MenuGet(aMenu, entry[0], entry[1])[4][3] = entry[2];
+  // Land back on the row that changed rather than wherever the undo row was.
+  return ShowMenu(entry[4]);
+}
+
+// aCurrentPath is mutated in place by OpenMenu and Finished
+// (Menu.c4d/Script.c:200-212), so an undo entry needs its own copy.
+private func CopyPath(array aPath)
+{
+  var aCopy = CreateArray();
+  if (aPath)
+    for (var Key in aPath)
+      PushBack(Key, aCopy);
+  return aCopy;
 }

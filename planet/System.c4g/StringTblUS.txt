@@ -4,3 +4,4 @@ MenuRangeDown=Currently %d (maximum). Right-click: -%d.
 MenuRangeFixed=Currently %d.
 MenuDone=Finished
 MenuBack=Back
+MenuUndo=Undo: %s
