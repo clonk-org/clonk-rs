@@ -9899,7 +9899,7 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn l075_prepared_host_survives_occupied_tcp_with_configured_udp() {
+    async fn prepared_host_survives_occupied_tcp_with_configured_udp() {
         let (occupied_tcp, udp_reservation, configured_address) =
             reserve_tcp_and_udp_at_same_address().await;
         drop(udp_reservation);
@@ -9962,7 +9962,7 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn l075_prepared_zero_tcp_port_starts_udp_without_a_bind_error() {
+    async fn prepared_zero_tcp_port_starts_udp_without_a_bind_error() {
         let (occupied_tcp, udp_reservation, configured_address) =
             reserve_tcp_and_udp_at_same_address().await;
         drop(udp_reservation);
@@ -10029,7 +10029,7 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn l075_prepared_host_fails_only_when_both_transports_are_unavailable() {
+    async fn prepared_host_fails_only_when_both_transports_are_unavailable() {
         let (occupied_tcp, occupied_udp, configured_address) =
             reserve_tcp_and_udp_at_same_address().await;
         let league_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -10097,7 +10097,7 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn l082_initial_start_rejection_ends_with_the_server_assigned_seed() {
+    async fn initial_start_rejection_ends_with_the_server_assigned_seed() {
         let (endpoint, league_server) = league_http_fixture(vec![
             b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nSeed=305419896\r\nMaxPlayers=-1\r\n",
             b"[Response]\r\nStatus=Success\r\n",
@@ -10168,7 +10168,7 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn l082_host_worker_returns_live_start_response_and_initializes_puncher() {
+    async fn host_worker_returns_live_start_response_and_initializes_puncher() {
         let (second_start_seen_tx, second_start_seen_rx) = mpsc::channel();
         let (release_second_start_tx, release_second_start_rx) = mpsc::channel();
         let (endpoint, league_server) = league_http_fixture_with_before_reply(
@@ -10358,7 +10358,7 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn l082_worker_finishes_live_end_when_lobby_drops_cleanup_handle() {
+    async fn worker_finishes_live_end_when_lobby_drops_cleanup_handle() {
         let (end_seen_tx, end_seen_rx) = mpsc::channel();
         let (release_end_tx, release_end_rx) = mpsc::channel();
         let (endpoint, league_server) = league_http_fixture_with_before_reply(
@@ -11340,7 +11340,7 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[test]
-    fn l119_decided_controls_stamp_authors_and_clients_always_queue() {
+    fn decided_controls_stamp_authors_and_clients_always_queue() {
         let set = LegacyControlSet {
             value_type: 1,
             data: 0,

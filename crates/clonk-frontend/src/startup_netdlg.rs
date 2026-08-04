@@ -6585,7 +6585,7 @@ mod tests {
     }
 
     #[test]
-    fn l044_hyperlink_uses_cpp_color_exact_underline_and_only_link_opens() {
+    fn hyperlink_uses_cpp_color_exact_underline_and_only_link_opens() {
         let fonts = endeavour_font_set();
         let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
         controller.set_text_font(&fonts.text);
@@ -7600,7 +7600,7 @@ mod tests {
     }
 
     #[test]
-    fn l057_home_end_and_pages_use_live_network_row_ranges() {
+    fn home_end_and_pages_use_live_network_row_ranges() {
         let command = vec![NetDlgAction::GuiSound(NetDlgSound::Command)];
         let mut with_master = NetDlgController::new(NetDlgConfig::default(), metrics());
         with_master.resize(1280, 720);
@@ -7678,7 +7678,7 @@ mod tests {
     }
 
     #[test]
-    fn l057_network_rows_do_not_match_typed_characters() {
+    fn network_rows_do_not_match_typed_characters() {
         let mut controller = NetDlgController::new(
             NetDlgConfig {
                 masterserver_signup: false,

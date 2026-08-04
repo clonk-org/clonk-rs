@@ -125,16 +125,29 @@ landing, say so on the issue and `gh issue edit <n> --repo clonk-org/clonk-rs
 repository is public, a bare `#28` is ambiguous between `clonk-org/clonk-rs` and
 `legacyclonk/LegacyClonk`, and only the qualified form renders as a link.
 
-**Never cite a private tracker id.** `CLO-###` and `M##-P#-L###` both name items
-in a work queue that lives outside this repository, so to any reader they assert
-that a constraint exists while withholding what it is. Write the fact instead —
-what is missing, what it blocks, which C++ symbol it mirrors — and put anything
-that needs tracking in `PORT_STATUS.md`, which ships with the code.
+**Never cite a private tracker id.** `CLO-###`, `M##-P#-L###` and a bare `L###`
+all name items in a work queue that lives outside this repository, so to any
+reader they assert that a constraint exists while withholding what it is. The
+bare form is worse than opaque: up to nine cards share one `L###` across
+milestones, so it is ambiguous even with the queue in hand. Write the fact
+instead — what is missing, what it blocks, which C++ symbol it mirrors — and put
+anything that needs tracking in `PORT_STATUS.md`, which ships with the code.
 
-`workspace quality` greps for all three spellings. It deliberately does not
-reject bare `#N` in general: object and definition numbers (`WIPF #564`,
-`KING #5129`) are spelled the same way. `CHANGELOG.md` is exempt because
-git-cliff regenerates it from landed commit subjects.
+**Name tests for the behaviour they pin, never for the item that prompted
+them.** 494 tests carried an `l###_`/`m##_l###_` prefix until it was stripped;
+it consumed the most valuable part of the name and told a reader nothing. Note
+`.config/nextest.toml` matches shard members by *regex over test names*, so
+renaming a test that a shard filter mentions silently removes it from that
+shard instead of failing — grep the filters before any rename, and diff
+`cargo nextest list --workspace` before and after.
+
+`workspace quality` greps for the `CLO-###`, `M##-P#-L###` and unqualified
+`issue #N` spellings. It deliberately does not reject a bare `#N` or a bare
+`L###`: object and definition numbers (`WIPF #564`, `KING #5129`) and C4IDs
+(`"L111"`) are spelled the same way. `CHANGELOG.md` is exempt because git-cliff
+regenerates it from landed commit subjects. `PORT_STATUS.md` still records the
+prefixed names of four About-dialog tests that were *deleted*; that is a
+historical record, not a live reference.
 
 ## Pull requests — how work lands
 

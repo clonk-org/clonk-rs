@@ -1387,7 +1387,7 @@ global func Step(state, frame, random)
     }
 
     #[test]
-    fn l021_legacy_group_loading_reports_monotonic_nonempty_decode_status() {
+    fn legacy_group_loading_reports_monotonic_nonempty_decode_status() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// scenario script\n");
         let group = Group::open(&scenario_dir).expect("open legacy scenario group");
@@ -1426,7 +1426,7 @@ global func Step(state, frame, random)
     }
 
     #[test]
-    fn l021_network_group_loading_reports_the_shared_initgame_milestones() {
+    fn network_group_loading_reports_the_shared_initgame_milestones() {
         // Network clients and hosts enter the same InitGame first/second-part
         // milestones after their respective 7 checkpoint
         // (src/C4Game.cpp:456-457,2551-2721).

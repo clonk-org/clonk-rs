@@ -2959,7 +2959,7 @@ mod tests {
     // round-to-nearest and the gamma shader's black floor (0 -> 1). The
     // former full-length strips double-blended the corners to (61,59,30).
     #[test]
-    fn m06_l034_tooltip_frame_corners_blend_once_per_cpp_capture() {
+    fn tooltip_frame_corners_blend_once_per_cpp_capture() {
         let gamma = GammaRamp::from_control_points([0x000000, 0x808080, 0xffffff]);
         let mut surface = Surface::new(16, 12, clonk_graphics::PixelFormat::Rgba8888);
         surface.fill(Color::opaque(241, 234, 120));
@@ -2995,7 +2995,7 @@ mod tests {
     // stays at the (1,1,1) background because both `CStdDDraw::DrawFrame`
     // lines exclude it as their endpoint.
     #[test]
-    fn m06_l034_extra_divider_skips_bottom_right_corner_per_cpp_capture() {
+    fn extra_divider_skips_bottom_right_corner_per_cpp_capture() {
         let gamma = GammaRamp::from_control_points([0x000000, 0x808080, 0xffffff]);
         let mut surface = Surface::new(16, 12, clonk_graphics::PixelFormat::Rgba8888);
         surface.fill(Color::opaque(1, 1, 1));
@@ -3084,7 +3084,7 @@ mod tests {
     }
 
     #[test]
-    fn l135_team_selection_menu_uses_declared_icon_spec_and_cpp_fallbacks() {
+    fn team_selection_menu_uses_declared_icon_spec_and_cpp_fallbacks() {
         let teams = vec![
             TeamSelectionEntry {
                 id: 1,
@@ -3399,7 +3399,7 @@ mod tests {
     // `Alignment = Left|Bottom` — the initial selection leaves it at zero,
     // which centers it (C4Player.cpp:1802; C4Menu.cpp:722-741).
     #[test]
-    fn l175_team_pages_use_the_normal_grid_and_only_switching_anchors_bottom_left() {
+    fn team_pages_use_the_normal_grid_and_only_switching_anchors_bottom_left() {
         use clonk_graphics::BitmapFont;
 
         let teams = (0..7)
@@ -3893,7 +3893,7 @@ mod tests {
         assert_eq!(menu.caption(), "No additional player files available.");
     }
 
-    fn l065_long_menu(count: usize) -> IngameMenuState {
+    fn long_menu(count: usize) -> IngameMenuState {
         let players = (0..count)
             .map(|index| NewPlayerEntry {
                 file: format!("Player{index}.c4p"),
@@ -3904,10 +3904,10 @@ mod tests {
     }
 
     #[test]
-    fn l065_selection_scroll_is_persistent_and_minimal() {
+    fn selection_scroll_is_persistent_and_minimal() {
         use clonk_graphics::BitmapFont;
 
-        let mut menu = l065_long_menu(8);
+        let mut menu = long_menu(8);
         let font_backend = BitmapFont::new();
         let font = HudFont::Fallback(&font_backend);
         let gfx = IngameMenuGraphics::default();
@@ -3931,7 +3931,7 @@ mod tests {
         menu.layout(area, &font, &gfx);
         assert_eq!(menu.scroll_y(), initial.item_height);
 
-        let mut one_line = l065_long_menu(8);
+        let mut one_line = long_menu(8);
         one_line.set_selection(4);
         assert_eq!(
             one_line
@@ -3947,10 +3947,10 @@ mod tests {
     }
 
     #[test]
-    fn l065_wheel_scroll_survives_layout_and_clips_partial_rows() {
+    fn wheel_scroll_survives_layout_and_clips_partial_rows() {
         use clonk_graphics::BitmapFont;
 
-        let menu = l065_long_menu(8);
+        let menu = long_menu(8);
         let font_backend = BitmapFont::new();
         let font = HudFont::Fallback(&font_backend);
         let gfx = IngameMenuGraphics::default();
@@ -4016,10 +4016,10 @@ mod tests {
     }
 
     #[test]
-    fn l065_title_location_persists_raw_until_reset() {
+    fn title_location_persists_raw_until_reset() {
         use clonk_graphics::BitmapFont;
 
-        let mut menu = l065_long_menu(8);
+        let mut menu = long_menu(8);
         let font_backend = BitmapFont::new();
         let font = HudFont::Fallback(&font_backend);
         let gfx = IngameMenuGraphics {
@@ -4043,7 +4043,7 @@ mod tests {
         assert_eq!(menu.bounds(area, &font, &gfx).x, -41);
         assert_eq!(menu.bounds(area, &font, &gfx).y, 377);
         let relaid_area = Rect::new(0, 0, 320, 148);
-        let relaid_expected = l065_long_menu(8).bounds(relaid_area, &font, &gfx);
+        let relaid_expected = long_menu(8).bounds(relaid_area, &font, &gfx);
         assert_eq!(
             menu.bounds(relaid_area, &font, &gfx),
             relaid_expected,

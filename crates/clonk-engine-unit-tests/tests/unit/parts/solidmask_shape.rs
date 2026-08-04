@@ -4133,7 +4133,7 @@ func ProbeGraphicsBounds() {
     }
 
     #[test]
-    fn l125_liquid_entry_splash_amount_uses_live_shape_area_like_cpp() {
+    fn liquid_entry_splash_amount_uses_live_shape_area_like_cpp() {
         let library = MaterialLibrary::parse(
             r#"
             [Material Water]

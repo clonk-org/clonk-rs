@@ -244,7 +244,7 @@ fn classic_league_start_removes_a_known_remote_split_screen_client() {
 }
 
 #[test]
-fn l016_forwarded_help_clear_kick_and_observer_commands_stay_in_lobby() {
+fn forwarded_help_clear_kick_and_observer_commands_stay_in_lobby() {
     let mut app = new_real_classic_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     app.control_clients.replace_snapshot([
@@ -315,7 +315,7 @@ fn l016_forwarded_help_clear_kick_and_observer_commands_stay_in_lobby() {
 }
 
 #[test]
-fn l104_network_start_wait_kick_click_reuses_direct_and_league_paths() {
+fn network_start_wait_kick_click_reuses_direct_and_league_paths() {
     let setup = |league: bool| {
         let mut app = new_menu_app(640, 480);
         let (network, _events, commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
@@ -395,7 +395,7 @@ fn l104_network_start_wait_kick_click_reuses_direct_and_league_paths() {
 }
 
 #[test]
-fn l081_remove_aborts_countdown_before_swap_removed_update_and_clears_league_password() {
+fn remove_aborts_countdown_before_swap_removed_update_and_clears_league_password() {
     let _lock = env_lock().lock();
     let user_data = tempdir().expect("isolated league configuration");
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -775,7 +775,7 @@ fn search_settings_recover_only_rust_truncated_masterserver_urls_before_query() 
 }
 
 #[test]
-fn l040_masterserver_row_projects_counts_motd_and_query_error_states() {
+fn masterserver_row_projects_counts_motd_and_query_error_states() {
     use clonk_frontend::startup_netdlg::{NetDlgRowIcon, NetDlgTextLine};
 
     let reply = clonk_network::MasterserverReplyInfo {
@@ -958,7 +958,7 @@ fn masterserver_results_do_not_throttle_manual_reload() {
 }
 
 #[test]
-fn l040_direct_empty_and_error_rows_expire_after_ten_seconds() {
+fn direct_empty_and_error_rows_expire_after_ten_seconds() {
     let mut app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
     let now = Instant::now();
@@ -1018,7 +1018,7 @@ fn l040_direct_empty_and_error_rows_expire_after_ten_seconds() {
 }
 
 #[test]
-fn l040_masterserver_redirect_decline_latches_and_accept_persists() {
+fn masterserver_redirect_decline_latches_and_accept_persists() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -1730,7 +1730,7 @@ fn league_record_resource_name_preserves_raw_legacy_basename() {
 }
 
 #[test]
-fn l013_running_fast_slow_commands_bound_and_honor_league_gate() {
+fn running_fast_slow_commands_bound_and_honor_league_gate() {
     let mut app = new_state_only_running_sandbox_app();
     assert!(!app.full_speed);
     assert_eq!(app.frame_skip, 1);
@@ -1771,7 +1771,7 @@ fn l013_running_fast_slow_commands_bound_and_honor_league_gate() {
 }
 
 #[test]
-fn l119_running_kick_uses_exact_name_and_live_player_league_gate() {
+fn running_kick_uses_exact_name_and_live_player_league_gate() {
     let mut app = new_state_only_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
     app.control_clients
@@ -1816,7 +1816,7 @@ fn l119_running_kick_uses_exact_name_and_live_player_league_gate() {
 }
 
 #[test]
-fn l143_exclusive_vote_outside_hit_still_reaches_exposed_chart() {
+fn exclusive_vote_outside_hit_still_reaches_exposed_chart() {
     let mut app = new_running_sandbox_app();
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::new(

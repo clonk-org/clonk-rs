@@ -3222,7 +3222,7 @@ mod tests {
     }
 
     #[test]
-    fn l148_static_info_uses_pipe_lines_without_a_client_or_live_snapshot() {
+    fn static_info_uses_pipe_lines_without_a_client_or_live_snapshot() {
         let mut dialog = RuntimeClientListDialog::new_static_info(
             "Error Log",
             10,
@@ -3268,7 +3268,7 @@ mod tests {
     }
 
     #[test]
-    fn l148_static_info_bottom_close_and_enter_dismiss_the_modal() {
+    fn static_info_bottom_close_and_enter_dismiss_the_modal() {
         let preferred = IntRect {
             x: 0,
             y: 0,
@@ -3603,7 +3603,7 @@ mod tests {
     // acknowledged the current network status
     // (src/C4Network2Dialogs.cpp:54-71).
     #[test]
-    fn l174_client_info_text_shows_unknown_ids_and_the_host_ack_marker() {
+    fn client_info_text_shows_unknown_ids_and_the_host_ack_marker() {
         assert_eq!(
             client_info_lines_for(&[], 12),
             vec!["Unknown client ID #12.".to_string()],
@@ -3639,7 +3639,7 @@ mod tests {
     }
 
     #[test]
-    fn l144_client_info_overflow_is_reachable_and_sec1_refresh_preserves_scroll() {
+    fn client_info_overflow_is_reachable_and_sec1_refresh_preserves_scroll() {
         let preferred = IntRect {
             x: 0,
             y: 0,
@@ -3802,7 +3802,7 @@ mod tests {
     }
 
     #[test]
-    fn l128_runtime_options_emit_mouse_combo_requests() {
+    fn runtime_options_emit_mouse_combo_requests() {
         let preferred = IntRect {
             x: 0,
             y: 0,
@@ -3870,7 +3870,7 @@ mod tests {
     }
 
     #[test]
-    fn l128_runtime_options_auto_scrollbar_reaches_hidden_rows() {
+    fn runtime_options_auto_scrollbar_reaches_hidden_rows() {
         let preferred = IntRect {
             x: 0,
             y: 0,
@@ -3924,7 +3924,7 @@ mod tests {
     }
 
     #[test]
-    fn l128_tab_focuses_native_order_and_list_keys_select_every_entry() {
+    fn tab_focuses_native_order_and_list_keys_select_every_entry() {
         let preferred = IntRect {
             x: 0,
             y: 0,
@@ -4071,7 +4071,7 @@ mod tests {
     }
 
     #[test]
-    fn l128_name_tooltip_waits_exactly_and_contains_only_player_names() {
+    fn name_tooltip_waits_exactly_and_contains_only_player_names() {
         let preferred = IntRect {
             x: 0,
             y: 0,
@@ -4180,7 +4180,7 @@ mod tests {
     }
 
     #[test]
-    fn l128_option_tooltip_uses_the_native_option_row_text() {
+    fn option_tooltip_uses_the_native_option_row_text() {
         let preferred = IntRect {
             x: 0,
             y: 0,

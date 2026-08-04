@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn l024_parse_basic_config_preserves_markup_and_inline_hash() {
+    fn parse_basic_config_preserves_markup_and_inline_hash() {
         let data = b"Name = <i>Player</i> # main user\nEnabled=true\n\n";
         let mut cursor = Cursor::new(&data[..]);
         let cfg = Config::from_reader(&mut cursor).unwrap();
@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn l024_trailing_backslash_does_not_consume_following_line() {
+    fn trailing_backslash_does_not_consume_following_line() {
         for line_ending in ["\n", "\r\n"] {
             let data = format!("[General]{line_ending}Path=C:\\{line_ending}Next=ok{line_ending}");
             let mut cursor = Cursor::new(data.as_bytes());
@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn l022_cpp_dump_rust_save_cpp_read_preserves_types_and_bytes() {
+    fn cpp_dump_rust_save_cpp_read_preserves_types_and_bytes() {
         let cpp_dump = b"[General]\r\nEnabled=false\r\nOtherEnabled=true\r\nName=\"Alice\"\r\nLanguageEx=\"US\"\r\nSpecial=\"a b\\\"c\\\\d\"\r\nUtf8=\"M\\303\\274ller\"\r\nLegacy=\"\\374\"\r\nDigits=\"\\1\\61\\62\"\r\nQuotedNumber=\"1\"\r\n\r\n[Graphics]\r\nEngine=OpenGL\r\n";
         let mut reader = Cursor::new(&cpp_dump[..]);
         let config = Config::from_reader(&mut reader).expect("parse C++ config dump");
@@ -830,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn l022_new_native_strings_are_quoted_and_scalars_remain_raw() {
+    fn new_native_strings_are_quoted_and_scalars_remain_raw() {
         let mut config = Config::new();
         config.set_in(Some("General"), "GamepadEnabled", "false");
         config.set_in(Some("General"), "Name", "Müller \"Q\"\\path");

@@ -1682,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn l040_explicit_linear_resampling_mode_uses_linear_interpolation() {
+    fn explicit_linear_resampling_mode_uses_linear_interpolation() {
         let frames = [[0.0, 0.0], [1.0, -1.0]];
 
         assert_eq!(

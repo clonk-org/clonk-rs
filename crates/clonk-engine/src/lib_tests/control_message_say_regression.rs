@@ -74,7 +74,7 @@ fn cinematic_say_uses_cursor_name_and_zero_color_fallback() {
 }
 
 #[test]
-fn l051_film_view_scope_requires_raw_replay_and_nonzero_film() {
+fn film_view_scope_requires_raw_replay_and_nonzero_film() {
     let mut engine = Engine::new();
     for (replay, film, expected) in [
         (0, 0, false),
@@ -95,7 +95,7 @@ fn l051_film_view_scope_requires_raw_replay_and_nonzero_film() {
 }
 
 #[test]
-fn l052_fullscreen_film_fallback_requires_replay_and_nonzero_film_mode() {
+fn fullscreen_film_fallback_requires_replay_and_nonzero_film_mode() {
     let mut engine = Engine::new();
     engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(
         0, 1,

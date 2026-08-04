@@ -1330,7 +1330,7 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
 }
 
 #[test]
-fn l034_about_shift_tab_reverses_buttons_and_license_tabs() {
+fn about_shift_tab_reverses_buttons_and_license_tabs() {
     use clonk_frontend::startup_about_dlg::AboutPage;
 
     let mut app = new_classic_menu_app(640, 480);
@@ -1413,7 +1413,7 @@ fn unsupported_startup_actions_fail_before_status_or_domain_mutation() {
 }
 
 #[test]
-fn l061_player_selection_widget_sounds_reach_the_production_audio_route() {
+fn player_selection_widget_sounds_reach_the_production_audio_route() {
     let mut app = new_classic_menu_app(640, 480);
     let mut dialog = clonk_frontend::startup_plrsel::PlrSelController::new(2);
     dialog.resize(640, 480);
@@ -3766,7 +3766,7 @@ fn startup_loader_render_uses_configured_user_gamma() {
 }
 
 #[test]
-fn l021_app_loader_keeps_progress_monotonic_and_retains_phase_status() {
+fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -3809,7 +3809,7 @@ fn l021_app_loader_keeps_progress_monotonic_and_retains_phase_status() {
 }
 
 #[test]
-fn l021_real_legacy_worker_updates_live_loader_through_activation() {
+fn real_legacy_worker_updates_live_loader_through_activation() {
     let user_data = tempdir().expect("isolated legacy-loader user data");
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     configure_test_startup_participant(&paths, user_data.path());
@@ -3878,7 +3878,7 @@ fn l021_real_legacy_worker_updates_live_loader_through_activation() {
 }
 
 #[test]
-fn l021_player_selection_wheel_and_held_arrow_route_through_app() {
+fn player_selection_wheel_and_held_arrow_route_through_app() {
     use clonk_frontend::startup_plrsel::{plrsel_layout, PlrSelController, PlrSelPlayer};
 
     let mut app = new_real_classic_menu_app(640, 480);
@@ -5056,7 +5056,7 @@ fn load_frontend_scenarios_orders_folders_by_index() {
 }
 
 #[test]
-fn l064_alphabetical_sorting_gates_only_folder_index_and_difficulty() {
+fn alphabetical_sorting_gates_only_folder_index_and_difficulty() {
     let titled_entry = |title: &str| {
         let mut entry = FrontendScenario::fallback();
         entry.identifier = format!("{title}.c4s");
@@ -5112,7 +5112,7 @@ fn l064_alphabetical_sorting_gates_only_folder_index_and_difficulty() {
 }
 
 #[test]
-fn l064_loader_reads_startup_alphabetical_sorting_recursively() {
+fn loader_reads_startup_alphabetical_sorting_recursively() {
     let _env_lock = crate::tests::env_lock().lock();
     reset_cached_app_paths();
 

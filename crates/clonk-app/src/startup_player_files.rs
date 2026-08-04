@@ -1909,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn l063_persist_activations_accepts_exact_cpp_buffer_payload() {
+    fn persist_activations_accepts_exact_cpp_buffer_payload() {
         let root = tempdir().expect("config root");
         let config_path = root.path().join("clonk-rust.config");
         let tail = "b".repeat(1022);
@@ -1932,7 +1932,7 @@ mod tests {
     }
 
     #[test]
-    fn l063_persist_activations_refuses_overflow_and_continues() {
+    fn persist_activations_refuses_overflow_and_continues() {
         let root = tempdir().expect("config root");
         let config_path = root.path().join("clonk-rust.config");
         fs::write(
@@ -1964,7 +1964,7 @@ mod tests {
     }
 
     #[test]
-    fn l063_persist_activations_reserves_separator_for_first_player() {
+    fn persist_activations_reserves_separator_for_first_player() {
         let root = tempdir().expect("config root");
         let accepted_path = root.path().join("accepted.config");
         let mut accepted = vec![synthetic_player("a".repeat(1023), "Accepted")];

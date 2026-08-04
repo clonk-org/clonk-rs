@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn l024_inline_hash_is_value_data() {
+    fn inline_hash_is_value_data() {
         match parse_line("Name = A # B").unwrap() {
             ParsedItem::Entry {
                 key,
@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn l024_unquoted_comment_marker_escapes_remain_verbatim() {
+    fn unquoted_comment_marker_escapes_remain_verbatim() {
         match parse_line(r"Value=A\#B\//C").unwrap() {
             ParsedItem::Entry { value, .. } => assert_eq!(value, r"A\#B\//C"),
             ParsedItem::Section { .. } => panic!("expected entry"),
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn l010_cpp_escaped_utf8_backslash_and_quote_decode_bytewise() {
+    fn cpp_escaped_utf8_backslash_and_quote_decode_bytewise() {
         let line = r#"Comment="M\303\274ller\\path\"quoted\"" trailing data"#;
         match parse_line(line).unwrap() {
             ParsedItem::Entry { value, .. } => {
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn l010_quoted_latin1_fallback_does_not_reprocess_comment_escapes() {
+    fn quoted_latin1_fallback_does_not_reprocess_comment_escapes() {
         match parse_line("Value=\"\\374\\\\#\"").unwrap() {
             ParsedItem::Entry { value, .. } => assert_eq!(value, "ü\\#"),
             ParsedItem::Section { .. } => panic!("expected entry"),

@@ -2,7 +2,7 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
 #[test]
-fn l028_console_open_close_and_message_fallback_follow_app_state() {
+fn console_open_close_and_message_fallback_follow_app_state() {
     let mut startup = new_state_only_menu_app(320, 200);
     startup.console_mode = true;
     let (boot_sender, boot_receiver) = mpsc::channel();
@@ -1306,7 +1306,7 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
 }
 
 #[test]
-fn l119_running_help_clear_and_case_sensitive_unknown() {
+fn running_help_clear_and_case_sensitive_unknown() {
     let mut app = new_state_only_running_sandbox_app();
     app.enqueue_control_message_board_line("old line".to_string());
 

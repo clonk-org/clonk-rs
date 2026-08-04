@@ -5561,7 +5561,7 @@ protected func ControlCommandFinished() { finished_dir = GetComDir(); }
     }
 
     #[test]
-    fn l068_tutorial_special2_keeps_context_location_before_control_returns() {
+    fn tutorial_special2_keeps_context_location_before_control_returns() {
         // FnExecuteCommand dispatches synchronously to C4Object::ExecuteCommand
         // (C4Script.cpp:835-838). ExecuteCommand calls
         // ~ControlCommandFinished while the finished command is still the

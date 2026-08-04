@@ -1078,7 +1078,7 @@ fn staged_host_installs_activated_participant_before_building_lobby_roster() {
 }
 
 #[test]
-fn l093_classic_lobby_identity_sanitizes_native_bytes() {
+fn classic_lobby_identity_sanitizes_native_bytes() {
     let _lock = env_lock().lock();
     let user_data = tempdir().expect("isolated native identity user data");
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -1265,7 +1265,7 @@ fn unsupported_classic_host_lobby_children_are_typed_fail_fast() {
 }
 
 #[test]
-fn l085_lobby_options_refresh_only_while_the_sheet_is_active() {
+fn lobby_options_refresh_only_while_the_sheet_is_active() {
     let mut app = new_menu_app(640, 480);
     let (_events, _commands) = install_classic_host_network_stub(&mut app);
     app.engine.set_control_rate(4);
@@ -1319,7 +1319,7 @@ fn l085_lobby_options_refresh_only_while_the_sheet_is_active() {
 }
 
 #[test]
-fn l082_classic_lobby_internet_signup_is_pollable_and_rolls_back_failure() {
+fn classic_lobby_internet_signup_is_pollable_and_rolls_back_failure() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let (_snapshot, reference) = default_exact_host_reference();
@@ -1366,7 +1366,7 @@ fn l082_classic_lobby_internet_signup_is_pollable_and_rolls_back_failure() {
 }
 
 #[test]
-fn l082_aborting_live_internet_signup_keeps_the_prior_off_state() {
+fn aborting_live_internet_signup_keeps_the_prior_off_state() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let (_snapshot, reference) = default_exact_host_reference();
@@ -1407,7 +1407,7 @@ fn l082_aborting_live_internet_signup_keeps_the_prior_off_state() {
 }
 
 #[test]
-fn l082_live_signup_applies_every_start_response_field() {
+fn live_signup_applies_every_start_response_field() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let (snapshot, reference) = default_exact_host_reference();
@@ -1496,7 +1496,7 @@ fn l082_live_signup_applies_every_start_response_field() {
 }
 
 #[test]
-fn l082_committed_start_apply_failure_tears_down_when_cleanup_cannot_start() {
+fn committed_start_apply_failure_tears_down_when_cleanup_cannot_start() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let (_snapshot, reference) = default_exact_host_reference();
@@ -1521,7 +1521,7 @@ fn l082_committed_start_apply_failure_tears_down_when_cleanup_cannot_start() {
 }
 
 #[test]
-fn l082_leaving_lobby_during_compensating_end_preserves_worker_cleanup() {
+fn leaving_lobby_during_compensating_end_preserves_worker_cleanup() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let (snapshot, reference) = default_exact_host_reference();
@@ -1557,7 +1557,7 @@ fn l082_leaving_lobby_during_compensating_end_preserves_worker_cleanup() {
 }
 
 #[test]
-fn l082_failed_live_end_tears_the_host_down() {
+fn failed_live_end_tears_the_host_down() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let (snapshot, reference) = default_exact_host_reference();
@@ -2066,7 +2066,7 @@ fn classic_host_zero_countdown_enters_go_without_a_countdown_packet() {
 }
 
 #[test]
-fn l085_atomic_go_worker_failure_is_reported_before_lobby_teardown() {
+fn atomic_go_worker_failure_is_reported_before_lobby_teardown() {
     let _lock = env_lock().lock();
     let user_data = tempdir().expect("isolated atomic Go user data");
     let content = tempdir().expect("minimal atomic Go content");
@@ -2305,7 +2305,7 @@ fn classic_host_chat_start_abort_and_readycheck_use_live_lobby_actions() {
 }
 
 #[test]
-fn l016_unknown_lobby_command_is_a_local_nonfatal_cpp_error() {
+fn unknown_lobby_command_is_a_local_nonfatal_cpp_error() {
     let mut app = new_menu_app(640, 480);
     install_classic_host_network_stub(&mut app);
     app.show_log_timestamps = true;
@@ -2331,7 +2331,7 @@ fn l016_unknown_lobby_command_is_a_local_nonfatal_cpp_error() {
 }
 
 #[test]
-fn l016_set_maxplayer_submits_sync_control_and_refreshes_lobby_count() {
+fn set_maxplayer_submits_sync_control_and_refreshes_lobby_count() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
 
@@ -2361,7 +2361,7 @@ fn l016_set_maxplayer_submits_sync_control_and_refreshes_lobby_count() {
 }
 
 #[test]
-fn l103_set_faircrew_submits_native_values_and_obeys_lobby_gates() {
+fn set_faircrew_submits_native_values_and_obeys_lobby_gates() {
     let _lock = env_lock().lock();
     let user_data = tempdir().expect("isolated fair-crew configuration");
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -2431,7 +2431,7 @@ fn l103_set_faircrew_submits_native_values_and_obeys_lobby_gates() {
 }
 
 #[test]
-fn l083_reached_network_start_wait_uses_host_roster_and_client_abort_dialog() {
+fn reached_network_start_wait_uses_host_roster_and_client_abort_dialog() {
     let status = clonk_network::NetworkStatus {
         state: clonk_network::NETWORK_STATE_GO,
         control_mode: 1,
@@ -3264,7 +3264,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
 }
 
 #[test]
-fn l108_completed_scenario_description_uses_exact_desc_or_title() {
+fn completed_scenario_description_uses_exact_desc_or_title() {
     let app = new_state_only_menu_app(640, 480);
     let directory = tempdir().expect("scenario description fixture");
     let scenario = directory.path().join("Remote.c4s");
@@ -3297,7 +3297,7 @@ fn l108_completed_scenario_description_uses_exact_desc_or_title() {
 }
 
 #[test]
-fn l163_lobby_scenario_description_ignores_bytes_after_native_nul() {
+fn lobby_scenario_description_ignores_bytes_after_native_nul() {
     let app = new_state_only_menu_app(640, 480);
     let directory = tempdir().expect("scenario description fixture");
     let scenario = directory.path().join("Remote.c4s");
@@ -4254,7 +4254,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
 }
 
 #[test]
-fn l102_joined_client_roster_context_reaches_mute_and_info_without_host_actions() {
+fn joined_client_roster_context_reaches_mute_and_info_without_host_actions() {
     let mut app = new_menu_app(640, 480);
     app.startup_view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
@@ -5974,7 +5974,7 @@ fn client_info_dialog_shows_unknown_id_and_host_unacknowledged_marker() {
 }
 
 #[test]
-fn l102_lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
+fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
     let mut app = new_real_menu_app(640, 480);
     app.startup_view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
@@ -6889,7 +6889,7 @@ fn focused_lobby_team_combo_opens_from_cpp_keyboard_bindings_and_escape_closes()
 }
 
 #[test]
-fn l037_paste_scanner_preserves_edit_rules_and_skips_empty_lines() {
+fn paste_scanner_preserves_edit_rules_and_skips_empty_lines() {
     let mut view = LobbyChatEditView {
         text: "abZZcd".into(),
         caret: 4,
@@ -6998,7 +6998,7 @@ fn l037_paste_scanner_preserves_edit_rules_and_skips_empty_lines() {
 }
 
 #[test]
-fn l037_lobby_paste_submits_each_line_and_retains_the_tail() {
+fn lobby_paste_submits_each_line_and_retains_the_tail() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
@@ -7042,7 +7042,7 @@ fn l037_lobby_paste_submits_each_line_and_retains_the_tail() {
 }
 
 #[test]
-fn l037_running_paste_obeys_finish_result_and_crlf_more_flag() {
+fn running_paste_obeys_finish_result_and_crlf_more_flag() {
     let mut app = new_running_sandbox_app();
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(network);
@@ -7823,7 +7823,7 @@ fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
 }
 
 #[test]
-fn l094_saving_a_file_picture_preserves_an_unchecked_lobby_icon() {
+fn saving_a_file_picture_preserves_an_unchecked_lobby_icon() {
     let _lock = env_lock().lock();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -8483,7 +8483,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
 }
 
 #[test]
-fn l038_network_lobby_does_not_displace_join_or_host_startup_dialog() {
+fn network_lobby_does_not_displace_join_or_host_startup_dialog() {
     let mut joined = new_menu_app(640, 480);
     joined.open_network_game_dialog();
     joined.open_network_lobby();
@@ -8495,7 +8495,7 @@ fn l038_network_lobby_does_not_displace_join_or_host_startup_dialog() {
     assert_eq!(joined.startup_view, StartupView::NetworkGame);
     assert_eq!(joined.last_startup_dialog, StartupDialog::NetworkGame);
 
-    let mut hosted = l038_running_browser_sandbox(ScenarioSelectorMode::NetworkHost);
+    let mut hosted = running_browser_sandbox(ScenarioSelectorMode::NetworkHost);
     hosted.open_network_lobby();
     confirm_abort_dialog(&mut hosted);
     assert_l038_browser_return(&hosted, ScenarioSelectorMode::NetworkHost);
@@ -9512,7 +9512,7 @@ fn ready_check_cooldown_reads_cpp_cooldowns_config_key() {
 }
 
 #[test]
-fn l030_ready_check_toast_config_uses_cpp_boolean_grammar_and_default() {
+fn ready_check_toast_config_uses_cpp_boolean_grammar_and_default() {
     assert!(ready_check_toasts_enabled_from_config(b""));
     assert!(ready_check_toasts_enabled_from_config(
         b"[Toasts]\nReadyCheck=true\n"
@@ -9527,7 +9527,7 @@ fn l030_ready_check_toast_config_uses_cpp_boolean_grammar_and_default() {
 }
 
 #[test]
-fn l030_unfocused_ready_check_queues_one_enabled_desktop_notification() {
+fn unfocused_ready_check_queues_one_enabled_desktop_notification() {
     fn client_app(window_active: bool, toasts_enabled: bool) -> GameApp {
         let mut app = new_menu_app(320, 200);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
@@ -9569,7 +9569,7 @@ fn l030_unfocused_ready_check_queues_one_enabled_desktop_notification() {
 }
 
 #[test]
-fn l030_desktop_notification_delivery_failure_is_nonfatal() {
+fn desktop_notification_delivery_failure_is_nonfatal() {
     let mut app = new_state_only_menu_app(320, 200);
     app.pending_desktop_notifications
         .push_back(DesktopNotification::new(
@@ -11352,7 +11352,7 @@ fn team_switch_menu_refills_membership_and_preserves_selection_like_tick35() {
 }
 
 #[test]
-fn l135_team_selection_entries_cache_icon_specs_and_player_info_occupancy() {
+fn team_selection_entries_cache_icon_specs_and_player_info_occupancy() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
     let mut definition =

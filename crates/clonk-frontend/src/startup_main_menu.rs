@@ -1232,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn l046_main_menu_mnemonics_follow_caption_markers_and_enabled_state() {
+    fn main_menu_mnemonics_follow_caption_markers_and_enabled_state() {
         let cases = [
             ('S', MainMenuItem::LocalGame),
             ('N', MainMenuItem::NetworkGame),

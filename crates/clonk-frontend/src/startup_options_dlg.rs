@@ -6982,7 +6982,7 @@ mod tests {
     }
 
     #[test]
-    fn l079_control_set_hotkeys_follow_visible_button_order() {
+    fn control_set_hotkeys_follow_visible_button_order() {
         let labels = || std::array::from_fn(|_| std::array::from_fn(|_| "Undefined".to_string()));
         let controls = ControlSheetState::new(labels(), labels(), 3, false);
         let mut state = OptionsDlgState::with_all(
@@ -7086,7 +7086,7 @@ mod tests {
     }
 
     #[test]
-    fn l131_graphics_tab_and_shift_tab_cover_native_controls() {
+    fn graphics_tab_and_shift_tab_cover_native_controls() {
         let mut state = OptionsDlgState::default();
         state.restore_sheet(OptionsSheet::Graphics);
         let mut controls = vec![
@@ -7105,7 +7105,7 @@ mod tests {
     }
 
     #[test]
-    fn l131_keyboard_tab_and_shift_tab_cover_native_controls() {
+    fn keyboard_tab_and_shift_tab_cover_native_controls() {
         let mut state = OptionsDlgState::default();
         state.restore_sheet(OptionsSheet::Keyboard);
         let mut controls: Vec<_> = (0..CONTROL_SET_COUNT)
@@ -7122,7 +7122,7 @@ mod tests {
     }
 
     #[test]
-    fn l131_gamepad_tab_and_shift_tab_follow_visible_controls() {
+    fn gamepad_tab_and_shift_tab_follow_visible_controls() {
         let labels = || std::array::from_fn(|_| std::array::from_fn(|_| "Undefined".to_string()));
         let controls_state = ControlSheetState::new(labels(), labels(), 3, false);
         let mut state = OptionsDlgState::with_all(
@@ -7308,7 +7308,7 @@ mod tests {
     }
 
     #[test]
-    fn l131_network_tab_and_shift_tab_follow_dynamic_visibility() {
+    fn network_tab_and_shift_tab_follow_dynamic_visibility() {
         let network = NetworkSheetState::new(
             [11_112, 11_113, 11_111, 11_114],
             true,

@@ -12,7 +12,7 @@ fn boxed_classic_running_sandbox_app() -> Box<GameApp> {
 }
 
 #[test]
-fn l143_default_z_dialog_order_tracks_show_raise_and_close() {
+fn default_z_dialog_order_tracks_show_raise_and_close() {
     let mut app = new_game_over_keyboard_app();
     assert_eq!(
         app.runtime_default_dialog_order_snapshot(),
@@ -51,7 +51,7 @@ fn l143_default_z_dialog_order_tracks_show_raise_and_close() {
 }
 
 #[test]
-fn l143_non_left_runtime_dialog_hits_swallow_without_raising() {
+fn non_left_runtime_dialog_hits_swallow_without_raising() {
     let mut app = new_game_over_keyboard_app();
     app.resize(1280, 720)
         .expect("resize pointer-routing fixture");
@@ -2649,7 +2649,7 @@ fn engine_script_menu_pointer_selects_enters_and_closes_like_cpp() {
 }
 
 #[test]
-fn l065_running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
+fn running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
     let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
@@ -2793,7 +2793,7 @@ fn l065_running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
 }
 
 #[test]
-fn l065_script_menu_scroll_and_drag_state_is_per_viewport_owner() {
+fn script_menu_scroll_and_drag_state_is_per_viewport_owner() {
     let mut app = new_classic_running_sandbox_app();
     let primary = app.local_owner;
     let secondary = primary + 1;
@@ -3900,7 +3900,7 @@ fn running_only_globals_are_excluded_from_menu_and_loading_modes() {
 }
 
 #[test]
-fn l019_window_close_confirms_running_round_and_nonrunning_close_exits() {
+fn window_close_confirms_running_round_and_nonrunning_close_exits() {
     let mut app = new_running_sandbox_app();
     app.update().expect("advance round before declining close");
     let running_frame = app.engine.frame();
@@ -3957,7 +3957,7 @@ fn l019_window_close_confirms_running_round_and_nonrunning_close_exits() {
 }
 
 #[test]
-fn l019_window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
+fn window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
     let mut observer = new_running_sandbox_app();
     let removed_owner = observer.local_owner;
     observer
@@ -3989,7 +3989,7 @@ fn l019_window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
 }
 
 #[test]
-fn l002_bare_escape_opens_abort_confirmation_without_exiting() {
+fn bare_escape_opens_abort_confirmation_without_exiting() {
     clonk_logging::init();
     let mut app = new_running_sandbox_app();
     app.status_text.clear();

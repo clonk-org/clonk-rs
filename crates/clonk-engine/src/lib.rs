@@ -12700,8 +12700,8 @@ fn value_to_liquid_segments(
 mod control_message_say_regression;
 
 #[cfg(test)]
-#[path = "lib_tests/l049_scenario_value_gain_regression.rs"]
-mod l049_scenario_value_gain_regression;
+#[path = "lib_tests/scenario_value_gain_regression.rs"]
+mod scenario_value_gain_regression;
 
 #[cfg(test)]
 #[path = "lib_tests/legacy_contents_order_regression.rs"]

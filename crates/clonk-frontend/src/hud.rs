@@ -4959,7 +4959,7 @@ mod tests {
     }
 
     #[test]
-    fn l049_fixed_items_respect_individual_visibility() {
+    fn fixed_items_respect_individual_visibility() {
         let hud = HudGraphics {
             wealth: Some(solid_image(60, 30, [220, 180, 0, 255])),
             score: Some(solid_image(60, 30, [180, 90, 0, 255])),
@@ -5070,7 +5070,7 @@ mod tests {
     }
 
     #[test]
-    fn l120_message_board_background_tile_is_screen_anchored() {
+    fn message_board_background_tile_is_screen_anchored() {
         let mut target = surface(8, 10);
         let hud = HudGraphics {
             background: Some(ImageData::new(
@@ -5093,7 +5093,7 @@ mod tests {
     }
 
     #[test]
-    fn l120_single_line_fader_offsets_and_alpha_fades_older_text() {
+    fn single_line_fader_offsets_and_alpha_fades_older_text() {
         let mut target = surface(64, 24);
         let hud = HudGraphics {
             background: Some(solid_image(2, 2, [0, 0, 0, 255])),
@@ -5125,7 +5125,7 @@ mod tests {
     }
 
     #[test]
-    fn l120_continuous_message_board_draws_multiple_lines_over_opaque_dynamic_strip() {
+    fn continuous_message_board_draws_multiple_lines_over_opaque_dynamic_strip() {
         let mut target = surface(96, 96);
         let background_color = Color::opaque(20, 24, 28);
         let hud = HudGraphics {

@@ -143,7 +143,7 @@
     }
 
     #[test]
-    fn l028_console_open_real_scenario_reaches_running() {
+    fn console_open_real_scenario_reaches_running() {
         let _env_lock = crate::tests::env_lock().lock();
         reset_cached_app_paths();
         let user_data = tempdir().expect("command-line user data");
@@ -227,7 +227,7 @@
     }
 
     #[test]
-    fn m10_l046_command_and_hash_routes_bypass_plain_script_control() {
+    fn command_and_hash_routes_bypass_plain_script_control() {
         let mut app = new_state_only_running_sandbox_app();
         let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
 
@@ -254,7 +254,7 @@
     }
 
     #[test]
-    fn m10_l046_plain_script_checks_editing_and_emits_decide_console_scope() {
+    fn plain_script_checks_editing_and_emits_decide_console_scope() {
         let _lock = env_lock().lock();
         let fixture = tempdir().expect("developer console strictness configuration");
         let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
@@ -288,7 +288,7 @@
     }
 
     #[test]
-    fn m10_l046_property_script_wraps_live_selection_as_emmo_script() {
+    fn property_script_wraps_live_selection_as_emmo_script() {
         let mut app = new_state_only_running_sandbox_app();
         let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
 
@@ -354,7 +354,7 @@
     }
 
     #[test]
-    fn l001_offline_seed_resolution_matches_cpp_time_pin_and_parameters() {
+    fn offline_seed_resolution_matches_cpp_time_pin_and_parameters() {
         let first_second = 1_700_000_000_u64;
         let next_second = first_second + 1;
 
@@ -395,7 +395,7 @@
     }
 
     #[test]
-    fn l001_pinned_offline_seed_reaches_dynamic_map_and_engine() {
+    fn pinned_offline_seed_reaches_dynamic_map_and_engine() {
         let _pin_guard = EnvGuard::set(&[
             ("LC_PIN_SEED", Some(Path::new("7"))),
             ("LC_RUST_ENGINE_RANDOM_SEED", None),
@@ -561,7 +561,7 @@
     }
 
     #[test]
-    fn l001_fresh_offline_skyparcour_retries_and_activates_the_accepted_seed() {
+    fn fresh_offline_skyparcour_retries_and_activates_the_accepted_seed() {
         let _pin_guard = EnvGuard::set(&[
             ("LC_PIN_SEED", Some(Path::new("1784903470"))),
             ("LC_RUST_ENGINE_RANDOM_SEED", None),
@@ -690,7 +690,7 @@
     }
 
     #[test]
-    fn l013_new_game_and_teardown_reset_transient_speed_state() {
+    fn new_game_and_teardown_reset_transient_speed_state() {
         let mut app = new_running_sandbox_app();
         app.full_speed = true;
         app.frame_skip = 500;
@@ -1636,7 +1636,7 @@
 
     #[cfg(unix)]
     #[test]
-    fn l032_writable_config_repairs_when_parent_forbids_staging() {
+    fn writable_config_repairs_when_parent_forbids_staging() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().expect("config root");
@@ -1660,7 +1660,7 @@
     }
 
     #[test]
-    fn l032_custom_corrupt_config_aborts_without_default_replacement() {
+    fn custom_corrupt_config_aborts_without_default_replacement() {
         let install = tempdir().expect("install root");
         let user_data = tempdir().expect("user data");
         let dir = tempdir().expect("config root");
@@ -1768,7 +1768,7 @@
     }
 
     #[test]
-    fn l032_environment_config_repairs_instead_of_custom_abort() {
+    fn environment_config_repairs_instead_of_custom_abort() {
         let install = tempdir().expect("install root");
         let user_data = tempdir().expect("user data");
         let custom = tempdir().expect("environment config root");
@@ -1795,7 +1795,7 @@
     }
 
     #[test]
-    fn l032_missing_integrity_fields_use_typed_defaults() {
+    fn missing_integrity_fields_use_typed_defaults() {
         let dir = tempdir().expect("config root");
         let path = dir.path().join("clonk-rust.config");
         let original = b"[General]\nName=Keep\n\n[Graphics]\nResolutionY=0\n";
@@ -1807,7 +1807,7 @@
     }
 
     #[test]
-    fn l032_default_repair_discards_cached_corrupt_user_path() {
+    fn default_repair_discards_cached_corrupt_user_path() {
         let install = tempdir().expect("install root");
         let home = tempdir().expect("home root");
         let poison = tempdir().expect("poison user root");
@@ -1861,7 +1861,7 @@
     }
 
     #[test]
-    fn l005_cli_config_flag_selects_the_explicit_file() {
+    fn cli_config_flag_selects_the_explicit_file() {
         let install = tempdir().expect("install root");
         let user_data = tempdir().expect("user data");
         let custom = tempdir().expect("custom config root");
@@ -1887,7 +1887,7 @@
     }
 
     #[test]
-    fn l005_environment_config_file_routes_app_reads_and_writes() {
+    fn environment_config_file_routes_app_reads_and_writes() {
         let install = tempdir().expect("install root");
         let user_data = tempdir().expect("user data");
         let custom = tempdir().expect("custom config root");
@@ -2426,7 +2426,7 @@
     }
 
     #[test]
-    fn l134_team_options_submit_exact_sets_and_refresh_from_echoes() {
+    fn team_options_submit_exact_sets_and_refresh_from_echoes() {
         let mut app = new_menu_app(640, 480);
         let (_events, mut commands) = install_classic_host_network_stub(&mut app);
         let metadata = set_control_test_metadata(
@@ -2609,8 +2609,8 @@
     }
 
     #[test]
-    fn l100_exhausted_script_player_names_pick_from_configured_list() {
-        let (mut app, mut commands) = l100_script_player_add_fixture(
+    fn exhausted_script_player_names_pick_from_configured_list() {
+        let (mut app, mut commands) = script_player_add_fixture(
             b"Alpha|Beta",
             &[(b"alpha".as_slice(), false), (b"BETA".as_slice(), true)],
             2,
@@ -2637,8 +2637,8 @@
     }
 
     #[test]
-    fn l100_empty_script_player_names_keep_computer_fallback() {
-        let (mut app, mut commands) = l100_script_player_add_fixture(b"", &[], 1);
+    fn empty_script_player_names_keep_computer_fallback() {
+        let (mut app, mut commands) = script_player_add_fixture(b"", &[], 1);
         let draws = [4, 5, 6];
         let mut draw = 0;
         let mut ranges = Vec::new();
@@ -2660,7 +2660,7 @@
     }
 
     #[test]
-    fn l034_player_shift_tab_wraps_and_continues_backwards() {
+    fn player_shift_tab_wraps_and_continues_backwards() {
         use clonk_frontend::startup_plrsel::{PlrSelControl, PlrSelController};
 
         let mut app = new_classic_menu_app(640, 480);
@@ -2710,7 +2710,7 @@
     }
 
     #[test]
-    fn l060_player_shift_tab_covers_back_list_and_crew_edges() {
+    fn player_shift_tab_covers_back_list_and_crew_edges() {
         use clonk_frontend::startup_plrsel::{PlrSelControl, PlrSelController};
 
         let mut app = new_classic_menu_app(640, 480);
@@ -2773,7 +2773,7 @@
     }
 
     #[test]
-    fn l047_player_typeahead_and_apps_route_through_selected_row() {
+    fn player_typeahead_and_apps_route_through_selected_row() {
         let player = |name: &str| clonk_frontend::startup_plrsel::PlrSelPlayer {
             name: name.to_string(),
             activated: false,
@@ -2922,7 +2922,7 @@
     }
 
     #[test]
-    fn l035_portrait_selector_uses_and_persists_last_folder_index() {
+    fn portrait_selector_uses_and_persists_last_folder_index() {
         let _lock = env_lock().lock();
         reset_cached_app_paths();
         let program_data = tempdir().expect("portrait program data");
@@ -3446,7 +3446,7 @@
     }
 
     #[test]
-    fn l079_options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
+    fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
         use clonk_frontend::startup_options_controls::ControlDevice;
         use clonk_frontend::startup_options_dlg::{OptionsDlgAction, OptionsSheet};
 
@@ -3561,7 +3561,7 @@
     }
 
     #[test]
-    fn l079_options_control_set_hotkeys_do_not_leak_through_modals() {
+    fn options_control_set_hotkeys_do_not_leak_through_modals() {
         use clonk_frontend::message_dialog::MessageDialogResult;
         use clonk_frontend::startup_options_controls::ControlDevice;
         use clonk_frontend::startup_options_dlg::{OptionsDlgAction, OptionsSheet};
@@ -4254,7 +4254,7 @@
     }
 
     #[test]
-    fn l026_unconfigured_stick_and_hat_emit_no_gameplay_controls() {
+    fn unconfigured_stick_and_hat_emit_no_gameplay_controls() {
         let mut app = new_running_sandbox_app();
         app.gamepad_bindings = GamepadBindings::from_config(&Config::new());
         app.local_controls = LocalControlRegistry::default();
@@ -4318,7 +4318,7 @@
     }
 
     #[test]
-    fn l026_axis_up_fires_dig_and_hat_zero_fires_configured_left() {
+    fn axis_up_fires_dig_and_hat_zero_fires_configured_left() {
         let mut config = Config::new();
         config.set_in(
             Some("Gamepad0"),
@@ -4410,7 +4410,7 @@
     }
 
     #[test]
-    fn l143_chart_toggle_key_is_default_unbound_configurable_and_escape_owned() {
+    fn chart_toggle_key_is_default_unbound_configurable_and_escape_owned() {
         assert!(RuntimeKeyConfig::default().chart_toggle.is_empty());
         let parsed = parse_runtime_key_config(b"[Keys]\nChartToggle=F8\n[Keys]\nChartToggle=F7\n")
             .expect("parse the represented default-unbound chart action");
@@ -4518,7 +4518,7 @@
     }
 
     #[test]
-    fn l119_running_script_uses_symbolic_console_strictness_and_frozen_sync() {
+    fn running_script_uses_symbolic_console_strictness_and_frozen_sync() {
         let _lock = env_lock().lock();
         let fixture = tempdir().expect("running script configuration");
         let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
@@ -4546,7 +4546,7 @@
     }
 
     #[test]
-    fn l006_runtime_key_config_compiles_lists_modifiers_raw_joy_and_disable_codes() {
+    fn runtime_key_config_compiles_lists_modifiers_raw_joy_and_disable_codes() {
         let parsed = parse_runtime_key_config(
                 b"[Keys]\nNetObsNextPlayer=F5\nChatOpen=Ctrl+Shift+F2,Return\nScoreboardToggle=None\nGameAbort=Joy2A\nKbd1Key1=\\x0042010a\nUnknownAction=F9\n[Keys]\nNetObsNextPlayer=F6\n",
             )
@@ -4643,7 +4643,7 @@
     }
 
     #[test]
-    fn l077_ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
+    fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
         let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
@@ -4880,7 +4880,7 @@
     }
 
     #[test]
-    fn l052_retargeted_primary_survives_its_original_local_player() {
+    fn retargeted_primary_survives_its_original_local_player() {
         let mut app = new_lightweight_running_sandbox_app();
         let original = app.local_owner;
         let target = original + 1;
@@ -5789,7 +5789,7 @@
     }
 
     #[test]
-    fn l013_speed_keys_flash_clamp_and_honor_keyconfig_priority() {
+    fn speed_keys_flash_clamp_and_honor_keyconfig_priority() {
         let mut app = new_running_sandbox_app();
         app.handle_modifiers_changed(ModifiersState::SHIFT)
             .expect("set default speed-key modifiers");
@@ -6635,7 +6635,7 @@
     }
 
     #[test]
-    fn l006_runtime_key_config_loads_known_remaps_from_directory_and_packed_groups() {
+    fn runtime_key_config_loads_known_remaps_from_directory_and_packed_groups() {
         let _lock = env_lock().lock();
         let install = tempdir().expect("runtime help install fixture");
         let user_data = tempdir().expect("runtime help user fixture");
@@ -7043,7 +7043,7 @@
     }
 
     #[test]
-    fn l006_secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
+    fn secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
         let mut app = new_running_sandbox_app();
         let primary = app.local_owner;
         let secondary = add_secondary_local_player_for_mouse_option_test(&mut app);
@@ -7294,7 +7294,7 @@
     }
 
     #[test]
-    fn l128_f4_player_tooltip_names_follow_retained_visibility_and_effective_name() {
+    fn f4_player_tooltip_names_follow_retained_visibility_and_effective_name() {
         let mut app = new_classic_running_sandbox_app();
         let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
         app.control_clients
@@ -7343,7 +7343,7 @@
     }
 
     #[test]
-    fn l128_f4_control_mode_waits_for_status_commit() {
+    fn f4_control_mode_waits_for_status_commit() {
         let mut app = new_classic_running_sandbox_app();
         let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
         app.runtime_network_control_mode = Some(0);

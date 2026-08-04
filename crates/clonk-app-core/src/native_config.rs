@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn l010_std_config_and_native_config_decoders_agree_on_cpp_escapes() {
+    fn std_config_and_native_config_decoders_agree_on_cpp_escapes() {
         let config = br#"[Network]
 Comment="M\303\274ller\\path\"quoted\""
 "#;

@@ -80,7 +80,7 @@ fn loaded_crew_info_list_prepends_group_entries_like_cpp() {
 }
 
 #[test]
-fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
+fn player_list_order_preserves_native_id_reuse_recheck_edges() {
     let mut two_players = Engine::new();
     assert_eq!(register_joining_player(&mut two_players, "Zero"), 0);
     assert_eq!(register_joining_player(&mut two_players, "One"), 1);
@@ -217,7 +217,7 @@ fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
 }
 
 #[test]
-fn l052_clear_pointer_callbacks_follow_native_player_list_order() {
+fn clear_pointer_callbacks_follow_native_player_list_order() {
     let mut engine = Engine::new();
     engine
         .register_player(PlayerConfig::new(1, "First"))

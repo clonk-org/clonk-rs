@@ -97,7 +97,7 @@ fn client_network_settings_preserve_configured_ports_and_zero_disables_protocol(
 }
 
 #[test]
-fn l023_network_port_sanitation_preserves_zero_and_disables_invalid_values() {
+fn network_port_sanitation_preserves_zero_and_disables_invalid_values() {
     assert_eq!(
         sanitized_network_ports(b""),
         NetworkPorts {
@@ -132,7 +132,7 @@ fn l023_network_port_sanitation_preserves_zero_and_disables_invalid_values() {
 }
 
 #[test]
-fn l023_network_port_collisions_increment_secondary_ports_and_wrap_at_u16_max() {
+fn network_port_collisions_increment_secondary_ports_and_wrap_at_u16_max() {
     assert_eq!(
         sanitized_network_ports(
             b"[Network]\nPortTCP=23000\nPortRefServer=23000\nPortUDP=24000\nPortDiscovery=24000\n"
@@ -158,7 +158,7 @@ fn l023_network_port_collisions_increment_secondary_ports_and_wrap_at_u16_max() 
 }
 
 #[test]
-fn l023_zero_ports_flow_to_disabled_app_network_services() {
+fn zero_ports_flow_to_disabled_app_network_services() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -1596,7 +1596,7 @@ fn fatal_worker_failure_during_game_over_preserves_the_network_halt() {
 }
 
 #[test]
-fn l038_back_history_and_fresh_app_match_native_dialog_memory() {
+fn back_history_and_fresh_app_match_native_dialog_memory() {
     let mut backed_out = new_menu_app(640, 480);
     backed_out.open_scenario_browser();
     backed_out
@@ -1618,7 +1618,7 @@ fn l038_back_history_and_fresh_app_match_native_dialog_memory() {
     assert_eq!(backed_out.startup_view, StartupView::MainMenu);
     assert_eq!(backed_out.last_startup_dialog, StartupDialog::MainMenu);
 
-    let mut previous_session = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
+    let mut previous_session = running_browser_sandbox(ScenarioSelectorMode::Local);
     confirm_abort_dialog(&mut previous_session);
     assert_l038_browser_return(&previous_session, ScenarioSelectorMode::Local);
     drop(previous_session);
@@ -1637,7 +1637,7 @@ fn l038_back_history_and_fresh_app_match_native_dialog_memory() {
 }
 
 #[test]
-fn l038_immediate_relaunch_retains_destination_without_background_discovery() {
+fn immediate_relaunch_retains_destination_without_background_discovery() {
     let mut app = new_menu_app(640, 480);
     app.open_network_game_dialog();
     app.open_network_lobby();
@@ -1659,7 +1659,7 @@ fn l038_immediate_relaunch_retains_destination_without_background_discovery() {
 }
 
 #[test]
-fn l027_refresh_generation_ignores_results_queued_before_worker_clear() {
+fn refresh_generation_ignores_results_queued_before_worker_clear() {
     let mut app = new_classic_menu_app(800, 600);
     app.startup_network_refresh_waiting_for_clear = true;
     let stale = clonk_network::NetworkGameReference {
@@ -1692,7 +1692,7 @@ fn l027_refresh_generation_ignores_results_queued_before_worker_clear() {
 }
 
 #[test]
-fn l146_network_search_results_render_only_in_native_rows() {
+fn network_search_results_render_only_in_native_rows() {
     let mut app = new_real_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::MasterserverReply(
@@ -1748,7 +1748,7 @@ fn l146_network_search_results_render_only_in_native_rows() {
 }
 
 #[test]
-fn l027_discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
+fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
     let mut app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
     let detail = "LAN discovery is unavailable: no multicast interface";
@@ -1805,7 +1805,7 @@ fn l027_discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
 }
 
 #[test]
-fn l084_join_progress_lists_logical_routes_once_without_collapsing_dial_attempts() {
+fn join_progress_lists_logical_routes_once_without_collapsing_dial_attempts() {
     // C++ expands a local address over every interface for NetIO.Connect,
     // but appends the original C4Network2Address only once to the progress
     // message (oracle-src-pinned src/C4Network2.cpp:375-405,412-423).
@@ -1857,7 +1857,7 @@ fn l084_join_progress_lists_logical_routes_once_without_collapsing_dial_attempts
 }
 
 #[test]
-fn l084_join_progress_names_target_and_dismisses_on_resolution() {
+fn join_progress_names_target_and_dismisses_on_resolution() {
     use clonk_frontend::message_dialog::{
         MessageDialogButton, MessageDialogButtons, MessageDialogIcon, MessageDialogSize,
     };
@@ -1921,7 +1921,7 @@ fn l084_join_progress_names_target_and_dismisses_on_resolution() {
 }
 
 #[test]
-fn l084_escape_aborts_inflight_join_and_keeps_network_dialog() {
+fn escape_aborts_inflight_join_and_keeps_network_dialog() {
     let mut app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
     let address: SocketAddr = "192.0.2.20:11112".parse().unwrap();
@@ -1961,7 +1961,7 @@ fn l084_escape_aborts_inflight_join_and_keeps_network_dialog() {
 }
 
 #[test]
-fn l084_cancel_button_aborts_inflight_join() {
+fn cancel_button_aborts_inflight_join() {
     let mut app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
     let (sender, receiver) = mpsc::channel();
@@ -2168,7 +2168,7 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
 }
 
 #[test]
-fn l040_network_reference_projects_five_lines_and_native_status_order() {
+fn network_reference_projects_five_lines_and_native_status_order() {
     use clonk_frontend::startup_netdlg::{NetDlgRowIcon, NetDlgStatusIcon};
 
     let reference = clonk_network::NetworkGameReference {
@@ -2234,7 +2234,7 @@ fn l040_network_reference_projects_five_lines_and_native_status_order() {
 }
 
 #[test]
-fn l040_lan_query_rows_resolve_fail_and_expire_without_modal() {
+fn lan_query_rows_resolve_fail_and_expire_without_modal() {
     use clonk_frontend::startup_netdlg::NetDlgRowIcon;
 
     let mut app = new_classic_menu_app(800, 600);
@@ -2428,7 +2428,7 @@ fn l040_lan_query_rows_resolve_fail_and_expire_without_modal() {
 }
 
 #[test]
-fn l040_resolved_game_selection_tracks_host_and_address_identity() {
+fn resolved_game_selection_tracks_host_and_address_identity() {
     let reference = |title: &str, host: &str, address: &str| clonk_network::NetworkGameReference {
         title: title.to_string(),
         host_name: host.to_string(),
@@ -2524,7 +2524,7 @@ fn l040_resolved_game_selection_tracks_host_and_address_identity() {
 }
 
 #[test]
-fn l070_network_message_modal_freezes_search_events_and_expiry_until_close() {
+fn network_message_modal_freezes_search_events_and_expiry_until_close() {
     use clonk_frontend::startup_netdlg::NetDlgRowIcon;
 
     let mut app = new_classic_menu_app(800, 600);
@@ -3680,7 +3680,7 @@ fn client_join_flow_submitted_password_is_frozen_for_the_worker() {
 }
 
 #[test]
-fn l017_gamepad_enabled_uses_native_false_and_defaults_true() {
+fn gamepad_enabled_uses_native_false_and_defaults_true() {
     assert!(configured_gamepads_enabled(b""));
     assert!(configured_gamepads_enabled(
         b"[General]\nGamepadEnabled=invalid\n"
@@ -3703,7 +3703,7 @@ fn startup_group_maker_snapshot_preserves_configured_native_bytes() {
 }
 
 #[test]
-fn l034_dirty_axis_calibration_updates_cpp_keys_without_rewriting_other_bytes() {
+fn dirty_axis_calibration_updates_cpp_keys_without_rewriting_other_bytes() {
     let source = b"[Vendor]\nOpaque=\x80\xff\n[Gamepad2]\nVendorKey=keep\nAxis4Min=7\n";
     assert_eq!(
         update_dirty_gamepad_axis_calibration_config(source, &GamepadBindings::default())
@@ -4607,7 +4607,7 @@ fn runtime_host_rechecks_unreported_arrival_on_sec1_timer() {
 }
 
 #[test]
-fn l120_message_board_change_mode_and_execute_match_native_faders() {
+fn message_board_change_mode_and_execute_match_native_faders() {
     let line_height = 15;
     let mut board = ClassicMessageBoardState::default();
     assert!(board.change_mode(MessageBoardMode::SingleLine, line_height));
@@ -4646,7 +4646,7 @@ fn l120_message_board_change_mode_and_execute_match_native_faders() {
 }
 
 #[test]
-fn l120_msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
+fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
     let _lock = env_lock().lock();
     let root = tempdir().expect("message-board config root");
     let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
@@ -4698,7 +4698,7 @@ fn l120_msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
 }
 
 #[test]
-fn l119_running_set_comment_is_direct_host_effect() {
+fn running_set_comment_is_direct_host_effect() {
     let _lock = env_lock().lock();
     let fixture = tempdir().expect("running comment configuration");
     let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
@@ -4770,7 +4770,7 @@ fn running_network_client_cannot_set_maxplayer_with_stale_engine_host_state() {
 }
 
 #[test]
-fn l119_running_dispatches_controls_modes_and_custom_commands() {
+fn running_dispatches_controls_modes_and_custom_commands() {
     let mut app = new_state_only_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
     app.control_clients
@@ -4924,7 +4924,7 @@ fn l119_running_dispatches_controls_modes_and_custom_commands() {
 }
 
 #[test]
-fn l143_network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
+fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
     let mut app = new_running_sandbox_app();
     assert!(
         app.network_stats.is_some(),
@@ -5064,7 +5064,7 @@ fn l143_network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() 
 }
 
 #[test]
-fn l143_chart_toggle_respects_reachable_native_key_priorities() {
+fn chart_toggle_respects_reachable_native_key_priorities() {
     let configured = |binding: &str| {
         let mut app = new_classic_running_sandbox_app();
         app.runtime_key_config_cache = OnceLock::new();
@@ -5255,7 +5255,7 @@ fn l143_chart_toggle_respects_reachable_native_key_priorities() {
 }
 
 #[test]
-fn l143_chart_uses_native_placement_caption_drag_and_close_control() {
+fn chart_uses_native_placement_caption_drag_and_close_control() {
     let mut app = new_running_sandbox_app();
     app.resize(1280, 720).expect("resize chart chrome fixture");
     app.toggle_network_chart();
@@ -5323,7 +5323,7 @@ fn l143_chart_uses_native_placement_caption_drag_and_close_control() {
 }
 
 #[test]
-fn l119_control_mode_targets_native_current_tick_after_cadence_consumption() {
+fn control_mode_targets_native_current_tick_after_cadence_consumption() {
     let mut app = new_running_sandbox_app();
     let (events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
     queue_empty_ready_tick(&app, &events);
@@ -5348,7 +5348,7 @@ fn l119_control_mode_targets_native_current_tick_after_cadence_consumption() {
 }
 
 #[test]
-fn l119_frozen_runtime_sync_executes_immediately_but_pending_barrier_queues() {
+fn frozen_runtime_sync_executes_immediately_but_pending_barrier_queues() {
     let disable_debug = || {
         NetworkControl::Set(clonk_network::LegacyControlSet {
             value_type: 1,
@@ -8871,7 +8871,7 @@ fn immediate_control_sets_execute_for_host_and_non_host_disable_debug() {
 }
 
 #[test]
-fn l052_host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
+fn host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
     // FnEliminatePlayer(plr, true) appends CID_RemovePlr to Game.Input;
     // it does not erase the player while the calling control/frame is
     // still executing (C4Script.cpp:2823-2833; C4PlayerList.cpp:480-484).
@@ -11564,13 +11564,13 @@ fn run_on_multi_app_test_stack(body: fn()) {
 }
 
 #[test]
-fn l031_debug_key_gates_remaps_and_native_priority_are_nonfatal() {
+fn debug_key_gates_remaps_and_native_priority_are_nonfatal() {
     // Thirteen sandbox apps live in this one debug-build frame; their
     // combined O0 stack slots sit right at the default test-thread stack.
-    run_on_multi_app_test_stack(l031_debug_key_gates_remaps_and_native_priority_body);
+    run_on_multi_app_test_stack(debug_key_gates_remaps_and_native_priority_body);
 }
 
-fn l031_debug_key_gates_remaps_and_native_priority_body() {
+fn debug_key_gates_remaps_and_native_priority_body() {
     for key in [VirtualKeyCode::F6, VirtualKeyCode::F7, VirtualKeyCode::F8] {
         let mut app = new_running_sandbox_app();
         app.handle_modifiers_changed(ModifiersState::CONTROL)
@@ -11888,7 +11888,7 @@ fn l031_debug_key_gates_remaps_and_native_priority_body() {
 }
 
 #[test]
-fn l049_renderer_config_loads_native_defaults_and_graphics_values() {
+fn renderer_config_loads_native_defaults_and_graphics_values() {
     let _lock = env_lock().lock();
     let install = tempdir().expect("renderer-config install fixture");
     let user_data = tempdir().expect("renderer-config user fixture");
@@ -11941,7 +11941,7 @@ fn l049_renderer_config_loads_native_defaults_and_graphics_values() {
 // the row's C4Network2Client exists and is not NCS_Ready
 // (src/C4Network2Dialogs.cpp:62,71; src/C4Network2Client.h:113).
 #[test]
-fn l174_client_info_ack_marker_needs_a_host_and_an_unready_net_client() {
+fn client_info_ack_marker_needs_a_host_and_an_unready_net_client() {
     let state = |status| network::RuntimeNetworkClientState {
         client_id: 7,
         status,
@@ -12266,7 +12266,7 @@ fn runtime_client_list_maps_native_lifecycle_readiness_and_wait() {
 }
 
 #[test]
-fn l140_network_status_collector_uses_native_client_next_control_baselines() {
+fn network_status_collector_uses_native_client_next_control_baselines() {
     let mut app = new_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
     let mut inactive = message_client(9, b"Inactive");
@@ -12396,7 +12396,7 @@ fn runtime_client_list_host_actions_submit_native_controls() {
 }
 
 #[test]
-fn l128_f4_control_rate_dropdown_waits_for_authoritative_echo() {
+fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
     let mut app = new_classic_running_sandbox_app();
     app.resize(640, 480).expect("resize F4 option fixture");
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
@@ -12495,7 +12495,7 @@ fn l128_f4_control_rate_dropdown_waits_for_authoritative_echo() {
 }
 
 #[test]
-fn l128_f4_runtime_join_waits_for_network_ack_and_flashes_state() {
+fn f4_runtime_join_waits_for_network_ack_and_flashes_state() {
     let mut app = new_classic_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
@@ -12537,7 +12537,7 @@ fn l128_f4_runtime_join_waits_for_network_ack_and_flashes_state() {
 }
 
 #[test]
-fn l128_running_f4_nonexclusive_scope_does_not_receive_tab() {
+fn running_f4_nonexclusive_scope_does_not_receive_tab() {
     let mut app = new_classic_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
@@ -12603,7 +12603,7 @@ fn runtime_client_list_wheel_precedes_running_player_control() {
 }
 
 #[test]
-fn l144_standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
+fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
     use clonk_frontend::runtime_client_list::{
         RuntimeClientListDialog, RuntimeClientRow, RuntimeClientStatusIcon,
     };

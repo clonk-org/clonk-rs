@@ -1023,7 +1023,7 @@ mod tests {
     }
 
     #[test]
-    fn l005_environment_config_file_precedes_explicit_candidate() {
+    fn environment_config_file_precedes_explicit_candidate() {
         let install_dir = TempDir::new().unwrap();
         touch_system_group(&install_dir);
         let user_dir = TempDir::new().unwrap();
@@ -1042,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn l005_explicit_config_file_precedes_default_and_creates_its_parent() {
+    fn explicit_config_file_precedes_default_and_creates_its_parent() {
         let install_dir = TempDir::new().unwrap();
         touch_system_group(&install_dir);
         let user_dir = TempDir::new().unwrap();
@@ -1115,7 +1115,7 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn l016_selected_config_user_path_expands_without_relocating_config() {
+    fn selected_config_user_path_expands_without_relocating_config() {
         let install_dir = TempDir::new().unwrap();
         touch_system_group(&install_dir);
         let home_dir = TempDir::new().unwrap();
@@ -1149,7 +1149,7 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn l016_rust_user_data_override_precedes_config_user_path() {
+    fn rust_user_data_override_precedes_config_user_path() {
         let install_dir = TempDir::new().unwrap();
         touch_system_group(&install_dir);
         let user_dir = TempDir::new().unwrap();

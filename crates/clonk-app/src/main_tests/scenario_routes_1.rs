@@ -98,7 +98,7 @@
         run_real_alchemy_app_subcase(
             "right_click_positions_classic_context_magic_menu",
             &mut failures,
-            || l068_real_alchemy_right_click_positions_classic_context_magic_menu(&prepared),
+            || real_alchemy_right_click_positions_classic_context_magic_menu(&prepared),
         );
         run_real_alchemy_app_subcase(
             "right_drag_frame_drops_all_selected_carryables",
@@ -151,7 +151,7 @@
         );
     }
 
-    fn l068_real_alchemy_right_click_positions_classic_context_magic_menu(
+    fn real_alchemy_right_click_positions_classic_context_magic_menu(
         prepared: &PreparedRealInstalledScenario,
     ) {
         // C4MouseControl issues C4CMD_Context on right-up with the clicked

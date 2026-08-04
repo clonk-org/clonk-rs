@@ -4318,7 +4318,7 @@ Entrance=1,2,,4
     }
 
     #[test]
-    fn l136_picture_uses_decoded_base_graphics_and_corrupt_graphics_is_typed() {
+    fn picture_uses_decoded_base_graphics_and_corrupt_graphics_is_typed() {
         let temp = tempdir().expect("tempdir");
         let def_dir = temp.path().join("Picture.c4d");
         fs::create_dir(&def_dir).expect("definition directory");

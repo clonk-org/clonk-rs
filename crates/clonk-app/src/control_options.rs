@@ -342,7 +342,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn l050_alphanumeric_key_labels_remain_unchanged() {
+    fn alphanumeric_key_labels_remain_unchanged() {
         for (key, expected) in [
             (VirtualKeyCode::KeyA, "A"),
             (VirtualKeyCode::KeyB, "B"),
@@ -387,7 +387,7 @@ mod tests {
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     #[test]
-    fn l050_key_labels_match_sdl_scancode_names() {
+    fn key_labels_match_sdl_scancode_names() {
         for (key, expected) in [
             (VirtualKeyCode::Enter, "Return"),
             (VirtualKeyCode::Escape, "Escape"),

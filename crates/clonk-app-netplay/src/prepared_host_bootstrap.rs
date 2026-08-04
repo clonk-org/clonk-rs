@@ -2807,7 +2807,7 @@ mod definition_root_graphics_tests {
     }
 
     #[test]
-    fn l085_lobby_runtime_join_choice_updates_retained_admission_policy() {
+    fn lobby_runtime_join_choice_updates_retained_admission_policy() {
         let mut prepared = league_prepared_host(1);
         assert!(prepared.admission().runtime_join_allowed());
 
@@ -2852,7 +2852,7 @@ mod definition_root_graphics_tests {
     }
 
     #[test]
-    fn l082_live_league_deinit_clears_identity_but_retains_start_overrides() {
+    fn live_league_deinit_clears_identity_but_retains_start_overrides() {
         let mut prepared = league_prepared_host(1);
         prepared
             .apply_league_start_response(&LeagueStartResponse {

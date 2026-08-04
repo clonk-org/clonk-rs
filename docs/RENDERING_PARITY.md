@@ -215,9 +215,9 @@ Renderer and scene tests pin the backend boundary:
 - Surface tests pin retained alpha/additive fragments, gamma capture,
   copy-on-write revisions, projective rejection, child clipping, and semantic
   text capture.
-- App tests `m06_l033_all_graphical_modes_produce_retained_scenes`,
-  `m06_l033_scale_native_text_keeps_logical_physical_painter_order`, and
-  `m06_l033_pixels_handles_surface_recovery_and_app_handles_renderer_failures`
+- App tests `all_graphical_modes_produce_retained_scenes`,
+  `scale_native_text_keeps_logical_physical_painter_order`, and
+  `pixels_handles_surface_recovery_and_app_handles_renderer_failures`
   cover mode integration and recovery policy. The scale-one and every-scale
   startup-font tests ensure reachable retained text cannot fall back to a
   point-rasterized or mismatched atlas.

@@ -1758,7 +1758,7 @@ fn install_test_free_savegame_player_row(app: &mut GameApp, player_id: i32) {
         ]);
 }
 
-fn l100_script_player_add_fixture(
+fn script_player_add_fixture(
     configured_names: &[u8],
     active_players: &[(&[u8], bool)],
     max_script_players: i32,
@@ -2126,7 +2126,7 @@ fn apply_test_frontend_assets(app: &mut GameApp, assets: Arc<FrontendAssets>) {
     app.menu_backdrop_cache = StartupBackdropCache::default();
 }
 
-fn l018_cursor_atlas() -> Arc<CursorAtlas> {
+fn drag_cursor_atlas() -> Arc<CursorAtlas> {
     let cell = 4u32;
     let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
     for _y in 0..cell {
@@ -2147,7 +2147,7 @@ fn install_l018_cursor_atlas(app: &mut GameApp) {
     );
     Arc::get_mut(&mut app.assets)
         .expect("focused fixture uniquely owns frontend assets")
-        .cursor_atlas = l018_cursor_atlas();
+        .cursor_atlas = drag_cursor_atlas();
     let (width, height) = {
         let surface = app.graphics.surface();
         (surface.width(), surface.height())
@@ -2382,7 +2382,7 @@ fn loader_origin_fixture_paths(root: &Path) -> (EnvGuard, AppPaths, PathBuf) {
     (guard, paths, content)
 }
 
-fn l038_running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp {
+fn running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp {
     let scenarios = sample_scenarios();
     let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
         .expect("build scenario menu");
@@ -3162,7 +3162,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
 
 #[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
-fn l021_client_go_combines_scenario_once_and_defers_100_until_final_init() {
+fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     // RetrieveScenario waits for Parameters.Scenario and ResDynamic, merges
     // them into Combined<client>.c4s, then waits for ordinary GameRes files.
     // It does not acknowledge GO until InitGame reaches FinalInit
@@ -3687,7 +3687,7 @@ fn set_control_test_player(id: i32, team: i32, flags: u16) -> clonk_engine::Cont
 
 #[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
-fn l052_ready_tick_local_join_opens_one_viewport_with_feedback() {
+fn ready_tick_local_join_opens_one_viewport_with_feedback() {
     // C4Control executes the complete list in packet order, so PlrInfo is
     // visible to the following JoinPlr; only then does C4Game advance the
     // simulation (src/C4Control.cpp:93-109; src/C4Game.cpp:797-805).
@@ -3768,7 +3768,7 @@ fn l052_ready_tick_local_join_opens_one_viewport_with_feedback() {
 
 #[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
-fn l052_synchronized_remote_join_has_no_local_viewport_feedback() {
+fn synchronized_remote_join_has_no_local_viewport_feedback() {
     // C4ControlJoinPlayer passes iAtClient through C4Game::JoinPlayer and
     // C4PlayerList::Join; C4Player::Init then stores it in AtClient
     // (pristine 9ffa0a5d src/C4Control.cpp:710-764;

@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn l075_configured_zero_udp_port_disables_the_udp_binding() {
+    fn configured_zero_udp_port_disables_the_udp_binding() {
         let binding = HostUdpBinding::bind(&HostConfig {
             udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
             netpuncher_addresses: vec![SocketAddr::from(([127, 0, 0, 1], 11_115))],
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l082_live_host_initializes_one_netpuncher_per_resolved_family() {
+    async fn live_host_initializes_one_netpuncher_per_resolved_family() {
         let mut ipv4_puncher =
             crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
         let mut ipv6_puncher =
@@ -3365,7 +3365,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn l075_udp_only_host_completes_session_admission_and_control() {
+    async fn udp_only_host_completes_session_admission_and_control() {
         let config = HostConfig {
             udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
             configured_tcp_port: Some(0),

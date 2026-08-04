@@ -2289,7 +2289,7 @@ mod tests {
     }
 
     #[test]
-    fn l091_nonzero_collection_face_builds_logical_and_scale_native_fonts() {
+    fn nonzero_collection_face_builds_logical_and_scale_native_fonts() {
         let collection = duplicate_font_collection(&endeavour_bytes());
         let logical = build_vector_font_face(&collection, 1, 14, 400, true)
             .expect("build second collection face");

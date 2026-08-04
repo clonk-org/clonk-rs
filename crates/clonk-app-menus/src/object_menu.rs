@@ -4021,7 +4021,7 @@ mod tests {
     // one DrawLineDw blend of 0x7f000000 with GL round-to-nearest and the
     // gamma black floor. Full strips double-blended corners to (61,59,30).
     #[test]
-    fn m06_l034_classic_tooltip_border_corners_blend_once_per_cpp_capture() {
+    fn classic_tooltip_border_corners_blend_once_per_cpp_capture() {
         let gamma = GammaRamp::from_control_points([0x000000, 0x808080, 0xffffff]);
         let mut surface = Surface::new(16, 12, PixelFormat::Rgba8888);
         surface.fill(CLASSIC_TOOLTIP_BG_COLOR);
@@ -4048,7 +4048,7 @@ mod tests {
     // the edges paint (68,1,1) while the bottom-right corner stays at the
     // (1,1,1) background — both `CStdDDraw::DrawFrame` lines exclude it.
     #[test]
-    fn m06_l034_classic_divider_skips_bottom_right_corner_per_cpp_capture() {
+    fn classic_divider_skips_bottom_right_corner_per_cpp_capture() {
         let gamma = GammaRamp::from_control_points([0x000000, 0x808080, 0xffffff]);
         let mut surface = Surface::new(16, 12, PixelFormat::Rgba8888);
         surface.fill(Color::opaque(1, 1, 1));
@@ -4739,7 +4739,7 @@ mod tests {
     }
 
     #[test]
-    fn l065_script_menu_scroll_range_is_minimal_pixel_persistent_and_column_aware() {
+    fn script_menu_scroll_range_is_minimal_pixel_persistent_and_column_aware() {
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
         let images = HashMap::new();
@@ -4848,7 +4848,7 @@ mod tests {
     }
 
     #[test]
-    fn l065_partial_scroll_clips_render_and_item_hits_below_title() {
+    fn partial_scroll_clips_render_and_item_hits_below_title() {
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
         let images = HashMap::new();
@@ -4952,7 +4952,7 @@ mod tests {
     }
 
     #[test]
-    fn l065_dialog_geometry_and_title_hits_follow_exact_presentation_location() {
+    fn dialog_geometry_and_title_hits_follow_exact_presentation_location() {
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
         let images = HashMap::new();
@@ -5079,7 +5079,7 @@ mod tests {
     }
 
     #[test]
-    fn l068_engine_script_context_menu_uses_free_location_and_cpp_clamping() {
+    fn engine_script_context_menu_uses_free_location_and_cpp_clamping() {
         // C4Menu::InitMenu gives context style 1 one column
         // (src/C4Menu.cpp:359-365), then the same classic menu location,
         // size, drawing, and GUI element path handles its items

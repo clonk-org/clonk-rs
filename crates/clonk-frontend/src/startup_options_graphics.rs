@@ -934,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn l008_loaded_subunit_scale_is_preserved_while_controls_stay_bounded() {
+    fn loaded_subunit_scale_is_preserved_while_controls_stay_bounded() {
         let mut state = GraphicsSheetState::new(
             GraphicsDisplayMode::Fullscreen,
             50,

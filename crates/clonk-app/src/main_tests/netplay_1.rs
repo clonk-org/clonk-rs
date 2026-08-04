@@ -208,7 +208,7 @@ fn runtime_join_restore_infos_come_from_dynamic_not_join_data_parameters() {
 }
 
 #[test]
-fn l028_console_input_and_open_parameters_follow_native_framing() {
+fn console_input_and_open_parameters_follow_native_framing() {
     assert_eq!(
         parse_classic_console_parameters(
             "\"Missions/My Round/Scenario.txt\" /network /lobby:17 \"/comment:console game\"",
@@ -373,7 +373,7 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
 
 #[cfg(unix)]
 #[test]
-fn l042_save_description_preserves_native_definition_path_bytes() {
+fn save_description_preserves_native_definition_path_bytes() {
     use std::os::unix::ffi::OsStringExt;
 
     let native_path_bytes = b"Defs-\xff.c4f\\Pack.c4d".to_vec();
@@ -427,7 +427,7 @@ fn optional_initial_network_game_source_distinguishes_missing_and_unreadable_ent
 }
 
 #[test]
-fn l068_context_command_coordinates_include_letterbox_and_ignore_camera_zoom() {
+fn context_command_coordinates_include_letterbox_and_ignore_camera_zoom() {
     let viewport = ActiveViewportProjection {
         index: 0,
         identity: None,
@@ -457,7 +457,7 @@ fn l068_context_command_coordinates_include_letterbox_and_ignore_camera_zoom() {
 }
 
 #[test]
-fn l054_help_regions_share_one_native_caption_slot() {
+fn help_regions_share_one_native_caption_slot() {
     let (mut app, owner, _crew, _first, target, inventory_point) = inventory_region_fixture();
     app.ingame_mouse_help = true;
 
@@ -951,7 +951,7 @@ fn control_script_errors_are_non_fatal_like_cpp() {
 }
 
 #[test]
-fn l032_startup_numbers_follow_native_long_narrowing() {
+fn startup_numbers_follow_native_long_narrowing() {
     assert_eq!(parse_startup_config_integer(b"7junk"), Some(7));
     assert_eq!(parse_startup_config_integer(b"0x2ajunk"), Some(42));
     assert_eq!(parse_startup_config_integer(b"0x"), Some(0));
@@ -973,7 +973,7 @@ fn l032_startup_numbers_follow_native_long_narrowing() {
 }
 
 #[test]
-fn l032_unsigned_renderer_mask_follows_native_ulong_narrowing() {
+fn unsigned_renderer_mask_follows_native_ulong_narrowing() {
     assert_eq!(
         parse_startup_config_unsigned(b"0xfffffffftail"),
         Some(u32::MAX)
@@ -1033,7 +1033,7 @@ fn advanced_renderer_config_loads_native_device_snapshot() {
 }
 
 #[test]
-fn l032_integrity_numbers_keep_native_scalar_grammar() {
+fn integrity_numbers_keep_native_scalar_grammar() {
     let quoted = b"[General]\nConfigResetSafety=\"7\"\n\n[Graphics]\nResolutionX=\"0\"\n";
     assert!(
         !startup_config_is_corrupted(quoted),
@@ -1788,7 +1788,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
 }
 
 #[test]
-fn l069_network_row_colors_disable_errors_but_not_too_few_warning() {
+fn network_row_colors_disable_errors_but_not_too_few_warning() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
     let user_data = tempdir().expect("isolated network-row user data");
@@ -3137,7 +3137,7 @@ fn staged_host_uses_startup_gui_but_pending_failure_beats_start_and_pixels() {
 }
 
 #[test]
-fn l093_staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
+fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
     let _lock = env_lock().lock();
     let user_data = tempdir().expect("isolated host model user data");
     let content = tempdir().expect("minimal host model content");
@@ -3229,7 +3229,7 @@ fn l093_staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
 }
 
 #[test]
-fn l085_control_rate_submits_relative_set_and_waits_for_echo() {
+fn control_rate_submits_relative_set_and_waits_for_echo() {
     let _lock = env_lock().lock();
     let user_data = tempdir().expect("isolated control-rate user data");
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -3290,7 +3290,7 @@ fn l085_control_rate_submits_relative_set_and_waits_for_echo() {
 }
 
 #[test]
-fn l085_runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
+fn runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
     let _lock = env_lock().lock();
     let user_data = tempdir().expect("isolated lobby-option user data");
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -3342,7 +3342,7 @@ fn l085_runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
 }
 
 #[test]
-fn l134_random_team_count_mutates_host_directly_and_tracks_distribution() {
+fn random_team_count_mutates_host_directly_and_tracks_distribution() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let mut metadata = set_control_test_metadata(
@@ -3445,7 +3445,7 @@ fn l134_random_team_count_mutates_host_directly_and_tracks_distribution() {
 }
 
 #[test]
-fn l035_classic_host_start_persists_and_honors_unassociated_savegame_warning() {
+fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
     let user_data = tempdir().expect("isolated savegame-warning user data");
@@ -3509,7 +3509,7 @@ fn l035_classic_host_start_persists_and_honors_unassociated_savegame_warning() {
 }
 
 #[test]
-fn l016_client_start_and_abort_report_the_cpp_host_only_error() {
+fn client_start_and_abort_report_the_cpp_host_only_error() {
     let mut app = new_menu_app(640, 480);
     app.startup_view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
@@ -3546,7 +3546,7 @@ fn l016_client_start_and_abort_report_the_cpp_host_only_error() {
 }
 
 #[test]
-fn l103_set_comment_updates_state_reference_and_invalidation() {
+fn set_comment_updates_state_reference_and_invalidation() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
     app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -3591,7 +3591,7 @@ fn l103_set_comment_updates_state_reference_and_invalidation() {
 }
 
 #[test]
-fn l103_set_password_sets_and_bare_command_clears_live_password() {
+fn set_password_sets_and_bare_command_clears_live_password() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let (_snapshot, reference) = default_exact_host_reference();
@@ -3636,7 +3636,7 @@ fn l103_set_password_sets_and_bare_command_clears_live_password() {
 }
 
 #[test]
-fn l083_client_start_wait_escape_and_abort_clear_network_and_return_to_main() {
+fn client_start_wait_escape_and_abort_clear_network_and_return_to_main() {
     use clonk_frontend::message_dialog::MessageDialogResult;
 
     for result in [MessageDialogResult::Dismissed, MessageDialogResult::Cancel] {
@@ -3846,7 +3846,7 @@ fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
 }
 
 #[test]
-fn l108_client_scenario_description_refreshes_only_while_active_until_terminal() {
+fn client_scenario_description_refreshes_only_while_active_until_terminal() {
     let mut app = new_menu_app(640, 480);
     app.startup_view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
@@ -4222,7 +4222,7 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
 }
 
 #[test]
-fn l102_host_client_context_mutes_locally_and_submits_activation_without_optimism() {
+fn host_client_context_mutes_locally_and_submits_activation_without_optimism() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
@@ -4629,7 +4629,7 @@ fn scenario_title_tooltip_tracks_native_readd_z_order_and_fresh_open_reset() {
 }
 
 #[test]
-fn l018_platform_cursor_tracks_client_area_and_focus_in_every_mode() {
+fn platform_cursor_tracks_client_area_and_focus_in_every_mode() {
     for (active, inside, visible) in [
         (false, false, true),
         (false, true, true),
@@ -4779,7 +4779,7 @@ fn startup_network_dialog_seeds_irc_login_from_config() {
 }
 
 #[test]
-fn l034_network_tab_and_shift_tab_are_inverse_and_wrap() {
+fn network_tab_and_shift_tab_are_inverse_and_wrap() {
     use clonk_frontend::startup_netdlg::{
         NetDlgConfig, NetDlgControl, NetDlgController, NetDlgFontMetrics,
     };
@@ -4861,7 +4861,7 @@ fn l034_network_tab_and_shift_tab_are_inverse_and_wrap() {
 }
 
 #[test]
-fn l063_activation_overflow_reverts_row_and_shows_native_error() {
+fn activation_overflow_reverts_row_and_shows_native_error() {
     reset_cached_app_paths();
     let user_data = tempdir().expect("isolated player-selection config");
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -5011,7 +5011,7 @@ fn retained_gpu_gamma_mode_matches_native_device_switch_matrix() {
 }
 
 #[test]
-fn l033_graphical_debug_mode_reads_native_config_and_obeys_allow_debug() {
+fn graphical_debug_mode_reads_native_config_and_obeys_allow_debug() {
     let install = tempdir().expect("install root");
     let user_data = tempdir().expect("user data");
     let custom = tempdir().expect("custom config root");
@@ -5052,7 +5052,7 @@ fn l033_graphical_debug_mode_reads_native_config_and_obeys_allow_debug() {
 }
 
 #[test]
-fn l033_replay_script_injection_obeys_native_config() {
+fn replay_script_injection_obeys_native_config() {
     assert!(!configured_allow_scripting_in_replays(b"[General]\n"));
     assert!(!configured_allow_scripting_in_replays(
         b"[General]\nAllowScriptingInReplays= true\n"
@@ -6142,7 +6142,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
 }
 
 #[test]
-fn m06_l033_all_graphical_modes_produce_retained_scenes() {
+fn all_graphical_modes_produce_retained_scenes() {
     let mut menu = new_real_menu_app(320, 200);
     menu.startup_dialog_fade = None;
     menu.graphics.set_runtime_sprite_filtering(1.0, false);
@@ -6200,7 +6200,7 @@ fn m06_l033_all_graphical_modes_produce_retained_scenes() {
 }
 
 #[test]
-fn m06_l033_scale_native_text_keeps_logical_physical_painter_order() {
+fn scale_native_text_keeps_logical_physical_painter_order() {
     let mut app = new_real_menu_app(320, 200);
     app.startup_dialog_fade = None;
     app.graphics.set_runtime_sprite_filtering(2.0, false);
@@ -6254,7 +6254,7 @@ fn startup_gamma_uses_the_native_snapshot_and_scalar_grammar() {
 }
 
 #[test]
-fn l008_fractional_loader_scales_reach_native_text() {
+fn fractional_loader_scales_reach_native_text() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -6286,7 +6286,7 @@ fn l008_fractional_loader_scales_reach_native_text() {
 }
 
 #[test]
-fn l008_scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
+fn scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
     let _lock = env_lock().lock();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -6389,7 +6389,7 @@ fn l008_scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
 }
 
 #[test]
-fn l149_scale_three_host_start_wait_renders_after_native_loader_text() {
+fn scale_three_host_start_wait_renders_after_native_loader_text() {
     let _lock = env_lock().lock();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -6468,7 +6468,7 @@ fn l149_scale_three_host_start_wait_renders_after_native_loader_text() {
 }
 
 #[test]
-fn l149_fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
+fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
     let _lock = env_lock().lock();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

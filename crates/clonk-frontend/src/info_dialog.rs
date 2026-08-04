@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn l144_scrolling_info_reaches_every_line_with_wheel_and_keyboard() {
+    fn scrolling_info_reaches_every_line_with_wheel_and_keyboard() {
         let mut dialog = ScrollingInfoDialog::new("Information", 10, true);
         assert_eq!(dialog.requested_line_count(), 10);
         dialog.reset_lines((0..17).map(|index| format!("line-{index:02}")).collect());
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn l144_scrolling_info_refresh_preserves_absolute_offset_then_clamps() {
+    fn scrolling_info_refresh_preserves_absolute_offset_then_clamps() {
         let mut dialog = ScrollingInfoDialog::new("Information", 10, true);
         dialog.reset_lines((0..20).map(|index| format!("old-{index:02}")).collect());
         let geometry = geometry(&dialog);
