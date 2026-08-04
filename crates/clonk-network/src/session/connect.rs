@@ -302,6 +302,7 @@ type ClientConnectFuture =
 
 pub(crate) struct ClientDialAttempt {
     pub(crate) index: usize,
+    address: crate::NetworkAddress,
     future: Option<ClientConnectFuture>,
     result: Option<Result<ClientDialStream, io::Error>>,
 }
@@ -349,6 +350,7 @@ impl ClientDialRace {
                     };
                     Some(ClientDialAttempt {
                         index,
+                        address,
                         future: Some(future),
                         result: None,
                     })
@@ -362,7 +364,13 @@ impl ClientDialRace {
         self.attempts.is_empty()
     }
 
-    async fn next(&mut self) -> Option<(usize, Result<ClientDialStream, io::Error>)> {
+    async fn next(
+        &mut self,
+    ) -> Option<(
+        usize,
+        crate::NetworkAddress,
+        Result<ClientDialStream, io::Error>,
+    )> {
         if self.attempts.is_empty() {
             return None;
         }
@@ -397,13 +405,14 @@ impl ClientDialRace {
         match ready {
             Ok((position, result)) => {
                 let attempt = self.attempts.remove(position);
-                Some((attempt.index, result))
+                Some((attempt.index, attempt.address, result))
             }
             Err(_) => {
-                let index = self.attempts[0].index;
+                let attempt = self.attempts.remove(0);
                 self.attempts.clear();
                 Some((
-                    index,
+                    attempt.index,
+                    attempt.address,
                     Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "connection attempt timed out",
@@ -894,11 +903,11 @@ pub async fn connect_client_addresses(
     }
     let mut failures = Vec::new();
     let mut wrong_password: Option<(usize, ClientError)> = None;
-    while let Some((index, result)) = dials.next().await {
+    while let Some((index, address, result)) = dials.next().await {
         let stream = match result {
             Ok(stream) => stream,
             Err(error) => {
-                failures.push((index, ClientError::Connect(error)));
+                failures.push((index, address, ClientError::Connect(error)));
                 continue;
             }
         };
@@ -940,7 +949,7 @@ pub async fn connect_client_addresses(
         };
         match admission {
             Ok(client) => return Ok(client),
-            Err(ClientAttemptError::Retryable(error)) => failures.push((index, error)),
+            Err(ClientAttemptError::Retryable(error)) => failures.push((index, address, error)),
             Err(ClientAttemptError::WrongPassword(error)) => {
                 if wrong_password
                     .as_ref()
@@ -955,12 +964,12 @@ pub async fn connect_client_addresses(
     if let Some((_, error)) = wrong_password {
         return Err(error);
     }
-    failures.sort_by_key(|(index, _)| *index);
+    failures.sort_by_key(|(index, ..)| *index);
     Err(failures
         .into_iter()
         .next()
         .expect("a completed dial race retains its failure")
-        .1)
+        .2)
 }
 
 #[cfg(test)]
