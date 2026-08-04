@@ -164,10 +164,7 @@ fn mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one() {
         .menu_user_enter(clonk, true)
         .expect("a right enter runs Command2");
     let cleared = items(&engine, clonk).swap_remove(0);
-    assert_eq!(
-        cleared.count, 12_345_678,
-        "the order is empty again, so C4MN_Item_NoCount hides the count (C4Script.cpp:1726)"
-    );
+    assert_eq!(cleared.count, 0, "the order is empty again");
     assert_eq!(
         cleared.caption, "Construction kit - 10{{GOLD}} (+1/<c 888888>-1</c>)",
         "back on the minimum the decrease greys out again"
@@ -231,8 +228,28 @@ fn mars_order_arrows_still_navigate_off_a_product_row() {
         "an unclaimed step wraps the selection like C4Menu::Control always did"
     );
     assert!(
-        menu.items.iter().all(|item| item.count == 12_345_678),
+        menu.items.iter().take(5).all(|item| item.count == 0),
         "and orders nothing"
+    );
+}
+
+#[test]
+fn every_product_shows_its_quantity_even_at_zero() {
+    // C4Script.cpp:1726 turns a zero count into C4MN_Item_NoCount, so an
+    // untouched order page showed no quantities at all and gave the player no
+    // hint that the right-hand column is one. C4MN_Add_ForceCount keeps it.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (_player, clonk) = open_order_page(&mut engine);
+
+    let counts: Vec<i32> = items(&engine, clonk)
+        .iter()
+        .take(5)
+        .map(|item| item.count)
+        .collect();
+    assert_eq!(
+        counts,
+        vec![0; 5],
+        "the quantity column reads 0x on every product before anything is ordered"
     );
 }
 
@@ -280,7 +297,7 @@ fn the_order_page_offers_undo_only_once_there_is_something_to_undo() {
 
     let undone = items(&engine, clonk);
     assert_eq!(
-        undone[0].count, 12_345_678,
+        undone[0].count, 0,
         "the construction kit is off the order again"
     );
     assert_eq!(
@@ -411,11 +428,7 @@ fn mars_order_row_moves_only_its_own_product_and_keeps_the_selection() {
     );
     // Five products, then the undo row the change just earned, then Back.
     let counts: Vec<i32> = menu.items.iter().take(5).map(|item| item.count).collect();
-    assert_eq!(
-        counts,
-        vec![12_345_678, 12_345_678, 1, 12_345_678, 12_345_678],
-        "only metal was ordered"
-    );
+    assert_eq!(counts, vec![0, 0, 1, 0, 0], "only metal was ordered");
     assert_eq!(
         menu.items[metal_row as usize].command, "Adjust(METL,2,0)",
         "each row names its own product and its own row number"

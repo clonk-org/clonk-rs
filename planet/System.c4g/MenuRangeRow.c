@@ -174,10 +174,14 @@ private func ShowRange(Key, array aCond, string szName, id idItem, data, &i)
   // so the row keeps the product's own picture as its symbol, and iValue
   // keeps the engine's right-aligned "Nx" on the row it belongs to
   // (C4Menu.cpp:198-207).
+  // C4MN_Add_ForceCount keeps the quantity on screen at zero, where
+  // C4Script.cpp:1726 would otherwise substitute C4MN_Item_NoCount and hide
+  // the whole column until something is ordered. It leaves iExtra & 127 at 0,
+  // so the symbol stays the product's own picture (C4Script.cpp:1785-1795).
   row_keys[i] = Key;
   row_names[i] = szName;
   AddMenuItem(Format("%s%s", szName, szSteps), Format("Adjust(%%d,%d,%%d)", i++),
-    idItem, pMenuObject, iValue, Key, szInfo);
+    idItem, pMenuObject, iValue, Key, szInfo, C4MN_Add_ForceCount);
 }
 
 // The engine offers COM_MenuLeft/Right here before turning them into a
