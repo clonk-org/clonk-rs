@@ -4999,7 +4999,6 @@ impl GameApp {
             .with_compatibility_build(reference.build)
             .with_join_route_plan(route_plan)
             .with_netpuncher(netpuncher_address, netpuncher_game_ids);
-        self.startup_game_search = None;
         self.pending_network_join = Some(settings);
         if reference.password_needed {
             self.open_network_join_password_dialog()?;
@@ -5045,6 +5044,12 @@ impl GameApp {
                     self.pending_network_join = None;
                     return Err(error);
                 }
+                // C4StartupNetDlg keeps DiscoverClient alive until the dialog
+                // itself goes away, so only a join that actually starts stops
+                // the search: a password prompt the user cancels, or a worker
+                // that never spawns, leaves the netdlg discovering
+                // (src/C4StartupNetDlg.cpp:737-738,752).
+                self.startup_game_search = None;
             }
             Err(error) => {
                 self.pending_network_join = None;
