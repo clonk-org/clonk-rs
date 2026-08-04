@@ -2962,31 +2962,42 @@ an ordered-map model gap.
   `classic_release_is_emitted_only_when_no_autostop_set_claims_the_key` and
   `selected_player_classic_control_synchronizes_horizontal_key_release`.
 
-- **The repeated-key flag is now a per-target choice, and macOS never sets it.**
-  C++ decides this per windowing backend, chosen at build time. Win32 reads the
-  hardware bit (`!!(lParam & 0x40000000)`, `C4Viewport.cpp:89,100`,
-  `C4FullScreen.cpp:59,64`, `C4GuiDialogs.cpp:231,240`); X11 passes `false` and
-  `C4Game::DoKeyboardInput` re-derives it from its own `PressedKeys` map, but
-  only inside `#ifdef USE_X11` (`C4Game.cpp:2153-2166`); **SDL passes a literal
-  `false` for every keydown and keyup** (`C4FullScreen.cpp:388-400`) and gets no
-  synthesis, and SDL is the default main loop on Apple with `USE_X11` excluded
-  there outright (`CMakeLists.txt:191-197`). The port runs winit on every
-  platform, so the equivalent choice is by target:
-  `game_app::input::BACKEND_SYNTHESIZES_KEY_REPEAT` is `!cfg!(target_os =
-  "macos")`. Previously the port synthesized repeats everywhere, which matched
-  Win32 and X11 but not the default macOS build.
-  This is observable, not cosmetic: `C4Game::LocalControlKey` swallows a repeat
-  for AutoStopControl players (`C4Game.cpp:3580-3583`) and
-  `C4Player::CountControl` raises a second identical com to `COM_Double`
-  (`C4Player.cpp:1568`). On macOS neither happens, so holding a direction key
-  can now issue the repeated control and arm the double-down window — including
-  the `DFA_PUSH` ungrab that follows a `COM_Down_D`.
-  The two tests that previously produced a repeat by pressing the same key twice
-  now drive the flag explicitly (`AppVirtualKeyboard::repeat`), because what
-  they pin is the engine's handling of a repeat, not the backend that reports
-  one. Pinned by `sdl_repeated_keydown_remains_fresh_like_cpp`,
+- **Accepted divergence: the repeated-key flag is set on every target,
+  including macOS.** C++ decides this per windowing backend, chosen at build
+  time. Win32 reads the hardware bit (`!!(lParam & 0x40000000)`,
+  `C4Viewport.cpp:89,100`, `C4FullScreen.cpp:59,64`, `C4GuiDialogs.cpp:231,240`);
+  X11 passes `false` and `C4Game::DoKeyboardInput` re-derives it from its own
+  `PressedKeys` map, but only inside `#ifdef USE_X11` (`C4Game.cpp:2143-2154`);
+  **SDL passes a literal `false` for every keydown and keyup**
+  (`C4FullScreen.cpp:387-400`) and gets no synthesis, and SDL is the default
+  main loop on Apple with `USE_X11` excluded there outright
+  (`CMakeLists.txt:198-200`). So the pinned C++ macOS build cannot tell a held
+  key from a tapped one.
+  `game_app::input::BACKEND_SYNTHESIZES_KEY_REPEAT` is `true` unconditionally,
+  which deliberately does **not** reproduce that. The SDL branch is not a rule
+  about repeats, it is C++ lacking the information; the port synthesizes the
+  flag from its own pressed-key set exactly as the X11 branch does, and that set
+  is just as available on macOS. Modelling the absence promotes a host
+  preference to gameplay: `C4Game::LocalControlKey` swallows a repeat for
+  AutoStopControl players (`C4Game.cpp:3566-3570`) and `C4Player::InCom` raises
+  a second identical com to `COM_Double` (`C4Player.cpp:1532-1533`), so with the
+  flag unset a *held* direction key manufactures `Control*Double` at the host's
+  auto-repeat rate. On stock macOS settings (~417 ms to the first repeat, then
+  ~100 ms) that beats the 10-frame `C4DoubleClick` window at the 28 ms tick, so
+  roughly half a second of holding Left or Right fires the ClonkMars Jetbelt
+  (`Jetbelt.c4d/Script.c:38-41`) and the Eke Airbike Hyperfly boost
+  (`Airbike.c4d/Script.c:33,55`), and holding Down arms the `COM_Down_D`
+  `DFA_PUSH` ungrab. Reported from play on 2026-08-04 against `0677f3aef`, which
+  had made the macOS target SDL-faithful; Linux players on the X11 branch never
+  saw it.
+  This cannot desync: repeat delivery is local input, upstream of the control
+  queue, and the repeat rate is a per-machine setting no lockstep peer can
+  observe.
+  Pinned by `every_target_reports_the_repeated_key_flag`,
   `autostop_ignores_repeated_physical_keydown_until_release` and
-  `app_virtual_keyboard_flings_tutorial05_wood_to_the_right_hill`.
+  `app_virtual_keyboard_flings_tutorial05_wood_to_the_right_hill`; the latter
+  two press the same key twice, which is exactly what the operating system
+  delivers.
 
 - Open gap (found 2026-08-02, not closed): **keyboard identity and delivery
   still differ at platform boundaries.** On X11, C++ explicitly asks XKB for

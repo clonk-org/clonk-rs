@@ -2905,52 +2905,48 @@ fn selected_player_autostop_stops_horizontal_keys_on_release() {
 }
 
 #[test]
-fn sdl_repeated_keydown_remains_fresh_like_cpp() {
+fn every_target_reports_the_repeated_key_flag() {
     // C++ picks its repeated-key semantics per windowing backend:
     //
     //   Win32  DoKeyboardInput(..., !!(lParam & 0x40000000), ...)
     //          (C4Viewport.cpp:89,100; C4FullScreen.cpp:59,64)
     //   X11    passes false, then C4Game::DoKeyboardInput re-derives it from
-    //          its PressedKeys map inside #ifdef USE_X11 (C4Game.cpp:2153-2166)
+    //          its PressedKeys map inside #ifdef USE_X11 (C4Game.cpp:2143-2154)
     //   SDL    passes a literal false for every keydown AND keyup
-    //          (C4FullScreen.cpp:388-400) with no synthesis at all
+    //          (C4FullScreen.cpp:387-400) with no synthesis at all
     //
-    // and SDL is the default main loop on Apple, where USE_X11 is excluded
-    // outright (CMakeLists.txt:191-197). So on macOS an operating-system
-    // auto-repeat is a *fresh* press: C4Game::LocalControlKey never swallows it
-    // (C4Game.cpp:3580-3583) and C4Player::CountControl may raise it to
-    // COM_Double (C4Player.cpp:1568).
+    // and SDL is the default main loop on Apple (CMakeLists.txt:198-200), so
+    // that build cannot tell a held key from a tapped one. The port declines to
+    // model that gap: winit reports repeats on every target it runs on, and
+    // without the flag `C4Player::InCom` turns a held direction key into a
+    // stream of Control*Double callbacks at the host's repeat rate
+    // (C4Player.cpp:1532-1533).
     use crate::game_app_input::{engine_key_repeated, BACKEND_SYNTHESIZES_KEY_REPEAT};
     assert!(
-        !engine_key_repeated(true, false),
-        "the SDL/macOS backend reports no repeats, so a held key stays fresh"
+        engine_key_repeated(true, BACKEND_SYNTHESIZES_KEY_REPEAT),
+        "no supported target hides a held key's repeat from the engine"
     );
     assert!(
         engine_key_repeated(true, true),
-        "Win32 and X11 keep their repeat detection"
+        "a keydown for a key that is already down is a repeat"
+    );
+    assert!(
+        !engine_key_repeated(true, false),
+        "a backend that cannot report repeats still yields a fresh press"
     );
     // A first press is never a repeat on any backend.
     assert!(!engine_key_repeated(false, true));
     assert!(!engine_key_repeated(false, false));
-
-    assert_eq!(
-        BACKEND_SYNTHESIZES_KEY_REPEAT,
-        !cfg!(target_os = "macos"),
-        "macOS follows the SDL main loop; every other target keeps Win32/X11 repeats"
-    );
 }
 
 #[test]
 fn autostop_ignores_repeated_physical_keydown_until_release() {
-    // C4Game::LocalControlKey swallows a repeated keydown for AutoStopControl
-    // players before C4Player::CountControl can turn it into a COM_Double
-    // (C4Game.cpp:3580-3583). A false Down_D makes DFA_PUSH ungrab its target,
-    // which is why holding Down while tensioning CATA could unexpectedly
-    // deselect the catapult.
-    //
-    // The repeat is driven explicitly because whether a *physical* auto-repeat
-    // carries the flag is a backend question, not an engine one — see
-    // `sdl_repeated_keydown_remains_fresh_like_cpp`.
+    // Winit reports the operating system's key-repeat as another Pressed event.
+    // C4Game::LocalControlKey swallows that repeat for AutoStopControl players
+    // before C4Player::InCom can turn it into a COM_Double (C4Game.cpp:
+    // 3560-3573). A false Down_D makes DFA_PUSH ungrab its target, which is why
+    // holding Down while tensioning CATA could unexpectedly deselect the
+    // catapult.
     let mut app = GameApp::new(
         320,
         200,
@@ -2994,7 +2990,7 @@ fn autostop_ignores_repeated_physical_keydown_until_release() {
         .expect("press physical Down");
     let first_press = keyboard.player_control();
     keyboard
-        .repeat(VirtualKeyCode::KeyX)
+        .press(VirtualKeyCode::KeyX)
         .expect("receive repeated physical Down");
     let repeated_press = keyboard.player_control();
 

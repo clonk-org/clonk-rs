@@ -6,29 +6,36 @@
 
 use super::*;
 
-/// Whether this platform's C++ counterpart turns an operating-system key-repeat
-/// into `C4KeyCodeEx::IsRepeated()`.
+/// Whether the windowing backend tells the engine that a keydown is an
+/// operating-system key-repeat, i.e. whether `C4KeyCodeEx::IsRepeated()` can
+/// ever be set.
 ///
-/// C++ decides this per *windowing backend*, chosen at build time, and the port
-/// runs winit everywhere — so the equivalent choice is by target:
+/// C++ answers this per *windowing backend*, chosen at build time:
 ///
 /// - **Win32** reads the real hardware bit: `DoKeyboardInput(..., !!(lParam &
 ///   0x40000000), ...)` (`C4Viewport.cpp:89,100`, `C4FullScreen.cpp:59,64`,
 ///   `C4GuiDialogs.cpp:231,240`). Repeats are repeats.
 /// - **X11** passes `false` and `C4Game::DoKeyboardInput` re-derives the flag
 ///   from its own `PressedKeys` map — but only inside `#ifdef USE_X11`
-///   (`C4Game.cpp:2153-2166`). Same answer as Win32, synthesized.
+///   (`C4Game.cpp:2143-2154`). Same answer as Win32, synthesized.
 /// - **SDL** passes a literal `false` for *every* keydown and keyup
-///   (`C4FullScreen.cpp:388-400`) and gets no synthesis, because `USE_X11` is
-///   off. SDL is the default main loop on Apple and `USE_X11` is explicitly
-///   excluded there (`CMakeLists.txt:191-197`), so on macOS an auto-repeat down
-///   is a **fresh press**.
+///   (`C4FullScreen.cpp:387-400`) and gets no synthesis, because `USE_X11` is
+///   excluded on Apple (`CMakeLists.txt:198-200`). A macOS auto-repeat is
+///   therefore a fresh press to that build.
 ///
-/// This is observable: `C4Game::LocalControlKey` swallows a repeat for
-/// AutoStopControl players (`C4Game.cpp:3580-3583`) and
-/// `C4Player::CountControl` turns a second identical com into `COM_Double`
-/// (`C4Player.cpp:1568`). Neither happens on macOS, where the flag is never set.
-pub(crate) const BACKEND_SYNTHESIZES_KEY_REPEAT: bool = !cfg!(target_os = "macos");
+/// The port answers `true` on every target, deliberately declining to model the
+/// SDL branch. That branch is not a rule about repeats; it is C++ *lacking the
+/// information*. The port synthesizes the flag from its own pressed-key set the
+/// way the X11 branch does, and that set is just as available on macOS.
+/// Modelling the absence turns a machine-local preference into gameplay:
+/// `C4Game::LocalControlKey` swallows a repeat for
+/// AutoStopControl players (`C4Game.cpp:3566-3570`) and `C4Player::InCom`
+/// raises a second identical com to `COM_Double` (`C4Player.cpp:1532-1533`), so
+/// with the flag unset a *held* direction key manufactures `Control*Double`
+/// every few frames at whatever rate the host repeats — firing the ClonkMars
+/// Jetbelt and the Eke Airbike's Hyperfly boost, and arming the `COM_Down_D`
+/// `DFA_PUSH` ungrab, without the player ever tapping twice.
+pub(crate) const BACKEND_SYNTHESIZES_KEY_REPEAT: bool = true;
 
 /// The repeated-key flag handed to `C4KeyCodeEx`, given whether the key was
 /// already down and whether this backend reports repeats at all.
