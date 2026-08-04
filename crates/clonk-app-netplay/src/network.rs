@@ -315,6 +315,16 @@ impl From<String> for NetworkStartError {
     }
 }
 
+/// Renders a failed client join for the startup caption the app shows.
+fn client_startup_error(error: clonk_network::ClientError) -> NetworkStartError {
+    match error {
+        clonk_network::ClientError::WrongPassword { message } => {
+            NetworkStartError::WrongPassword { message }
+        }
+        other => NetworkStartError::Other(format!("failed to connect to host: {other}")),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkStartupCancellation {
     inner: Arc<NetworkStartupCancellationInner>,
@@ -7122,16 +7132,11 @@ async fn run_client_worker(
     };
     let mut client = match client_result {
         Ok(client) => client,
-        Err(clonk_network::ClientError::WrongPassword { message }) => {
-            let startup_error = NetworkStartError::WrongPassword { message };
+        Err(error) => {
+            let startup_error = client_startup_error(error);
             let detail = startup_error.to_string();
             let _ = local_id_tx.send(Err(startup_error));
             return Err(anyhow!(detail));
-        }
-        Err(err) => {
-            let message = format!("failed to connect to host: {err}");
-            let _ = local_id_tx.send(Err(message.clone().into()));
-            return Err(anyhow!(message));
         }
     };
     if startup_cancellation
