@@ -38,8 +38,10 @@ fn items(engine: &Engine, clonk: ObjectId) -> Vec<clonk_engine::ObjectMenuItem> 
 }
 
 /// Walk into a Base, press up and choose Order — the route the ticket
-/// describes (Base.c4d/Script.c:115-130).
-fn open_order_page(engine: &mut Engine) -> ObjectId {
+/// describes (Base.c4d/Script.c:115-130). The ordering Clonk becomes the
+/// player's cursor, because that is what player controls address
+/// (C4Object::Control via the cursor, C4Player.cpp).
+fn open_order_page(engine: &mut Engine) -> (i32, ObjectId) {
     let player = join_local_player(engine, "Mars order tester");
     let base = engine
         .spawn_object(
@@ -59,6 +61,12 @@ fn open_order_page(engine: &mut Engine) -> ObjectId {
                 .with_container(base),
         )
         .expect("ordering Spaceclonk spawns inside the base");
+    engine
+        .select_crew(player, vec![clonk])
+        .expect("the ordering Clonk joins the crew");
+    engine
+        .set_crew_cursor(player, Some(clonk))
+        .expect("the ordering Clonk becomes the cursor");
     // Base.c4d/Script.c:157-160 refuses the menu without a satellite hanging
     // over it; Sat.c4d/Script.c:18-25 is what puts one there.
     let sat = engine
@@ -86,7 +94,7 @@ fn open_order_page(engine: &mut Engine) -> ObjectId {
     engine
         .menu_user_enter(clonk, false)
         .expect("selecting Order opens the submenu");
-    clonk
+    (player, clonk)
 }
 
 #[test]
@@ -95,7 +103,7 @@ fn mars_order_page_collapses_each_product_to_a_single_row() {
     // HomeBaseMaterial=CNKT=6;PIKT=3;METL=10;PSTC=10;WIRO=3), so the shipped
     // three-rows-per-product expansion produced 16 rows for them.
     let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let clonk = open_order_page(&mut engine);
+    let (_player, clonk) = open_order_page(&mut engine);
 
     let captions: Vec<String> = items(&engine, clonk)
         .into_iter()
@@ -115,7 +123,7 @@ fn mars_order_row_offers_both_steps_on_the_product_row() {
     // carries both activations — Command on a left enter, Command2 on a right
     // one (C4Menu.cpp:512-514).
     let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let clonk = open_order_page(&mut engine);
+    let (_player, clonk) = open_order_page(&mut engine);
 
     let row = items(&engine, clonk).swap_remove(0);
     assert_eq!(
@@ -136,7 +144,7 @@ fn mars_order_row_offers_both_steps_on_the_product_row() {
 #[test]
 fn mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one() {
     let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let clonk = open_order_page(&mut engine);
+    let (_player, clonk) = open_order_page(&mut engine);
 
     engine
         .menu_user_enter(clonk, false)
@@ -172,7 +180,7 @@ fn mars_order_row_stops_offering_a_step_it_cannot_take() {
     // AddRangeChoice was given (Base.c4d/Script.c:125). Increase clamps there
     // (Menu.c4d/Script.c:184-187), so the row must stop advertising it.
     let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let clonk = open_order_page(&mut engine);
+    let (_player, clonk) = open_order_page(&mut engine);
 
     for _ in 0..6 {
         engine
@@ -206,7 +214,7 @@ fn mars_order_row_moves_only_its_own_product_and_keeps_the_selection() {
     // to change and the row number is what ShowMenu re-selects afterwards
     // (Menu.c4d/Script.c:55,178-182).
     let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let clonk = open_order_page(&mut engine);
+    let (_player, clonk) = open_order_page(&mut engine);
 
     let metal_row = 2;
     let index = engine.find_object_index(clonk).expect("clonk remains live");
