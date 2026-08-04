@@ -321,7 +321,7 @@ fn client_startup_error(error: clonk_network::ClientError) -> NetworkStartError 
         clonk_network::ClientError::WrongPassword { message } => {
             NetworkStartError::WrongPassword { message }
         }
-        other => NetworkStartError::Other(format!("failed to connect to host: {other}")),
+        other => NetworkStartError::Other(other.to_string()),
     }
 }
 
@@ -8406,6 +8406,20 @@ mod tests {
 
     fn test_netpuncher_state() -> Arc<Mutex<NetworkNetpuncherState>> {
         Arc::new(Mutex::new(NetworkNetpuncherState::default()))
+    }
+
+    #[test]
+    fn failed_client_join_names_the_connect_failure_once() {
+        // `ClientError::Connect` already carries the caption, so the startup
+        // mapping must not prepend a second copy of it.
+        let startup_error = client_startup_error(clonk_network::ClientError::Connect(
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "connection attempt timed out"),
+        ));
+
+        assert_eq!(
+            startup_error.to_string(),
+            "failed to connect to host: connection attempt timed out"
+        );
     }
 
     #[test]
