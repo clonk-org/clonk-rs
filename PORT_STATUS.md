@@ -425,31 +425,53 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
-- Open: **`inherited` in a script function is resolved from a statically wired
-  overload chain, not from the live function tables C4Aul searches at link
-  time.** `Function::owner_overloaded` (`crates/clonk-script/src/ast.rs`) now
-  models both cuts of `Fn->Owner->GetOverloadedFunc(Fn)`
-  (`C4AulParse.cpp:1406-1408`): an engine-owned `global func` reaches only
-  other engine-owned functions, and a definition-scope function walks its own
-  host's declarations before hopping to the engine. Three narrower gaps
-  remain, none of which shipped content exercises today:
-  - The engine hop is a chain walk, so a definition-scope function reaches a
-    global only when one sits in its own chain. C++ evaluates
-    `Owner->GetFuncRecursive(ByFunc->Name)` (`C4Aul.cpp:281-288`) against the
-    live engine table, which resolves to the newest same-name global from
-    *any* host.
-  - A `global func` body resolves unqualified identifiers against its
-    declaring host as well as the engine table. C++ switches the whole lookup
-    to the engine for engine-owned functions (`C4AulParse.cpp:2216-2219`,
-    `:2820-2823`), so a global body cannot see its declaring definition's
-    other functions at all.
-  - `inherited()` with no overload target is a runtime error here
-    (`crates/clonk-script/src/vm.rs`) and a *parse*-time link error in C++
-    (`C4AulParse.cpp:2799`, `Type == PARSER`). Correcting the global chain
-    widens the set of globals with no target, so it widens this timing gap;
-    the failsafe `_inherited` spelling both engines agree on is unaffected.
+- Open: **A `global func` body resolves unqualified identifiers against its
+  declaring host, where C4Aul resolves them against the engine only.** Both
+  identifier sites switch the *whole* lookup for an engine-owned function —
+  `if (Fn->Owner == &Game.ScriptEngine) FoundFn = a->Owner->GetFuncRecursive(Idtf);`
+  (`C4AulParse.cpp:2216-2219`, `:2818-2823`) — so a global body cannot see its
+  declaring host's definition-scope functions at all. The port instead honours
+  `env.linked_host_lookup` (`crates/clonk-script/src/vm.rs`) at ten body
+  resolution sites. `C4AulFunc::GetLocalSFunc` ("search linked scope first",
+  `C4Aul.cpp:118-127`) is *not* a counter-example: its only callers are
+  `FnResortObjects`/`FnResortObject` (`C4Script.cpp:4491`, `:4512`), i.e. a
+  by-name runtime lookup, not body resolution — the port should keep modelling
+  that with `exact_global_link_lookup` while dropping the body-resolution half.
+  Closing this reds three assertions installed by earlier parity work
+  (`script_relink_regression.rs`'s
+  `global_resort_comparator_executes_without_a_definition_context`, and
+  `effects.rs`'s `no_command_target_effect_uses_exact_engine_global_scope` and
+  `command_target_global_effect_keeps_this_and_linked_helper_scope`), which
+  pin values C4Aul cannot produce and need re-scoping, not a value bump. No
+  shipped content is affected: of 80 candidate sites in `content/`, every one
+  is an `Obj->Method()` call, which compiles to AB_CALL rather than identifier
+  resolution.
 
-  `parity verify` does not cover any of it: the golden has no `global func`.
+  A second divergence sits behind it: the port lets a `global func` body read
+  and write its declaring host's named `local`s, which C4Aul rejects at parse
+  time in both the lvalue and rvalue paths (`C4AulParse.cpp:2000-2004`,
+  `:2731-2737`, "using local variable in global function!").
+
+- Open: **`inherited()` with no overload target is reported only when the call
+  executes, where C4Aul reports it once at link time.** `C4AulParse.cpp:2799`
+  throws under `Type == PARSER`; `C4AulScript::Parse` catches it, logs it,
+  counts it into `Game.ScriptEngine.errCnt`, truncates that function's bytecode
+  at the offending token and appends `AB_ERR` (`C4AulParse.cpp:3563-3586`), so
+  the function still raises when called. The port raises the equivalent runtime
+  error (`crates/clonk-script/src/vm.rs`) but never reports at load, has no
+  `errCnt` summary (`C4AulLink.cpp:299-301`), and cannot reproduce the
+  statement-granular truncation without expression spans. Closing it needs a
+  link-time pass whose "no target" oracle is the same resolver the VM uses —
+  a chain-only oracle would falsely poison the ~99 shipped functions that carry
+  a hard `inherited()` and resolve through the engine hop or a native. C++ also
+  suppresses the *log* for a pure `#appendto` System.c4g host
+  (`C4AulParse.cpp:3566`), which several shipped scripts are.
+
+  Survey trap: `content/` scripts are latin-1, so plain `grep -rn`/`grep -rI`
+  classifies them as binary and silently skips them — use
+  `--binary-files=text`, or an earlier survey's "8 hits" becomes 100.
+
+  `parity verify` covers neither: the golden has no `global func`.
 
 - Open: **A `Game.pGlobalEffects` callback still runs with no ambient object
   even when the effect has a command target.** Object effects now execute on

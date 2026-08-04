@@ -3990,6 +3990,32 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// `GetOverloadedFunc`'s owner hop: `if (!f && Owner) { f =
+    /// Owner->GetFuncRecursive(ByFunc->Name); }` (C4Aul.cpp:281-288). A
+    /// definition script's Owner IS the script engine (C4Def.cpp:649
+    /// `Script.Reg2List(&Game.ScriptEngine, &Game.ScriptEngine)`, and every
+    /// other script kind registers the same way), so the hop resolves against
+    /// the LIVE engine function table (C4Aul.cpp:293-301). Its same-name
+    /// entries are head-inserted — the `C4AulFunc` constructor's `bAtEnd`
+    /// default of true reaches `C4AulFuncMap::Add` as `bAtStart`
+    /// (C4Aul.cpp:76-79, :613-629) — so the hop yields the NEWEST global from
+    /// ANY host, with the engine-init natives left at the bucket tail.
+    ///
+    /// The stored overload chain can only approximate that, so it is consulted
+    /// first for the own-host result and superseded here whenever C4Aul would
+    /// have taken the hop. An engine-owned function never hops: the engine has
+    /// no owner above it.
+    fn inherited_engine_hop(&self, env: &Environment) -> Option<&Function> {
+        let own_list_found_none = env
+            .inherited_target
+            .as_ref()
+            .is_none_or(|target| target.access == AccessLevel::Global);
+        (!env.engine_scope && own_list_found_none)
+            .then(|| self.engine_global_script_function(&env.function_name))
+            .flatten()
+            .filter(|found| found.access == AccessLevel::Global)
+    }
+
     fn invoke_engine_global_raw(
         &self,
         name: &str,
@@ -5009,7 +5035,12 @@ impl<'a> Vm<'a> {
             return false;
         };
         if matches!(name.as_str(), "inherited" | "_inherited") {
-            if let Some(function) = env.inherited_target.as_ref() {
+            // Same precedence as the dispatch arm, so the C4Value::Set
+            // decision cannot disagree with the function actually called.
+            if let Some(function) = self
+                .inherited_engine_hop(env)
+                .or(env.inherited_target.as_deref())
+            {
                 return !function.returns_reference;
             }
             return self.has_host_function(&env.function_name);
@@ -5614,8 +5645,14 @@ impl<'a> Vm<'a> {
                         Expr::Variable(name) if name == "inherited" || name == "_inherited" => {
                             // `inherited` calls the overloaded function; the
                             // `_inherited` spelling yields nil when there is
-                            // none (C4AulParse.cpp:2775-2798).
-                            let Some(target) = env.inherited_target.clone() else {
+                            // none (C4AulParse.cpp:2775-2798). The own-owner
+                            // list wins; C4Aul's owner hop into the live engine
+                            // table supersedes the chain when that list held
+                            // nothing.
+                            let hop = self
+                                .inherited_engine_hop(env)
+                                .map(|found| std::sync::Arc::new(found.clone()));
+                            let Some(target) = hop.or_else(|| env.inherited_target.clone()) else {
                                 let inherited_name = env.function_name.clone();
                                 // Script functions overload same-name ENGINE
                                 // functions: inherited() chains to the host
