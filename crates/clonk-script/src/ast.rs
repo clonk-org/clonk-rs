@@ -183,6 +183,14 @@ pub struct Function {
     /// script redefining the name, or an #include'd parent's same-name
     /// function. `inherited(...)`/`_inherited(...)` call it.
     pub overloaded: Option<std::sync::Arc<Function>>,
+    /// One-based source line of a hard `inherited(...)` call in this body, if
+    /// it has one. C4Aul binds `inherited` while parsing function bodies —
+    /// which happens after every func table is built — and refuses the
+    /// function outright when `Fn->OwnerOverloaded` is null
+    /// (`C4AulParse.cpp:2799`). The port parses bodies before linking, so it
+    /// records the site here and runs the same check once the overload tables
+    /// exist. The failsafe `_inherited` spelling never sets it.
+    pub(crate) hard_inherited_line: Option<usize>,
 }
 
 impl Function {

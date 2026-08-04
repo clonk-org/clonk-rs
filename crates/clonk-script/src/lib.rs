@@ -19,7 +19,7 @@ pub use crate::engine::{
     DirectCallFunctionProbe, Engine, GlobalSlots, GlobalVariables, HostRegistrationSnapshot,
     MethodRefArgsDispatch, MethodReferenceDispatch, ReferenceParameterProbe, Script,
     ScriptFunctionResolution, ScriptFunctionScope, StaticConstLinkError, StringRegistrationLedger,
-    StringRegistrations,
+    StringRegistrations, UnresolvedInherited,
 };
 pub use crate::error::{ParseError, RuntimeCallFrame, RuntimeError, ScriptError};
 pub use crate::value::{

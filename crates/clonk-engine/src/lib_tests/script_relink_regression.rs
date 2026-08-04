@@ -19,6 +19,46 @@ fn link_initial_scripts(engine: &mut Engine) {
 }
 
 #[test]
+fn link_surfaces_an_unresolvable_hard_inherited_per_definition() {
+    // The engine-side half of C4AulScript::Parse's link-time report
+    // (C4AulParse.cpp:2799 raising, :3563-3586 catching and counting). ADEF's
+    // `inherited` has no target anywhere; BDEF's resolves through C4Aul's
+    // owner hop into the engine table (C4Aul.cpp:281-288), so only ADEF is
+    // reported — a chain-only oracle would report both.
+    let mut engine = Engine::new();
+    register(
+        &mut engine,
+        "ADEF",
+        "#strict\nfunc Orphan() { return inherited(); }",
+    );
+    register(
+        &mut engine,
+        "BDEF",
+        "#strict\n\
+         global func Hop() { return 1; }\n\
+         func Hop() { return inherited() + 10; }",
+    );
+    engine.relink_scripts().expect("scripts relink");
+
+    let reported = |id: &str| {
+        engine
+            .definitions
+            .get(id)
+            .expect("definition remains")
+            .script
+            .unresolved_inherited_diagnostics()
+    };
+    let orphan = reported("ADEF");
+    assert_eq!(orphan.len(), 1, "{orphan:?}");
+    assert_eq!(orphan[0].function, "Orphan");
+    assert!(
+        reported("BDEF").is_empty(),
+        "the engine hop resolves BDEF's inherited: {:?}",
+        reported("BDEF")
+    );
+}
+
+#[test]
 fn initial_link_preparses_every_host_constant_before_function_literal_holds() {
     let mut engine = Engine::new();
     assert_eq!(
