@@ -171,3 +171,125 @@ fn same_script_redefinition_reaches_the_earlier_definition_via_inherited() {
         "the later definition wins and inherited() reaches the earlier one"
     );
 }
+
+#[test]
+fn global_func_inherited_skips_the_same_hosts_definition_scope_func() {
+    // A `global func` belongs to the ENGINE script: C4AulParse.cpp:1610-1614
+    // builds it as `new C4AulScriptFunc(a->Engine, Idtf)` and leaves only an
+    // UNNAMED `C4AulFunc(a, nullptr)` link in the declaring script. Its
+    // overload target is then searched in that owner's list
+    // (C4AulParse.cpp:1406-1408, "*MUST* check Fn->Owner-list, because it may
+    // be the engine (due to linked globals)"), and C4Aul.cpp:266-277 walks the
+    // list backwards comparing `SEqual(ByFunc->Name, f->Name)` — the unnamed
+    // link never matches, so the declaring host's own definition-scope
+    // function is unreachable from the global. MetalMagic's
+    // MagixRoom.c4d/Script.c declares exactly this pair for `GetDir`/`SetDir`.
+    let source = r#"
+        #strict
+        public func F() { return 99; }
+        global func F() { return _inherited(); }
+    "#;
+    let mut engine = Engine::new();
+    engine.add_script(compile_clean(source));
+    assert_eq!(
+        engine.call("F", &[]).expect("call succeeds"),
+        Value::Nil,
+        "the global func has no engine-side overload, so _inherited is nil"
+    );
+}
+
+#[test]
+fn global_func_inherited_reaches_the_engine_native_it_overloads() {
+    // MetalMagic's MagixRoom.c4d/Script.c:271-282 is this exact shape: the
+    // global `SetDir(dir, obj)` handles its own definition and forwards
+    // everything else to the engine's `AddFunc(pEngine, "SetDir", FnSetDir)`
+    // (C4Script.cpp:6934) through `_inherited`. The engine native is what the
+    // engine-owned overload search terminates on (C4Aul.cpp:281-288 finds no
+    // owner above the engine, leaving `OwnerOverloaded` null and the call to
+    // the same-name native).
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("SetDir", 2, |_| Ok(Value::Int(42)));
+    engine.add_script(compile_clean(
+        r#"
+        #strict
+        local direction;
+        public func SetDir(dir) { direction = dir; return direction; }
+        global func SetDir(dir, obj) { return _inherited(dir, obj); }
+        "#,
+    ));
+    assert_eq!(
+        engine
+            .call("SetDir", &[Value::Int(7), Value::Nil])
+            .expect("call succeeds"),
+        Value::Int(42),
+        "the global forwards to the native, not to the definition-scope func"
+    );
+}
+
+#[test]
+fn global_func_inherited_reaches_the_previous_global_not_a_foreign_local() {
+    // Two hosts declaring the same global is the shipped MetalMagic /
+    // MetalMagicExtra pairing (both MagixRoom.c4d/Script.c files declare
+    // `global func GetDir`). The later global's owner list is the engine's,
+    // so it reaches the earlier GLOBAL — never the definition-scope function
+    // sitting beside it in its own host (C4AulParse.cpp:1608-1615).
+    let mut engine = Engine::new();
+    engine.add_script(compile_clean("global func F() { return 1; }"));
+    engine.add_script(compile_clean(
+        "#strict\n\
+         public func F() { return 99; }\n\
+         global func F() { return _inherited() + 5; }",
+    ));
+    assert_eq!(
+        engine.call("F", &[]).expect("call succeeds"),
+        Value::Int(6),
+        "the engine-owned chain skips the later host's definition-scope func"
+    );
+}
+
+#[test]
+fn definition_scope_inherited_prefers_an_older_own_func_over_a_global() {
+    // The other half of the same C4Aul rule. `GetOverloadedFunc` walks the
+    // DECLARING host's list backwards first (C4Aul.cpp:269-276), and a
+    // `global func`'s presence there is the UNNAMED `C4AulFunc(a, nullptr)`
+    // link (C4AulParse.cpp:1613) — `SEqual(ByFunc->Name, f->Name)` never
+    // matches it, so the walk steps over the global and stops at the earlier
+    // definition-scope declaration.
+    let source = r#"
+        #strict
+        public func F() { return 1; }
+        global func F() { return 2; }
+        public func F() { return inherited(); }
+    "#;
+    let mut engine = Engine::new();
+    engine.add_script(compile_clean(source));
+    assert_eq!(
+        engine.call("F", &[]).expect("call succeeds"),
+        Value::Int(1),
+        "the interposed global is skipped, not taken as the overload target"
+    );
+}
+
+#[test]
+fn definition_scope_inherited_hops_to_the_engine_when_its_own_host_has_none() {
+    // Only when the host's own backward walk finds nothing does
+    // `GetOverloadedFunc` hop to the owner — `if (!f && Owner) { if ((f =
+    // Owner->GetFuncRecursive(ByFunc->Name))) ... }` (C4Aul.cpp:281-288). A
+    // definition script's owner IS the script engine (C4Def.cpp:649
+    // `Script.Reg2List(&Game.ScriptEngine, &Game.ScriptEngine)`), so a
+    // definition-scope function can legitimately overload a global. The
+    // reverse direction is structurally impossible, which is why this rule is
+    // asymmetric.
+    let source = r#"
+        #strict
+        global func F() { return 1; }
+        public func F() { return inherited() + 10; }
+    "#;
+    let mut engine = Engine::new();
+    engine.add_script(compile_clean(source));
+    assert_eq!(
+        engine.call("F", &[]).expect("call succeeds"),
+        Value::Int(11),
+        "with no earlier own declaration the walk hops to the engine's global"
+    );
+}

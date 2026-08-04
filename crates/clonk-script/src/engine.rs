@@ -3065,6 +3065,107 @@ mod tests {
     }
 
     #[test]
+    fn definition_scope_inherited_hops_to_the_live_engine_global_table() {
+        // `GetOverloadedFunc`'s owner hop is a LIVE table lookup, not a walk of
+        // the caller's own overload chain. A definition script's Owner IS the
+        // script engine (C4Def.cpp:649 `Script.Reg2List(&Game.ScriptEngine,
+        // &Game.ScriptEngine)`), so `if (!f && Owner) { f =
+        // Owner->GetFuncRecursive(ByFunc->Name); }` (C4Aul.cpp:281-288) reads
+        // the engine's function map (C4Aul.cpp:293-301). Same-name entries are
+        // head-inserted there — the `C4AulFunc` constructor passes its
+        // `bAtEnd` default of true into `FuncLookUp.Add(this, bAtEnd)`
+        // (C4Aul.cpp:76-79), which `C4AulFuncMap::Add` receives as `bAtStart`
+        // (C4Aul.cpp:586-628) — so `GetFirstFunc` (C4Aul.cpp:553-560) yields
+        // the NEWEST global from ANY host. A definition that declares no global
+        // of its own therefore still reaches one.
+        let mut provider = Engine::new();
+        provider
+            .load_script("global func Pick() { return 1; }")
+            .expect("first global compiles");
+        let mut functions = provider
+            .global_access_functions()
+            .map(|(name, function)| (name.clone(), function.clone()))
+            .collect::<FxHashMap<_, _>>();
+
+        let mut later = Engine::new();
+        later
+            .load_script("global func Pick() { return 2; }")
+            .expect("newer global compiles");
+        let mut latest = later.functions().get("Pick").expect("Pick exists").clone();
+        latest.push_overload(functions.remove("Pick").expect("older Pick exists"));
+        functions.insert("Pick".to_string(), latest);
+
+        // The definition declares no global at all, so nothing in its own
+        // overload chain can supply the target.
+        let mut definition = Engine::new();
+        definition
+            .load_script("#strict\nfunc Pick() { return inherited() + 10; }")
+            .expect("definition-scope declaration compiles");
+        definition.set_global_functions(Some(Arc::new(functions)));
+
+        assert_eq!(
+            definition.call("Pick", &[]).expect("call succeeds"),
+            Value::Int(12),
+            "the owner hop reaches the newest engine global, not the older one"
+        );
+    }
+
+    #[test]
+    fn engine_hop_inherited_result_copies_like_a_chain_target_call() {
+        // The hop dispatches a script function, so its result must carry the
+        // same C4Value::Set semantics as the equivalent chain-target call — an
+        // array result is copied, not aliased (C4AulExec.cpp:330-337). This is
+        // an equivalence guard, not a discriminator: the two paths agree today
+        // whichever target `direct_value_call_has_materialized_result` picks,
+        // and it exists so they keep agreeing once one of them changes.
+        fn tail_mutates_source(engine: &Engine) -> Value {
+            engine.call("Probe", &[]).expect("call succeeds")
+        }
+
+        let mut provider = Engine::new();
+        provider
+            .load_script("#strict\nglobal func Make() { return [1, 2]; }")
+            .expect("global provider compiles");
+        let globals = provider
+            .global_access_functions()
+            .map(|(name, function)| (name.clone(), function.clone()))
+            .collect::<FxHashMap<_, _>>();
+
+        // Chain target: the same-host earlier declaration supplies `inherited`.
+        let mut chained = Engine::new();
+        chained
+            .load_script(
+                "#strict\n\
+                 func Make() { return [1, 2]; }\n\
+                 func Make() { var a = inherited(); a[0] = 9; return [a, inherited()]; }\n\
+                 func Probe() { return Make(); }",
+            )
+            .expect("chained declaration compiles");
+
+        // Engine hop: the definition declares no `Make` of its own to inherit.
+        let mut hopped = Engine::new();
+        hopped
+            .load_script(
+                "#strict\n\
+                 func Make() { var a = inherited(); a[0] = 9; return [a, inherited()]; }\n\
+                 func Probe() { return Make(); }",
+            )
+            .expect("hopping declaration compiles");
+        hopped.set_global_functions(Some(Arc::new(globals)));
+
+        let expected = Value::Array(vec![
+            Value::Array(vec![Value::Int(9), Value::Int(2)]),
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+        ]);
+        assert_eq!(tail_mutates_source(&chained), expected);
+        assert_eq!(
+            tail_mutates_source(&hopped),
+            expected,
+            "the hopped target's result copies exactly like the chain target's"
+        );
+    }
+
+    #[test]
     fn named_local_survives_a_newer_own_global_in_the_overload_chain() {
         let mut host = Engine::new();
         host.load_script("func Pick() { return 1; }")
