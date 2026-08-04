@@ -9,13 +9,13 @@ use std::thread;
 use std::time::Duration;
 
 use clonk_engine::LegacyCString;
-use socket2::{Protocol, SockRef, Type};
+use socket2::{Protocol, Type};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 use crate::host_game_reference::{quote_legacy, serialize_reference_parameters};
-use crate::search::{join_discovery_multicast, multicast_targets, DISCOVERY_MULTICAST};
+use crate::search::{join_discovery_multicast, send_discovery_datagram, DISCOVERY_MULTICAST};
 use crate::{
     HostGameReference, HostGameReferenceError, NetworkAddress, NetworkGameReference,
     NetworkProtocol,
@@ -539,14 +539,7 @@ async fn announce(
         return;
     };
     let target = SocketAddrV6::new(DISCOVERY_MULTICAST, discovery_port, 0, 0);
-    for target in multicast_targets(target, interfaces) {
-        if SockRef::from(discovery)
-            .set_multicast_if_v6(target.scope_id())
-            .is_ok()
-        {
-            let _ = discovery.send_to(&reply, target).await;
-        }
-    }
+    let _ = send_discovery_datagram(discovery, &reply, target, interfaces).await;
 }
 
 async fn serve_reference(

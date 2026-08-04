@@ -893,23 +893,34 @@ struct DiscoverySocket {
 
 impl DiscoverySocket {
     async fn send_probe(&self, payload: &[u8], target: SocketAddrV6) -> io::Result<()> {
-        let mut last_error = None;
-        let mut sent = false;
-        for target in multicast_targets(target, &self.multicast_interfaces) {
-            if let Err(error) = SockRef::from(&self.socket).set_multicast_if_v6(target.scope_id()) {
-                last_error = Some(error);
-                continue;
-            }
-            match self.socket.send_to(payload, target).await {
-                Ok(_) => sent = true,
-                Err(error) => last_error = Some(error),
-            }
+        send_discovery_datagram(&self.socket, payload, target, &self.multicast_interfaces).await
+    }
+}
+
+/// Sends one discovery datagram to every target the joined interface list
+/// expands to, succeeding when any of them left the host.
+pub(crate) async fn send_discovery_datagram(
+    socket: &UdpSocket,
+    payload: &[u8],
+    target: SocketAddrV6,
+    interfaces: &[u32],
+) -> io::Result<()> {
+    let mut last_error = None;
+    let mut sent = false;
+    for target in multicast_targets(target, interfaces) {
+        if let Err(error) = SockRef::from(socket).set_multicast_if_v6(target.scope_id()) {
+            last_error = Some(error);
+            continue;
         }
-        if sent {
-            Ok(())
-        } else {
-            Err(last_error.unwrap_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable)))
+        match socket.send_to(payload, target).await {
+            Ok(_) => sent = true,
+            Err(error) => last_error = Some(error),
         }
+    }
+    if sent {
+        Ok(())
+    } else {
+        Err(last_error.unwrap_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable)))
     }
 }
 
