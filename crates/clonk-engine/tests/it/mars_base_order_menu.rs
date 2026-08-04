@@ -175,6 +175,125 @@ fn mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one() {
 }
 
 #[test]
+fn mars_order_row_steps_with_the_left_and_right_controls() {
+    // The reporter could only ever increase, because -1 lives on an
+    // activation nothing on screen names. Left/Right are dead keys in a
+    // one-column menu (C4Menu.cpp:433-457), so the override claims them for
+    // the selected product — the horizontal-axis-adjusts-a-value convention.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+
+    for _ in 0..3 {
+        engine
+            .player_in_com(player, clonk_engine::COM_MENU_RIGHT, 0)
+            .expect("right steps the selected product");
+    }
+    engine
+        .player_in_com(player, clonk_engine::COM_MENU_LEFT, 0)
+        .expect("left steps it back");
+
+    let menu = engine
+        .debug_object_menu(clonk.as_u64())
+        .flatten()
+        .expect("the order page is rebuilt");
+    assert_eq!(menu.items[0].count, 2, "three up and one down leaves two");
+    assert_eq!(
+        menu.selection, 0,
+        "stepping a value must not also move the selection"
+    );
+}
+
+#[test]
+fn mars_order_arrows_still_navigate_off_a_product_row() {
+    // The closing row is not a range, so the arrows must fall back to the
+    // shipped selection move there rather than swallowing the input.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+    let closing_row = 5;
+    let index = engine.find_object_index(clonk).expect("clonk remains live");
+    engine.objects[index]
+        .state
+        .menu
+        .as_mut()
+        .expect("the order page is open")
+        .selection = closing_row;
+
+    engine
+        .player_in_com(player, clonk_engine::COM_MENU_RIGHT, 0)
+        .expect("right runs on the closing row");
+
+    let menu = engine
+        .debug_object_menu(clonk.as_u64())
+        .flatten()
+        .expect("the order page stays open");
+    assert_eq!(
+        menu.selection, 0,
+        "an unclaimed step wraps the selection like C4Menu::Control always did"
+    );
+    assert!(
+        menu.items.iter().all(|item| item.count == 12_345_678),
+        "and orders nothing"
+    );
+}
+
+#[test]
+fn the_closing_row_says_which_of_its_two_jobs_it_is_doing() {
+    // Shipped Menu2 captions the last row "Finished" on every page, but it
+    // steps back out of a submenu and commits the whole template at the root
+    // (Menu.c4d/Script.c:54,206-228) — two very different outcomes behind one
+    // word and one green check.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (_player, clonk) = open_order_page(&mut engine);
+
+    let order_page = items(&engine, clonk);
+    assert_eq!(
+        order_page[order_page.len() - 1].caption,
+        "Back",
+        "the Order page's last row leaves the page"
+    );
+
+    let closing_row = i32::try_from(order_page.len()).expect("row count fits") - 1;
+    let index = engine.find_object_index(clonk).expect("clonk remains live");
+    engine.objects[index]
+        .state
+        .menu
+        .as_mut()
+        .expect("the order page is open")
+        .selection = closing_row;
+    engine
+        .menu_user_enter(clonk, false)
+        .expect("Back returns to the Call Capsule page");
+    let root_page = items(&engine, clonk);
+    assert_eq!(root_page.len(), 4, "the Call Capsule page is back");
+    assert_eq!(
+        root_page[root_page.len() - 1].caption,
+        "Finished",
+        "the root page's last row is the commit"
+    );
+}
+
+#[test]
+fn escape_abandons_the_order_from_the_order_page() {
+    // Shipped MenuQueryCancel pops one path level, so closing from a submenu
+    // reopened the page above and the ordering UI could not be dismissed
+    // there at all (Menu.c4d/Script.c:208-212,230-235).
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+
+    engine
+        .player_in_com(player, clonk_engine::COM_MENU_CLOSE, 0)
+        .expect("closing the menu runs");
+
+    assert_eq!(
+        engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk lives"),
+        None,
+        "the whole ordering menu is gone, not just the page"
+    );
+}
+
+#[test]
 fn mars_order_row_stops_offering_a_step_it_cannot_take() {
     // Fossae stocks six construction kits, which is the range maximum
     // AddRangeChoice was given (Base.c4d/Script.c:125). Increase clamps there

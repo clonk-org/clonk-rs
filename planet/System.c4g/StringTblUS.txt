@@ -2,3 +2,5 @@ MenuRangeBoth=Currently %d. Click: +%d, right-click: -%d.
 MenuRangeUp=Currently %d. Click: +%d.
 MenuRangeDown=Currently %d (maximum). Right-click: -%d.
 MenuRangeFixed=Currently %d.
+MenuDone=Finished
+MenuBack=Back
