@@ -1013,3 +1013,64 @@ fn unix_time_now() -> u64 {
         .unwrap()
         .as_secs()
 }
+
+#[test]
+fn cpp_directory_candidate_loads_through_its_packed_image_so_peers_enumerate_alike() {
+    // C++ only ever resolves a core against packed group FILES, because the
+    // shipped installation is packed: SetByCore's candidate search and
+    // GetStandalone both operate on files (src/C4Network2Res.cpp:441-458,
+    // 588-631). clonk-rs additionally accepts an unpacked directory, and a
+    // directory enumerates in host `readdir` order while the packed image the
+    // host itself loads is sorted by the C4CFN_FLS spec
+    // (C4Group.cpp:260-320). Loading a resource from the raw directory
+    // therefore gives the two peers different entry orders — and material
+    // slots are assigned by entry order (C4Material.cpp:263-299), so
+    // BlastFree's index-ordered cast loop (C4Landscape.cpp:1054-1068) draws
+    // Random() against different materials on host and client. The resolved
+    // load path must be the packed image even when its bytes are not
+    // binary-compatible with the served core.
+    let directory = TestDirectory::new();
+    let candidate = directory.path().join("Material.c4g");
+    let standalones = directory.path().join("Network");
+    fs::create_dir_all(&candidate).unwrap();
+    // Written in an order the C4FLS_MATERIAL sort has to undo.
+    fs::write(candidate.join("Water.c4m"), b"[Material]\nName=Water\n").unwrap();
+    fs::write(candidate.join("Acid.c4m"), b"[Material]\nName=Acid\n").unwrap();
+    fs::write(candidate.join("TexMap.txt"), b"1=Water-Liquid\n").unwrap();
+
+    let contents_crc = Group::open(&candidate).unwrap().contents_crc().unwrap();
+    // A deliberately impossible physical size/CRC: the host packed the same
+    // directory at another time, so the images differ byte-wise while the
+    // contents match.
+    let core = core(b"Material.c4g", 1, 0xdead_beef, contents_crc, true);
+
+    let resolution = resolve_local_resource(&core, [&candidate], &standalones).unwrap();
+
+    let LocalResourceResolution::Local(local) = resolution else {
+        panic!("contents-identical directory must remain local");
+    };
+    assert!(
+        !local.binary_compatible(),
+        "a non-byte-identical image must never be served"
+    );
+    assert_ne!(
+        local.path(),
+        candidate,
+        "the load path must not be the unpacked directory"
+    );
+    assert_eq!(local.source_path(), candidate);
+
+    let loaded = Group::open(local.path()).unwrap();
+    let names = loaded
+        .entries()
+        .unwrap()
+        .into_iter()
+        .map(|entry| String::from_utf8(entry.name_bytes).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["TexMap.txt", "Acid.c4m", "Water.c4m"]);
+
+    let mut backend = ResourceTransferBackend::new(1, directory.path().join("Backend")).unwrap();
+    let expected_path = local.path().to_path_buf();
+    local.register(&mut backend).unwrap();
+    assert_eq!(backend.path(core.id), Some(expected_path.as_path()));
+}
