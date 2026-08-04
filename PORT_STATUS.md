@@ -2717,7 +2717,21 @@ an ordered-map model gap.
   and `ShowEnum` are now rebuilt rather than inherited, so the closing row and
   the radio symbols are ours; the MS4C index constants are spelled as literals
   with citations, because Menu2's own `System.c4g` is not registered when
-  `planet/System.c4g` parses. One trap this uncovered and the append guards:
+  `planet/System.c4g` parses.
+  **Replacing a shipped function is a silent-loss risk, and it is guarded.**
+  An `#appendto` override always wins, so a content bump that changed one of
+  the replaced functions would be discarded with nothing failing.
+  `crates/clonk-engine/tests/it/mars_menu_override_drift.rs` reads the shipped
+  source straight out of the submodule — through `clonk_resources::Group`,
+  since `Menu.c4d` is a packed C4Group — and pins the exact text of every
+  function these appends replace (`ShowMenu`, `ShowEnum`, `ShowRange`,
+  `MenuQueryCancel`, `OrderCapsule`), every function they call and lean on
+  (`IncreaseRange`, `DecreaseRange`, `Finished`, `CreateDummy`,
+  `GetMenuValues`, `CapsuleCheck`, `CreateCapsule`, `ContainedUp`), and the
+  `MS4C_*` index declarations the literals stand for. A bump that touches one
+  fails with the new source in the message. That failure is not a defect: read
+  the new function, decide whether this entry still says what we want, re-pin.
+  One trap this uncovered and the append guards:
   re-rendering a page with `CreateMenu` while the menu is **open** asks the
   owner whether the close is denied (`C4Script.cpp:1525`), and Menu2 answers by
   aborting the template — row commands never hit it because `C4Menu::Enter`
