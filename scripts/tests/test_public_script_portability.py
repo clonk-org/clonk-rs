@@ -1,9 +1,8 @@
 import subprocess
 import unittest
-from pathlib import Path
 
+from _repo import REPOSITORY
 
-REPOSITORY = Path(__file__).resolve().parents[2]
 PINNED_ORACLE_REVISION = "7d43b47b7d789b533f32d005e64596e0a07019cd"
 
 
@@ -70,13 +69,12 @@ class PublicScriptPortabilityTests(unittest.TestCase):
         self.assertIn("${TMPDIR:-/tmp}", benchmark)
 
     def test_public_shell_scripts_pass_bash_syntax_validation(self):
+        scripts = [
+            REPOSITORY / "parity/oracle/gen_golden.sh",
+            *sorted(REPOSITORY.glob("scripts/*.sh")),
+        ]
         subprocess.run(
-            [
-                "bash",
-                "-n",
-                str(REPOSITORY / "parity/oracle/gen_golden.sh"),
-                str(REPOSITORY / "scripts/run-deep-sea-gpu-benchmark.sh"),
-            ],
+            ["bash", "-n", *map(str, scripts)],
             check=True,
         )
 

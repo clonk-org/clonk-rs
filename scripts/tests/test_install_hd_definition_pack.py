@@ -5,7 +5,8 @@ import unittest
 import zlib
 from pathlib import Path
 
-REPOSITORY = Path(__file__).resolve().parents[2]
+from _repo import REPOSITORY
+
 MODULE_PATH = REPOSITORY / "scripts" / "install_hd_definition_pack.py"
 
 _spec = importlib.util.spec_from_file_location("install_hd_definition_pack", MODULE_PATH)

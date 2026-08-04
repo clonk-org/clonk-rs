@@ -1,16 +1,11 @@
 import json
 import pathlib
 import subprocess
-import tomllib
 import unittest
 
+from _repo import REPOSITORY, manifest
 
-REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 CARGO_REGISTRY_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
-
-
-def manifest(relative_path):
-    return tomllib.loads((REPOSITORY / relative_path).read_text(encoding="utf-8"))
 
 
 def workspace_packages():

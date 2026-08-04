@@ -14,7 +14,7 @@ differential evidence. For structural-only changes, write "Not applicable."
 <!-- Name the test observed RED before implementation and GREEN afterward. -->
 
 - [ ] `cargo fmt --all -- --check`
-- [ ] `python3 -m unittest discover -s scripts/tests -p 'test_*.py'`
+- [ ] `python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py'`
 - [ ] `cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked`
 - [ ] `cargo test --workspace --locked`
 - [ ] `cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings`

@@ -10,7 +10,7 @@ git submodule update --init --recursive
 
 The workspace and CI pin Rust 1.97.1; CI pins cargo-nextest 0.9.91. Rustup
 selects the checked-in toolchain automatically, which keeps local and CI
-diagnostics comparable. Repository script tests require Python 3.10 or newer.
+diagnostics comparable. Repository script tests require Python 3.11 or newer.
 
 On Debian or Ubuntu, install the native development dependencies used by CI:
 
@@ -155,7 +155,7 @@ handoff or merge:
 
 ```sh
 cargo fmt --all -- --check
-python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py'
 cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
 cargo nextest run --workspace --no-fail-fast
 cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
@@ -165,9 +165,8 @@ cargo xtask parity verify
 
 The Python unittest discovery covers repository scripts, including public-path
 portability and the 24-player benchmark harness. The explicit engine-tools
-test command exercises the feature-gated packager, archive, release-dependency,
-and release-license checks that the default workspace feature set does not
-build. The workspace
+test command exercises the feature-gated packager, archive, and release-dependency
+checks that the default workspace feature set does not build. The workspace
 test run includes the focused tutorial, virtual-play, snapshot, and C++↔Rust
 differential tests. The explicit snapshot and parity commands remain named
 completion gates so both baselines are visible independently in local and CI

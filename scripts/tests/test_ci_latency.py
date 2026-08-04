@@ -4,10 +4,9 @@ import re
 import tomllib
 import unittest
 from collections import Counter
-from pathlib import Path
 
+from _repo import REPOSITORY
 
-REPOSITORY = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPOSITORY / ".github" / "workflows"
 LANDING = WORKFLOWS / "landing.yml"
 MAIN = WORKFLOWS / "rust.yml"
@@ -282,7 +281,7 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("rustfmt --version || failed=1", quality)
         for command in (
             "cargo fmt --all -- --check || failed=1",
-            "python3 -m unittest discover -s scripts/tests -p 'test_*.py' || failed=1",
+            "python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py' || failed=1",
             "cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings || failed=1",
         ):
             self.assertIn(command, quality)
@@ -387,7 +386,7 @@ class CiLatencyTests(unittest.TestCase):
             "cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked",
             "cargo xtask engine-snapshots verify",
             "cargo fmt --all -- --check",
-            "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+            "python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py'",
         )
         for command in required:
             with self.subTest(command=command):

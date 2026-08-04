@@ -4,10 +4,9 @@ import re
 import tomllib
 import unittest
 from collections import Counter
-from pathlib import Path
 
+from _repo import REPOSITORY
 
-REPOSITORY = Path(__file__).resolve().parents[2]
 MANIFEST = REPOSITORY / "crates" / "clonk-engine-integration-tests" / "Cargo.toml"
 HARNESS = REPOSITORY / "crates" / "clonk-engine" / "tests" / "it"
 SENTINEL = "engine-it-sharded"
