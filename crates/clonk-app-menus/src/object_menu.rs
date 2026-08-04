@@ -4113,6 +4113,44 @@ mod tests {
         menu
     }
 
+    /// `planet/System.c4g/MenuRangeRow.c` greys the step a range cannot take
+    /// instead of dropping it, and relies on colour markup costing no width so
+    /// a Context row never resizes as its value moves. Pin that property here,
+    /// where the width is actually measured (C4Menu.cpp:650-664 through
+    /// CStdFont::GetTextExtent's markup skip, StdFont.cpp:571-601).
+    #[test]
+    fn colour_markup_in_a_context_caption_costs_no_row_width() {
+        let fallback = clonk_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let images = HashMap::new();
+        let width_of = |caption: &str| {
+            let mut menu = engine_script_menu_fixture(1, 1);
+            menu.items[0].caption = caption.to_string();
+            engine_script_menu_layout_with_images(
+                Rect::new(0, 0, 640, 480),
+                &font,
+                &menu,
+                false,
+                &images,
+                None,
+            )
+            .item_width
+        };
+
+        let plain = width_of("Metal - 4 (+1/-1)");
+        for greyed in [
+            "Metal - 4 (+1/<c 888888>-1</c>)",
+            "Metal - 4 (<c 888888>+1</c>/-1)",
+            "Metal - 4 (<c 888888>+1</c>/<c 888888>-1</c>)",
+        ] {
+            assert_eq!(
+                width_of(greyed),
+                plain,
+                "greying a step must not move the row: {greyed}"
+            );
+        }
+    }
+
     fn surface_rect_contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
         (rect.y..rect.y + rect.height as i32).any(|y| {
             (rect.x..rect.x + rect.width as i32)
