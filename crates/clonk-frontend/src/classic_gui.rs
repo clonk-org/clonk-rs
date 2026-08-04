@@ -1205,8 +1205,8 @@ mod tests {
     // `CStdDDraw::DrawFrame` (StdDDraw2.cpp:1173-1179) on a render target:
     // two horizontals `x1->x2`, two verticals `y1->y2`. Their excluded GL
     // endpoints never rasterize the shared bottom-right corner while the
-    // shared origin rasterizes twice. Capture oracle (M06-P3-L034,
-    // 2026-07-21, Drachenfels divider (1032,647)-(1208,662)): bottom-right
+    // shared origin rasterizes twice. Capture oracle
+    // (2026-07-21, Drachenfels divider (1032,647)-(1208,662)): bottom-right
     // (1208,662) stayed background while the other corners painted.
     #[test]
     fn hv_engine_frame_skips_shared_end_corner_and_double_covers_origin() {

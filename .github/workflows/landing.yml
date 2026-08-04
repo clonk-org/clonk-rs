@@ -127,11 +127,14 @@ jobs:
               git fetch --no-tags --depth=1 origin 7d43b47b7d789b533f32d005e64596e0a07019cd || failed=1
               # Issue references must name their repository: this one is public,
               # and a bare "#28" collides across clonk-rs and LegacyClonk. The
-              # CLO- tracker is not resolvable from this repository at all.
+              # CLO- and M##-P#-L### trackers are not resolvable from this
+              # repository at all -- state the fact, not the id.
               # Deliberately NOT a general bare-#N check -- object and definition
               # numbers (WIPF #564, KING #5129) use the same spelling.
-              if git grep -nIE 'CLO-[0-9]+|(issue|task|ticket)s? #[0-9]+'; then
-                echo "::error::write issue references as owner/repo#N (e.g. clonk-org/clonk-rs#50, legacyclonk/LegacyClonk#28)"
+              # CHANGELOG.md is exempt: git-cliff regenerates it from landed
+              # commit subjects, which are frozen history on main.
+              if git grep -nIE 'CLO-[0-9]+|M[0-9]{2}(-[A-Z]?[0-9]+)*-L[0-9]+|(issue|task|ticket)s? #[0-9]+' -- ':!CHANGELOG.md'; then
+                echo "::error::write issue references as owner/repo#N (e.g. clonk-org/clonk-rs#50, legacyclonk/LegacyClonk#28); replace private tracker ids with the fact they stand for"
                 failed=1
               fi
               python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py' || failed=1

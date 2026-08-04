@@ -4015,7 +4015,7 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    // C++ GL capture oracle (M06-P3-L034, 2026-07-21, Drachenfels choice-menu
+    // C++ GL capture oracle (2026-07-21, Drachenfels choice-menu
     // tooltip at (942,580) 182x26 in Screenshot001.png): every frame pixel
     // over the opaque #F1EA78 fill — corners included — reads (121,117,60):
     // one DrawLineDw blend of 0x7f000000 with GL round-to-nearest and the
@@ -4043,7 +4043,7 @@ mod tests {
         assert_eq!(surface.get_pixel(2, 5), frame);
     }
 
-    // C++ GL capture oracle (M06-P3-L034, 2026-07-21, Drachenfels extra-bar
+    // C++ GL capture oracle (2026-07-21, Drachenfels extra-bar
     // divider (1032,647)-(1208,662) in Screenshot001.png): three corners and
     // the edges paint (68,1,1) while the bottom-right corner stays at the
     // (1,1,1) background — both `CStdDDraw::DrawFrame` lines exclude it.
@@ -7635,7 +7635,7 @@ mod tests {
         let character_knight_1 = render(&character_knight, 1);
         let character_mage_1 = render(&character_mage, 1);
         let character_mage_90 = render(&character_mage, 90);
-        // Re-pinned for M06-P3-L034 against the 2026-07-21 Drachenfels C++ GL
+        // Re-pinned against the 2026-07-21 Drachenfels C++ GL
         // capture (Screenshot001.png): the extra-bar divider leaves its
         // bottom-right corner unpainted (capture (1208,662) = background,
         // CStdDDraw::DrawFrame end-drop) and the delayed tooltip frame blends

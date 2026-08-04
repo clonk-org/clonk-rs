@@ -1,4 +1,4 @@
-//! Deep Sea construction-start chain (M03-P2-L225).
+//! Deep Sea construction-start chain.
 //!
 //! User report: in FarWorlds.c4f/Deep.c4s construction never starts. The
 //! whole loop is underwater: CNKT from the TRTS shell -> dig-double

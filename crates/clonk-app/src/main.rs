@@ -854,9 +854,9 @@ fn run() -> Result<()> {
         }
         app.window_active = initial_window_active();
         // C++ only has an `ITaskbarList3` once `CStdWindow` owns a handle, so the
-        // real sink replaces the no-op one here rather than in `GameApp::new`
-        // (M10-P4-L079). Everything but Windows keeps the no-op, matching the SDL
-        // and X11 `CStdWindow` implementations, which are no-ops there too.
+        // real sink replaces the no-op one here rather than in `GameApp::new`.
+        // Everything but Windows keeps the no-op, matching the SDL and X11
+        // `CStdWindow` implementations, which are no-ops there too.
         //
         // The handle is extracted unconditionally so this compiles and is checked
         // on every host: `RawWindowHandle::Win32` exists on all platforms, and only
@@ -933,8 +933,8 @@ fn run() -> Result<()> {
         let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
 
         // The shell is a registry record like every other developer window, so a
-        // WindowId arriving from winit resolves to a purpose before it is routed
-        // (M10-P4-L081). It is the only record until the console opens its own.
+        // WindowId arriving from winit resolves to a purpose before it is
+        // routed. It is the only record until the console opens its own.
         let mut developer_windows: developer_windows::DeveloperWindows<
             developer_host::DeveloperHost,
         > = developer_windows::DeveloperWindows::new();

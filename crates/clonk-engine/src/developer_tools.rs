@@ -5,8 +5,8 @@
 //! (`C4EditCursor.cpp:74,159,234,301-304`).
 //!
 //! This is the state machine only — dialog chrome, the shared developer window
-//! host and the control-queue round trip for `EMDT_SetMode` stay out
-//! (M10-P4-L044's remaining criteria, and M10-P4-L081).
+//! host and the control-queue round trip for `EMDT_SetMode` stay out; the
+//! console-surface entries in `PORT_STATUS.md` track what remains.
 
 /// `C4TLS_*` (`C4ToolsDlg.h:33-37`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
