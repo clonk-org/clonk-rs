@@ -62,6 +62,13 @@ local row_names;
 // [path, key, value before, row caption, row index].
 local adjust_history;
 
+// `[value]` while the menu's owner wants the C4MN_Extra_Value footer, else
+// nil. Wrapped in an array so a legitimate total of 0 is still a request for
+// the footer. The engine draws the SELECTED item's value (C4Menu.cpp:830-841),
+// so every row has to carry the same figure through C4MN_Add_PassValue or the
+// total would blink out as the selection moves.
+local footer;
+
 // ShowMenu, rebuilt rather than inherited so the closing row can say which of
 // its two jobs it is doing. Mirrors Menu.c4d/Script.c:27-56 exactly otherwise.
 // The MS4C_* index constants live in Menu2's own System.c4g, which is not
@@ -80,8 +87,16 @@ private func ShowMenu(int iSelection)
     currentMenu = GetSubmenu(aMenu, aCurrentPath);
   else
     currentMenu = aMenu;
+  // Ask the owner what this order is worth, in the same shape the commit
+  // callback receives (Menu.c4d/Script.c:222-225). A menu whose owner has no
+  // opinion about money keeps the shipped footer-less page.
+  footer = pCommandObject->~MenuFooterValue(
+    GetMenuValues(aMenu, 0, fForcedValues), ExtraData);
+  var iFooter = 0;
+  if (footer)
+    iFooter = C4MN_Extra_Value;
   menu_rendering = true;
-  CreateMenu(currentMenu[0], pMenuObject, this, 0, currentMenu[1], 0, 1);
+  CreateMenu(currentMenu[0], pMenuObject, this, iFooter, currentMenu[1], 0, 1);
   menu_rendering = false;
   row_keys = CreateArray();
   row_names = CreateArray();
@@ -104,6 +119,45 @@ private func ShowMenu(int iSelection)
   SelectMenuItem(iSelection, pMenuObject);
 }
 
+// C4MN_Add_PassValue makes the engine prefer our figure over the row
+// definition's own value (C4Script.cpp:1621-1626, C4Menu.cpp:830-841). It only
+// changes command composition for OLD-style commands; every command this file
+// builds carries parentheses and is therefore new-style (C4Script.cpp:
+// 1556-1597), so the pair is safe to add to any row here.
+private func FooterExtra(int iExtra)
+{
+  if (footer)
+    return iExtra + C4MN_Add_PassValue;
+  return iExtra;
+}
+
+private func FooterValue()
+{
+  if (footer)
+    return footer[0];
+  return 0;
+}
+
+// A Context row is sized from its caption and its symbol only
+// (C4Menu.cpp:648-662), while the count is drawn right-aligned at the row's
+// right edge regardless (C4Menu.cpp:198-207). The widest caption on the page
+// therefore ends exactly where its own count starts, and the two overprint.
+// Reserve the room in the caption, since only the caption is measured. Three
+// spaces per digit plus three clears the "Nx" and leaves a gap at every stock
+// size the shipped content uses.
+private func CountPadding(int iMax)
+{
+  var szPad = "   ";
+  if (iMax < 0)
+    iMax = -iMax;
+  while (iMax > 0)
+  {
+    szPad = Format("%s   ", szPad);
+    iMax = iMax / 10;
+  }
+  return szPad;
+}
+
 // A step control and a right mouse button are both invisible until someone
 // tells you about them. This row is neither: it is on screen from the first
 // change, it names what it will take back, and a plain activation runs it.
@@ -118,7 +172,7 @@ private func ShowUndoRow(&i)
     return;
   var szCaption = Format("$MenuUndo$", entry[3]);
   AddMenuItem(szCaption, Format("Undo(%d)", i++), MS4C, pMenuObject, 0, 0,
-    szCaption, 2, 2);
+    szCaption, FooterExtra(2), 2, FooterValue());
 }
 
 // The shipped page ends in one row captioned "Finished" whichever of its two
@@ -129,7 +183,8 @@ private func ShowClosingRow(&i)
   var szCaption = "$MenuDone$";
   if (aCurrentPath && aCurrentPath != [])
     szCaption = "$MenuBack$";
-  AddMenuItem(szCaption, "Finished()", MS4C, pMenuObject, 0, 0, szCaption, 2, 3);
+  AddMenuItem(szCaption, "Finished()", MS4C, pMenuObject, 0, 0, szCaption,
+    FooterExtra(2), 3, FooterValue());
   i++;
 }
 
@@ -144,7 +199,7 @@ private func ShowRange(Key, array aCond, string szName, id idItem, data, &i)
     var szGreyed = GreyString(szName);
     var pDummy = CreateDummy(idItem, false, false, false);
     AddMenuItem(szGreyed, Format("ShowMenu(%d)", i++), 0, pMenuObject, iValue,
-      0, szGreyed, 4, pDummy);
+      0, szGreyed, FooterExtra(4), pDummy, FooterValue());
     RemoveObject(pDummy);
     return;
   }
@@ -184,8 +239,10 @@ private func ShowRange(Key, array aCond, string szName, id idItem, data, &i)
   // so the symbol stays the product's own picture (C4Script.cpp:1785-1795).
   row_keys[i] = Key;
   row_names[i] = szName;
+  szSteps = Format("%s%s", szSteps, CountPadding(data[1]));
   AddMenuItem(Format("%s%s", szName, szSteps), Format("Adjust(%%d,%d,%%d)", i++),
-    idItem, pMenuObject, iValue, Key, szInfo, C4MN_Add_ForceCount);
+    idItem, pMenuObject, iValue, Key, szInfo,
+    FooterExtra(C4MN_Add_ForceCount), 0, FooterValue());
 }
 
 // Menu2 has no icon of its own for "not selected", so an iconless enum item
@@ -215,15 +272,16 @@ private func ShowEnum(Key, array aCond, string szName, id idItem, data, &i)
     {
       // Own picture: keep CreateDummy's overlaid badge exactly as shipped.
       var pDummy = CreateDummy(itemvalue[1], fChosen, false, selectable);
-      AddMenuItem(szCaption, szCommand, 0, pMenuObject, 0, 0, szCaption, 4,
-        pDummy);
+      AddMenuItem(szCaption, szCommand, 0, pMenuObject, 0, 0, szCaption,
+        FooterExtra(4), pDummy, FooterValue());
       RemoveObject(pDummy);
     }
     else if (fChosen)
-      AddMenuItem(szCaption, szCommand, MS4C, pMenuObject, 0, 0, szCaption, 2,
-        3);
+      AddMenuItem(szCaption, szCommand, MS4C, pMenuObject, 0, 0, szCaption,
+        FooterExtra(2), 3, FooterValue());
     else
-      AddMenuItem(szCaption, szCommand, 0, pMenuObject, 0, 0, szCaption);
+      AddMenuItem(szCaption, szCommand, 0, pMenuObject, 0, 0, szCaption,
+        FooterExtra(0), 0, FooterValue());
   }
 }
 

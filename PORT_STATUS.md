@@ -2732,11 +2732,37 @@ an ordered-map model gap.
   `an_unchosen_mode_row_is_blank_rather_than_crossed_out` and, through the real
   app input layer,
   `context_style_script_menu_reaches_command2_by_right_click_and_special2`.
-  **Still open:** the page shows no running total and the player's wealth stays
-  hidden while composing — `CreateMenu` passes `iExtra = 0`, where
-  `C4MN_Extra_Value` would draw a script-supplied figure and un-hide the wealth
-  HUD (`C4Menu.cpp:898-906`). The refusal message now reports cost against
-  wealth, but only after the fact.
+  **Extended again 2026-08-04** with the running total that was left open.
+  `ShowMenu` asks the menu's owner for a figure through
+  `~MenuFooterValue(values, ExtraData)` — the same shape the commit callback
+  receives — and passes `C4MN_Extra_Value` to `CreateMenu` when it gets one,
+  where shipped Menu2 passes `iExtra = 0` and opts out of the only money footer
+  the engine has. That draws the order total beside the wealth symbol *and*
+  arms the player's wealth HUD for the duration (`C4Menu.cpp:898-906`;
+  `C4Viewport.cpp:1286-1296` otherwise keeps the counter hidden), so both
+  halves of "can I afford this" are on screen while the order is composed
+  rather than only in the refusal afterwards. Because the footer draws the
+  *selected* item's value (`C4Menu.cpp:830-841`), every row carries the same
+  figure through `C4MN_Add_PassValue` or the total would blink out as the
+  selection moved; that flag only rewrites OLD-style command composition
+  (`C4Script.cpp:1556-1597`) and every command this append builds is new-style,
+  so the two compose safely. A menu whose owner does not answer keeps the
+  shipped footer-less page, which is what the viewport size chooser does.
+  **A latent layout defect surfaced with it and is worked around here.** A
+  Context row is sized from its caption and symbol only (`C4Menu.cpp:648-662`)
+  while the count is drawn right-aligned at the row's right edge regardless
+  (`C4Menu.cpp:198-207`), so the widest caption on a page ends exactly where
+  its own count starts and the two overprint — visible as `(+1/2)x` on the
+  construction-kit row once `C4MN_Add_ForceCount` gave every row a count. Only
+  the caption is measured, so only the caption can reserve the room: each range
+  row now appends three spaces per digit of its maximum plus three. This is a
+  C++ defect, not a port one — stock ClonkMars overprints the same way whenever
+  its widest row carries a quantity — and sizing the row from the count instead
+  would change `ItemWidth` for every Context menu in every pack, which is why
+  it is worked around in content. Pinned by
+  `the_order_page_shows_what_it_will_cost`,
+  `a_menu_whose_owner_prices_nothing_keeps_the_shipped_footer` and
+  `a_product_row_reserves_the_column_its_quantity_is_drawn_in`.
 
 - **A refused default-interface multicast join falls back to per-interface
   joins** (`join_discovery_multicast`, `multicast_targets`,

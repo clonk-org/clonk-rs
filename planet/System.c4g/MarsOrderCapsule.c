@@ -72,6 +72,20 @@ public func OrderCapsule(hash, object pClonk, bool fCanceled)
   return true;
 }
 
+// Menu2 asks the menu's owner for a figure to put in the C4MN_Extra_Value
+// footer, and shipped ClonkMars asks for no footer at all
+// (Menu.c4d/Script.c:34-35 passes iExtra 0), so the player composed an order
+// with neither a total nor their own wealth on screen -- the wealth counter is
+// hidden unless something arms it (C4Viewport.cpp:1286-1296), and
+// C4MN_Extra_Value is what arms it (C4Menu.cpp:901-905). Answering here turns
+// both on for the ordering menu only.
+public func MenuFooterValue(hash, object pClonk)
+{
+  if (!pClonk)
+    return;
+  return [OrderTotal(HashGet(hash, "Buy"), pClonk->GetOwner())];
+}
+
 // What the order will actually cost, priced exactly as the rows are captioned
 // (Base.c4d/Script.c:125 uses the same GetValue) and clamped to the stock the
 // commit is about to re-clamp to anyway.
