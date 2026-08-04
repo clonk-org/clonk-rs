@@ -2177,7 +2177,6 @@ impl GameApp {
             ),
         );
         self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
-        self.mark_menu_dirty();
         Ok(true)
     }
 
@@ -2671,9 +2670,7 @@ impl GameApp {
             self.publish_updated_host_join_snapshot();
         }
         self.sync_classic_lobby_roster();
-        if self.refresh_classic_lobby_options(true) {
-            self.mark_menu_dirty();
-        }
+        let _ = self.refresh_classic_lobby_options(true);
     }
 
     pub(crate) fn set_classic_lobby_runtime_join(&mut self, allowed: bool) {
@@ -3159,7 +3156,6 @@ impl GameApp {
             }
         }
         self.play_classic_lobby_sounds();
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn request_lobby_ready_check_at(
@@ -3415,7 +3411,6 @@ impl GameApp {
                 lobby.chat_history_index = -1;
             }
         }
-        self.mark_menu_dirty();
         result.map(|_| ())
     }
 
@@ -3944,7 +3939,6 @@ impl GameApp {
         self.lobby_chat_drag_anchor = None;
         self.scenario_game_options.cancel_interaction();
         self.play_classic_lobby_sounds();
-        self.mark_menu_dirty();
         true
     }
 
@@ -3965,7 +3959,6 @@ impl GameApp {
         self.menu_state.set_pointer_position(None);
         self.scenario_game_options.pointer_left();
         self.play_classic_lobby_sounds();
-        self.mark_menu_dirty();
         true
     }
 
@@ -4162,7 +4155,6 @@ impl GameApp {
         }
         let mut pending: VecDeque<ClassicLobbyAction> = actions.into();
         while let Some(action) = pending.pop_front() {
-            self.mark_menu_dirty();
             match action {
                 ClassicLobbyAction::FocusChanged(control) => {
                     self.set_active_lobby_chat_focus(control == LobbyControl::ChatInput);
@@ -4509,7 +4501,6 @@ impl GameApp {
         if automatic_preload {
             self.request_lobby_preload();
         }
-        self.mark_menu_dirty();
     }
 
     fn active_lobby_preload_state(&self) -> Option<&LobbyPreloadState> {
@@ -4575,7 +4566,6 @@ impl GameApp {
                 self.append_control_message_log(message, 0x00ff_1f1f, None);
             }
         }
-        self.mark_menu_dirty();
     }
 
     fn prepare_lobby_preload_job(&self) -> Result<LobbyPreloadJob, String> {
@@ -5187,7 +5177,6 @@ impl GameApp {
                 });
             }
         }
-        self.mark_menu_dirty();
     }
 
     fn append_unknown_lobby_command(&mut self, text: &str) {
@@ -5213,7 +5202,6 @@ impl GameApp {
             lobby.logs.clear();
             lobby.controller.set_logs(Vec::new());
         }
-        self.mark_menu_dirty();
     }
 
     fn append_lobby_command_help(&mut self) {
@@ -6312,7 +6300,6 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let mut pending: VecDeque<ClassicLobbyAction> = actions.into();
         while let Some(action) = pending.pop_front() {
-            self.mark_menu_dirty();
             match action {
                 ClassicLobbyAction::FocusChanged(control) => {
                     self.set_active_lobby_chat_focus(control == LobbyControl::ChatInput);
@@ -6893,7 +6880,7 @@ impl GameApp {
         self.scenario_game_options.note_pointer_wheel();
         let outside_scroll_window = contains(layout.chat_log) && !contains(layout.chat_log_client)
             || contains(layout.roster) && !contains(layout.roster_client);
-        let scrolled = self.classic_host_lobby.as_mut().is_some_and(|lobby| {
+        let _ = self.classic_host_lobby.as_mut().is_some_and(|lobby| {
             !outside_scroll_window && lobby.controller.wheel(point, delta, &layout, &roster)
         });
         if scroll_window_captured {
@@ -6902,9 +6889,6 @@ impl GameApp {
             // detection, but require a later pointer event before either
             // controller may expose another tooltip.
             self.note_classic_lobby_non_pointer_input();
-        }
-        if scrolled || scroll_window_captured {
-            self.mark_menu_dirty();
         }
         Ok(())
     }
@@ -7057,13 +7041,10 @@ impl GameApp {
                 }
             } else {
                 self.remove_message_dialog_at(prompt_index);
-                self.mark_menu_dirty();
                 if let Err(error) = self.complete_lobby_ready_check_response(false) {
                     tracing::error!(%error, "failed to expire lobby ready check");
                 }
             }
-        } else {
-            self.mark_menu_dirty();
         }
         true
     }
@@ -7095,7 +7076,6 @@ impl GameApp {
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
         self.startup_player_properties_dialog = None;
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn tick_network_lobby_countdown(&mut self) -> bool {
@@ -7157,7 +7137,6 @@ impl GameApp {
         &mut self,
         action: GameOptionAction,
     ) -> Result<(), EngineError> {
-        self.mark_menu_dirty();
         match action {
             GameOptionAction::FocusTraversalRequested { .. } => {
                 tracing::error!("lobby game-option focus traversal escaped its recursive owner");

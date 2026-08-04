@@ -2089,7 +2089,9 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
     ))
     .expect("hover custom evaluation viewport");
 
-    let render_version = app.menu_render_version;
+    let mut before = vec![0_u8; (width * height * 4) as usize];
+    app.render(&mut before)
+        .expect("render the unscrolled evaluation");
     app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
         .expect("route wheel into evaluation");
     assert_eq!(
@@ -2099,7 +2101,13 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
             .custom_evaluation_scroll(),
         60
     );
-    assert_ne!(app.menu_render_version, render_version);
+    let mut after = vec![0_u8; (width * height * 4) as usize];
+    app.render(&mut after)
+        .expect("render the scrolled evaluation");
+    assert_ne!(
+        before, after,
+        "routing the wheel into the evaluation must change the rendered frame"
+    );
 
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
     app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
@@ -2600,7 +2608,7 @@ fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries
         .require_classic_game_over_resources()
         .expect("fixture has the complete running evaluation bundle");
 
-    for (index, view) in StartupView::ALL.into_iter().enumerate() {
+    for view in StartupView::ALL {
         // Exhaustive arms force future startup roots into this lifecycle
         // invariant instead of silently omitting the evaluation dialog.
         match view {
@@ -2620,26 +2628,13 @@ fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries
             }
         }
         app.status_text = format!("lower-priority status for {view:?}");
-        let cached = vec![0x20 + index as u8; 640 * 480 * 4];
-        app.menu_frame_cache = Some(MenuFrameCache {
-            view,
-            version: app.menu_render_version,
-            width: 640,
-            height: 480,
-            native_text_deferred: false,
-            frame: cached.clone(),
-        });
 
         let mut frame = vec![0xc3; 640 * 480 * 4];
         let error = app
             .render(&mut frame)
-            .expect_err("stale evaluation must precede startup cache or pixels");
+            .expect_err("stale evaluation must precede every startup pixel");
         assert_startup_game_over_boundary(&error, view);
         assert!(frame.iter().all(|byte| *byte == 0xc3));
-        assert_eq!(
-            app.menu_frame_cache.as_ref().expect("cache retained").frame,
-            cached
-        );
 
         let mut native = vec![0x6d; 1280 * 960 * 4];
         let error = app
@@ -2653,10 +2648,6 @@ fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries
 #[test]
 fn stale_menu_game_over_lifecycle_boundary_precedes_missing_resources() {
     let mut app = new_real_classic_menu_app(320, 200);
-    let mut cached = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut cached)
-        .expect("populate startup frame cache");
-    assert!(app.menu_frame_cache.is_some());
     app.handle_game_over().expect("show stale game-over dialog");
     app.status_text.clear();
     app.assets = Arc::new(FrontendAssets::load(None));
@@ -2670,10 +2661,6 @@ fn stale_menu_game_over_lifecycle_boundary_precedes_missing_resources() {
     assert_eq!(
         frame, sentinel,
         "startup preflight must precede every pixel"
-    );
-    assert_eq!(
-        app.menu_frame_cache.as_ref().expect("cache retained").frame,
-        cached
     );
 
     let mut native = vec![0x47; 640 * 400 * 4];
@@ -4810,8 +4797,7 @@ fn assert_game_over_fixture_has_no_sound_activity(app: &GameApp) {
     }
 }
 
-fn assert_only_gamepad_dirty_mark_changed(mut before: RuntimeGlobalUiSnapshot, app: &GameApp) {
-    before.menu_render_version = before.menu_render_version.wrapping_add(1);
+fn assert_no_global_ui_change(before: RuntimeGlobalUiSnapshot, app: &GameApp) {
     assert_eq!(runtime_global_ui_snapshot(app), before);
     assert_game_over_fixture_has_no_sound_activity(app);
 }
@@ -4895,7 +4881,7 @@ fn game_over_gui_stack_requires_enabled_primary_gamepad_source() {
         )
         .expect("disabled or non-primary evaluation GUI input is inert");
 
-        assert_only_gamepad_dirty_mark_changed(before, &app);
+        assert_no_global_ui_change(before, &app);
         assert_eq!(app.message_dialogs.len(), 1);
     }
 }
@@ -5187,14 +5173,14 @@ fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
         },
     ])
     .expect("non-binding game-over controller events are consumed");
-    assert_only_gamepad_dirty_mark_changed(before, &app);
+    assert_no_global_ui_change(before, &app);
 
     let clear_before = runtime_global_ui_snapshot(&app);
     app.process_gamepad_event_batch([GamepadEvent::Clear {
         slot: GamepadSlot::new(0),
     }])
     .expect("standalone Clear is inert while game over owns the screen");
-    assert_only_gamepad_dirty_mark_changed(clear_before, &app);
+    assert_no_global_ui_change(clear_before, &app);
 
     let direct_before = runtime_global_ui_snapshot(&app);
     for action in [
@@ -5807,14 +5793,13 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         modified
             .handle_modifiers_changed(modifiers)
             .expect("set F3 modifiers");
-        let mut before = runtime_global_ui_snapshot(&modified);
+        let before = runtime_global_ui_snapshot(&modified);
         modified
             .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .expect("modified F3 falls through without player dispatch");
         modified
             .handle_key(VirtualKeyCode::F3, ElementState::Released)
             .expect("modified F3 release falls through");
-        before.menu_render_version = before.menu_render_version.wrapping_add(2);
         assert_eq!(runtime_global_ui_snapshot(&modified), before);
     }
 

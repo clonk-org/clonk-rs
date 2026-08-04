@@ -4860,34 +4860,42 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
 }
 
 #[test]
-fn production_gamepad_batch_invalidates_cache_once_when_switching_options_sheet() {
+fn production_gamepad_batch_navigates_main_menu_then_options_sheet() {
     let mut app = new_real_classic_menu_app(640, 480);
-    let mut frame = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut frame).expect("cache supported main menu");
-    let main_version = app.menu_render_version;
+    let mut main_menu = vec![0_u8; 640 * 480 * 4];
+    app.render(&mut main_menu).expect("render main menu");
     app.process_gamepad_event_batch([GamepadEvent::Direction {
         slot: GamepadSlot::new(0),
         button: ControlButton::Down,
         state: ElementState::Pressed,
     }])
     .expect("supported main-menu gamepad navigation");
-    assert_eq!(app.menu_render_version, main_version.wrapping_add(1));
-    assert!(app.render(&mut frame).expect("redraw changed main menu"));
+    let mut navigated = vec![0_u8; 640 * 480 * 4];
+    app.render(&mut navigated)
+        .expect("redraw changed main menu");
+    assert_ne!(
+        main_menu, navigated,
+        "the D-pad must move the main-menu selection"
+    );
 
     app.open_options_menu();
-    app.render(&mut frame)
-        .expect("cache supported Program sheet");
-    let options_version = app.menu_render_version;
+    let mut program_sheet = vec![0xa9; 640 * 480 * 4];
+    app.render(&mut program_sheet)
+        .expect("render Program sheet");
     app.process_gamepad_event_batch([GamepadEvent::Direction {
         slot: GamepadSlot::new(0),
         button: ControlButton::Down,
         state: ElementState::Pressed,
     }])
     .expect("D-pad enters Graphics sheet");
-    assert_eq!(app.menu_render_version, options_version.wrapping_add(1));
-    let mut sentinel = vec![0xa9; 640 * 480 * 4];
-    assert!(app.render(&mut sentinel).expect("render Graphics sheet"));
-    assert!(sentinel.iter().any(|byte| *byte != 0xa9));
+    let mut graphics_sheet = vec![0xa9; 640 * 480 * 4];
+    app.render(&mut graphics_sheet)
+        .expect("render Graphics sheet");
+    assert!(graphics_sheet.iter().any(|byte| *byte != 0xa9));
+    assert_ne!(
+        program_sheet, graphics_sheet,
+        "the D-pad must leave the Program sheet for the Graphics sheet"
+    );
 }
 
 #[test]
@@ -4942,9 +4950,8 @@ fn l020_gamepad_enabled_defaults_true_and_captures_false_before_config_writes() 
 #[test]
 fn l020_global_gamepad_disable_drops_events_before_dispatch() {
     let mut app = new_real_classic_menu_app(640, 480);
-    let mut frame = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut frame).expect("cache supported main menu");
-    let initial_version = app.menu_render_version;
+    let mut initial = vec![0_u8; 640 * 480 * 4];
+    app.render(&mut initial).expect("render main menu");
     let down = || GamepadEvent::Direction {
         slot: GamepadSlot::new(0),
         button: ControlButton::Down,
@@ -4955,8 +4962,11 @@ fn l020_global_gamepad_disable_drops_events_before_dispatch() {
     app.gamepad_input_enabled = false;
     app.process_gamepad_event_batch([down()])
         .expect("globally disabled input is discarded");
+    let mut discarded = vec![0_u8; 640 * 480 * 4];
+    app.render(&mut discarded)
+        .expect("redraw after a dropped event");
     assert_eq!(
-        app.menu_render_version, initial_version,
+        discarded, initial,
         "disabled events must not reach startup input dispatch"
     );
 
@@ -4964,7 +4974,13 @@ fn l020_global_gamepad_disable_drops_events_before_dispatch() {
     app.gamepad_input_enabled = true;
     app.process_gamepad_event_batch([down()])
         .expect("globally enabled input reaches dispatch");
-    assert_eq!(app.menu_render_version, initial_version.wrapping_add(1));
+    let mut dispatched = vec![0_u8; 640 * 480 * 4];
+    app.render(&mut dispatched)
+        .expect("redraw after a dispatched event");
+    assert_ne!(
+        dispatched, initial,
+        "enabled events must move the main-menu selection"
+    );
 }
 
 #[test]

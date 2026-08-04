@@ -1136,16 +1136,15 @@ fn startup_tooltip_app_uses_the_shared_cmouse_clock_and_runtime_resources() {
         "[Undefined: IDS_L022_MISSING_RESOURCE]"
     );
 
-    // Render the exact hovered base first with mouse input suppressed.
-    // That frame is cacheable because no tooltip can become due.
+    // Render the exact hovered base first with mouse input suppressed, so
+    // no tooltip can become due.
     app.startup_tooltip.note_non_pointer_input();
     let mut base = vec![0; 640 * 480 * 4];
     assert!(app.render(&mut base).expect("render suppressed base"));
-    assert!(app.menu_frame_cache.is_some());
 
     // Re-arm the one process-level clock far enough in the past to make
-    // the inclusive 500ms boundary eligible. Pending hover bypasses the
-    // cached base and the final overlay changes pixels.
+    // the inclusive 500ms boundary eligible, so the final overlay changes
+    // pixels against that base.
     let started = Instant::now()
         .checked_sub(clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY + Duration::from_millis(1))
         .expect("monotonic clock supports a 501ms lookback");
@@ -1651,15 +1650,6 @@ fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
             "finished must remain queued".to_string(),
         )))
         .expect("queue finish");
-    let cached = vec![0x31; 320 * 200 * 4];
-    app.menu_frame_cache = Some(MenuFrameCache {
-        view: StartupView::MainMenu,
-        version: app.menu_render_version,
-        width: 320,
-        height: 200,
-        native_text_deferred: false,
-        frame: cached.clone(),
-    });
     let boundary = ClassicParityBoundary::GlobalGuiBootstrapResources {
         issues: vec![ClassicGuiBootstrapIssue::malformed(
             "GUISpinBoxArrow",
@@ -1690,10 +1680,6 @@ fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
         loader.resources().fonts(),
         &loader_fonts_before
     ));
-    assert_eq!(
-        app.menu_frame_cache.as_ref().expect("cache retained").frame,
-        cached
-    );
 
     let error = app
         .update()
@@ -2205,7 +2191,6 @@ fn player_context_menu_missing_global_resources_fails_typed_without_selection_mu
         .as_ref()
         .expect("player controller")
         .selected_index();
-    let version_before = app.menu_render_version;
     let error = app
         .open_startup_player_context_menu(false)
         .expect_err("missing process-global resource must fail typed");
@@ -2222,7 +2207,6 @@ fn player_context_menu_missing_global_resources_fails_typed_without_selection_mu
             .selected_index(),
         selected_before
     );
-    assert_eq!(app.menu_render_version, version_before);
 }
 
 #[test]

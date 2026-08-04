@@ -986,7 +986,7 @@ fn startup_irc_command_projection_covers_the_frontend_command_language() {
 }
 
 #[test]
-fn missing_startup_models_precede_status_and_matching_cache_pixels() {
+fn missing_startup_models_precede_status_and_leave_pixels_untouched() {
     let mut app = new_real_classic_menu_app(320, 200);
     let cases = [
         (StartupView::NetworkGame, "C4StartupNetDlg"),
@@ -1002,15 +1002,6 @@ fn missing_startup_models_precede_status_and_matching_cache_pixels() {
         app.startup_options_dialog = None;
         app.startup_about_dialog = None;
         app.status_text = "model boundary wins".to_string();
-        let cached = vec![0x31; 320 * 200 * 4];
-        app.menu_frame_cache = Some(MenuFrameCache {
-            view,
-            version: app.menu_render_version,
-            width: 320,
-            height: 200,
-            native_text_deferred: false,
-            frame: cached.clone(),
-        });
         let expected = ClassicParityBoundary::StartupModel { view, missing };
         let mut frame = vec![0x7c; 320 * 200 * 4];
 
@@ -1020,7 +1011,6 @@ fn missing_startup_models_precede_status_and_matching_cache_pixels() {
             Some(&expected)
         );
         assert!(frame.iter().all(|byte| *byte == 0x7c));
-        assert_eq!(app.menu_frame_cache.as_ref().unwrap().frame, cached);
 
         let mut native = vec![0x48; 640 * 400 * 4];
         let error = app
@@ -2348,16 +2338,8 @@ fn startup_bootstrap_precedes_recursive_startup_children() {
 }
 
 #[test]
-fn startup_status_boundary_precedes_supported_view_cached_pixels() {
+fn startup_status_boundary_precedes_supported_view_pixels() {
     let mut app = new_real_classic_menu_app(320, 200);
-    let mut initial = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut initial).expect("populate main-menu cache");
-    let cached = app
-        .menu_frame_cache
-        .as_ref()
-        .expect("main-menu frame is cached")
-        .frame
-        .clone();
 
     for view in [
         StartupView::MainMenu,
@@ -2376,14 +2358,6 @@ fn startup_status_boundary_precedes_supported_view_cached_pixels() {
             StartupView::About => app.open_about_dialog(),
             StartupView::NetworkLobby => unreachable!(),
         }
-        app.menu_frame_cache = Some(MenuFrameCache {
-            view,
-            version: app.menu_render_version,
-            width: 320,
-            height: 200,
-            native_text_deferred: false,
-            frame: cached.clone(),
-        });
         let status = format!("diagnostic status for {view:?}");
         app.status_text = status.clone();
         let mut frame = vec![0x5a; 320 * 200 * 4];
@@ -2404,15 +2378,7 @@ fn startup_status_boundary_precedes_supported_view_cached_pixels() {
         assert_eq!(app.status_text, status, "diagnostic state is retained");
         assert!(
             frame.iter().all(|byte| *byte == 0x5a),
-            "{view:?} must fail before copying cached or newly rendered pixels"
-        );
-        assert_eq!(
-            app.menu_frame_cache
-                .as_ref()
-                .expect("existing cache remains available for diagnostics")
-                .frame,
-            cached,
-            "{view:?} must fail before replacing the frame cache"
+            "{view:?} must fail before copying newly rendered pixels"
         );
     }
 }
@@ -4081,7 +4047,6 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
                 app.startup_dialog_fade.as_ref().map(|fade| fade.step),
                 Some(expected_step)
             );
-            assert!(app.menu_frame_cache.is_none());
         } else {
             assert!(app.startup_dialog_fade.is_none());
         }
@@ -4102,12 +4067,12 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
     }
     assert_eq!(presented[9], about, "frame ten is fully incoming");
 
-    let mut cached = vec![0_u8; 320 * 200 * 4];
-    assert!(app.render(&mut cached).expect("cache settled About"));
-    assert_eq!(cached, about);
-    let mut replay = vec![0_u8; 320 * 200 * 4];
-    assert!(!app.render(&mut replay).expect("replay settled About"));
-    assert_eq!(replay, about);
+    let mut settled = vec![0_u8; 320 * 200 * 4];
+    assert!(app.render(&mut settled).expect("present settled About"));
+    assert_eq!(settled, about);
+    let mut again = vec![0_u8; 320 * 200 * 4];
+    assert!(app.render(&mut again).expect("re-present settled About"));
+    assert_eq!(again, about);
 }
 
 #[test]

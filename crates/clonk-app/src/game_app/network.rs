@@ -231,9 +231,6 @@ impl GameApp {
                 clonk_frontend::league_signup::LeagueSignupSound::Click => "Click",
             });
         }
-        if !actions.is_empty() {
-            self.mark_menu_dirty();
-        }
         for action in actions {
             match action {
                 LeagueSignupAction::FocusChanged(_)
@@ -626,12 +623,10 @@ impl GameApp {
             return;
         };
         self.remove_message_dialog_at(index);
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn clear_pending_league_player_auth(&mut self) {
         self.pending_league_player_auth = None;
-        let mut removed = false;
         while let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
             matches!(
                 dialog.continuation,
@@ -642,10 +637,6 @@ impl GameApp {
             )
         }) {
             self.remove_message_dialog_at(index);
-            removed = true;
-        }
-        if removed {
-            self.mark_menu_dirty();
         }
     }
 
@@ -3642,10 +3633,6 @@ impl GameApp {
             .as_mut()
             .map(NetworkManager::poll_events)
             .unwrap_or_default();
-        let had_events = !events.is_empty();
-        if had_events {
-            self.mark_menu_dirty();
-        }
         {
             for event in events {
                 // C4GameControlNetwork::HandleControlPkt executes synchronized
@@ -4803,7 +4790,6 @@ impl GameApp {
             })
             .unwrap_or_default();
         self.process_network_dialog_actions(actions)?;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -4844,7 +4830,6 @@ impl GameApp {
             })
             .unwrap_or_default();
         self.process_league_signup_actions(actions)?;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -5533,7 +5518,6 @@ impl GameApp {
             if let Some(wait) = self.network_start_wait.as_mut() {
                 wait.visible = true;
             }
-            self.mark_menu_dirty();
             return Ok(());
         }
 
@@ -5560,7 +5544,6 @@ impl GameApp {
         };
         if self.remove_message_dialog_at(index).is_some() {
             self.startup_tooltip.pointer_left();
-            self.mark_menu_dirty();
         }
     }
 
@@ -5583,7 +5566,6 @@ impl GameApp {
                 );
             }
         }
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn update_network_start_wait_ack(
@@ -5623,26 +5605,22 @@ impl GameApp {
                 pending.status.target_tick = status.target_tick;
             }
         }
-        if wait.controller.update_client_status(
+        wait.controller.update_client_status(
             client_id,
             clonk_frontend::network_start_wait::NetworkStartWaitClientStatus::Ready,
-        ) {
-            self.mark_menu_dirty();
-        }
+        );
     }
 
     fn mark_network_start_wait_client_kick(&mut self, client_id: ClientId) {
         let Ok(client_id) = i32::try_from(client_id) else {
             return;
         };
-        if self.network_start_wait.as_mut().is_some_and(|wait| {
+        let _ = self.network_start_wait.as_mut().is_some_and(|wait| {
             wait.controller.update_client_status(
                 client_id,
                 clonk_frontend::network_start_wait::NetworkStartWaitClientStatus::Kick,
             )
-        }) {
-            self.mark_menu_dirty();
-        }
+        });
     }
 
     pub(crate) fn network_game_start_guard_passes(&mut self) -> bool {
@@ -6459,7 +6437,6 @@ impl GameApp {
             )
         }) {
             self.remove_message_dialog_at(index);
-            self.mark_menu_dirty();
         }
         let rejected_own_cancel = !result.approve
             && origin == local_client_id

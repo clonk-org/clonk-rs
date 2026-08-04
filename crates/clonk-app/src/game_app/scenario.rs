@@ -88,7 +88,6 @@ impl GameApp {
         // isolated `MenuState::submit_search` method retains C++ behavior for
         // parity coverage.
         self.startup_tooltip.pointer_left();
-        self.menu_frame_cache = None;
         // Rebuilding the list necessarily recreates and reselects a row.
         // That programmatic selection must stay silent while the user types;
         // dependent controls are synchronized explicitly below.
@@ -128,7 +127,6 @@ impl GameApp {
                 self.menu_state.search_edit.select_all();
             }
         }
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -226,13 +224,11 @@ impl GameApp {
         };
         let RenameEditAction::Submit(title) = action else {
             self.abort_scenario_rename();
-            self.mark_menu_dirty();
             return Ok(());
         };
         if title == original_title {
             self.menu_state.resolve_renaming(RenameEditResult::Deleted);
             self.set_scensel_dialog_focus(ScenselDialogFocus::List);
-            self.mark_menu_dirty();
             return Ok(());
         }
         let scenario = self.scenario_catalog.get(&identifier).cloned().or_else(|| {
@@ -291,7 +287,6 @@ impl GameApp {
                 )?;
             }
         }
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -326,7 +321,6 @@ impl GameApp {
     pub(crate) fn enter_scenario_folder(&mut self, identifier: &str) {
         self.menu_state.enter_folder(identifier);
         self.configure_current_folder_map();
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn close_scenario_browser(&mut self) {
@@ -356,7 +350,6 @@ impl GameApp {
                     dialog.pointer_left();
                 }
                 self.status_text.clear();
-                self.mark_menu_dirty();
             }
             _ => {
                 // `DoStartup` recreated the selector without `pLastDlg`.

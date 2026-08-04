@@ -2028,7 +2028,6 @@
         );
 
         app.menu_state.set_search_text("W".repeat(100));
-        app.mark_menu_dirty();
         let mut frame = vec![0_u8; 800 * 600 * 4];
         app.render(&mut frame)
             .expect("render horizontally scrolled edit");
@@ -2705,7 +2704,6 @@
             .as_mut()
             .expect("loading state remains installed before polling")
             .progress_percent = 37;
-        app.mark_menu_dirty();
         let mut progressed_frame = vec![0_u8; 800 * 600 * 4];
         app.render(&mut progressed_frame)
             .expect("render progressed loading book");

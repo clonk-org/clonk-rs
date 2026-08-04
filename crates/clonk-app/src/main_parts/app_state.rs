@@ -829,11 +829,6 @@ pub(crate) struct GameApp {
     pub(crate) game_option_input_last_click: Option<Instant>,
     pub(crate) game_option_consumed_keys: HashSet<VirtualKeyCode>,
     pub(crate) game_option_pointer_capture: bool,
-    /// Monotonic counter bumped by every event that can change what the
-    /// startup menu shows; `menu_frame_cache` is only replayed while it
-    /// still matches the version it was rendered at.
-    pub(crate) menu_render_version: u64,
-    pub(crate) menu_frame_cache: Option<MenuFrameCache>,
     pub(crate) menu_backdrop_cache: StartupBackdropCache,
     /// Last scenario-list row click (index, time) for double-click detection
     /// (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
@@ -881,19 +876,6 @@ pub(crate) struct GameApp {
     /// `LC_APP_HUD_DEBUG=1`: draw the FRAME/POS/VEL debug lines on top of
     /// the C++-faithful HUD.
     pub(crate) debug_hud: bool,
-}
-
-/// The last composed startup-menu frame. Menu mode is fully event-driven
-/// (`update()` does no work there), so until an input/network event bumps
-/// `menu_render_version` the frame is replayed as a copy instead of
-/// re-running the expensive software composition.
-pub(crate) struct MenuFrameCache {
-    pub(crate) view: StartupView,
-    pub(crate) version: u64,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) native_text_deferred: bool,
-    pub(crate) frame: Vec<u8>,
 }
 
 /// The static layer of a startup view — the full-screen bilinear background

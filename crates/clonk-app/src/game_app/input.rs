@@ -73,9 +73,6 @@ impl GameApp {
         if let Some(dialog) = self.runtime_client_list.as_mut() {
             dialog.note_non_pointer_input();
         }
-        if self.mode == AppMode::Menu {
-            self.menu_frame_cache = None;
-        }
         if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
@@ -127,7 +124,6 @@ impl GameApp {
                 .map(|dialog| dialog.handle_text_input(text, &fonts.text))
                 .unwrap_or_default();
             self.process_network_dialog_actions(actions)?;
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_options_advanced_dialog.is_some() {
@@ -136,7 +132,6 @@ impl GameApp {
             if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
                 pending.controller.handle_text_input(text);
             }
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -148,7 +143,6 @@ impl GameApp {
                 .map(|pending| pending.controller.handle_text_input(text))
                 .unwrap_or_default();
             self.process_startup_player_properties_actions(actions);
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.game_option_input_dialog.is_some()
@@ -220,7 +214,6 @@ impl GameApp {
             if let Some(rename) = self.menu_state.rename_edit.as_mut() {
                 rename.edit.insert_text(character.encode_utf8(&mut encoded));
             }
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_view == StartupView::ScenarioBrowser && self.menu_state.search_focused() {
@@ -231,7 +224,6 @@ impl GameApp {
             {
                 self.submit_scenario_search()?;
             }
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_view == StartupView::ScenarioBrowser {
@@ -246,7 +238,6 @@ impl GameApp {
             if let Some(rename) = self.startup_crew_rename.as_mut() {
                 rename.edit.insert_text(character.encode_utf8(&mut encoded));
             }
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_view == StartupView::PlayerSelection {
@@ -267,14 +258,12 @@ impl GameApp {
             };
             if !actions.is_empty() {
                 self.process_player_dialog_actions(actions)?;
-                self.mark_menu_dirty();
             }
             return Ok(());
         }
         if self.startup_view != StartupView::NetworkGame {
             return Ok(());
         }
-        self.mark_menu_dirty();
         let mut encoded = [0_u8; 4];
         let text = character.encode_utf8(&mut encoded);
         let fonts = self.assets.clonk_fonts.clone();
@@ -388,7 +377,7 @@ impl GameApp {
                     };
                     let geometry = self.runtime_client_list_input_geometry();
                     let point = self.running_pointer_position;
-                    let changed = geometry
+                    let _ = geometry
                         .zip(point)
                         .and_then(|((preferred, line_height), point)| {
                             self.runtime_client_list.as_mut().map(|dialog| {
@@ -396,9 +385,6 @@ impl GameApp {
                             })
                         })
                         .unwrap_or(false);
-                    if changed {
-                        self.mark_menu_dirty();
-                    }
                     self.suspend_ingame_pointer_for_gui();
                     self.cancel_ingame_mouse_gestures();
                     return Ok(());
@@ -438,7 +424,6 @@ impl GameApp {
                 if let Some(dialog) = self.runtime_client_list.as_mut() {
                     let _ = dialog.handle_wheel(point, native_delta, preferred, line_height);
                 }
-                self.mark_menu_dirty();
             }
             return Ok(());
         }
@@ -470,7 +455,6 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.process_network_dialog_actions(actions)?;
-            self.mark_menu_dirty();
             return Ok(());
         }
         if let Some(layout) = self.network_start_wait_layout() {
@@ -480,13 +464,10 @@ impl GameApp {
                     (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
                 }
             };
-            let scrolled = self.network_start_wait.as_mut().is_some_and(|wait| {
+            let _ = self.network_start_wait.as_mut().is_some_and(|wait| {
                 wait.pointer
                     .is_some_and(|point| wait.controller.handle_wheel(point, native_delta, &layout))
             });
-            if scrolled {
-                self.mark_menu_dirty();
-            }
             return Ok(());
         }
         if self.startup_options_advanced_dialog.is_some() {
@@ -496,13 +477,10 @@ impl GameApp {
                     (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
                 }
             };
-            let changed = self
+            let _ = self
                 .startup_options_advanced_dialog
                 .as_mut()
                 .is_some_and(|pending| pending.controller.handle_wheel(native_delta));
-            if changed {
-                self.mark_menu_dirty();
-            }
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -512,13 +490,10 @@ impl GameApp {
                     (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
                 }
             };
-            let changed = self
+            let _ = self
                 .startup_player_properties_dialog
                 .as_mut()
                 .is_some_and(|pending| pending.controller.handle_wheel(native_delta));
-            if changed {
-                self.mark_menu_dirty();
-            }
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -545,7 +520,6 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.finish_definition_selector_input(actions)?;
-            self.mark_menu_dirty();
             return Ok(());
         }
         if !context_routed_before_running_dialogs {
@@ -616,7 +590,6 @@ impl GameApp {
                         }
                         RuntimeDefaultDialog::NetworkChart | RuntimeDefaultDialog::Scoreboard => {}
                     }
-                    self.mark_menu_dirty();
                     return Ok(());
                 }
             }
@@ -650,7 +623,7 @@ impl GameApp {
                 return Ok(());
             }
             self.scenario_game_options.note_pointer_wheel();
-            let (changed, scroll_window_captured) = match self.network_lobby.as_mut() {
+            let (_, scroll_window_captured) = match self.network_lobby.as_mut() {
                 Some(lobby) => lobby
                     .wheel_right_sheet(
                         amount,
@@ -671,9 +644,6 @@ impl GameApp {
                 // C4GUI::ScrollWindow consumes the wheel and clears the
                 // screen's pMouseOver owner until a later pointer event.
                 self.note_classic_lobby_non_pointer_input();
-            }
-            if changed || scroll_window_captured {
-                self.mark_menu_dirty();
             }
             return Ok(());
         }
@@ -738,7 +708,6 @@ impl GameApp {
             self.process_player_dialog_actions(actions)?;
             if scrolled {
                 self.plrsel_last_click = None;
-                self.mark_menu_dirty();
             }
             return Ok(());
         }
@@ -762,7 +731,6 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.process_network_dialog_actions(actions)?;
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::About {
@@ -787,7 +755,6 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.process_about_dialog_actions(actions)?;
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
@@ -852,9 +819,7 @@ impl GameApp {
                     &info,
                 )
             };
-            if self.menu_state.scroll_selection_info_by(amount, metrics) {
-                self.mark_menu_dirty();
-            }
+            self.menu_state.scroll_selection_info_by(amount, metrics);
             return Ok(());
         }
         if contains(layout.list) {
@@ -862,12 +827,8 @@ impl GameApp {
             let item_height =
                 clonk_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
             let viewport_height = layout.list.h - 6;
-            if self
-                .menu_state
-                .scroll_scenario_list_by(amount, viewport_height, item_height + 1)
-            {
-                self.mark_menu_dirty();
-            }
+            self.menu_state
+                .scroll_scenario_list_by(amount, viewport_height, item_height + 1);
             return Ok(());
         }
         if !contains(layout.selection_info) {
@@ -880,9 +841,7 @@ impl GameApp {
                 &layout, book_fonts, &info,
             )
         };
-        if self.menu_state.scroll_selection_info_by(amount, metrics) {
-            self.mark_menu_dirty();
-        }
+        self.menu_state.scroll_selection_info_by(amount, metrics);
         Ok(())
     }
 
@@ -1304,7 +1263,6 @@ impl GameApp {
             }
             _ => {}
         }
-        self.mark_menu_dirty();
         Ok(true)
     }
 
@@ -2160,14 +2118,12 @@ impl GameApp {
                         dialog.sync_frontend_music_from_f3(enabled);
                     }
                 }
-                self.mark_menu_dirty();
             }
             return Ok(true);
         }
         if c4_modifiers == ModifiersState::CONTROL {
             if state == ElementState::Pressed {
                 self.toggle_frontend_sound_option()?;
-                self.mark_menu_dirty();
             }
             return Ok(true);
         }
@@ -2420,7 +2376,6 @@ impl GameApp {
             if let Some(action) = action {
                 self.handle_runtime_client_list_action(action)?;
             }
-            self.mark_menu_dirty();
             return Ok(true);
         }
         if self.runtime_client_list.is_none() || state == ElementState::Released {
@@ -3308,9 +3263,6 @@ impl GameApp {
         if let Some(dialog) = self.runtime_client_list.as_mut() {
             dialog.note_non_pointer_input();
         }
-        if self.mode == AppMode::Menu {
-            self.menu_frame_cache = None;
-        }
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_dismissed_lobby_option = None;
         if state == ElementState::Released && self.chat_paste_consumed_keys.remove(&key) {
@@ -3419,7 +3371,6 @@ impl GameApp {
         if self.handle_runtime_chart_toggle_key(key, state) {
             return Ok(());
         }
-        self.mark_menu_dirty();
         if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
@@ -3690,7 +3641,6 @@ impl GameApp {
                 Vec::new()
             };
             self.process_options_advanced_actions(actions)?;
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -3713,7 +3663,6 @@ impl GameApp {
                 if let Some((index, path)) = location {
                     self.reload_startup_player_portrait_location(index, &path);
                 }
-                self.mark_menu_dirty();
                 return Ok(());
             }
             #[cfg(target_os = "windows")]
@@ -3792,7 +3741,6 @@ impl GameApp {
                 Vec::new()
             };
             self.process_startup_player_properties_actions(actions);
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.handle_definition_selector_key(key, state)? {
@@ -4938,10 +4886,6 @@ impl GameApp {
             if let Some(dialog) = self.runtime_client_list.as_mut() {
                 dialog.note_non_pointer_input();
             }
-            if self.mode == AppMode::Menu {
-                self.menu_frame_cache = None;
-            }
-            self.mark_menu_dirty();
             if self.startup_network_transition_blocks_input() {
                 return Ok(());
             }
@@ -5398,7 +5342,6 @@ impl GameApp {
                                         } else {
                                             self.abort_startup_crew_rename();
                                         }
-                                        self.mark_menu_dirty();
                                     }
                                     // RenameEdit's AnyHighButton binding owns
                                     // the complete physical cluster, including
@@ -5412,7 +5355,6 @@ impl GameApp {
                                 } if scenario_rename_owns_raw_gui_button => {
                                     if state == ElementState::Pressed {
                                         self.activate_scensel_after_gamepad_low_rename_abort()?;
-                                        self.mark_menu_dirty();
                                     }
                                     // Dialog's AnyLowButton binding owns the
                                     // cluster and calls DoOK, whose first step
@@ -5827,7 +5769,6 @@ impl GameApp {
                         })
                         .unwrap_or_default();
                     self.process_network_start_wait_actions(actions)?;
-                    self.mark_menu_dirty();
                 } else if self.startup_options_advanced_dialog.is_some() {
                     let key = match class {
                         GuiButtonClass::Low => KeyCode::Space,
@@ -5842,7 +5783,6 @@ impl GameApp {
                         })
                         .unwrap_or_default();
                     self.process_options_advanced_actions(actions)?;
-                    self.mark_menu_dirty();
                 } else if self.startup_player_properties_dialog.is_some() {
                     let actions = self
                         .startup_player_properties_dialog
@@ -5861,7 +5801,6 @@ impl GameApp {
                         })
                         .unwrap_or_default();
                     self.process_startup_player_properties_actions(actions);
-                    self.mark_menu_dirty();
                 }
             }
             GamepadEvent::Action {
@@ -6103,7 +6042,6 @@ impl GameApp {
                 if let Some(wait) = self.network_start_wait.as_mut() {
                     wait.controller.handle_gamepad_horizontal(backwards);
                 }
-                self.mark_menu_dirty();
             }
             return Ok(());
         }
@@ -6130,7 +6068,6 @@ impl GameApp {
                 }
             }
             self.process_options_advanced_actions(Vec::new())?;
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -6149,7 +6086,6 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.process_startup_player_properties_actions(actions);
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -6438,7 +6374,6 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.process_options_advanced_actions(actions)?;
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -6460,7 +6395,6 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.process_startup_player_properties_actions(actions);
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -6731,18 +6665,12 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
-        self.mark_menu_dirty();
         // C4GraphicsSystem::MouseMove ceil-quantizes the scale-adjusted
         // coordinates once before either C4GUI::CMouse or viewport routing.
         let raw_point = gui_point_from_position(position);
         let point = GuiPoint::new(raw_point.x.ceil(), raw_point.y.ceil());
         self.window_mouse_position = Some(point);
         self.pointer_inside_window = true;
-        if self.mode == AppMode::Menu {
-            // The classic cursor is part of the cached startup frame, so a
-            // same-control move still invalidates the prior cursor pixels.
-            self.mark_menu_dirty();
-        }
         if self.mode == AppMode::Running {
             // C4GraphicsSystem first offers every new move to C4GUI, then
             // returns ownership to C4MouseControl unless a GUI route wins.
@@ -7123,11 +7051,9 @@ impl GameApp {
                         self.finish_game_option_input(actions)?;
                         if self.scenario_selector_discovery.is_some() {
                             let _ = self.handle_scensel_search_pointer_move(point);
-                            self.mark_menu_dirty();
                             return Ok(());
                         }
                         if self.menu_state.current_map().is_some() {
-                            self.mark_menu_dirty();
                             return Ok(());
                         }
                         if self.handle_scensel_rename_pointer_move(point)
@@ -7162,7 +7088,6 @@ impl GameApp {
                             }
                         }
                         if self.handle_startup_crew_rename_pointer_move(point) {
-                            self.mark_menu_dirty();
                             return Ok(());
                         }
                         let actions = self
@@ -7875,13 +7800,10 @@ impl GameApp {
             show_close_button: true,
             ..IngameMenuGraphics::default()
         };
-        let changed = self.ingame_menu.get(player).is_some_and(|menu| {
+        let _ = self.ingame_menu.get(player).is_some_and(|menu| {
             menu.client_contains(area, &font, &gfx, point)
                 && menu.scroll_by(amount, area, &font, &gfx)
         });
-        if changed {
-            self.mark_menu_dirty();
-        }
         true
     }
 
@@ -8702,7 +8624,6 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
-        self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_blocks_input() {
             return Ok(());
@@ -8989,7 +8910,6 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
-        self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_blocks_input() {
             return Ok(());
@@ -9667,7 +9587,6 @@ impl GameApp {
             .get_mut(&owner)
             .filter(|state| state.key.target == target)
         {
-            let old = state.scroll_y;
             if state.location_needs_initialization {
                 state.location = Some((layout.bounds.x, layout.bounds.y));
                 state.location_needs_initialization = false;
@@ -9682,9 +9601,6 @@ impl GameApp {
             };
             state.scroll_selection = menu_selection;
             state.selection_needs_adjustment = false;
-            if state.scroll_y != old {
-                self.mark_menu_dirty();
-            }
         }
         Ok(true)
     }
@@ -10043,7 +9959,6 @@ impl GameApp {
         self.primary_pointer_left_down = button_state == ElementState::Pressed;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_dismissed_lobby_option = None;
-        self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_blocks_input() {
             return Ok(());
@@ -10981,7 +10896,6 @@ impl GameApp {
                     }
                 }
             }
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.running_chat_controller().is_some() {
@@ -11008,7 +10922,6 @@ impl GameApp {
                     self.release_game_option_input_pointer_elements();
                 }
             }
-            self.mark_menu_dirty();
             return Ok(());
         }
         if phase == TouchPhase::Started {
@@ -11035,7 +10948,6 @@ impl GameApp {
                 ContextMenuPointerButton::Left,
             )
         {
-            self.mark_menu_dirty();
             return Ok(());
         }
         if phase == TouchPhase::Cancelled {
@@ -11067,7 +10979,6 @@ impl GameApp {
                         self.release_occluded_running_pointer_captures(None);
                     }
                     self.occlude_running_dialog_pointer_hovers();
-                    self.mark_menu_dirty();
                     return Ok(());
                 }
             }
@@ -11095,7 +11006,6 @@ impl GameApp {
             )
             && self.handle_scoreboard_touch(position, phase)?
         {
-            self.mark_menu_dirty();
             if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                 self.pointer_left_unchecked();
             }
@@ -11119,7 +11029,6 @@ impl GameApp {
                 && !self.network_chart_elevated
                 && self.running_shared_gui_has_keyboard_focus())
         {
-            self.mark_menu_dirty();
             let retained_title_drag = self.captured_message_dialog_index().filter(|index| {
                 self.message_dialogs
                     .get(*index)
@@ -11151,7 +11060,6 @@ impl GameApp {
             return Ok(());
         }
         if self.league_signup_dialog.is_some() {
-            self.mark_menu_dirty();
             self.league_signup_pointer_position =
                 (!matches!(phase, TouchPhase::Cancelled)).then_some(position);
             if phase == TouchPhase::Cancelled {
@@ -11227,7 +11135,6 @@ impl GameApp {
             return Ok(());
         }
         if let Some(layout) = self.network_start_wait_layout() {
-            self.mark_menu_dirty();
             let actions = self
                 .network_start_wait
                 .as_mut()
@@ -11253,7 +11160,6 @@ impl GameApp {
             return Ok(());
         }
         if self.startup_options_advanced_dialog.is_some() {
-            self.mark_menu_dirty();
             let font = self.assets.clonk_fonts.as_deref().map(|fonts| &fonts.text);
             let actions = self
                 .startup_options_advanced_dialog
@@ -11287,7 +11193,6 @@ impl GameApp {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
-            self.mark_menu_dirty();
             let actions = self
                 .startup_player_properties_dialog
                 .as_mut()
@@ -11308,7 +11213,6 @@ impl GameApp {
             return Ok(());
         }
         if self.definition_selector.is_some() {
-            self.mark_menu_dirty();
             let layout = self.definition_selector_layout();
             let clicked_label_row = layout.as_ref().and_then(|layout| {
                 self.definition_selector.as_ref().and_then(|controller| {
@@ -11362,11 +11266,9 @@ impl GameApp {
             return Ok(());
         }
         if definition_selector_release_latched {
-            self.mark_menu_dirty();
             return Ok(());
         }
         if self.context_menu.is_some() {
-            self.mark_menu_dirty();
             if phase == TouchPhase::Cancelled {
                 self.close_context_menu_silently();
             } else {
@@ -11567,7 +11469,6 @@ impl GameApp {
             return Ok(());
         }
         if self.mode == AppMode::Running {
-            self.mark_menu_dirty();
             let _ = self.handle_scoreboard_touch(position, phase)?;
             if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                 self.pointer_left_unchecked();
@@ -11581,10 +11482,8 @@ impl GameApp {
             return Ok(());
         }
         if self.classic_host_lobby_active() {
-            self.mark_menu_dirty();
             return self.handle_classic_lobby_touch(phase, position, left_double_click);
         }
-        self.mark_menu_dirty();
         if self.game_over_dialog.is_some() {
             if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                 self.dismiss_game_over_dialog();
@@ -11904,7 +11803,6 @@ impl GameApp {
     }
 
     pub(crate) fn pointer_left_unchecked(&mut self) {
-        self.mark_menu_dirty();
         self.startup_tooltip.pointer_left();
         if self.mode == AppMode::Running {
             self.scoreboard_pointer_left();
@@ -12298,7 +12196,6 @@ impl GameApp {
             Vec::new()
         };
         self.process_network_start_wait_actions(actions)?;
-        self.mark_menu_dirty();
         Ok(true)
     }
 

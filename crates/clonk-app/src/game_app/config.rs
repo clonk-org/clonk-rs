@@ -1220,7 +1220,6 @@ impl GameApp {
         self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
         self.native_startup_fonts = native_fonts;
         self.open_options_menu();
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -1337,7 +1336,6 @@ impl GameApp {
             controller,
             return_sheet,
         });
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -1407,10 +1405,8 @@ impl GameApp {
         if let Some(config) = self.loader_render_config {
             self.configure_native_startup_fonts(config.application_scale(), point_filtering);
         }
-        self.menu_frame_cache = None;
         self.menu_backdrop_cache = StartupBackdropCache::default();
         self.startup_dialog_fade = None;
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn process_options_advanced_actions(
@@ -1467,7 +1463,6 @@ impl GameApp {
                 }
             }
         }
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -1630,7 +1625,6 @@ impl GameApp {
                 );
             }
         }
-        self.mark_menu_dirty();
     }
 
     fn show_options_alternate_server_notice(&mut self) -> Result<(), EngineError> {
@@ -1695,7 +1689,6 @@ impl GameApp {
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -1728,7 +1721,6 @@ impl GameApp {
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -1947,7 +1939,6 @@ impl GameApp {
 
     pub(crate) fn queue_options_display_request(&mut self, request: OptionsDisplayRequest) {
         self.pending_options_display_requests.push_back(request);
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn tick_options_scale_test_prompt(&mut self) -> bool {
@@ -2012,7 +2003,6 @@ impl GameApp {
                 });
             }
         }
-        self.mark_menu_dirty();
         true
     }
 
@@ -2049,7 +2039,6 @@ impl GameApp {
         actions: Vec<GameOptionAction>,
     ) -> Result<(), EngineError> {
         for action in actions {
-            self.mark_menu_dirty();
             match action {
                 GameOptionAction::FocusTraversalRequested { backwards } => {
                     self.advance_scensel_dialog_focus(backwards);
@@ -2136,7 +2125,6 @@ impl GameApp {
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -2271,7 +2259,6 @@ impl GameApp {
         actions: Vec<InputDialogAction>,
     ) -> Result<(), EngineError> {
         for action in actions {
-            self.mark_menu_dirty();
             match action {
                 InputDialogAction::FocusChanged(_) | InputDialogAction::TextChanged(_) => {}
                 InputDialogAction::SubmittedLine(text) => {

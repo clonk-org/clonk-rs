@@ -2753,15 +2753,13 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
 }
 
 #[test]
-fn l018_menu_cursor_moves_with_cached_startup_frame_and_clears_on_leave() {
+fn l018_menu_cursor_moves_and_clears_on_leave() {
     let mut app = new_menu_app(64, 48);
     install_l018_cursor_atlas(&mut app);
     let background = Color::opaque(9, 10, 11);
 
-    let version = app.menu_render_version;
     app.handle_cursor_moved(PhysicalPosition::new(20.0, 18.0))
         .expect("first startup cursor move");
-    assert!(app.menu_render_version > version);
     app.graphics.surface_mut().fill(background);
     assert!(app.draw_classic_gui_cursor(None));
     assert_eq!(
@@ -2769,10 +2767,8 @@ fn l018_menu_cursor_moves_with_cached_startup_frame_and_clears_on_leave() {
         Some(Color::opaque(0, 40, 200))
     );
 
-    let version = app.menu_render_version;
     app.handle_cursor_moved(PhysicalPosition::new(40.0, 30.0))
         .expect("same-control startup cursor move");
-    assert!(app.menu_render_version > version);
     app.graphics.surface_mut().fill(background);
     assert!(app.draw_classic_gui_cursor(None));
     assert_eq!(app.graphics.surface().get_pixel(18, 16), Some(background));
@@ -2781,9 +2777,7 @@ fn l018_menu_cursor_moves_with_cached_startup_frame_and_clears_on_leave() {
         Some(Color::opaque(0, 40, 200))
     );
 
-    let version = app.menu_render_version;
     app.pointer_left().expect("leave startup window");
-    assert!(app.menu_render_version > version);
     assert!(!app.draw_classic_gui_cursor(None));
 }
 
@@ -3801,7 +3795,7 @@ fn player_properties_context_closes_and_opens_the_editor() {
 }
 
 #[test]
-fn cached_menu_requests_the_deferred_monitor_gamma_post_pass() {
+fn menu_render_defers_or_applies_the_monitor_gamma_post_pass() {
     let mut app = new_real_classic_menu_app(320, 240);
     let configured_gamma =
         clonk_graphics::GammaRamp::from_control_points([0x101010, 0x707070, 0xe0e0e0]);
@@ -3814,33 +3808,27 @@ fn cached_menu_requests_the_deferred_monitor_gamma_post_pass() {
             ..clonk_frontend::AdvancedRendererConfig::DEFAULT
         });
     app.main_menu_state.menu.set_gamma_ramp(None);
-    app.menu_frame_cache = None;
 
-    let mut cold = vec![0_u8; 320 * 240 * 4];
+    // A deferred pass leaves the raw logical frame for the physical
+    // post-pass; the same render without the deferral applies the ramp
+    // itself.
+    let mut deferred = vec![0x55; 320 * 240 * 4];
     assert!(app
-        .render_for_presentation_with_monitor_defer(&mut cold, false, false, false, true,)
-        .expect("render raw cached menu base"));
-    let cached = app
-        .menu_frame_cache
-        .as_ref()
-        .expect("cold render caches the raw logical frame")
-        .frame
-        .clone();
-    assert_eq!(cold, cached);
+        .render_for_presentation_with_monitor_defer(&mut deferred, false, false, false, true,)
+        .expect("render the raw logical menu base"));
 
-    let mut deferred_hit = vec![0x55; cold.len()];
+    let mut direct = vec![0x77; deferred.len()];
     assert!(app
-        .render_for_presentation_with_monitor_defer(&mut deferred_hit, false, false, false, true,)
-        .expect("replay raw cache for a physical post-pass"));
-    assert_eq!(deferred_hit, cached);
+        .render_for_presentation_with_monitor_defer(&mut direct, false, false, false, false,)
+        .expect("direct render applies its own monitor gamma"));
 
-    let mut direct_hit = vec![0x77; cold.len()];
-    assert!(!app
-        .render_for_presentation_with_monitor_defer(&mut direct_hit, false, false, false, false,)
-        .expect("direct replay applies its own monitor gamma"));
-    let mut expected = cached;
+    let mut expected = deferred.clone();
     configured_gamma.apply_to_rgba_bytes(&mut expected);
-    assert_eq!(direct_hit, expected);
+    assert_eq!(direct, expected);
+    assert_ne!(
+        direct, deferred,
+        "the configured monitor ramp must change the presented pixels"
+    );
 }
 
 fn solid_gui_sheet(pixel: [u8; 4], width: u32, height: u32) -> ImageData {
@@ -4307,7 +4295,6 @@ fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
 fn global_gui_guard_is_first_at_every_external_ui_ingress() {
     let mut app = new_classic_menu_app(320, 200);
     remove_global_gui_sheet(&mut app, "GUISpinBoxArrow.png");
-    let version = app.menu_render_version;
     let modifiers = app.keyboard_modifiers;
     let dimensions = {
         let surface = app.graphics.surface();
@@ -4351,7 +4338,6 @@ fn global_gui_guard_is_first_at_every_external_ui_ingress() {
         resize.downcast_ref::<ClassicParityBoundary>(),
         Some(ClassicParityBoundary::GlobalGuiBootstrapResources { .. })
     ));
-    assert_eq!(app.menu_render_version, version);
     assert_eq!(app.keyboard_modifiers, modifiers);
     let surface = app.graphics.surface();
     assert_eq!((surface.width(), surface.height()), dimensions);
@@ -5386,12 +5372,12 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
         .expect("render after close"));
     assert_ne!(
         with_context, without_context,
-        "closed popup must not ghost from cache"
+        "a closed popup must not ghost into the next frame"
     );
     let stable = without_context.clone();
-    assert!(!app
+    assert!(app
         .render(&mut without_context)
-        .expect("replay clean frame"));
+        .expect("recompose the clean frame"));
     assert_eq!(without_context, stable);
 
     open_on_row(&mut app, 1);
@@ -5603,7 +5589,6 @@ fn message_dialog_malformed_specific_assets_fail_before_modal_mutation() {
             "GUIIcons.png".to_string(),
             ImageData::new(1, 1, vec![255, 255, 255, 255]),
         );
-    let version_before = app.menu_render_version;
     let error = app
         .push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -5621,26 +5606,22 @@ fn message_dialog_malformed_specific_assets_fail_before_modal_mutation() {
                 && detail.contains("GUIIcons.png")
     ));
     assert!(app.message_dialogs.is_empty());
-    assert_eq!(app.menu_render_version, version_before);
 }
 
 #[test]
-fn menu_input_invalidates_cached_frame() {
+fn menu_input_changes_the_composed_frame() {
     clonk_logging::init();
 
     let mut app = new_real_classic_menu_app(320, 200);
-    let mut frame = vec![0u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("render");
-    let cached_version = app
-        .menu_frame_cache
-        .as_ref()
-        .expect("cache populated")
-        .version;
+    let mut before = vec![0u8; 320 * 200 * 4];
+    app.render(&mut before).expect("render");
     app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("key input");
+    let mut after = vec![0u8; 320 * 200 * 4];
+    app.render(&mut after).expect("render after input");
     assert_ne!(
-        app.menu_render_version, cached_version,
-        "input events must invalidate the cached menu frame"
+        before, after,
+        "input events must change what the menu presents"
     );
 }
 
@@ -5654,12 +5635,10 @@ fn menu_backdrop_restore_matches_full_recomposition() {
     app.render(&mut first).expect("cold render");
 
     // A recomposition that restores the cached static backdrop...
-    app.mark_menu_dirty();
     let mut restored = vec![0u8; len];
     app.render(&mut restored).expect("backdrop-restored render");
 
     // ...must match one composed from scratch.
-    app.mark_menu_dirty();
     app.menu_backdrop_cache = StartupBackdropCache::default();
     let mut recomposed = vec![0u8; len];
     app.render(&mut recomposed).expect("full recomposition");
@@ -5684,10 +5663,14 @@ fn menu_resize_renders_at_new_dimensions() {
     app.resize(400, 300).expect("resize");
     let mut larger = vec![0u8; 400 * 300 * 4];
     app.render(&mut larger).expect("render after resize");
-    let cache = app.menu_frame_cache.as_ref().expect("cache after resize");
+    let surface = app.graphics.surface();
     assert_eq!(
-        (cache.width, cache.height),
+        (surface.width(), surface.height()),
         (400, 300),
-        "cache must track the resized surface"
+        "the composed surface must track the resized window"
+    );
+    assert!(
+        larger.iter().any(|byte| *byte != 0),
+        "the resized menu must reach the enlarged frame"
     );
 }
