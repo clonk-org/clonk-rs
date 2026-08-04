@@ -4128,6 +4128,44 @@ fn real_mars_full_size_highlight_reaches_host_gui_resources() {
 }
 
 #[test]
+fn real_mars_upper_board_keeps_the_product_logo() {
+    // C4GraphicsResource::Init resolves Logo.png over the registered
+    // Graphics.c4g group set, so a scenario folder that ships its own copy
+    // wins over planet/ (src/C4GraphicsResource.cpp:418-470), and
+    // C4UpperBoard::Execute draws that facet centered on the board
+    // (src/C4UpperBoard.cpp:88-92). ClonkMars must therefore not carry a
+    // stale copy of the base-game logo: unlike Hazard's own total-conversion
+    // branding, it only restates the product name, which this port rebranded.
+    let _lock = env_lock().lock();
+    let user_data = tempdir().expect("isolated Mars logo user data");
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let app = new_menu_app_with_paths(320, 200, &paths);
+    let scenario =
+        resolve_next_mission_scenario(&app.scenario_catalog, "ClonkMars.c4f/01_Fossae.c4s")
+            .expect("Mars Fossae is present in the real scenario catalog");
+    let product = app
+        .assets
+        .hud_graphics()
+        .logo
+        .clone()
+        .expect("planet/Graphics.c4g supplies the product logo");
+    let mars = app
+        .loaded_game_graphics_resources(&scenario, None)
+        .expect("resolve the real Mars game graphics")
+        .hud_graphics
+        .logo
+        .clone()
+        .expect("Mars upper-board logo");
+
+    assert_eq!(
+        (mars.width(), mars.height()),
+        (product.width(), product.height()),
+        "a Mars scenario must draw the product logo on its upper board"
+    );
+    assert_eq!(mars.pixels(), product.pixels());
+}
+
+#[test]
 fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
     let check = |mut app: GameApp, label: &str| {
         app.scoreboard_initial_reconcile_pending = true;

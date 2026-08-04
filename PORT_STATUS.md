@@ -2134,6 +2134,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   lines and everything around them is compiled and linted on every host.
   **Still open:** observing it on a real taskbar.
 
+- Closed 2026-08-04: **ClonkMars drew the base game's logo on its upper board.**
+  `C4UpperBoard::Execute` centers the `Logo` facet on the board strip
+  (`C4UpperBoard.cpp:88-92`), and `C4GraphicsResource` resolves that facet over
+  the registered `Graphics.c4g` groups, so a scenario folder's own copy outranks
+  `planet/` (`C4GraphicsResource.cpp:418-470`). Two bundled packs ship one:
+  Hazard's is its own total-conversion wordmark and stays, but ClonkMars carried
+  a 220x85 copy of the *base game's* logo, which this port rebranded — so every
+  Mars scenario ran under the old product name while every other scenario showed
+  the new one. Fixed in the data, not the engine: the override mechanism is
+  correct and load-bearing for Hazard, so the redundant file is simply gone from
+  the content submodule and Mars falls through to `planet/Graphics.c4g/Logo.png`.
+  Height-neutral — both logos land on the same 67px `UPPER_BOARD_LOGO_MAX_HEIGHT`
+  clamp. Pinned by `real_mars_upper_board_keeps_the_product_logo`, which resolves
+  the real catalog entry through the real group set.
+
 - Closed 2026-07-29: **Loading-screen GUI log capture.** The loader's log box
   showed only its own hard-coded phase labels: `ScenarioLoadingReporter` kept a
   private `VecDeque` that `report` replaced wholesale, so engine diagnostics
