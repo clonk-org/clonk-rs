@@ -1,9 +1,7 @@
 import json
-import pathlib
 import unittest
 
-
-REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
+from _repo import REPOSITORY
 
 
 def load_config():

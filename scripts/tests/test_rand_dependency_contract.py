@@ -1,14 +1,9 @@
 import pathlib
-import tomllib
 import unittest
 
+from _repo import REPOSITORY, manifest
 
-REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 DEPENDENCY_SECTIONS = ("dependencies", "dev-dependencies", "build-dependencies")
-
-
-def manifest(relative_path):
-    return tomllib.loads((REPOSITORY / relative_path).read_text(encoding="utf-8"))
 
 
 def dependency_declarations(cargo_manifest, dependency_name):

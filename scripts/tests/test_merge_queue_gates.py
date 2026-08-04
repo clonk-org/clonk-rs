@@ -6,8 +6,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-
-REPOSITORY = Path(__file__).resolve().parents[2]
+from _repo import REPOSITORY
 WORKFLOWS = REPOSITORY / ".github" / "workflows"
 LANDING = WORKFLOWS / "landing.yml"
 MAIN_VALIDATION = WORKFLOWS / "rust.yml"

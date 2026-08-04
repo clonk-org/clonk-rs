@@ -2,10 +2,9 @@
 
 import re
 import unittest
-from pathlib import Path
 
+from _repo import REPOSITORY
 
-REPOSITORY = Path(__file__).resolve().parents[2]
 WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
 ORACLE_REASON = (
     "recording-host material order; required macOS CI job"

@@ -17,7 +17,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPOSITORY = Path(__file__).resolve().parents[2]
+from _repo import REPOSITORY
+
 WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
 
 PIN = "d34d385591134ce6c262b8c9ed53faaa6229cc6b"

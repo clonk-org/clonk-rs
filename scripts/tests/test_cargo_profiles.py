@@ -2,10 +2,9 @@
 
 import tomllib
 import unittest
-from pathlib import Path
 
+from _repo import REPOSITORY
 
-REPOSITORY = Path(__file__).resolve().parents[2]
 MANIFEST = REPOSITORY / "Cargo.toml"
 
 

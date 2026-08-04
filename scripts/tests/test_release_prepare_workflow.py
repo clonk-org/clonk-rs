@@ -1,10 +1,9 @@
 """Static guards for the GitHub-native release preparation flow."""
 
 import unittest
-from pathlib import Path
 
+from _repo import REPOSITORY
 
-REPOSITORY = Path(__file__).resolve().parents[2]
 PREPARE = REPOSITORY / ".github" / "workflows" / "release-prepare.yml"
 PUBLISH = REPOSITORY / ".github" / "workflows" / "release.yml"
 

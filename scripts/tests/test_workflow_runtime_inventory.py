@@ -1,9 +1,9 @@
 """Static guards keeping CI and release checks aligned with shipped binaries."""
 
 import unittest
-from pathlib import Path
 
-REPOSITORY = Path(__file__).resolve().parents[2]
+from _repo import REPOSITORY
+
 LANDING_WORKFLOW = REPOSITORY / ".github" / "workflows" / "landing.yml"
 MAIN_WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
 RELEASE_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
