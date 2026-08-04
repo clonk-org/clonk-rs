@@ -104,6 +104,7 @@ shard_modules!(
     legacy_scenario_loading,
     literal_zero_strictness,
     manifest_definitions,
+    mars_base_order_menu,
     mars_base_research_exit,
     mars_material_unit_entrance,
     mars_oxygen,

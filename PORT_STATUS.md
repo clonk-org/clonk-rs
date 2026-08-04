@@ -2581,6 +2581,63 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **A Menu2 range is one row that adds on a primary and takes back on a
+  secondary activation** (`planet/System.c4g/MenuRangeRow.c`, `#appendto MS4C`;
+  departs from `content/ClonkMars.c4d/Helpers.c4d/Menu2.c4d/Menu.c4d/
+  Script.c:108-143`). Approved 2026-08-04, clonk-org/clonk-rs#119. The shipped
+  `ShowRange` expands one range into three `AddMenuItem` rows — the value, an
+  `Increase by 1` and a `Decrease by 1` whose captions name no product because
+  the pack's authors commented out the per-product wording that its own
+  `StringTbl*.txt` still carries (`Menu.c4d/Script.c:112-115`). Cerberus Fossae
+  therefore listed 16 rows for five products, in a menu the engine draws as one
+  narrow column of single-line rows: `C4MN_Style_Context` forces `Columns = 1`
+  (`C4Menu.cpp:359-365`) and `InitLocation` gives each row one line of height
+  (`C4Menu.cpp:650-664`), so there is no wider layout for those rows to use.
+  The append collapses a range to one row and spends the engine's two
+  activations on the two directions: `C4Menu::Enter` runs `C4MenuItem::Command2`
+  on a right enter (`C4Menu.cpp:512-514`), which the engine composes itself out
+  of the same command string (`C4Script.cpp:1630-1670`) and the player reaches
+  with the right mouse button (`C4Menu.cpp:228-232`), with `[Special2]`
+  (`C4Menu.cpp:1053`) or through `COM_MenuEnterAll` (`C4Menu.cpp:440`) — the
+  same two activations the bottom key strip already advertises
+  (`C4Menu.cpp:846-880`). This is not a new interaction for a purchase menu:
+  the engine's own `C4MN_Buy` rows are one per product and already put a
+  different quantity on `Command2` (`C4ObjectMenu.cpp:246-271`, ported at
+  `crates/clonk-engine/src/direct_com.rs:5060-5069`). The direction differs
+  deliberately — that menu buys immediately, where this one composes a pending
+  order that nothing else can reduce. Because a hidden secondary action is only
+  usable if the row says it is there, each row spells out both steps from its
+  first frame and greys the one its limits forbid rather than dropping it — so a
+  value on a limit says so instead of promising a click the shipped `BoundBy`
+  would discard, and because colour markup carries no width the row is exactly
+  as wide at every value and the menu never resizes under a pointer that is
+  clicking it. The info caption, previously a verbatim duplicate of the row it
+  covers, states the current value and both bindings, localized from a new
+  `planet/System.c4g/StringTbl{US,DE}.txt`.
+  **Blast radius.** Presentation of a script-built menu: `Increase`, `Decrease`
+  and their clamp are untouched (`Menu.c4d/Script.c:178-198`), so a committed
+  order is unchanged. `parity verify` and `engine-snapshots verify` cannot see
+  it — neither executes content C4Script — and the replay goldens run no
+  ClonkMars scenario. One piece of synchronized state does move: the shipped
+  non-selectable branch creates and removes three dummy objects per range row
+  and this one creates one, so the object-number counter advances differently
+  once a greyed range is drawn. No draw site is added or removed on any branch,
+  so `RandomCount` is untouched. Cross-play against a stock LegacyClonk client
+  would diverge on that counter; `planet/System.c4g` is the port's own engine
+  data and never reaches one. Both Menu2 clients are covered — ClonkMars' Base
+  order page (`Base.c4d/Script.c:115-131`) and the viewport size chooser, whose
+  ranges use a string key and no item id (`Viewport.c4d/Script.c:61-62`).
+  Pinned by `mars_order_page_collapses_each_product_to_a_single_row`,
+  `mars_order_row_offers_both_steps_on_the_product_row`,
+  `mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one`,
+  `mars_order_row_stops_offering_a_step_it_cannot_take`,
+  `mars_order_row_moves_only_its_own_product_and_keeps_the_selection`,
+  `menu2_range_rows_collapse_for_a_string_key_without_a_symbol_too`,
+  `a_range_whose_condition_fails_collapses_to_one_inert_row`,
+  `collapsing_the_rows_spends_no_synchronized_draw`,
+  `colour_markup_in_a_context_caption_costs_no_row_width` and
+  `the_row_hint_is_localized_from_the_system_group`.
+
 - **A refused default-interface multicast join falls back to per-interface
   joins** (`join_discovery_multicast`, `multicast_targets`,
   `multicast_interface_indices`, `crates/clonk-network/src/search.rs`; no key;
