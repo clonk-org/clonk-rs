@@ -50,6 +50,17 @@ enum LocalResourceStandalone {
         path: PathBuf,
         ownership: ResourceFileOwnership,
     },
+    /// Packed image of a directory candidate whose bytes differ from the
+    /// served core. It can never be served, but it is still what has to be
+    /// *loaded*: an unpacked directory enumerates in host `readdir` order
+    /// while every peer that took the resource as a file enumerates it in
+    /// C4CFN_FLS order, and entry order decides material slots
+    /// (C4Material.cpp:263-299). C++ never has to make this distinction
+    /// because its candidates are always packed files.
+    LoadableOnly {
+        path: PathBuf,
+        ownership: ResourceFileOwnership,
+    },
     Unavailable,
 }
 
@@ -58,18 +69,29 @@ impl LocalResourceMatch {
         &self.core
     }
 
+    /// The path the engine loads this resource from. Every peer must agree on
+    /// its contents entry for entry, so a packed image always wins over the
+    /// directory it was packed from.
     pub fn path(&self) -> &Path {
-        self.standalone_path().unwrap_or(&self.source_path)
+        match &self.standalone {
+            LocalResourceStandalone::BinaryCompatible { path, .. }
+            | LocalResourceStandalone::LoadableOnly { path, .. } => path,
+            LocalResourceStandalone::Unavailable => &self.source_path,
+        }
     }
 
     pub fn source_path(&self) -> &Path {
         &self.source_path
     }
 
+    /// The servable standalone. A `LoadableOnly` image is deliberately absent:
+    /// only a byte-identical one may answer a chunk request.
     pub fn standalone_path(&self) -> Option<&Path> {
         match &self.standalone {
             LocalResourceStandalone::BinaryCompatible { path, .. } => Some(path),
-            LocalResourceStandalone::Unavailable => None,
+            LocalResourceStandalone::LoadableOnly { .. } | LocalResourceStandalone::Unavailable => {
+                None
+            }
         }
     }
 
@@ -82,7 +104,8 @@ impl LocalResourceMatch {
 
     pub fn standalone_ownership(&self) -> Option<ResourceFileOwnership> {
         match self.standalone {
-            LocalResourceStandalone::BinaryCompatible { ownership, .. } => Some(ownership),
+            LocalResourceStandalone::BinaryCompatible { ownership, .. }
+            | LocalResourceStandalone::LoadableOnly { ownership, .. } => Some(ownership),
             LocalResourceStandalone::Unavailable => None,
         }
     }
@@ -98,6 +121,14 @@ impl LocalResourceMatch {
                 source_path: _,
                 standalone: LocalResourceStandalone::BinaryCompatible { path, ownership },
             } => backend.register_local_complete(core, path, ownership, true),
+            // Logical like the Unavailable arm — the catalog clears its chunk
+            // set, so it is never advertised or served — but loaded from the
+            // packed image rather than the directory it was packed from.
+            Self {
+                core,
+                source_path: _,
+                standalone: LocalResourceStandalone::LoadableOnly { path, .. },
+            } => backend.register_local_logical(core, path),
             Self {
                 core,
                 source_path,
@@ -198,7 +229,8 @@ pub(crate) fn resolve_local_resource_candidates_with_group_maker(
             continue;
         }
 
-        let standalone_result = if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
+        let from_directory = metadata.as_ref().is_some_and(fs::Metadata::is_dir);
+        let standalone_result = if from_directory {
             crate::host_resource_core::pack_directory_standalone(path, group_maker)
                 .ok()
                 .and_then(|packed| {
@@ -247,6 +279,14 @@ pub(crate) fn resolve_local_resource_candidates_with_group_maker(
                     });
                 if compatible {
                     Some(LocalResourceStandalone::BinaryCompatible {
+                        path: standalone,
+                        ownership,
+                    })
+                } else if from_directory {
+                    // The image is not servable, but discarding it would leave
+                    // the directory as the load source and its readdir order
+                    // as this peer's entry order.
+                    Some(LocalResourceStandalone::LoadableOnly {
                         path: standalone,
                         ownership,
                     })
