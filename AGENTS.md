@@ -124,10 +124,17 @@ landing, say so on the issue and `gh issue edit <n> --repo clonk-org/clonk-rs
 **Cite issues as `owner/repo#N`** in comments, docs and `PORT_STATUS.md` — this
 repository is public, a bare `#28` is ambiguous between `clonk-org/clonk-rs` and
 `legacyclonk/LegacyClonk`, and only the qualified form renders as a link.
-`workspace quality` greps for the bare `issue #N` spelling and for the retired
-private `CLO-` tracker, whose ids no reader of this repository can resolve. It
-deliberately does not reject bare `#N` in general: object and definition numbers
-(`WIPF #564`, `KING #5129`) are spelled the same way.
+
+**Never cite a private tracker id.** `CLO-###` and `M##-P#-L###` both name items
+in a work queue that lives outside this repository, so to any reader they assert
+that a constraint exists while withholding what it is. Write the fact instead —
+what is missing, what it blocks, which C++ symbol it mirrors — and put anything
+that needs tracking in `PORT_STATUS.md`, which ships with the code.
+
+`workspace quality` greps for all three spellings. It deliberately does not
+reject bare `#N` in general: object and definition numbers (`WIPF #564`,
+`KING #5129`) are spelled the same way. `CHANGELOG.md` is exempt because
+git-cliff regenerates it from landed commit subjects.
 
 ## Pull requests — how work lands
 
