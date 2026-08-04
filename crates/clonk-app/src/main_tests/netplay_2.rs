@@ -1751,7 +1751,7 @@ fn l146_network_search_results_render_only_in_native_rows() {
 fn l027_discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
     let mut app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
-    let detail = "unable to send LAN discovery probe: no multicast interface";
+    let detail = "LAN discovery is unavailable: no multicast interface";
 
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::SearchError {
         source: Some(clonk_network::ReferenceQuerySource::GameDiscovery),

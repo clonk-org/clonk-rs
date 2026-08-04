@@ -621,10 +621,11 @@ fn create_discovery_socket(port: u16) -> io::Result<(std::net::UdpSocket, Vec<u3
         socket.set_multicast_loop_v6(true)?;
     }
     socket.bind(&address.into())?;
-    let multicast_interfaces = dual_stack
-        .then(|| join_discovery_multicast(&socket))
-        .transpose()?
-        .unwrap_or_default();
+    let multicast_interfaces = if dual_stack {
+        join_discovery_multicast(&socket)
+    } else {
+        Vec::new()
+    };
     socket.set_nonblocking(true)?;
     Ok((socket.into(), multicast_interfaces))
 }

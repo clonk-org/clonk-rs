@@ -191,22 +191,20 @@ The 300-frame runs in the table below are the startup burst and are noisy by
 ±20% on a shared machine; the 6000-frame `03_Chaos` figure is the one to
 regress against.
 
-Two environment traps that will otherwise be misread as regressions. First,
-`content/` in a worktree is an empty directory unless symlinked to the main
-checkout: with it empty, five `clonk-network::integration
-initial_network_dynamic` tests fail on missing oracle content and look like
-code faults. Second, `clonk-network`'s LAN-discovery tests need IPv6 multicast;
-where the host cannot join a multicast group (`EADDRNOTAVAIL` from
-`IPV6_JOIN_GROUP`), `startup_lan_reference_query_reports_address_lifecycle` and
-`disabled_reference_server_keeps_discovery_only_advertiser_clean` fail
-deterministically regardless of the revision under test. The same host
-condition makes
-`selected_network_scenario_installs_prepared_host_before_admission` fail
-because the prepared host cannot install its LAN advertiser. A third,
+One environment trap that will otherwise be misread as a regression:
+`content/` in a worktree is an empty directory unless the submodule is checked
+out; with it empty, six `clonk-network::integration initial_network_dynamic`
+tests fail on missing oracle content and look like code faults. A host that
+refuses `IPV6_JOIN_GROUP` on the default interface (`EADDRNOTAVAIL`) no longer
+fails `startup_lan_reference_query_reports_address_lifecycle`,
+`disabled_reference_server_keeps_discovery_only_advertiser_clean` or
+`selected_network_scenario_installs_prepared_host_before_admission`: issue #107
+made the join non-fatal, so those three are once again ordinary regressions
+wherever they fail. Separately,
 `synchronized_tick::inactive_joined_client_does_not_block_host_lockstep`, plus
 `clonk-app`'s `real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running`
 (a 480-attempt timeout), are load-sensitive and pass in isolation. Re-run the
-crate alone before attributing any of these to a change.
+crate alone before attributing either to a change.
 
 Per-frame simulation cost by scenario, before against after, 2000 frames each.
 Both binaries are run **interleaved** in the same pass and repeated twice, so
@@ -2464,6 +2462,51 @@ hashed but not exported by the C++ bridge; unequal-count duplicate IDs remain
 an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
+
+- **A refused default-interface multicast join falls back to per-interface
+  joins** (`join_discovery_multicast`, `multicast_targets`,
+  `multicast_interface_indices`, `crates/clonk-network/src/search.rs`; no key;
+  C++ `C4NetIOSimpleUDP::InitBroadcast`, LegacyClonk 7d43b47
+  src/C4NetIO.cpp:1620-1631). Approved 2026-08-03, issue #107. C++ joins
+  `ff02::1` with `ipv6mr_interface = 0` and sends to the group with the
+  destination scope unset, under an acknowledged `// TODO: do multicast on all
+  interfaces?` (src/C4NetIO.cpp:1623); where the kernel's default multicast
+  route has no IPv6-capable interface — a Mac whose only LAN NIC has IPv6
+  switched off is enough — the join returns `EADDRNOTAVAIL` and every send
+  `EHOSTUNREACH`, so LAN discovery is dead in both directions and the reporter
+  could neither see games nor be seen. The port keeps the C++ attempt first and
+  reaches for `if_nameindex` only after the kernel has refused it, joining every
+  interface that accepts the group and giving each its own destination scope;
+  wherever the C++ join succeeds the wire behaviour is byte-identical, one
+  unscoped datagram, and no interface is ever enumerated. Nothing
+  simulation-facing reads discovery — it selects which game to join, before any
+  control is exchanged, and the reference it fetches is the same document either
+  way — so this cannot desync. Two consequences are accepted: on a host that
+  needs the fallback, probes reach interfaces that cannot carry a reply and
+  those queries expire through the ordinary reference-query timeout, and a host
+  and client on the *same* such machine list one game once per shared interface,
+  because the host rewrites its advertised addresses per source scope. Windows
+  keeps the C++ behaviour unchanged — enumerating there needs
+  `GetAdaptersAddresses`, which no required gate compiles for this crate. Pinned
+  by `discovery_multicast_target_uses_cpp_default_interface`,
+  `a_refused_default_multicast_join_keeps_every_joinable_interface`,
+  `a_scoped_join_set_sends_one_probe_per_joined_interface`,
+  `an_unjoinable_host_still_probes_the_cpp_default_interface`,
+  `the_cpp_default_interface_never_sets_ipv6_multicast_if` and
+  `enumerated_multicast_interfaces_do_not_depend_on_kernel_listing_order`.
+
+- **An explicit refresh rebuilds a discovery socket that reached no group**
+  (`discovery_needs_rebuild`, `crates/clonk-network/src/search.rs`; no key; C++
+  `C4StartupNetDlg::DoRefresh`, LegacyClonk 7d43b47
+  src/C4StartupNetDlg.cpp:1093-1105). Approved 2026-08-03, issue #107. C++
+  builds `DiscoverClient` once in the dialog constructor and discards the result
+  (src/C4StartupNetDlg.cpp:737); `DoRefresh` only re-sends the probe byte, so a
+  machine that had no network when the dialog opened stays blind until the
+  dialog is reopened. The port re-runs socket construction on an explicit
+  refresh, and only when the existing socket joined nothing at all — a socket
+  that reached a group keeps its buffered replies exactly as C++ does. This is
+  matchmaking state outside the lockstep simulation and cannot desync. Pinned by
+  `only_an_unusable_discovery_socket_is_rebuilt_on_refresh`.
 
 - **Earned mission access is written when it is earned**
   (`GameApp::persist_mission_access_if_changed`,
