@@ -4,6 +4,29 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-08-04
+
+### Bug fixes
+
+- Keep LAN discovery and the host reference server alive when the multicast join fails (#137)
+- Run Fx callbacks on the effect command target (#136)
+- Treat an empty Sound name as a lookup that finds nothing (#135)
+- Draw the upper board scenario title with markup (#132)
+- Wrap Abs at i32::MIN like the C++ two's-complement negation (#127)
+- Report a tolerated script error above its own call frames (#130)
+- Dispatch the configured NetStatsToggle key (#128)
+- Wrap C4Script integer subtraction on overflow like C++ (#126)
+- Reproduce the wrapped C++ Sqrt correction steps (#124)
+
+### Continuous integration
+
+- Stop publishing a dependency-guard cache no ref can restore (#125)
+
+### Documentation
+
+- Claim a GitHub issue before working it (#133)
+- Require opening and shepherding a pull request for every change (#129)
+
 ## [0.6.4] - 2026-08-03
 
 ### Bug fixes
