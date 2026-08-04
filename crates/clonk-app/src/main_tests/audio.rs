@@ -4543,12 +4543,10 @@
     }
 
     #[test]
-    fn modal_and_definition_overlays_never_replace_the_base_frame_cache() {
+    fn modal_and_definition_overlays_restore_the_base_frame_when_closed() {
         let mut app = new_real_classic_menu_app(640, 480);
         let mut base = vec![0_u8; 640 * 480 * 4];
-        app.render(&mut base).expect("cache main-menu base");
-        let base_cache = app.menu_frame_cache.as_ref().unwrap().frame.clone();
-        let base_version = app.menu_render_version;
+        app.render(&mut base).expect("compose main-menu base");
 
         app.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -4559,34 +4557,28 @@
             MessageDialogContinuation::None,
         )
         .expect("open message overlay");
-        app.menu_render_version = base_version;
         let mut modal = vec![0_u8; 640 * 480 * 4];
         assert!(app.render(&mut modal).expect("render message overlay"));
         assert_ne!(modal, base);
-        assert_eq!(app.menu_frame_cache.as_ref().unwrap().frame, base_cache);
         app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
             .expect("close message overlay");
-        app.menu_render_version = base_version;
         let mut closed = vec![0x77; 640 * 480 * 4];
-        assert!(!app.render(&mut closed).expect("replay base after modal"));
+        assert!(app.render(&mut closed).expect("render base after modal"));
         assert_eq!(closed, base);
 
         app.open_definition_selector(FrontendScenario::fallback())
             .expect("open definition selector");
-        app.menu_render_version = base_version;
         let mut selector = vec![0_u8; 640 * 480 * 4];
         assert!(app
             .render(&mut selector)
             .expect("render definition selector"));
         assert_ne!(selector, base);
-        assert_eq!(app.menu_frame_cache.as_ref().unwrap().frame, base_cache);
         app.process_definition_selector_actions(vec![
             clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
         ])
         .expect("close definition selector");
-        app.menu_render_version = base_version;
         let mut closed = vec![0x88; 640 * 480 * 4];
-        assert!(!app.render(&mut closed).expect("replay base after selector"));
+        assert!(app.render(&mut closed).expect("render base after selector"));
         assert_eq!(closed, base);
     }
 

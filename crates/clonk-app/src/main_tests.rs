@@ -2123,9 +2123,7 @@ fn apply_test_frontend_assets(app: &mut GameApp, assets: Arc<FrontendAssets>) {
     app.graphics.set_clonk_fonts(assets.clonk_fonts.clone());
     app.assets = assets;
     app.active_global_gui_failures.clear();
-    app.menu_frame_cache = None;
     app.menu_backdrop_cache = StartupBackdropCache::default();
-    app.mark_menu_dirty();
 }
 
 fn l018_cursor_atlas() -> Arc<CursorAtlas> {
@@ -4128,7 +4126,6 @@ fn new_game_over_keyboard_app() -> GameApp {
 
 #[derive(Debug, PartialEq, Eq)]
 struct RuntimeGlobalUiSnapshot {
-    menu_render_version: u64,
     mode: AppMode,
     startup_view: StartupView,
     exit_requested: bool,
@@ -4158,7 +4155,6 @@ struct RuntimeGlobalUiSnapshot {
 
 fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
     RuntimeGlobalUiSnapshot {
-        menu_render_version: app.menu_render_version,
         mode: app.mode,
         startup_view: app.startup_view,
         exit_requested: app.exit_requested,

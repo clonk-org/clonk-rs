@@ -301,7 +301,6 @@ impl GameApp {
             self.script_menu_close_pointer_capture = None;
         }
         self.menu_viewport_rects = current;
-        self.mark_menu_dirty();
     }
 
     /// C4FullScreen::Close intercepts the native window close while a round
@@ -1330,15 +1329,12 @@ impl GameApp {
                         .monitor_gamma = monitor_gamma.clone();
                 }
                 self.advance_startup_player_portrait_thumbnail();
-                if self
+                // C4GUI::ScrollBar repeats held arrows from DrawElement, so
+                // advance once per presentation rather than per update.
+                let _ = self
                     .startup_player_properties_dialog
                     .as_mut()
-                    .is_some_and(|pending| pending.controller.tick_portrait_selector_scrollbar())
-                {
-                    // C4GUI::ScrollBar repeats held arrows from DrawElement,
-                    // so advance once per presentation rather than per update.
-                    self.mark_menu_dirty();
-                }
+                    .is_some_and(|pending| pending.controller.tick_portrait_selector_scrollbar());
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
                 if self.startup_view == StartupView::NetworkLobby
@@ -1348,14 +1344,13 @@ impl GameApp {
                 }
                 if self.startup_view == StartupView::NetworkGame
                     && !self.startup_network_transition_active()
-                    && self
-                        .startup_network_dialog
-                        .as_mut()
-                        .is_some_and(|dialog| dialog.tick_scrollbar())
                 {
                     // C4GUI::ScrollBar repeats held arrows from DrawElement,
                     // so advance once per presentation rather than per update.
-                    self.mark_menu_dirty();
+                    let _ = self
+                        .startup_network_dialog
+                        .as_mut()
+                        .is_some_and(|dialog| dialog.tick_scrollbar());
                 }
                 if self.startup_view == StartupView::PlayerSelection
                     && self
@@ -1365,16 +1360,13 @@ impl GameApp {
                 {
                     // Book-scrollbar arrows repeat once per presentation.
                     self.plrsel_last_click = None;
-                    self.mark_menu_dirty();
                 }
-                if self.startup_view == StartupView::About
-                    && self
+                if self.startup_view == StartupView::About {
+                    // About TextWindow arrows repeat from ScrollBar::DrawElement.
+                    let _ = self
                         .startup_about_dialog
                         .as_mut()
-                        .is_some_and(|dialog| dialog.tick_scrollbar())
-                {
-                    // About TextWindow arrows repeat from ScrollBar::DrawElement.
-                    self.mark_menu_dirty();
+                        .is_some_and(|dialog| dialog.tick_scrollbar());
                 }
                 if self.startup_view == StartupView::Options {
                     let actions = self
@@ -1384,13 +1376,11 @@ impl GameApp {
                         .unwrap_or_default();
                     if !actions.is_empty() {
                         self.process_options_dialog_actions(actions)?;
-                        self.mark_menu_dirty();
                     }
                 }
                 if self.startup_view == StartupView::NetworkLobby
                     && self.classic_host_lobby.is_some()
                 {
-                    self.menu_frame_cache = None;
                     self.render_classic_host_lobby()?;
                     if ordered_native {
                         self.commit_pending_native_base(frame);
@@ -1532,47 +1522,6 @@ impl GameApp {
                     .startup_dialog_fade
                     .as_ref()
                     .is_some_and(|fade| fade.step < STARTUP_DIALOG_FADE_STEPS);
-                let startup_tooltip_pending = self.startup_element_tooltip_pending();
-                let cache_eligible = !ordered_native
-                    && !self.graphics.surface().is_gpu_scene_capture_active()
-                    && !fade_was_active
-                    // A retained lobby advances held scrollbars, expires
-                    // transient status icons, and matures its own 500 ms
-                    // tooltip clock even without another input event.
-                    && self.startup_view != StartupView::NetworkLobby
-                    && self.context_menu.is_none()
-                    && self.startup_player_properties_dialog.is_none()
-                    && self.startup_options_advanced_dialog.is_none()
-                    && self.game_option_input_dialog.is_none()
-                    && self.league_signup_dialog.is_none()
-                    && self.definition_selector.is_none()
-                    && self.message_dialogs.is_empty()
-                    && self.runtime_client_list.is_none()
-                    && !self.external_irc_dialog_visible
-                    && !startup_tooltip_pending;
-                if cache_eligible {
-                    if let Some(cache) = self.menu_frame_cache.as_ref() {
-                        if cache.view == self.startup_view
-                            && cache.version == self.menu_render_version
-                            && cache.width == width
-                            && cache.height == height
-                            && cache.native_text_deferred == defer_native_main_text
-                            && cache.frame.len() == frame.len()
-                        {
-                            frame.copy_from_slice(&cache.frame);
-                            if !defer_monitor_gamma {
-                                if let Some(gamma) = monitor_gamma.as_ref() {
-                                    gamma.apply_to_rgba_bytes(frame);
-                                }
-                            }
-                            // A physical post-pass still counts as refreshed:
-                            // the event loop must run it after the cached raw
-                            // logical frame has been copied into the presenter.
-                            return Ok(defer_monitor_gamma && monitor_gamma.is_some());
-                        }
-                    }
-                }
-                let version = self.menu_render_version;
                 let definition_selector_open = self.definition_selector.is_some();
                 let game_option_input_open = self.game_option_input_dialog.is_some();
                 let league_signup_open = self.league_signup_dialog.is_some();
@@ -1902,16 +1851,6 @@ impl GameApp {
                     } else {
                         copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
                     }
-                }
-                if cache_eligible {
-                    self.menu_frame_cache = Some(MenuFrameCache {
-                        view: self.startup_view,
-                        version,
-                        width,
-                        height,
-                        native_text_deferred: defer_native_main_text,
-                        frame: frame.to_vec(),
-                    });
                 }
                 if !ordered_native && !defer_monitor_gamma {
                     if let Some(gamma) = monitor_gamma.as_ref() {

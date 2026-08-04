@@ -2872,35 +2872,6 @@ fn l026_axis_binding_routes_to_configured_set_not_physical_slot() {
 }
 
 #[test]
-fn menu_render_replays_cached_frame_for_unchanged_state() {
-    clonk_logging::init();
-
-    let mut app = new_real_classic_menu_app(320, 200);
-    let len = 320 * 200 * 4;
-    let mut fresh = vec![0u8; len];
-    let composed = app.render(&mut fresh).expect("first render");
-    assert!(composed, "first render must report a new frame");
-    assert!(
-        app.menu_frame_cache.is_some(),
-        "menu render should populate the frame cache"
-    );
-
-    let mut replay = vec![0u8; len];
-    let replayed = app.render(&mut replay).expect("cached render");
-    assert!(!replayed, "cache replay must report an unchanged frame");
-    assert_eq!(fresh, replay, "cached replay must match the first render");
-
-    // The replay must be pixel-identical to a full recomposition.
-    app.menu_frame_cache = None;
-    let mut recomposed = vec![0u8; len];
-    app.render(&mut recomposed).expect("recomposed render");
-    assert_eq!(
-        fresh, recomposed,
-        "cached replay must match a fresh recomposition"
-    );
-}
-
-#[test]
 fn initial_record_origin_is_relative_to_cpp_executable_root() {
     let paths = AppPaths::discover().expect("discover repository install");
     let scenario = paths

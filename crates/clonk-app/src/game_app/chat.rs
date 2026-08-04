@@ -66,7 +66,6 @@ impl GameApp {
             Vec::new()
         };
         self.process_network_dialog_actions(actions)?;
-        self.mark_menu_dirty();
         Ok(true)
     }
 
@@ -447,7 +446,6 @@ impl GameApp {
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = self.running_pointer_position;
         self.game_option_input_last_click = None;
-        self.mark_menu_dirty();
     }
 
     fn start_message_board_input(&mut self, input: clonk_engine::ActiveMessageBoardInput) {
@@ -484,7 +482,6 @@ impl GameApp {
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = self.running_pointer_position;
         self.game_option_input_last_click = None;
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn reconcile_message_board_input_dialog(&mut self) -> Result<(), EngineError> {
@@ -630,7 +627,6 @@ impl GameApp {
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
         self.clear_local_controls()?;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -663,7 +659,6 @@ impl GameApp {
                 controller.set_input_text(&text);
             }
         }
-        self.mark_menu_dirty();
     }
 
     fn complete_running_chat_nick(&mut self) {
@@ -702,7 +697,6 @@ impl GameApp {
             if let Some(controller) = self.running_chat_controller_mut() {
                 controller.handle_text_input(&suffix, &layout, &fonts.text);
             }
-            self.mark_menu_dirty();
         }
     }
 
@@ -978,7 +972,6 @@ impl GameApp {
                 }
             }
         }
-        self.mark_menu_dirty();
         Ok(true)
     }
 
@@ -1113,7 +1106,6 @@ impl GameApp {
         }
         if self.external_irc_dialog_visible && self.external_irc_dialog.is_some() {
             self.sync_startup_irc_snapshot();
-            self.mark_menu_dirty();
             return Ok(());
         }
         let (width, height) = {
@@ -1142,7 +1134,6 @@ impl GameApp {
             dialog.force_chat_mode_and_default_focus();
             dialog.pointer_left();
         }
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -1153,7 +1144,6 @@ impl GameApp {
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
         self.irc_dialog_last_click = None;
         self.external_irc_pointer_capture = false;
-        self.mark_menu_dirty();
     }
 
     fn toggle_external_irc_dialog(&mut self) -> Result<(), EngineError> {

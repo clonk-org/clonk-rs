@@ -2500,8 +2500,6 @@ impl GameApp {
             game_option_input_last_click: None,
             game_option_consumed_keys: HashSet::new(),
             game_option_pointer_capture: false,
-            menu_render_version: 0,
-            menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
             scensel_last_click: None,
             scensel_rename_pointer_focus: None,
@@ -2818,7 +2816,6 @@ impl GameApp {
         // must not acquire whichever control moves underneath it.
         self.startup_tooltip.pointer_left();
         self.release_message_dialog_pointer_elements();
-        self.menu_frame_cache = None;
         self.context_menu_pointer_capture = None;
         if let Some(dialog) = self.league_signup_dialog.as_mut() {
             dialog.controller.cancel_interaction();
@@ -2849,7 +2846,6 @@ impl GameApp {
         for state in self.script_menu_presentations.values_mut() {
             reset_script_menu_presentation_location(state);
         }
-        self.mark_menu_dirty();
         let cursor_atlas = self.current_cursor_atlas();
         let hud_graphics = self.current_hud_graphics();
         let game_palette = self.current_game_palette();
@@ -3772,7 +3768,6 @@ impl GameApp {
 
     fn handle_focus_gained(&mut self) -> Result<(), EngineError> {
         self.window_active = true;
-        self.mark_menu_dirty();
         let Some(point) = self.window_mouse_position else {
             return Ok(());
         };
@@ -5704,7 +5699,6 @@ impl GameApp {
         // replacing the outer dialog. Mirror native element destruction by
         // dropping hover ownership before resolving the rebuilt hierarchy.
         self.startup_tooltip.pointer_left();
-        self.menu_frame_cache = None;
         let width = self.graphics.surface().width() as i32;
         let height = self.graphics.surface().height() as i32;
         let languages = self
@@ -5947,9 +5941,7 @@ impl GameApp {
                         control_rate.to_string(),
                     );
                 }
-                if self.refresh_classic_lobby_options(false) {
-                    self.mark_menu_dirty();
-                }
+                self.refresh_classic_lobby_options(false);
             }
             // C4CVT_DisableDebug has no HostControl gate.
             1 => {
@@ -6222,9 +6214,7 @@ impl GameApp {
         }
         if matches!(set.value_type, 3 | 4) {
             self.sync_classic_lobby_roster();
-            if self.refresh_classic_lobby_options(false) {
-                self.mark_menu_dirty();
-            }
+            self.refresh_classic_lobby_options(false);
         }
         if set.value_type == 2 {
             self.append_control_message_log(
@@ -7451,7 +7441,6 @@ impl GameApp {
         self.graphics.set_clonk_fonts(Some(fonts.clone()));
         self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
         self.native_startup_fonts = native_fonts;
-        self.mark_menu_dirty();
     }
 
     /// Rebinds the process-global GUI sheets to the active scenario's
@@ -7464,7 +7453,6 @@ impl GameApp {
         }
         if Arc::make_mut(&mut self.assets).apply_active_gui_sheet_overrides(overrides) {
             self.ingame_menu_gfx = None;
-            self.mark_menu_dirty();
         }
     }
 

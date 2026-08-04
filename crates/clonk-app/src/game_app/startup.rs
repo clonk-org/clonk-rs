@@ -54,7 +54,6 @@ impl GameApp {
         match fonts {
             Ok(fonts) => {
                 self.native_startup_fonts = Some(Arc::new(fonts));
-                self.mark_menu_dirty();
             }
             Err(error) => {
                 tracing::warn!(%error, scale, "failed to build scale-native startup fonts");
@@ -700,7 +699,6 @@ impl GameApp {
             }
             _ => {}
         }
-        self.mark_menu_dirty();
         Ok(true)
     }
 
@@ -1377,7 +1375,6 @@ impl GameApp {
             .map(|query| query.id)
         {
             self.focus_startup_direct_reference_query(existing);
-            self.mark_menu_dirty();
             return;
         }
 
@@ -1410,7 +1407,6 @@ impl GameApp {
         }
         self.sync_startup_network_game_rows();
         self.focus_startup_direct_reference_query(id);
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn startup_network_join_target(
@@ -1628,7 +1624,6 @@ impl GameApp {
             } else if let Some(id) = selected_discovery_query {
                 self.focus_startup_discovery_reference_query(id);
             }
-            self.mark_menu_dirty();
         }
 
         let masterserver_enabled = self
@@ -1642,7 +1637,6 @@ impl GameApp {
         {
             self.startup_masterserver_next_query_at = None;
             self.reset_startup_masterserver_entry();
-            self.mark_menu_dirty();
         }
     }
 
@@ -1699,7 +1693,6 @@ impl GameApp {
         self.sync_startup_network_game_rows();
         self.reset_startup_masterserver_entry();
         self.status_text.clear();
-        self.mark_menu_dirty();
 
         self.startup_network_refresh_waiting_for_clear = true;
         let refresh_error = match self.startup_game_search.as_ref() {
@@ -1729,7 +1722,6 @@ impl GameApp {
         if let Some(dialog) = self.external_irc_dialog.as_mut() {
             dialog.sync_chat_snapshot(snapshot);
         }
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn startup_irc_client_active(&self) -> bool {
@@ -2100,7 +2092,6 @@ impl GameApp {
         } else {
             self.status_text.clear();
         }
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -2114,7 +2105,6 @@ impl GameApp {
             return;
         };
         self.remove_message_dialog_at(index);
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn finish_startup_network_failure(
@@ -2180,7 +2170,6 @@ impl GameApp {
                 close_label,
             ),
         );
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -2355,7 +2344,6 @@ impl GameApp {
             // run its continuation and incorrectly turn success into abort.
             self.dismiss_startup_network_connect_progress();
         }
-        self.mark_menu_dirty();
         let Some(result) = result else {
             let message = "network worker disconnected before reporting readiness";
             if self.defer_pending_host_rejoin() {
@@ -2623,7 +2611,6 @@ impl GameApp {
                             self.replace_startup_view(StartupView::NetworkLobby);
                             self.mode = AppMode::Menu;
                             self.status_text.clear();
-                            self.menu_frame_cache = None;
                             self.restore_startup_fonts();
                             self.finish_classic_command_line_host_entry()?;
                             return Ok(());
@@ -2675,7 +2662,6 @@ impl GameApp {
                             self.replace_startup_view(StartupView::NetworkLobby);
                             self.mode = AppMode::Menu;
                             self.status_text.clear();
-                            self.menu_frame_cache = None;
                             if let Some(audio) = self.audio.as_mut() {
                                 audio.stop_music();
                             }
@@ -2965,7 +2951,6 @@ impl GameApp {
                 self.sync_startup_participant_models();
                 self.refresh_participants_label();
                 self.status_text.clear();
-                self.mark_menu_dirty();
             }
             Err(error) => {
                 tracing::error!(reference, %error, "failed to update startup participants");
@@ -3067,7 +3052,6 @@ impl GameApp {
                 }
             }
         }
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -3222,7 +3206,6 @@ impl GameApp {
         self.startup_player_properties_dialog =
             Some(PendingStartupPlayerProperties { origin, controller });
         self.status_text.clear();
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn open_existing_startup_player_properties(&mut self, index: usize) {
@@ -3259,7 +3242,6 @@ impl GameApp {
             controller,
         });
         self.status_text.clear();
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn process_startup_player_properties_actions(
@@ -3274,7 +3256,6 @@ impl GameApp {
                     self.startup_tooltip.pointer_left();
                     self.startup_player_properties_dialog = None;
                     self.status_text.clear();
-                    self.mark_menu_dirty();
                 }
                 PlayerPropertiesAction::ChoosePicture => {
                     self.open_startup_player_portrait_selector();
@@ -3325,7 +3306,6 @@ impl GameApp {
                 }
             }
         }
-        self.mark_menu_dirty();
     }
 
     fn show_startup_portrait_error(&mut self, message: String) {
@@ -3397,7 +3377,6 @@ impl GameApp {
             pending.controller.close_portrait_selector();
             pending.controller.clear_validation_error();
         }
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn advance_startup_player_portrait_thumbnail(&mut self) {
@@ -3610,7 +3589,6 @@ impl GameApp {
         };
 
         let Some(paths) = self.app_paths.as_ref() else {
-            self.mark_menu_dirty();
             return;
         };
         let config_file = paths.config_file().to_path_buf();
@@ -3618,7 +3596,6 @@ impl GameApp {
             Ok(players) => players,
             Err(error) => {
                 tracing::error!(%error, "failed to reconcile startup players after properties save failure");
-                self.mark_menu_dirty();
                 return;
             }
         };
@@ -3721,12 +3698,10 @@ impl GameApp {
             dialog.set_selected_index(selected_index);
         }
         self.plrsel_last_click = None;
-        self.menu_frame_cache = None;
         self.refresh_participants_label();
         if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
             tracing::error!(%error, "failed to show participant overflow after properties save failure");
         }
-        self.mark_menu_dirty();
     }
 
     fn record_startup_player_properties_save_failure(&mut self, error: String) {
@@ -3734,7 +3709,6 @@ impl GameApp {
             pending.controller.set_validation_error(Some(error.clone()));
         }
         self.status_text = error;
-        self.mark_menu_dirty();
     }
 
     fn finish_startup_player_properties_save(
@@ -3762,7 +3736,6 @@ impl GameApp {
             self.startup_tooltip.pointer_left();
             self.startup_player_properties_dialog = None;
             self.status_text = "Player saved, but application paths are unavailable".to_string();
-            self.mark_menu_dirty();
             return;
         };
         let mut players = match discover_player_files(paths) {
@@ -3774,7 +3747,6 @@ impl GameApp {
                 self.refresh_participants_label();
                 self.status_text =
                     format!("Player saved, but the list could not be refreshed: {error}");
-                self.mark_menu_dirty();
                 return;
             }
         };
@@ -3848,7 +3820,6 @@ impl GameApp {
         if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
             tracing::error!(%error, "failed to show participant overflow after player save");
         }
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn show_startup_player_activation_refusals(
@@ -3950,7 +3921,6 @@ impl GameApp {
         }
         // UpdatePlayerList replaces the row controls on this same dialog.
         self.startup_tooltip.pointer_left();
-        self.menu_frame_cache = None;
         self.startup_crew_models = crew
             .iter()
             .map(|entry| entry.render_model.clone())
@@ -3960,7 +3930,6 @@ impl GameApp {
         self.plrsel_last_click = None;
         self.status_text.clear();
         self.play_ui_sound("DoorOpen");
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -3976,13 +3945,11 @@ impl GameApp {
             return;
         }
         self.startup_tooltip.pointer_left();
-        self.menu_frame_cache = None;
         self.startup_crew_files.clear();
         self.startup_crew_models.clear();
         self.startup_crew_player_index = None;
         self.plrsel_last_click = None;
         self.play_ui_sound("DoorClose");
-        self.mark_menu_dirty();
     }
 
     fn reload_startup_crew_list(&mut self, select_file: Option<&str>) -> io::Result<()> {
@@ -3998,7 +3965,6 @@ impl GameApp {
         let mut crew = discover_crew_files(player)?;
         self.hydrate_startup_crew_models(&mut crew);
         self.startup_tooltip.pointer_left();
-        self.menu_frame_cache = None;
         let selected = select_file.and_then(|file_name| {
             crew.iter()
                 .position(|entry| entry.file_name.eq_ignore_ascii_case(file_name))
@@ -4020,7 +3986,6 @@ impl GameApp {
             );
         }
         self.plrsel_last_click = None;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -4081,7 +4046,6 @@ impl GameApp {
                 self.show_startup_crew_error("File modification failure.", "")?;
             }
         }
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -4228,7 +4192,6 @@ impl GameApp {
             }
             Command::SelectAll => rename.edit.select_all(),
         }
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn start_startup_crew_rename(&mut self, index: usize) -> Result<(), EngineError> {
@@ -4269,7 +4232,6 @@ impl GameApp {
             last_click: None,
             ignore_pointer_up: false,
         });
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -4288,7 +4250,6 @@ impl GameApp {
         rename.edit.abort();
         let previous_focus = rename.edit.take_previous_focus();
         self.restore_startup_crew_focus(previous_focus);
-        self.mark_menu_dirty();
         true
     }
 
@@ -4335,7 +4296,6 @@ impl GameApp {
         };
         if new_name == original_name {
             self.resolve_startup_crew_rename(RenameEditResult::Accepted);
-            self.mark_menu_dirty();
             return Ok(true);
         }
 
@@ -4365,7 +4325,6 @@ impl GameApp {
                         self.runtime_resource_text("IDS_FAIL_MODIFY", "File modification failure.");
                     self.show_startup_crew_error(message, "")?;
                 }
-                self.mark_menu_dirty();
                 Ok(true)
             }
             Err(StartupCrewMutationError::NameCollision { file_name }) => {
@@ -4379,7 +4338,6 @@ impl GameApp {
                     format_resource_string(template, &[&file_name]),
                     caption,
                 )?;
-                self.mark_menu_dirty();
                 Ok(false)
             }
             Err(StartupCrewMutationError::RenameAcceptedCoreRewriteFailed {
@@ -4414,7 +4372,6 @@ impl GameApp {
                     format_resource_string(template, &[&old_file_name, &new_file_name]),
                     caption,
                 )?;
-                self.mark_menu_dirty();
                 Ok(false)
             }
         }
@@ -4446,7 +4403,6 @@ impl GameApp {
 
         let message = self.runtime_resource_text("IDS_FAIL_MODIFY", "File modification failure.");
         self.show_startup_crew_error(message, "")?;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -4540,7 +4496,6 @@ impl GameApp {
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -4578,7 +4533,6 @@ impl GameApp {
                 }
             }
         }
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -4797,7 +4751,6 @@ impl GameApp {
             outgoing_gpu_plan: layers.outgoing_gpu_plan,
         });
         self.startup_tooltip.pointer_left();
-        self.menu_frame_cache = None;
     }
 
     pub(crate) fn begin_startup_dialog_fade_in(&mut self) {
@@ -4844,7 +4797,6 @@ impl GameApp {
             outgoing_gpu_plan: None,
         });
         self.startup_tooltip.pointer_left();
-        self.menu_frame_cache = None;
     }
 
     pub(crate) fn replace_startup_view(&mut self, view: StartupView) {
@@ -4852,7 +4804,6 @@ impl GameApp {
         // pMouseOverElement. Retaining only the screen coordinate would
         // otherwise invent a target in the new view without mouse input.
         self.startup_tooltip.pointer_left();
-        self.menu_frame_cache = None;
         if view != StartupView::Options {
             self.startup_options_advanced_dialog = None;
             self.gamepads.set_options_open_slot(None);
@@ -5239,7 +5190,6 @@ impl GameApp {
             }
         };
         self.startup_tooltip.pointer_left();
-        self.menu_frame_cache = None;
         let activation_refusals = match persist_activations(&paths.config_file(), &mut players) {
             Ok(refusals) => refusals,
             Err(error) => {
@@ -5270,7 +5220,6 @@ impl GameApp {
         if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
             tracing::error!(%error, "failed to show participant overflow after player deletion");
         }
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn startup_base_context_menu(
@@ -5742,7 +5691,6 @@ impl GameApp {
                 config.point_filtering(),
             );
         }
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn failed_open_game_returns_to_startup(&self) -> bool {

@@ -8009,7 +8009,6 @@ pub(crate) fn run_menu_dump(
             origin: StartupPlayerPropertiesOrigin::MainMenuFirstPlayer,
             controller,
         });
-        app.mark_menu_dirty();
         return finish_menu_dump(&mut app, dump_path);
     }
     let item = match view_name {
@@ -8037,7 +8036,6 @@ pub(crate) fn run_menu_dump(
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("Options dialog is not open"))?
                 .restore_sheet(sheet);
-            app.mark_menu_dirty();
         }
         return finish_menu_dump(&mut app, dump_path);
     }
@@ -8060,7 +8058,6 @@ pub(crate) fn run_menu_dump(
                 .map_err(anyhow::Error::new)?;
         }
         app.scenario_label = app.menu_state.label_path();
-        app.mark_menu_dirty();
     }
 
     finish_menu_dump(&mut app, dump_path)

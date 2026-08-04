@@ -437,7 +437,6 @@ impl GameApp {
             )
         }) {
             dialog.state.set_progress(percent);
-            self.mark_menu_dirty();
         }
     }
 
@@ -451,7 +450,6 @@ impl GameApp {
             return;
         };
         self.remove_message_dialog_at(index);
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn abort_update_download(&mut self) {
@@ -509,7 +507,6 @@ impl GameApp {
         // Removed rather than finished: `finish_message_dialog_at` would route
         // straight back into `abort_update_check`.
         self.remove_message_dialog_at(index);
-        self.mark_menu_dirty();
         Ok(())
     }
 

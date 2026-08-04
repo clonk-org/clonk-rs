@@ -3097,7 +3097,6 @@ fn staged_host_uses_startup_gui_but_pending_failure_beats_start_and_pixels() {
         .render(&mut visible)
         .expect("visible lobby keeps the accepted startup GUI bundle"));
 
-    let version = app.menu_render_version;
     let error = app
         .process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
             countdown_seconds: 5,
@@ -3115,33 +3114,26 @@ fn staged_host_uses_startup_gui_but_pending_failure_beats_start_and_pixels() {
             )],
         },
     );
-    assert_eq!(app.menu_render_version, version);
+    let mut after_rejected_start = vec![0_u8; 640 * 480 * 4];
+    app.render(&mut after_rejected_start)
+        .expect("visible lobby still renders after the rejected Start child");
+    assert_eq!(
+        after_rejected_start, visible,
+        "a rejected Start child must not change what the lobby shows"
+    );
     assert!(app.classic_host_lobby.is_some());
     assert!(app.active_global_gui_failures.is_empty());
 
     remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
-    let cached = vec![0x45; 640 * 480 * 4];
-    app.menu_frame_cache = Some(MenuFrameCache {
-        view: StartupView::NetworkLobby,
-        version: app.menu_render_version,
-        width: 640,
-        height: 480,
-        native_text_deferred: false,
-        frame: cached.clone(),
-    });
     let mut frame = vec![0x97; 640 * 480 * 4];
     let error = app
         .render(&mut frame)
-        .expect_err("lobby must preflight startup GUI before cache or pixels");
+        .expect_err("lobby must preflight startup GUI before pixels");
     assert_global_gui_boundary(
         &error,
         vec![ClassicGuiBootstrapIssue::missing("GUIBigArrows")],
     );
     assert!(frame.iter().all(|byte| *byte == 0x97));
-    assert_eq!(
-        app.menu_frame_cache.as_ref().expect("cache retained").frame,
-        cached
-    );
 }
 
 #[test]
@@ -5154,14 +5146,6 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
         let surface = app.graphics.surface();
         (surface.width(), surface.height())
     };
-    app.menu_frame_cache = Some(MenuFrameCache {
-        view: StartupView::MainMenu,
-        version: app.menu_render_version,
-        width,
-        height,
-        native_text_deferred: false,
-        frame: vec![0; width as usize * height as usize * 4],
-    });
     app.menu_backdrop_cache = StartupBackdropCache {
         key: Some(StartupBackdropKey {
             view: StartupView::MainMenu,
@@ -5188,7 +5172,6 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
         underlay_gpu_recorder: None,
         outgoing_gpu_plan: None,
     });
-    let version = app.menu_render_version;
 
     app.synchronize_advanced_options_runtime();
     assert!(app.graphics.advanced_renderer_config().disable_gamma);
@@ -5197,11 +5180,9 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
         app.startup_active_gamma(),
         clonk_graphics::GammaRamp::identity()
     );
-    assert!(app.menu_frame_cache.is_none());
     assert!(app.menu_backdrop_cache.key.is_none());
     assert!(app.menu_backdrop_cache.pixels.is_empty());
     assert!(app.startup_dialog_fade.is_none());
-    assert_eq!(app.menu_render_version, version.wrapping_add(1));
 
     fs::write(
         paths.config_file(),
@@ -5327,14 +5308,15 @@ fn malformed_active_gui_sheet_override_fails_typed_before_pixels() {
 }
 
 #[test]
-fn global_gui_bootstrap_precedes_all_startup_roots_cache_and_native_pixels() {
+fn global_gui_bootstrap_precedes_all_startup_roots_and_native_pixels() {
     let mut app = new_real_classic_menu_app(320, 200);
     let mut initial = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut initial).expect("populate startup cache");
+    app.render(&mut initial)
+        .expect("startup renders before the sheet is removed");
     remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
     let expected = vec![ClassicGuiBootstrapIssue::missing("GUIBigArrows")];
 
-    for (index, view) in StartupView::ALL.into_iter().enumerate() {
+    for view in StartupView::ALL {
         match view {
             StartupView::MainMenu => app.startup_view = StartupView::MainMenu,
             StartupView::ScenarioBrowser => {
@@ -5362,25 +5344,12 @@ fn global_gui_bootstrap_precedes_all_startup_roots_cache_and_native_pixels() {
             }
         }
         app.status_text = format!("lower status for {view:?}");
-        let cached = vec![0x20 + index as u8; 320 * 200 * 4];
-        app.menu_frame_cache = Some(MenuFrameCache {
-            view,
-            version: app.menu_render_version,
-            width: 320,
-            height: 200,
-            native_text_deferred: false,
-            frame: cached.clone(),
-        });
         let mut frame = vec![0xa5; 320 * 200 * 4];
         let error = app
             .render(&mut frame)
             .expect_err("global GUI must precede every startup root");
         assert_global_gui_boundary(&error, expected.clone());
         assert!(frame.iter().all(|byte| *byte == 0xa5));
-        assert_eq!(
-            app.menu_frame_cache.as_ref().expect("cache retained").frame,
-            cached
-        );
 
         let mut native = vec![0x6d; 640 * 400 * 4];
         let error = app
@@ -5736,11 +5705,11 @@ fn network_join_applies_active_scenario_gui_overrides() {
 }
 
 #[test]
-fn startup_bootstrap_precedes_all_seven_roots_status_models_cache_and_native_pixels() {
+fn startup_bootstrap_precedes_all_seven_roots_status_models_and_native_pixels() {
     let mut app = new_real_classic_menu_app(320, 200);
     let mut initial = vec![0_u8; 320 * 200 * 4];
     app.render(&mut initial)
-        .expect("populate supported startup cache");
+        .expect("supported startup renders before the image is removed");
     Arc::get_mut(&mut app.assets)
         .expect("frontend assets are app-owned")
         .startup_dialog_images
@@ -5750,7 +5719,7 @@ fn startup_bootstrap_precedes_all_seven_roots_status_models_cache_and_native_pix
         "StartupPlrPropBG.png",
     )];
 
-    for (index, view) in StartupView::ALL.into_iter().enumerate() {
+    for view in StartupView::ALL {
         // Exhaustive arms make a future StartupView addition update this
         // all-root regression rather than silently escaping the audit.
         match view {
@@ -5780,26 +5749,15 @@ fn startup_bootstrap_precedes_all_seven_roots_status_models_cache_and_native_pix
             }
         }
         app.status_text = format!("lower-priority status for {view:?}");
-        let cached = vec![0x20 + index as u8; 320 * 200 * 4];
-        app.menu_frame_cache = Some(MenuFrameCache {
-            view,
-            version: app.menu_render_version,
-            width: 320,
-            height: 200,
-            native_text_deferred: false,
-            frame: cached.clone(),
-        });
 
         let mut frame = vec![0xa5; 320 * 200 * 4];
         let error = app
             .render(&mut frame)
-            .expect_err("bootstrap must precede every root and cache lookup");
+            .expect_err("bootstrap must precede every root");
         assert_startup_bootstrap_boundary(&error, expected.clone());
-        assert!(frame.iter().all(|byte| *byte == 0xa5));
-        assert_eq!(
-            app.menu_frame_cache.as_ref().expect("cache retained").frame,
-            cached,
-            "{view:?} must not clear or replace its stale cache first"
+        assert!(
+            frame.iter().all(|byte| *byte == 0xa5),
+            "{view:?} must not touch the frame before its bootstrap boundary"
         );
 
         let mut native = vec![0x6d; 640 * 400 * 4];
@@ -5812,26 +5770,15 @@ fn startup_bootstrap_precedes_all_seven_roots_status_models_cache_and_native_pix
 }
 
 #[test]
-fn retained_main_requires_matching_native_fonts_but_headless_cpu_does_not() {
+fn retained_main_requires_scaled_native_fonts_but_headless_cpu_renders_without_them() {
     let mut app = new_real_classic_menu_app(320, 200);
     Arc::make_mut(&mut app.assets).startup_native_font_source = None;
-    let cached = vec![0x42; 320 * 200 * 4];
-    app.menu_frame_cache = Some(MenuFrameCache {
-        view: StartupView::MainMenu,
-        version: app.menu_render_version,
-        width: 320,
-        height: 200,
-        native_text_deferred: false,
-        frame: cached.clone(),
-    });
     app.configure_native_startup_fonts(3.0, false);
     assert!(app.native_startup_fonts.is_none());
 
     let mut frame = vec![0xb4; 320 * 200 * 4];
-    assert!(!app
-        .render(&mut frame)
-        .expect("headless CPU rendering keeps exact logical font cells"));
-    assert_eq!(frame, cached);
+    app.render(&mut frame)
+        .expect("headless CPU rendering keeps exact logical font cells");
 
     let error = app
         .render_retained_gpu_frame(GpuPresentation {
@@ -5847,16 +5794,10 @@ fn retained_main_requires_matching_native_fonts_but_headless_cpu_does_not() {
             "ScaleNativeStartupFonts",
         )],
     );
-    assert_eq!(
-        app.menu_frame_cache.as_ref().expect("cache retained").frame,
-        cached
-    );
 
     app.configure_native_startup_fonts(1.0, false);
-    assert!(!app
-        .render(&mut frame)
-        .expect("scale-one headless CPU rendering uses exact logical font cells"));
-    assert_eq!(frame, cached);
+    app.render(&mut frame)
+        .expect("scale-one headless CPU rendering uses exact logical font cells");
 
     let error = app
         .render_retained_gpu_frame(GpuPresentation::identity(320, 200))
@@ -6735,12 +6676,18 @@ fn scale_three_clipped_main_menu_commits_native_captions_after_bilinear_base() {
         .present(&mut output, |frame| {
             app.render_for_presentation(frame, true, false, false)
         })
-        .expect("replay cached base");
-    assert!(
-        !refreshed,
-        "cached menu must not request another alpha overlay"
+        .expect("recompose the filtered base");
+    assert!(refreshed);
+    assert_eq!(
+        output, filtered_base,
+        "an unchanged menu recomposes the same deferred-text base"
     );
-    assert_eq!(output, with_native_text);
+    app.render_native_main_menu_text(&mut output, 1920, 1438)
+        .expect("re-render native main-menu captions");
+    assert_eq!(
+        output, with_native_text,
+        "the physical caption pass is deterministic over an identical base"
+    );
 }
 
 #[test]

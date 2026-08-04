@@ -938,12 +938,7 @@ fn staged_host_completion_enters_exact_lobby_over_loader_background() {
     let mut frame = vec![0_u8; 800 * 600 * 4];
     assert!(app.render(&mut frame).expect("render exact host lobby"));
     assert_eq!(&frame[..4], expected_corner.as_slice());
-    assert!(
-        app.menu_frame_cache.is_none(),
-        "lobby frames are never cached"
-    );
     assert!(app.render(&mut frame).expect("render live lobby again"));
-    assert!(app.menu_frame_cache.is_none());
 
     app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
         .expect("route lobby focus traversal");
@@ -7779,10 +7774,6 @@ fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
     );
     assert!(layout.start_button.is_none());
     assert!(frame.iter().any(|byte| *byte != 0x5a));
-    assert!(
-        app.menu_frame_cache.is_none(),
-        "live joined lobbies cannot cache away timers, held scroll, or tooltips"
-    );
 
     let (classic_layout, roster) = app.joined_lobby_layouts().expect("joined layout");
     let exit = GuiPoint::new(
@@ -7801,20 +7792,12 @@ fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
         .controller
         .tooltip_state_at(Instant::now() + Duration::from_secs(1))
         .is_some());
-    let cached = vec![0x45; 640 * 480 * 4];
-    app.menu_frame_cache = Some(MenuFrameCache {
-        view: StartupView::NetworkLobby,
-        version: app.menu_render_version,
-        width: 640,
-        height: 480,
-        native_text_deferred: false,
-        frame: cached.clone(),
-    });
-    let mut refreshed = cached.clone();
+    let sentinel = vec![0x45; 640 * 480 * 4];
+    let mut refreshed = sentinel.clone();
     assert!(app
         .render(&mut refreshed)
-        .expect("joined lobby bypasses a matching startup frame cache"));
-    assert_ne!(refreshed, cached);
+        .expect("joined lobby composes a fresh frame"));
+    assert_ne!(refreshed, sentinel);
 
     // The classic renderer remains fail-closed when its required assets
     // are absent; NetworkLobby must not re-enable the old generic pane.
@@ -7910,36 +7893,20 @@ fn l094_saving_a_file_picture_preserves_an_unchecked_lobby_icon() {
 }
 
 #[test]
-fn network_lobby_live_render_bypasses_matching_exact_cache() {
+fn network_lobby_renders_live_without_a_deferred_native_text_pass() {
     let mut app = new_real_classic_menu_app(320, 200);
     app.startup_view = StartupView::NetworkLobby;
     app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
     app.sync_network_lobby_game_option_state();
     assert!(app.status_text.is_empty());
 
-    let cached = vec![0x31; 320 * 200 * 4];
-    app.menu_frame_cache = Some(MenuFrameCache {
-        view: StartupView::NetworkLobby,
-        version: app.menu_render_version,
-        width: 320,
-        height: 200,
-        native_text_deferred: false,
-        frame: cached.clone(),
-    });
-    let mut frame = vec![0x73; 320 * 200 * 4];
-
     // A retained lobby advances tooltip clocks, held scrollbars and
-    // transient status icons without input, so a matching cache must
-    // neither replay nor be replaced by the live frame.
+    // transient status icons without input, so every presentation composes
+    // the live frame.
+    let sentinel = vec![0x73; 320 * 200 * 4];
+    let mut frame = sentinel.clone();
     assert!(app.render(&mut frame).expect("live lobby renders"));
-    assert_ne!(frame, cached, "stale lobby pixels must not replay");
-    assert_eq!(
-        app.menu_frame_cache
-            .as_ref()
-            .expect("bypassed cache remains available for diagnostics")
-            .frame,
-        cached
-    );
+    assert_ne!(frame, sentinel, "the live lobby must reach the frame");
 
     let mut native_frame = vec![0x47; 960 * 600 * 4];
     app.render_native_main_menu_text(&mut native_frame, 960, 600)

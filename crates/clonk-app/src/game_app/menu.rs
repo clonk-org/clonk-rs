@@ -56,7 +56,6 @@ impl GameApp {
             auth,
             continuation,
         });
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -82,7 +81,6 @@ impl GameApp {
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -1785,7 +1783,6 @@ impl GameApp {
             )
         }) {
             dialog.state.set_progress(present_percent);
-            self.mark_menu_dirty();
         }
     }
 
@@ -1806,7 +1803,6 @@ impl GameApp {
             return;
         };
         self.remove_message_dialog_at(index);
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn handle_menu_cancel_action(
@@ -1825,7 +1821,6 @@ impl GameApp {
         {
             if state == ElementState::Pressed {
                 self.abort_startup_crew_rename();
-                self.mark_menu_dirty();
             }
             return Ok(());
         }
@@ -1837,7 +1832,6 @@ impl GameApp {
         {
             if state == ElementState::Pressed {
                 self.abort_scenario_rename();
-                self.mark_menu_dirty();
             }
             return Ok(());
         }
@@ -2969,7 +2963,6 @@ impl GameApp {
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
         self.status_text.clear();
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -3072,9 +3065,6 @@ impl GameApp {
         &mut self,
         outcome: ContextMenuOutcome<AppContextMenuCommand>,
     ) -> Result<(), EngineError> {
-        if !outcome.events.is_empty() {
-            self.mark_menu_dirty();
-        }
         for event in outcome.events {
             match event {
                 ContextMenuEvent::Sound(sound) => self.play_ui_sound(match sound {
@@ -3333,7 +3323,6 @@ impl GameApp {
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_dismissed_lobby_option = None;
         self.context_menu_pointer_capture = None;
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn process_player_dialog_actions(
@@ -3843,12 +3832,6 @@ impl GameApp {
         )
     }
 
-    /// Invalidates the cached startup-menu frame; called by every event
-    /// source that can change what the menu shows.
-    pub(crate) fn mark_menu_dirty(&mut self) {
-        self.menu_render_version = self.menu_render_version.wrapping_add(1);
-    }
-
     pub(crate) fn open_live_masterserver_signup_dialog(
         &mut self,
         server_name: &str,
@@ -3971,7 +3954,6 @@ impl GameApp {
         if !chat_above && !chart_stays_above {
             self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
         }
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -4130,7 +4112,6 @@ impl GameApp {
         };
         self.startup_tooltip.pointer_left();
         let checkbox_checked = pending.state.checkbox_checked();
-        self.mark_menu_dirty();
         match pending.continuation {
             MessageDialogContinuation::None => {}
             MessageDialogContinuation::AbortGame { .. } => match result {

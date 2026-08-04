@@ -831,7 +831,6 @@ impl GameApp {
                 let _ = sender.send(ScenarioSelectorDiscoveryEvent::Finished(entries));
             }
         });
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -869,7 +868,6 @@ impl GameApp {
         self.sync_scenario_game_option_constraint();
         self.scensel_last_click = None;
         self.scensel_rename_pointer_focus = None;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -910,7 +908,6 @@ impl GameApp {
                     let percent = state.progress_percent.max(percent.min(100));
                     if state.progress_percent != percent {
                         state.progress_percent = percent;
-                        self.mark_menu_dirty();
                     }
                 }
                 Ok(ScenarioSelectorDiscoveryEvent::Finished(entries)) => {
@@ -948,7 +945,6 @@ impl GameApp {
             self.cancel_scenario_selector_discovery();
             self.status_text = "Scenario discovery interrupted".to_string();
             tracing::warn!("scenario discovery worker disconnected");
-            self.mark_menu_dirty();
         }
         Ok(())
     }
@@ -999,7 +995,6 @@ impl GameApp {
                 if self.menu_state.start_renaming_selected(previous_focus) {
                     self.scenario_game_options.set_focused_button(None);
                 }
-                self.mark_menu_dirty();
                 Ok(true)
             }
             VirtualKeyCode::Delete if no_modifiers && book_selection => {
@@ -1142,7 +1137,6 @@ impl GameApp {
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
-        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -1221,7 +1215,6 @@ impl GameApp {
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
-        self.mark_menu_dirty();
         Ok(true)
     }
 
@@ -1265,7 +1258,6 @@ impl GameApp {
             pending.controller.clear_validation_error();
         }
         self.startup_tooltip.pointer_left();
-        self.mark_menu_dirty();
     }
 
     pub(crate) fn scensel_do_back(&mut self) -> Result<(), EngineError> {
@@ -1470,7 +1462,6 @@ impl GameApp {
             self.play_ui_sound("ArrowHit");
         }
         self.sync_scenario_game_option_constraint();
-        self.mark_menu_dirty();
         true
     }
 
@@ -1516,7 +1507,6 @@ impl GameApp {
         use clonk_frontend::definition_sel::DefinitionSelAction;
 
         for action in actions {
-            self.mark_menu_dirty();
             match action {
                 DefinitionSelAction::FocusChanged(_)
                 | DefinitionSelAction::SelectionChanged(_)

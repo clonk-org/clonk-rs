@@ -515,10 +515,8 @@ impl GameApp {
         // must still happen when the ready-control gate returns early.
         self.deactivate_inactive_network_clients();
         if !matches!(self.mode, AppMode::Menu) {
-            // Whatever happens while loading or in-game (game over, return
-            // to menu) must not replay a stale pre-game menu frame; dropping
-            // the backdrop also frees its full-screen buffer during play.
-            self.menu_frame_cache = None;
+            // Dropping the backdrop while loading or in-game (game over,
+            // return to menu) frees its full-screen buffer during play.
             self.menu_backdrop_cache = StartupBackdropCache::default();
             self.startup_dialog_fade = None;
         }
@@ -883,45 +881,30 @@ impl GameApp {
                 self.poll_boot_loading();
             }
             AppMode::Menu => {
-                let definition_scroll_changed = self
-                    .definition_selector_layout()
-                    .and_then(|layout| {
-                        self.definition_selector.as_mut().map(|controller| {
-                            let before = controller.scroll_y();
-                            controller.tick_scrollbar(&layout);
-                            controller.scroll_y() != before
-                        })
-                    })
-                    .unwrap_or(false);
-                let scrollbar_changed = self.tick_scensel_scrollbar_arrow();
-                let search_blink_changed = self.menu_state.search_edit.tick_blink();
-                let rename_blink_changed = self
+                if let Some(layout) = self.definition_selector_layout() {
+                    if let Some(controller) = self.definition_selector.as_mut() {
+                        controller.tick_scrollbar(&layout);
+                    }
+                }
+                self.tick_scensel_scrollbar_arrow();
+                self.menu_state.search_edit.tick_blink();
+                let _ = self
                     .menu_state
                     .rename_edit
                     .as_mut()
                     .is_some_and(|rename| rename.edit.tick_blink());
-                let crew_rename_blink_changed = self
+                let _ = self
                     .startup_crew_rename
                     .as_mut()
                     .is_some_and(|rename| rename.edit.tick_blink());
-                let advanced_blink_changed = self
+                let _ = self
                     .startup_options_advanced_dialog
                     .as_mut()
                     .is_some_and(|dialog| dialog.controller.tick_edit_blink());
-                let netdlg_blink_changed = self
+                let _ = self
                     .startup_network_dialog
                     .as_mut()
                     .is_some_and(|dialog| dialog.tick_join_address_cursor());
-                if definition_scroll_changed
-                    || scrollbar_changed
-                    || search_blink_changed
-                    || rename_blink_changed
-                    || crew_rename_blink_changed
-                    || advanced_blink_changed
-                    || netdlg_blink_changed
-                {
-                    self.mark_menu_dirty();
-                }
                 let fade_finished = self.resume_frontend_music_after_fade
                     && self
                         .audio
