@@ -1446,7 +1446,7 @@ mod tests {
             engine.install_global_scripts(&[(
                 "System.c4g/GooReaction.c".to_string(),
                 r#"
-                func IsBlockedGoo(xdir, ydir, ls_mat, event) {
+                global func IsBlockedGoo(xdir, ydir, ls_mat, event) {
                     // meeMassMove = 2; dirs are Fix0; the landscape side is
                     // a real material
                     if (event != 2) { return 0; }
@@ -1456,8 +1456,10 @@ mod tests {
                     return 1;
                 }
                 global func GooEats(x, y, lsx, lsy, xdir, ydir, pxs_mat, ls_mat, event) {
-                    // A Game.ScriptEngine SFunc retains its declaring
-                    // System.c4g host for ordinary local-helper lookup.
+                    // The helper is declared `global` because a
+                    // Game.ScriptEngine SFunc resolves identifiers in the
+                    // ENGINE table, never in its declaring System.c4g host
+                    // (C4AulParse.cpp:2818-2823).
                     return IsBlockedGoo(xdir, ydir, ls_mat, event);
                 }
                 "#

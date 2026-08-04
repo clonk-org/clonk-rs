@@ -4302,9 +4302,6 @@ impl<'a> Vm<'a> {
             });
         env.definition_context = explicit_definition_context
             || (self.definition_context && inherited_definition_context);
-        env.linked_host_lookup = self.exact_global_link_lookup
-            && env.engine_scope
-            && function.global_link_host == Some(self.host_identity);
         env.caller_host_identity = if env.engine_scope {
             function.global_link_host.unwrap_or(self.host_identity)
         } else {
@@ -5048,7 +5045,7 @@ impl<'a> Vm<'a> {
         if self.call_expression_returns_reference(expr, env) {
             return false;
         }
-        let function = if env.engine_scope && !env.linked_host_lookup {
+        let function = if env.engine_scope {
             self.engine_script_function(name)
         } else {
             self.own_or_global_script_function(name)
@@ -5366,7 +5363,7 @@ impl<'a> Vm<'a> {
                     // lvalue path (clonk-engine registers neither as a host function).
                     if let Expr::Variable(name) = callee.as_ref() {
                         if name == "this" {
-                            let function = if env.engine_scope && !env.linked_host_lookup {
+                            let function = if env.engine_scope {
                                 self.engine_script_function(name)
                             } else {
                                 self.own_or_global_script_function(name)
@@ -5777,7 +5774,7 @@ impl<'a> Vm<'a> {
                                     return Ok(Self::fold_legacy_zero(value, env.strict_level));
                                 }
                             }
-                            let function = if env.engine_scope && !env.linked_host_lookup {
+                            let function = if env.engine_scope {
                                 self.engine_script_function(name)
                             } else {
                                 self.own_or_global_script_function(name)
@@ -5791,7 +5788,7 @@ impl<'a> Vm<'a> {
                                     self.direct_call_parameter_limit(name, function),
                                 )?;
                             }
-                            if env.engine_scope && !env.linked_host_lookup {
+                            if env.engine_scope {
                                 self.invoke_engine_value(
                                     name,
                                     evaluated_args,
@@ -6102,7 +6099,7 @@ impl<'a> Vm<'a> {
                         .map(TrackedValue::runtime);
                 }
                 if let Expr::Variable(name) = callee.as_ref() {
-                    let function = if env.engine_scope && !env.linked_host_lookup {
+                    let function = if env.engine_scope {
                         self.engine_script_function(name)
                     } else {
                         self.own_or_global_script_function(name)
@@ -6167,7 +6164,7 @@ impl<'a> Vm<'a> {
                                 self.direct_call_parameter_limit(name, function),
                             )?;
                         }
-                        return if env.engine_scope && !env.linked_host_lookup {
+                        return if env.engine_scope {
                             self.invoke_engine_tracked_value(
                                 name,
                                 evaluated_args,
@@ -8734,7 +8731,7 @@ impl<'a> Vm<'a> {
         if *is_optional {
             return Ok(None);
         }
-        let function = if env.engine_scope && !env.linked_host_lookup {
+        let function = if env.engine_scope {
             self.engine_script_function(name)
         } else {
             self.own_or_global_script_function(name)
@@ -8748,7 +8745,7 @@ impl<'a> Vm<'a> {
         if *forward_rest {
             Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
         }
-        let value = if env.engine_scope && !env.linked_host_lookup {
+        let value = if env.engine_scope {
             self.invoke_engine_raw(
                 name,
                 evaluated_args,
@@ -8786,7 +8783,7 @@ impl<'a> Vm<'a> {
         let Expr::Variable(name) = callee.as_ref() else {
             return Ok(None);
         };
-        let function = if env.engine_scope && !env.linked_host_lookup {
+        let function = if env.engine_scope {
             self.engine_script_function(name)
         } else {
             self.own_or_global_script_function(name)
@@ -8858,7 +8855,7 @@ impl<'a> Vm<'a> {
         };
         match callee.as_ref() {
             Expr::Variable(name) => {
-                let function = if env.engine_scope && !env.linked_host_lookup {
+                let function = if env.engine_scope {
                     self.engine_script_function(name)
                 } else {
                     self.own_or_global_script_function(name)
@@ -9562,10 +9559,6 @@ struct Environment {
     /// C4Aul global functions are owned by Game.ScriptEngine; unqualified
     /// calls inside them resolve in engine scope, not against `this`'s def.
     engine_scope: bool,
-    /// A global function's named-link lookup still starts at its declaring
-    /// `LinkedTo` script. This is enabled only when the VM is that exact
-    /// retained host; otherwise execution remains engine-table-only.
-    linked_host_lookup: bool,
     /// DirectExec/eval expression frames are backed by temporary scripts;
     /// ordinary function invocation leaves this false.
     temporary_script: bool,
@@ -9620,7 +9613,6 @@ impl Environment {
             inherited_target: None,
             function_name: String::new(),
             engine_scope: false,
-            linked_host_lookup: false,
             temporary_script: false,
             definition_context: false,
         })

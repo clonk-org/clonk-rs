@@ -459,16 +459,23 @@ fn global_resort_comparator_executes_without_a_definition_context() {
         &mut engine,
         "ADEF",
         "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
-             func Helper() { return 1; }",
+             global func Helper(object obj) { return 1; }",
     );
     register(
         &mut engine,
         "BDEF",
+        // Both helpers are `global` because `Cmp` is engine-owned and
+        // therefore resolves identifiers in the ENGINE table, not in its
+        // declaring definition (C4AulParse.cpp:2818-2823). BDEF registers
+        // after ADEF, and the engine's function map head-inserts same-name
+        // entries (C4Aul.cpp:76-79, :613-629), so BDEF's is the one found.
+        // The sorted object arrives as a parameter rather than through an
+        // implicit context, because a comparator runs with cthr->Def == null.
         "global func Cmp(object first, object second) {\n\
-                 return Helper();\n\
+                 return Helper(first);\n\
              }\n\
-             func Helper() {\n\
-                 if (GetID() == BDEF) return -1;\n\
+             global func Helper(object obj) {\n\
+                 if (GetID(obj) == BDEF) return -1;\n\
                  return 1;\n\
              }\n\
              func Trigger() { return Queue(); }",
@@ -502,7 +509,7 @@ fn global_resort_comparator_executes_without_a_definition_context() {
     assert_eq!(
         engine.debug_exec_order(),
         [second, first],
-        "BDEF's global Cmp resolves BDEF's local Helper, not ADEF's conflicting helper"
+        "BDEF's global Cmp resolves the newest engine-table Helper, not ADEF's older one"
     );
 }
 

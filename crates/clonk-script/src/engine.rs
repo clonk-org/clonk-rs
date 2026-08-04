@@ -3191,11 +3191,23 @@ mod tests {
             host.call("Pick", &[]).expect("ordinary own root resolves"),
             Value::Int(1)
         );
+        // The global caller's body is a different question from the named
+        // local lookup above. An engine-owned function switches its WHOLE
+        // identifier lookup to the engine — `if (Fn->Owner ==
+        // &Game.ScriptEngine) FoundFn = a->Owner->GetFuncRecursive(Idtf);`
+        // (C4AulParse.cpp:2216-2219 on the statement path, :2818-2823 on the
+        // expression path), where `a->Owner` is the script engine
+        // (C4Def.cpp:649) — so `Queue` reads the engine table's `Pick`, not
+        // the definition-scope one declared beside it. `GetLocalSFunc`'s
+        // "search linked scope first" (C4Aul.cpp:118-127) does not apply: its
+        // only callers are FnResortObjects/FnResortObject (C4Script.cpp:4491,
+        // :4512), a by-name runtime lookup rather than body resolution.
         assert_eq!(
             host.call_global_with_ref_args("Queue", &[])
                 .expect("exact global callback resolves")
                 .0,
-            Value::Int(1)
+            Value::Int(2),
+            "the global body resolves against the engine, not its LinkedTo host"
         );
     }
 
@@ -3232,24 +3244,26 @@ mod tests {
     }
 
     #[test]
-    fn pinned_global_shared_context_uses_its_linked_host_helper() {
+    fn pinned_global_callback_keeps_this_and_resolves_its_helper_in_the_engine() {
+        // A pinned engine-owned callback keeps the supplied `this`, but its
+        // body resolves identifiers in the ENGINE table, not in the host it is
+        // linked to: `if (Fn->Owner == &Game.ScriptEngine) FoundFn =
+        // Fn->Owner->GetFuncRecursive(Idtf);` (C4AulParse.cpp:2818-2823). The
+        // declaring host's definition-scope `Helper` is therefore invisible
+        // here, and the engine table's `global func Helper` wins.
         let mut linked_host = Engine::new();
         linked_host
             .load_script(
                 "#strict\n\
-                 local Shared;\n\
-                 func Helper() { Shared = Shared + 4; return Shared; }\n\
-                 global func Deferred() {\n\
-                     Shared = Shared + 2;\n\
-                     return [this, Helper(), Shared];\n\
-                 }",
+                 func Helper() { return 4; }\n\
+                 global func Deferred() { return [this, Helper()]; }",
             )
             .expect("linked-host script compiles");
 
         let mut destination = Engine::new();
         destination
             .load_script("global func Helper() { return 999; }")
-            .expect("conflicting destination helper compiles");
+            .expect("engine-table helper compiles");
 
         let mut globals = linked_host
             .global_access_functions()
@@ -3265,20 +3279,50 @@ mod tests {
             .resolve_global_function("Deferred")
             .expect("global callback resolves")
             .function;
+        let cells = crate::vm::LocalCells::default();
+
+        let value = linked_host
+            .call_pinned_with_cells_and_this(&pinned, true, &[], &cells, Value::Object(42))
+            .expect("pinned callback runs");
+
+        assert_eq!(
+            value,
+            Value::Array(vec![Value::Object(42), Value::Int(999)]),
+            "`this` survives the pin; the helper comes from the engine table"
+        );
+    }
+
+    #[test]
+    fn pinned_definition_callback_round_trips_its_local_cells() {
+        // The other half of the split: object `local`s are legal only in a
+        // definition-scope function — C4Aul rejects a `local` read or write
+        // inside an engine-owned body outright ("using local variable in
+        // global function!", C4AulParse.cpp:2000-2004 for the lvalue path and
+        // :2731-2737 for the rvalue path). This pins the supplied cells
+        // round-tripping through a pinned callback that may legally use them.
+        let mut host = Engine::new();
+        host.load_script(
+            "#strict\n\
+             local Shared;\n\
+             func Deferred() { Shared = Shared + 2; return [this, Shared]; }",
+        )
+        .expect("definition-scope script compiles");
+
+        let pinned = host
+            .resolve_function("Deferred", false)
+            .expect("definition callback resolves")
+            .function;
         let cells = crate::vm::LocalCells::from_local_vars(&HashMap::from([(
             "Shared".to_string(),
             Value::Int(5),
         )]));
 
-        let value = linked_host
-            .call_pinned_with_cells_and_this(&pinned, true, &[], &cells, Value::Object(42))
-            .expect("pinned callback runs on its LinkedTo host");
+        let value = host
+            .call_pinned_with_cells_and_this(&pinned, false, &[], &cells, Value::Object(42))
+            .expect("pinned callback runs");
 
-        assert_eq!(
-            value,
-            Value::Array(vec![Value::Object(42), Value::Int(11), Value::Int(11)])
-        );
-        assert_eq!(cells.snapshot().get("Shared"), Some(&Value::Int(11)));
+        assert_eq!(value, Value::Array(vec![Value::Object(42), Value::Int(7)]));
+        assert_eq!(cells.snapshot().get("Shared"), Some(&Value::Int(7)));
     }
 
     #[test]

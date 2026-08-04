@@ -1593,8 +1593,10 @@ func FxNegativeTimer(pThis, iNumber, iTime)
         // C4Effect::GetCallbackScript falls back to Game.ScriptEngine when
         // both command-target fields are empty; the affected object's local
         // callback must not shadow that table (C4Effect.cpp:31-56). The
-        // retained global function then resolves the ordinary Helper in its
-        // own LinkedTo host and still has cthr->Def == nullptr.
+        // retained global function resolves its Helper in the ENGINE table —
+        // an engine-owned body never searches its declaring System.c4g host
+        // (C4AulParse.cpp:2818-2823), which is why Helper is declared
+        // `global` — and still has cthr->Def == nullptr.
         let definition_script = r#"#strict 2
 local result;
 
@@ -1621,7 +1623,7 @@ global func FxNoTargetTimer(target, number, time)
     return Helper(target);
 }
 
-func Helper(target)
+global func Helper(target)
 {
     var no_value;
     if (GetActMapVal("Length", "Probe") == no_value)
@@ -1678,7 +1680,13 @@ func Helper(target)
     }
 
     #[test]
-    fn command_target_global_effect_keeps_this_and_linked_helper_scope() {
+    fn command_target_global_effect_keeps_this_and_engine_helper_scope() {
+        // `this()` survives into the engine-owned callback, but its bare
+        // `Helper()` resolves in the ENGINE table: an engine-owned body never
+        // searches the definition it was invoked on, nor its own declaring
+        // System.c4g host (C4AulParse.cpp:2818-2823). The definition's
+        // `func Helper` is therefore invisible, which is why the System
+        // script's Helper is declared `global`.
         let definition_script = r#"#strict 2
 local result;
 func Arm() { result = 0; AddEffect("Commanded", this(), 100, 1, this()); return true; }
@@ -1697,7 +1705,7 @@ global func FxCommandedTimer(target, number, time)
     this()->Mark(Helper());
     return 0;
 }
-func Helper() { return 17; }
+global func Helper() { return 17; }
 "#;
         let mut definition =
             Definition::from_script("FXCT", "Command-target probe", definition_script)
