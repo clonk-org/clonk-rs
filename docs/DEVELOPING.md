@@ -165,9 +165,8 @@ cargo xtask parity verify
 
 The Python unittest discovery covers repository scripts, including public-path
 portability and the 24-player benchmark harness. The explicit engine-tools
-test command exercises the feature-gated packager, archive, release-dependency,
-and release-license checks that the default workspace feature set does not
-build. The workspace
+test command exercises the feature-gated packager, archive, and release-dependency
+checks that the default workspace feature set does not build. The workspace
 test run includes the focused tutorial, virtual-play, snapshot, and C++↔Rust
 differential tests. The explicit snapshot and parity commands remain named
 completion gates so both baselines are visible independently in local and CI
