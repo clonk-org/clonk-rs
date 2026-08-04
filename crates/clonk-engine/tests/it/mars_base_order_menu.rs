@@ -422,6 +422,40 @@ fn the_undo_row_stays_on_the_page_its_change_belongs_to() {
 }
 
 #[test]
+fn an_unchosen_mode_row_is_blank_rather_than_crossed_out() {
+    // Menu2 renders an iconless enum item with the whole 64px cell from its
+    // sheet: cell 3 is a green check for the chosen one and cell 4 a red cross
+    // for the rest (Menu.c4d/Script.c:255-261). They are radio markers, but a
+    // red cross beside "Only Sell" reads as forbidden, not as unselected. A
+    // blank symbol says the same thing without the false warning.
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (_player, clonk) = open_order_page(&mut engine);
+    let last = i32::try_from(items(&engine, clonk).len()).expect("fits") - 1;
+    let index = engine.find_object_index(clonk).expect("clonk remains live");
+    engine.objects[index]
+        .state
+        .menu
+        .as_mut()
+        .expect("the order page is open")
+        .selection = last;
+    engine.menu_user_enter(clonk, false).expect("Back");
+
+    let rows = items(&engine, clonk);
+    assert_eq!(rows[0].caption, "Only Sell");
+    assert_eq!(
+        rows[0].image,
+        clonk_engine::ObjectMenuImage::None,
+        "the unchosen mode carries no symbol at all"
+    );
+    assert_eq!(rows[1].caption, "Buy");
+    assert_eq!(
+        rows[1].image,
+        clonk_engine::ObjectMenuImage::Indexed { index: 3 },
+        "and the chosen one keeps the check that marks it"
+    );
+}
+
+#[test]
 fn the_closing_row_says_which_of_its_two_jobs_it_is_doing() {
     // Shipped Menu2 captions the last row "Finished" on every page, but it
     // steps back out of a submenu and commits the whole template at the root

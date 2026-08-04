@@ -188,6 +188,45 @@ private func ShowRange(Key, array aCond, string szName, id idItem, data, &i)
     idItem, pMenuObject, iValue, Key, szInfo, C4MN_Add_ForceCount);
 }
 
+// Menu2 has no icon of its own for "not selected", so an iconless enum item
+// takes the whole 64px cell 4 from its sheet -- a red cross
+// (Menu.c4d/Script.c:255-261 via SetPicture(64*4,...)). Beside a caption like
+// "Only Sell" that reads as forbidden rather than as the other half of a
+// radio pair. Leave the unchosen ones blank and let the check carry the
+// meaning. An enum item that supplies its own idItem keeps the shipped
+// corner-badge treatment, which never had this problem.
+private func ShowEnum(Key, array aCond, string szName, id idItem, data, &i)
+{
+  var selectable = Evaluate_MenuCond(aMenu, aCond);
+  for (var itemkey in data[3])
+  {
+    var itemvalue = HashGet(data[0], itemkey);
+    var fChosen = itemkey == data[2];
+    var szCaption = itemvalue[0];
+    if (szName != 0)
+      szCaption = Format("$MenuChoose$", itemvalue[0], szName);
+    if (!selectable)
+      szCaption = GreyString(szCaption);
+    var szCommand = Format("ShowMenu(%d)", i);
+    if (selectable)
+      szCommand = Format("Choose(%v,%v,%d)", Key, itemkey, i);
+    i++;
+    if (itemvalue[1])
+    {
+      // Own picture: keep CreateDummy's overlaid badge exactly as shipped.
+      var pDummy = CreateDummy(itemvalue[1], fChosen, false, selectable);
+      AddMenuItem(szCaption, szCommand, 0, pMenuObject, 0, 0, szCaption, 4,
+        pDummy);
+      RemoveObject(pDummy);
+    }
+    else if (fChosen)
+      AddMenuItem(szCaption, szCommand, MS4C, pMenuObject, 0, 0, szCaption, 2,
+        3);
+    else
+      AddMenuItem(szCaption, szCommand, 0, pMenuObject, 0, 0, szCaption);
+  }
+}
+
 // The engine offers COM_MenuLeft/Right here before turning them into a
 // selection move. Claim them only over a range row, so the arrows keep
 // navigating everywhere else.
