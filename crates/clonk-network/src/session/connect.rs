@@ -964,12 +964,65 @@ pub async fn connect_client_addresses(
     if let Some((_, error)) = wrong_password {
         return Err(error);
     }
+    Err(dial_race_failure(failures))
+}
+
+/// Renders the failure of a dial race in which no address reached admission.
+///
+/// A reference lists its IPv6 endpoints first, so reporting only the
+/// lowest-indexed dial hides whatever went wrong on the address the client
+/// actually needed. Naming every endpoint keeps that diagnosis available; a
+/// lone failure — what a direct join by address produces — is reported
+/// unchanged.
+fn dial_race_failure(
+    mut failures: Vec<(usize, crate::NetworkAddress, ClientError)>,
+) -> ClientError {
     failures.sort_by_key(|(index, ..)| *index);
-    Err(failures
-        .into_iter()
-        .next()
-        .expect("a completed dial race retains its failure")
-        .2)
+    if failures.len() < 2 {
+        return failures
+            .pop()
+            .expect("a completed dial race retains its failure")
+            .2;
+    }
+    let kind = failures
+        .iter()
+        .map(|(_, _, error)| match error {
+            ClientError::Connect(cause) => cause.kind(),
+            _ => io::ErrorKind::Other,
+        })
+        .reduce(|left, right| {
+            if left == right {
+                left
+            } else {
+                io::ErrorKind::Other
+            }
+        })
+        .unwrap_or(io::ErrorKind::Other);
+    let detail = failures
+        .iter()
+        .map(|(_, address, error)| {
+            format!("{}: {}", dial_address_label(*address), dial_cause(error))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    ClientError::Connect(io::Error::new(kind, detail))
+}
+
+fn dial_address_label(address: crate::NetworkAddress) -> String {
+    match address.protocol {
+        crate::NetworkProtocol::Tcp => format!("TCP {}", address.endpoint),
+        crate::NetworkProtocol::Udp => format!("UDP {}", address.endpoint),
+        _ => address.endpoint.to_string(),
+    }
+}
+
+/// Strips the caption `ClientError::Connect` carries so the aggregate does not
+/// repeat it once per endpoint.
+fn dial_cause(error: &ClientError) -> String {
+    match error {
+        ClientError::Connect(cause) => cause.to_string(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]

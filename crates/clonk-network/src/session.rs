@@ -9087,6 +9087,47 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_join_names_every_refused_address() {
+        // Reference address lists put the IPv6 endpoints first, so reporting
+        // only the lowest-indexed dial hides whatever went wrong on the
+        // address the client actually needed (clonk-org/clonk-rs#109).
+        let first_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_address = first_listener.local_addr().unwrap();
+        let second_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_address = second_listener.local_addr().unwrap();
+        drop(first_listener);
+        drop(second_listener);
+
+        let error = connect_client_addresses(
+            [
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, first_address),
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, second_address),
+            ],
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect_err("no listener remains on either address");
+
+        // The refusal text is the platform's own, so only the endpoint labels
+        // and their dial order are asserted here.
+        let rendered = error.to_string();
+        let first_label = rendered
+            .find(&format!("TCP {first_address}: "))
+            .unwrap_or_else(|| panic!("the first endpoint is missing from {rendered:?}"));
+        let second_label = rendered
+            .find(&format!("TCP {second_address}: "))
+            .unwrap_or_else(|| panic!("the second endpoint is missing from {rendered:?}"));
+        assert!(
+            first_label < second_label,
+            "the endpoints are out of dial order in {rendered:?}"
+        );
+        assert!(
+            rendered.starts_with("failed to connect to host: TCP "),
+            "the caption is not carried once by {rendered:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn exclusive_join_defers_welcome_until_the_active_route_fails() {
         // InitClient opens every prepared route together, but exclusive mode
         // permits only one outstanding PID_Conn. OnDisconn promotes the next
