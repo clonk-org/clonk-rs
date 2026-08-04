@@ -165,8 +165,8 @@ pub(in crate::scenario) struct ScenarioDefinition {
     pub(in crate::scenario) resource_group: Option<Group>,
     pub(in crate::scenario) components: Vec<DefinitionComponent>,
     pub(in crate::scenario) line_connect: u32,
-    /// DefCore shape vertices + rect (the spawn shape; task #15 carries
-    /// the rest of the core).
+    /// DefCore shape vertices + rect (the spawn shape; the `core` field
+    /// below carries the rest).
     pub(in crate::scenario) vertices: Vec<clonk_resources::definition::DefVertex>,
     pub(in crate::scenario) shape: Option<clonk_resources::definition::PictureRect>,
     /// The FULL DefCore for legacy defs — applied via

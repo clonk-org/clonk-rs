@@ -430,9 +430,9 @@ pub(crate) struct GameApp {
     /// A control stall is completely silent in C++: `DrawHoldMessages` prints
     /// only "Pause", and only for `HaltCount`, which a stall never sets. The
     /// world therefore freezes while rendering carries on at full frame rate,
-    /// which is indistinguishable from a hang — the symptom behind LegacyClonk
-    /// issue #28, "network games stop randomly". There is no C++ behaviour to
-    /// preserve here, so the port says something.
+    /// which is indistinguishable from a hang — the symptom behind
+    /// legacyclonk/LegacyClonk#28, "network games stop randomly". There is no
+    /// C++ behaviour to preserve here, so the port says something.
     pub(crate) network_stall_since: Option<(Instant, bool)>,
     /// Simulation frames executed since anything was last drawn, so a long
     /// catch-up cannot leave the screen frozen. See `NETWORK_RENDER_FLOOR_FRAMES`.

@@ -121,6 +121,14 @@ the issue assigned forever and the next session skips it. If you stop without
 landing, say so on the issue and `gh issue edit <n> --repo clonk-org/clonk-rs
 --remove-assignee @me`.
 
+**Cite issues as `owner/repo#N`** in comments, docs and `PORT_STATUS.md` — this
+repository is public, a bare `#28` is ambiguous between `clonk-org/clonk-rs` and
+`legacyclonk/LegacyClonk`, and only the qualified form renders as a link.
+`workspace quality` greps for the bare `issue #N` spelling and for the retired
+private `CLO-` tracker, whose ids no reader of this repository can resolve. It
+deliberately does not reject bare `#N` in general: object and definition numbers
+(`WIPF #564`, `KING #5129`) are spelled the same way.
+
 ## Pull requests — how work lands
 
 `main` is protected and lands through a **merge queue**. Do not push to `main`.

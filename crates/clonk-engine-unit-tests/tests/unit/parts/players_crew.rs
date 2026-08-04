@@ -2380,9 +2380,11 @@ func ControlUpSingle()
     fn shipped_hazard_teams_do_evaluation_records_both_player_lines() {
         // Execute Hazard's actual TEAM::DoEvaluation body while bypassing
         // its scoreboard-heavy Initialize. Player number and player-info id
-        // deliberately match here: their distinction is covered by CLO-221,
-        // while this regression isolates AddEvaluationData and its ordered
-        // accumulation of the two shipped calls.
+        // deliberately match here: `GetPlayerID` returns the player-info id
+        // and `GetPlayerVal("Index")` the in-round number
+        // (C4Script.cpp:5710-5714), so equal values keep this regression on
+        // AddEvaluationData and its ordered accumulation of the two shipped
+        // calls rather than on that distinction.
         let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../content");
         let group = clonk_resources::Group::open(

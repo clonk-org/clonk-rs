@@ -13293,9 +13293,9 @@ fn a_lockstep_stall_announces_itself_once_after_a_grace_period() {
     // A control stall is silent in C++: `DrawHoldMessages` prints only "Pause",
     // and only for `HaltCount`, which a stall never sets, so the world freezes
     // while rendering carries on at full frame rate. That is indistinguishable
-    // from a hang and is the symptom behind LegacyClonk issue #28, "network
-    // games stop randomly". There is no C++ behaviour to preserve, so the port
-    // says something -- but only after a grace period, or ordinary jitter on a
+    // from a hang and is the symptom behind legacyclonk/LegacyClonk#28,
+    // "network games stop randomly". There is no C++ behaviour to preserve, so
+    // the port says something -- but only after a grace period, or jitter on a
     // bad link would flash constantly, and only once per stall.
     let mut app = new_running_sandbox_app();
     let start = Instant::now();

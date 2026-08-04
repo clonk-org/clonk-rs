@@ -1871,8 +1871,8 @@ impl GameApp {
     /// a clean quit (C4Application.cpp:367). A mission the player has already
     /// unlocked is earned progress rather than a runtime toggle, though, so a
     /// round that ends any other way must not relock it — the deliberate
-    /// divergence behind issue #50. Runtime toggles keep C++'s timing in
-    /// `DeferredConfig`.
+    /// divergence behind clonk-org/clonk-rs#50. Runtime toggles keep C++'s
+    /// timing in `DeferredConfig`.
     pub(crate) fn persist_mission_access_if_changed(&mut self) {
         if self.mission_access.matches(&self.persisted_mission_access) {
             return;

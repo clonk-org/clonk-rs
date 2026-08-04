@@ -141,7 +141,7 @@ each window owner can reconstruct `Pixels`; `Outdated` reconfigures and retries
 once before skipping the frame; and `Suboptimal` reconfigures once before using
 the still-valid acquired frame if it remains suboptimal. `Timeout` and
 `Occluded` also return success without invoking the render callback. This bounds
-the upstream retry loop tracked by pixels issue #460. `clonk-app` records
+the upstream retry loop tracked by parasyte/pixels#460. `clonk-app` records
 whether the callback ran, reports a skipped presentation when it did not, and
 leaves screenshots and save-thumbnail requests queued for the next drawable
 frame.

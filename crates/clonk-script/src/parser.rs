@@ -1930,10 +1930,14 @@ impl<'a> Parser<'a> {
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         if self.consume_if_symbol(Symbol::Bang)?.is_some() {
-            // Preserve the existing speculative preflight for lexer-error
-            // recovery until CLO-111 makes oversized integer tokens
-            // rewindable. Its AST must never choose precedence: replay and
-            // parse only the unary operand, so `!x = y` stays `(!x) = y`.
+            // The speculative preflight predates the `(!x) = y` precedence
+            // fix and now contributes only a fallback error. A lexer error
+            // never becomes a token, so `reset_speculative` has nothing to
+            // replay for the text the preflight scanned past — which is why
+            // `!Foo(<oversized literal>)` still compiles, recorded under
+            // "Open" in PORT_STATUS.md. Its AST must never choose
+            // precedence: replay and parse only the unary operand, so
+            // `!x = y` stays `(!x) = y`.
             if self.speculative_tokens.is_none() {
                 self.begin_speculative();
                 let speculative_result = self.parse_assignment();
