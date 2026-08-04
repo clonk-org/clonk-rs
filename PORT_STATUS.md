@@ -423,32 +423,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
-- Open: **A `global func` body resolves unqualified identifiers against its
-  declaring host, where C4Aul resolves them against the engine only.** Both
-  identifier sites switch the *whole* lookup for an engine-owned function —
-  `if (Fn->Owner == &Game.ScriptEngine) FoundFn = a->Owner->GetFuncRecursive(Idtf);`
-  (`C4AulParse.cpp:2216-2219`, `:2818-2823`) — so a global body cannot see its
-  declaring host's definition-scope functions at all. The port instead honours
-  `env.linked_host_lookup` (`crates/clonk-script/src/vm.rs`) at ten body
-  resolution sites. `C4AulFunc::GetLocalSFunc` ("search linked scope first",
-  `C4Aul.cpp:118-127`) is *not* a counter-example: its only callers are
-  `FnResortObjects`/`FnResortObject` (`C4Script.cpp:4491`, `:4512`), i.e. a
-  by-name runtime lookup, not body resolution — the port should keep modelling
-  that with `exact_global_link_lookup` while dropping the body-resolution half.
-  Closing this reds three assertions installed by earlier parity work
-  (`script_relink_regression.rs`'s
-  `global_resort_comparator_executes_without_a_definition_context`, and
-  `effects.rs`'s `no_command_target_effect_uses_exact_engine_global_scope` and
-  `command_target_global_effect_keeps_this_and_linked_helper_scope`), which
-  pin values C4Aul cannot produce and need re-scoping, not a value bump. No
-  shipped content is affected: of 80 candidate sites in `content/`, every one
-  is an `Obj->Method()` call, which compiles to AB_CALL rather than identifier
-  resolution.
-
-  A second divergence sits behind it: the port lets a `global func` body read
-  and write its declaring host's named `local`s, which C4Aul rejects at parse
-  time in both the lvalue and rvalue paths (`C4AulParse.cpp:2000-2004`,
-  `:2731-2737`, "using local variable in global function!").
+- Open: **A `global func` body may read and write its declaring host's named
+  `local`s.** C4Aul rejects that outright at parse time, in both the lvalue and
+  the rvalue path — `else if (a->LocalNamed.GetItemNr(Idtf) != -1) { if
+  (Fn->Owner == &Game.ScriptEngine) throw C4AulParseError(this, "using local
+  variable in global function!"); }` (`C4AulParse.cpp:2000-2004`,
+  `:2731-2737`) — so the enclosing function never links and every call raises.
+  Engine-owned *function* resolution now matches (`global func` bodies resolve
+  identifiers against the engine table), but the named-`local` rejection has no
+  equivalent, because the port resolves object locals at run time against the
+  supplied cells rather than against a per-script `LocalNamed` table checked
+  during parsing. No shipped content depends on it. `parity verify` does not
+  cover it: the golden has no `global func`.
 
 - Open: **`inherited()` with no overload target is reported only when the call
   executes, where C4Aul reports it once at link time.** `C4AulParse.cpp:2799`
