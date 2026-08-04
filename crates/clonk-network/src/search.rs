@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::ops::Not as _;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,6 +30,9 @@ const EMPTY_REFERENCE_LIFETIME: Duration = Duration::from_secs(10);
 
 const DISCOVERY_PROBE: u8 = 0x03;
 const DISCOVERY_REPLY: u8 = 0x04;
+/// `MCGrpInfo.ipv6mr_interface = 0; // Default interface` — the only interface
+/// C++ ever joins on (pinned oracle src/C4NetIO.cpp:1624).
+const DEFAULT_MULTICAST_INTERFACE: u32 = 0;
 const SCOPED_IPV6_REQUEST_HOST: &str = "clonk-rust-lan.invalid";
 pub(crate) const DISCOVERY_MULTICAST: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
@@ -755,13 +759,27 @@ pub enum StartupGameSearchEvent {
     },
 }
 
+/// Which half of the discovery path a refresh has to report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LanProbeFailure {
+    /// The socket could not be built, so no datagram was ever attempted.
+    Unavailable,
+    /// `sendto` itself failed — the only failure C++ carries into its refresh
+    /// modal (pinned oracle src/C4NetIO.cpp:1784).
+    Send,
+}
+
 fn lan_probe_error_event(
     trigger: LanProbeTrigger,
+    failure: LanProbeFailure,
     error: io::Error,
 ) -> Option<StartupGameSearchEvent> {
     (trigger == LanProbeTrigger::ExplicitRefresh).then(|| StartupGameSearchEvent::SearchError {
         source: Some(ReferenceQuerySource::GameDiscovery),
-        message: format!("unable to send LAN discovery probe: {error}"),
+        message: match failure {
+            LanProbeFailure::Unavailable => format!("LAN discovery is unavailable: {error}"),
+            LanProbeFailure::Send => format!("unable to send LAN discovery probe: {error}"),
+        },
     })
 }
 
@@ -893,24 +911,50 @@ struct DiscoverySocket {
 
 impl DiscoverySocket {
     async fn send_probe(&self, payload: &[u8], target: SocketAddrV6) -> io::Result<()> {
-        let mut last_error = None;
-        let mut sent = false;
-        for target in multicast_targets(target, &self.multicast_interfaces) {
-            if let Err(error) = SockRef::from(&self.socket).set_multicast_if_v6(target.scope_id()) {
+        send_discovery_datagram(&self.socket, payload, target, &self.multicast_interfaces).await
+    }
+}
+
+/// Sends one discovery datagram to every target the joined interface list
+/// expands to, succeeding when any of them left the host.
+pub(crate) async fn send_discovery_datagram(
+    socket: &UdpSocket,
+    payload: &[u8],
+    target: SocketAddrV6,
+    interfaces: &[u32],
+) -> io::Result<()> {
+    let mut last_error = None;
+    let mut sent = false;
+    for target in multicast_targets(target, interfaces) {
+        if let Some(interface) = multicast_send_interface(&target) {
+            if let Err(error) = SockRef::from(socket).set_multicast_if_v6(interface) {
                 last_error = Some(error);
                 continue;
             }
-            match self.socket.send_to(payload, target).await {
-                Ok(_) => sent = true,
-                Err(error) => last_error = Some(error),
-            }
         }
-        if sent {
-            Ok(())
-        } else {
-            Err(last_error.unwrap_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable)))
+        match socket.send_to(payload, target).await {
+            Ok(_) => sent = true,
+            Err(error) => last_error = Some(error),
         }
     }
+    if sent {
+        Ok(())
+    } else {
+        Err(last_error.unwrap_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable)))
+    }
+}
+
+/// Whether an explicit refresh should rebuild the discovery socket.
+///
+/// C4StartupNetDlg never re-inits its DiscoverClient (pristine 9ffa0a5d
+/// src/C4StartupNetDlg.cpp:737, 1093-1105); the port rebuilds only a socket
+/// that reaches no group at all, so that joining a network after the dialog
+/// opened recovers without reopening it.
+fn discovery_needs_rebuild(discovery: &io::Result<DiscoverySocket>) -> bool {
+    discovery
+        .as_ref()
+        .is_ok_and(|socket| !socket.multicast_interfaces.is_empty())
+        .not()
 }
 
 async fn run_game_search(
@@ -920,7 +964,7 @@ async fn run_game_search(
     events: mpsc::Sender<StartupGameSearchEvent>,
 ) {
     let mut search = NetworkGameSearch::new(config.clone());
-    let discovery = discovery_socket(config.discovery_port);
+    let mut discovery = discovery_socket(config.discovery_port);
     let (query_tx, mut query_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut generation = 0_u64;
     let mut masterserver_generation = 0_u64;
@@ -948,6 +992,11 @@ async fn run_game_search(
                     next_periodic_lan_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
                     next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
                     let _ = events.send(StartupGameSearchEvent::Cleared);
+                    if matches!(command, StartupGameSearchCommand::Refresh)
+                        && discovery_needs_rebuild(&discovery)
+                    {
+                        discovery = discovery_socket(config.discovery_port);
+                    }
                     let commands = match command {
                         StartupGameSearchCommand::InitialRefresh => search.initial_commands(),
                         _ => search.refresh(),
@@ -1273,14 +1322,21 @@ async fn execute_search_command(
             payload,
             trigger,
         } => {
-            let result = match discovery {
-                Ok(socket) => socket.send_probe(&payload, target).await,
-                Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
+            let failure = match discovery {
+                Ok(socket) => socket
+                    .send_probe(&payload, target)
+                    .await
+                    .err()
+                    .map(|error| (LanProbeFailure::Send, error)),
+                Err(error) => Some((
+                    LanProbeFailure::Unavailable,
+                    io::Error::new(error.kind(), error.to_string()),
+                )),
             };
-            if let Err(error) = result {
-                if let Some(event) = lan_probe_error_event(trigger, error) {
-                    let _ = events.send(event);
-                }
+            if let Some(event) =
+                failure.and_then(|(failure, error)| lan_probe_error_event(trigger, failure, error))
+            {
+                let _ = events.send(event);
             }
         }
         SearchCommand::QueryReferences {
@@ -1340,10 +1396,11 @@ fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
         socket.set_multicast_loop_v6(true)?;
     }
     socket.bind(&address.into())?;
-    let multicast_interfaces = dual_stack
-        .then(|| join_discovery_multicast(&socket))
-        .transpose()?
-        .unwrap_or_default();
+    let multicast_interfaces = if dual_stack {
+        join_discovery_multicast(&socket)
+    } else {
+        Vec::new()
+    };
     socket.set_nonblocking(true)?;
     Ok(DiscoverySocket {
         socket: UdpSocket::from_std(socket.into())?,
@@ -1351,32 +1408,89 @@ fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
     })
 }
 
-pub(crate) fn multicast_targets(target: SocketAddrV6, _interfaces: &[u32]) -> Vec<SocketAddrV6> {
-    vec![target]
-}
-
-/// Joins the C++ discovery group on every candidate interface, falling back to
-/// the platform default when none of them accepted the join.
-pub(crate) fn join_discovery_multicast(socket: &Socket) -> io::Result<Vec<u32>> {
-    let mut multicast_interfaces = multicast_interface_indices()
-        .into_iter()
-        .filter(|interface| {
-            socket
-                .join_multicast_v6(&DISCOVERY_MULTICAST, *interface)
-                .is_ok()
-        })
-        .collect::<Vec<_>>();
-    if multicast_interfaces.is_empty() {
-        socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
-        multicast_interfaces.push(0);
+/// Expands the discovery group into one destination per joined interface.
+///
+/// The C++ default-interface join yields the single unscoped destination
+/// C4NetIOSimpleUDP sends to (pinned oracle src/C4NetIO.cpp:1624, :1793-1796),
+/// and so does a host that joined nothing at all.
+pub(crate) fn multicast_targets(target: SocketAddrV6, interfaces: &[u32]) -> Vec<SocketAddrV6> {
+    if interfaces
+        .iter()
+        .all(|interface| *interface == DEFAULT_MULTICAST_INTERFACE)
+    {
+        return vec![target];
     }
-    Ok(multicast_interfaces)
+    interfaces
+        .iter()
+        .map(|interface| {
+            SocketAddrV6::new(*target.ip(), target.port(), target.flowinfo(), *interface)
+        })
+        .collect()
 }
 
+/// The interface `IPV6_MULTICAST_IF` must name before sending to `target`, or
+/// `None` where C++ leaves the option untouched.
+fn multicast_send_interface(target: &SocketAddrV6) -> Option<u32> {
+    (target.scope_id() != DEFAULT_MULTICAST_INTERFACE).then(|| target.scope_id())
+}
+
+/// Joins the C++ discovery group, preferring the platform default interface and
+/// falling back to every interface that accepts the join when it refuses.
+///
+/// Never fails: `C4NetIOSimpleUDP::InitBroadcast` returns false on a refused
+/// join without closing anything (pinned oracle src/C4NetIO.cpp:1626-1632), and
+/// both callers keep going — the client discards the result outright
+/// (src/C4StartupNetDlg.cpp:737) and the host merely logs and drops its
+/// discovery object, building the reference server afterwards
+/// (src/C4Network2IO.cpp:86-89, :151-161).
+pub(crate) fn join_discovery_multicast(socket: &Socket) -> Vec<u32> {
+    joined_discovery_interfaces(&multicast_interface_indices, &|interface| {
+        socket.join_multicast_v6(&DISCOVERY_MULTICAST, interface)
+    })
+}
+
+/// `candidates` stays unevaluated until the default interface has refused the
+/// join, so a host that behaves like C++ never enumerates anything.
+fn joined_discovery_interfaces(
+    candidates: &dyn Fn() -> Vec<u32>,
+    join: &dyn Fn(u32) -> io::Result<()>,
+) -> Vec<u32> {
+    if join(DEFAULT_MULTICAST_INTERFACE).is_ok() {
+        return vec![DEFAULT_MULTICAST_INTERFACE];
+    }
+    candidates()
+        .into_iter()
+        .filter(|interface| *interface != DEFAULT_MULTICAST_INTERFACE && join(*interface).is_ok())
+        .collect()
+}
+
+/// Interface indices to try once the platform default has refused the join,
+/// ascending so the joined set does not depend on kernel enumeration order.
+#[cfg(unix)]
 pub(crate) fn multicast_interface_indices() -> Vec<u32> {
-    // C4NetIOSimpleUDP::InitBroadcast uses ipv6mr_interface=0 and relies on
-    // the platform's default interface (C4NetIO.cpp:1617-1633).
-    vec![0]
+    // SAFETY: `if_nameindex` returns a caller-owned array terminated by an
+    // entry whose index is zero, released exactly once by `if_freenameindex`
+    // below. Every read stays inside that terminator.
+    let list = unsafe { libc::if_nameindex() };
+    if list.is_null() {
+        return Vec::new();
+    }
+    let mut indices = BTreeSet::new();
+    let mut entry = list;
+    while let index @ 1.. = unsafe { (*entry).if_index } {
+        indices.insert(index);
+        entry = unsafe { entry.add(1) };
+    }
+    unsafe { libc::if_freenameindex(list) };
+    indices.into_iter().collect()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn multicast_interface_indices() -> Vec<u32> {
+    // Enumerating interfaces needs `GetAdaptersAddresses` here, which no
+    // required gate compiles for this crate. Leaving the fallback empty keeps
+    // the C++ default-interface join as the only attempt, unchanged.
+    Vec::new()
 }
 
 pub fn parse_reference_response(
@@ -2641,10 +2755,136 @@ Title=Empty\n",
         // C4NetIOSimpleUDP::InitBroadcast joins ff02::1 with
         // ipv6mr_interface=0 and leaves the destination scope unset; it does
         // not enumerate or fan out over interfaces (pristine 9ffa0a5d
-        // src/C4NetIO.cpp:1587-1633).
+        // src/C4NetIO.cpp:1587-1633). Wherever that join succeeds the port
+        // still sends exactly that one datagram; the fan-out below is reached
+        // only once the kernel has refused it (PORT_STATUS.md, deliberate
+        // divergences).
         let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
 
-        assert_eq!(multicast_targets(target, &[2, 7]), vec![target]);
+        assert_eq!(
+            multicast_targets(target, &[DEFAULT_MULTICAST_INTERFACE]),
+            vec![target]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_an_unusable_discovery_socket_is_rebuilt_on_refresh() {
+        // C4StartupNetDlg builds DiscoverClient once in its constructor and
+        // never re-inits it (pristine 9ffa0a5d src/C4StartupNetDlg.cpp:737,
+        // 1093-1105). The port rebuilds only what cannot work at all, so a
+        // socket that joined a group keeps its buffered replies across a
+        // refresh exactly as C++ does.
+        let unbuilt = Err::<DiscoverySocket, _>(io::Error::from(io::ErrorKind::AddrNotAvailable));
+        let joined = discovery_socket(0).expect("an ephemeral discovery socket binds");
+
+        assert!(discovery_needs_rebuild(&unbuilt));
+        assert_eq!(
+            discovery_needs_rebuild(&Ok(joined)),
+            joined_nothing_on_this_host(),
+        );
+    }
+
+    /// Whether this host refused every multicast join, which decides what
+    /// `only_an_unusable_discovery_socket_is_rebuilt_on_refresh` may expect
+    /// without baking one kernel's answer into the assertion.
+    fn joined_nothing_on_this_host() -> bool {
+        discovery_socket(0)
+            .expect("an ephemeral discovery socket binds")
+            .multicast_interfaces
+            .is_empty()
+    }
+
+    #[test]
+    fn a_scoped_join_set_sends_one_probe_per_joined_interface() {
+        // The unscoped destination only reaches the interface the kernel picks
+        // by default. Once that interface has refused the join there is nothing
+        // left to reach it through, so each joined interface gets its own
+        // destination scope.
+        let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
+
+        assert_eq!(
+            multicast_targets(target, &[3, 11]),
+            vec![
+                SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 3),
+                SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 11),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unjoinable_host_still_probes_the_cpp_default_interface() {
+        // C4NetIOSimpleUDP::Send keeps sending to the unscoped group after a
+        // refused join, because InitBroadcast leaves the socket usable
+        // (pinned oracle src/C4NetIO.cpp:1626-1632, :1773-1791).
+        let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
+
+        assert_eq!(multicast_targets(target, &[]), vec![target]);
+    }
+
+    #[test]
+    fn the_cpp_default_interface_never_sets_ipv6_multicast_if() {
+        // C++ sets IPV6_MULTICAST_HOPS, IPV6_ADD_MEMBERSHIP and
+        // IPV6_MULTICAST_LOOP and no other multicast option; IPV6_MULTICAST_IF
+        // appears nowhere in the oracle tree (pinned oracle
+        // src/C4NetIO.cpp:1614, :1627, :1886). macOS rejects a request for
+        // interface 0 outright, so only the scoped fan-out may ask for one.
+        let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
+        let scoped = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 7);
+
+        assert_eq!(multicast_send_interface(&target), None);
+        assert_eq!(multicast_send_interface(&scoped), Some(7));
+    }
+
+    #[test]
+    fn enumerated_multicast_interfaces_do_not_depend_on_kernel_listing_order() {
+        // `if_nameindex` reports interfaces in kernel-list order, which differs
+        // between hosts and across reboots. The fallback drives probe send
+        // order, so it is sorted and deduplicated; index 0 is excluded because
+        // it is the attempt that already failed.
+        let interfaces = multicast_interface_indices();
+
+        assert!(interfaces.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(!interfaces.contains(&DEFAULT_MULTICAST_INTERFACE));
+    }
+
+    #[test]
+    fn a_refused_default_multicast_join_keeps_every_joinable_interface() {
+        // C4NetIOSimpleUDP::InitBroadcast joins on ipv6mr_interface=0 alone and
+        // gives up when the kernel refuses it (pinned oracle
+        // src/C4NetIO.cpp:1620-1631). Where the default interface has no IPv6
+        // route the port keeps searching instead, so discovery survives.
+        let refuses_the_default = |interface: u32| {
+            (interface == DEFAULT_MULTICAST_INTERFACE || interface == 7)
+                .then(|| io::Error::from(io::ErrorKind::AddrNotAvailable))
+                .map_or(Ok(()), Err)
+        };
+
+        assert_eq!(
+            joined_discovery_interfaces(&|| vec![3, 7, 11], &refuses_the_default),
+            vec![3, 11]
+        );
+    }
+
+    #[test]
+    fn an_accepted_default_multicast_join_enumerates_no_interfaces() {
+        // The whole fallback is invisible wherever C++ works: the port must not
+        // even ask the kernel for an interface list, so a host that behaves
+        // like the oracle issues exactly the one join the oracle issues
+        // (pinned oracle src/C4NetIO.cpp:1627-1631).
+        let enumerated = std::cell::Cell::new(false);
+        let joined = joined_discovery_interfaces(
+            &|| {
+                enumerated.set(true);
+                vec![3, 11]
+            },
+            &|_| Ok(()),
+        );
+
+        assert_eq!(joined, vec![DEFAULT_MULTICAST_INTERFACE]);
+        assert!(
+            !enumerated.get(),
+            "the C++ path must not enumerate interfaces"
+        );
     }
 
     #[test]
@@ -2695,16 +2935,44 @@ Title=Empty\n",
         // master query (pristine 9ffa0a5d src/C4StartupNetDlg.cpp:736-739,
         // 1093-1105, 1122-1128).
         let failure = || io::Error::new(io::ErrorKind::HostUnreachable, "no route");
+        let send = LanProbeFailure::Send;
 
-        assert!(lan_probe_error_event(LanProbeTrigger::Initial, failure()).is_none());
-        assert!(lan_probe_error_event(LanProbeTrigger::Periodic, failure()).is_none());
+        assert!(lan_probe_error_event(LanProbeTrigger::Initial, send, failure()).is_none());
+        assert!(lan_probe_error_event(LanProbeTrigger::Periodic, send, failure()).is_none());
 
-        let event = lan_probe_error_event(LanProbeTrigger::ExplicitRefresh, failure())
+        let event = lan_probe_error_event(LanProbeTrigger::ExplicitRefresh, send, failure())
             .expect("explicit refresh reports the discovery send failure");
         match event {
             StartupGameSearchEvent::SearchError { source, message } => {
                 assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
                 assert_eq!(message, "unable to send LAN discovery probe: no route");
+            }
+            _ => panic!("expected LAN discovery error"),
+        }
+    }
+
+    #[test]
+    fn an_unbuilt_discovery_socket_is_not_reported_as_a_failed_send() {
+        // The only error C4StartupNetDlg's refresh modal can carry comes from
+        // C4NetIOSimpleUDP::Send, because InitBroadcast's failure never reaches
+        // GetError() there (pinned oracle src/C4NetIO.cpp:1784,
+        // src/C4StartupNetDlg.cpp:1094-1102). A socket that was never built
+        // sent nothing, so it must not claim a send was attempted.
+        let error = || io::Error::new(io::ErrorKind::AddrNotAvailable, "no multicast interface");
+
+        let event = lan_probe_error_event(
+            LanProbeTrigger::ExplicitRefresh,
+            LanProbeFailure::Unavailable,
+            error(),
+        )
+        .expect("explicit refresh reports the unusable socket");
+        match event {
+            StartupGameSearchEvent::SearchError { source, message } => {
+                assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
+                assert_eq!(
+                    message,
+                    "LAN discovery is unavailable: no multicast interface"
+                );
             }
             _ => panic!("expected LAN discovery error"),
         }
@@ -3009,7 +3277,7 @@ Build=362\n";
                 assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
                 assert_eq!(
                     message,
-                    "unable to send LAN discovery probe: no multicast interface"
+                    "LAN discovery is unavailable: no multicast interface"
                 );
             }
             _ => panic!("expected LAN discovery error"),

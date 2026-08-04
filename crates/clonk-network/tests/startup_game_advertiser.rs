@@ -217,6 +217,35 @@ fn assert_reference_charset(response: &[u8], charset: &str, encoded: &[u8], cont
 }
 
 #[test]
+fn a_host_that_cannot_join_the_discovery_group_still_serves_its_reference() {
+    // C4Network2IO::Init logs a failed discovery init, leaves pNetIODiscover
+    // null and builds the reference server afterwards, so hosting survives a
+    // refused multicast join and the game stays reachable by typed address
+    // (pinned oracle src/C4Network2IO.cpp:86-89, :151-161).
+    let discovery_reservation = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let discovery_port = discovery_reservation.local_addr().unwrap().port();
+    drop(discovery_reservation);
+
+    let advertiser = NetworkGameAdvertiser::start(
+        NetworkGameAdvertiserConfig {
+            discovery_port,
+            reference_port: Some(0),
+            language_charset: String::new(),
+        },
+        advertised_game(),
+    )
+    .expect("a host advertises even where the kernel refuses the discovery group");
+
+    let reference_port = advertiser.reference_addr().port();
+    assert_ne!(reference_port, 0, "the reference listener must survive");
+    let response = http_request(reference_port, b"GET / HTTP/1.0\r\n\r\n");
+    let references = parse_reference_response(&response).expect("reference server answers");
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].title, "Gold Rush");
+    drop(advertiser);
+}
+
+#[test]
 fn disabled_reference_server_keeps_discovery_only_advertiser_clean() {
     let discovery_reservation = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
     let discovery_port = discovery_reservation.local_addr().unwrap().port();
