@@ -9091,12 +9091,13 @@ mod tests {
         // Reference address lists put the IPv6 endpoints first, so reporting
         // only the lowest-indexed dial hides whatever went wrong on the
         // address the client actually needed (clonk-org/clonk-rs#109).
-        let first_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let first_address = first_listener.local_addr().unwrap();
-        let second_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let second_address = second_listener.local_addr().unwrap();
-        drop(first_listener);
-        drop(second_listener);
+        //
+        // Both ports sit below every platform's ephemeral range, so no
+        // concurrent test in this binary can be bound to one of them. Dialling
+        // a just-released ephemeral port instead would let a listener opened
+        // elsewhere in the suite answer this join.
+        let first_address = SocketAddr::from(([127, 0, 0, 1], 31_116));
+        let second_address = SocketAddr::from(([127, 0, 0, 1], 31_117));
 
         let error = connect_client_addresses(
             [
