@@ -425,6 +425,32 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Open: **`inherited` in a script function is resolved from a statically wired
+  overload chain, not from the live function tables C4Aul searches at link
+  time.** `Function::owner_overloaded` (`crates/clonk-script/src/ast.rs`) now
+  models both cuts of `Fn->Owner->GetOverloadedFunc(Fn)`
+  (`C4AulParse.cpp:1406-1408`): an engine-owned `global func` reaches only
+  other engine-owned functions, and a definition-scope function walks its own
+  host's declarations before hopping to the engine. Three narrower gaps
+  remain, none of which shipped content exercises today:
+  - The engine hop is a chain walk, so a definition-scope function reaches a
+    global only when one sits in its own chain. C++ evaluates
+    `Owner->GetFuncRecursive(ByFunc->Name)` (`C4Aul.cpp:281-288`) against the
+    live engine table, which resolves to the newest same-name global from
+    *any* host.
+  - A `global func` body resolves unqualified identifiers against its
+    declaring host as well as the engine table. C++ switches the whole lookup
+    to the engine for engine-owned functions (`C4AulParse.cpp:2216-2219`,
+    `:2820-2823`), so a global body cannot see its declaring definition's
+    other functions at all.
+  - `inherited()` with no overload target is a runtime error here
+    (`crates/clonk-script/src/vm.rs`) and a *parse*-time link error in C++
+    (`C4AulParse.cpp:2799`, `Type == PARSER`). Correcting the global chain
+    widens the set of globals with no target, so it widens this timing gap;
+    the failsafe `_inherited` spelling both engines agree on is unaffected.
+
+  `parity verify` does not cover any of it: the golden has no `global func`.
+
 - Open: **A `Game.pGlobalEffects` callback still runs with no ambient object
   even when the effect has a command target.** Object effects now execute on
   their command target, so `cthr->Obj` — the fallback every implicit-object

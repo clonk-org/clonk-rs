@@ -4259,7 +4259,9 @@ impl<'a> Vm<'a> {
             function.strict_level,
             object_state,
         )?;
-        env.inherited_target = function.overloaded.clone();
+        // `Fn->OwnerOverloaded` is resolved in the function's OWN owner list,
+        // which for a `global func` is the engine's (C4AulParse.cpp:1406-1408).
+        env.inherited_target = function.owner_overloaded().cloned();
         env.function_name = function.name.clone();
         env.engine_scope = function.access == AccessLevel::Global;
         let explicit_definition_context = match &self.this_value {

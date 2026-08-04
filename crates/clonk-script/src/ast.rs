@@ -195,6 +195,43 @@ impl Function {
             .find(|function| function.access != AccessLevel::Global)
     }
 
+    /// The function this one overloaded, resolved in its OWNER's function
+    /// list like `Fn->OwnerOverloaded = Fn->Owner->GetOverloadedFunc(Fn)`
+    /// (C4AulParse.cpp:1406-1408, whose comment reads "*MUST* check
+    /// Fn->Owner-list, because it may be the engine (due to linked globals)").
+    ///
+    /// A `global func` is built as `new C4AulScriptFunc(a->Engine, Idtf)` and
+    /// leaves only an UNNAMED `C4AulFunc(a, nullptr)` link in the declaring
+    /// script (C4AulParse.cpp:1608-1615), so:
+    ///
+    /// * an engine-owned function walks the ENGINE's list, which holds only
+    ///   natives and other globals — never a definition-scope function of the
+    ///   declaring host;
+    /// * a definition-scope function walks its own host's list first, where
+    ///   the unnamed link never matches `SEqual(ByFunc->Name, f->Name)`
+    ///   (C4Aul.cpp:269-276), and only when that finds nothing does it hop to
+    ///   the engine (`if (!f && Owner)`, C4Aul.cpp:281-288).
+    ///
+    /// Rust keys one overload chain per name for the whole host, so both cuts
+    /// are applied here rather than at chain construction: the chain is also
+    /// how `first_non_global` keeps the host's own declaration reachable.
+    pub(crate) fn owner_overloaded(&self) -> Option<&std::sync::Arc<Self>> {
+        let ancestors = || {
+            std::iter::successors(self.overloaded.as_ref(), |parent| {
+                parent.overloaded.as_ref()
+            })
+        };
+        let engine_owned =
+            |function: &&std::sync::Arc<Self>| function.access == AccessLevel::Global;
+        if self.access == AccessLevel::Global {
+            ancestors().find(engine_owned)
+        } else {
+            ancestors()
+                .find(|function| !engine_owned(function))
+                .or_else(|| ancestors().find(engine_owned))
+        }
+    }
+
     /// Hang `parent` at the tail of this function's overload chain (C++
     /// `Fn->OwnerOverloaded`). Idempotent for repeat-link callers: a parent
     /// already on the chain is replaced when it has gained its own chain.

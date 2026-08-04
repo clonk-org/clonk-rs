@@ -26,6 +26,38 @@ fn appended_functions_override_and_reach_the_original_via_inherited() {
 }
 
 #[test]
+fn appended_function_reaches_the_targets_own_func_past_its_global_twin() {
+    // The append copy is created at the target's `FuncL` (C4AulLink.cpp:41
+    // `AppendTo(Def->Script, true)` -> :127 with bAtEnd), so
+    // `GetOverloadedFunc`'s backward walk (C4Aul.cpp:269-276) passes the
+    // target's UNNAMED global link (C4AulParse.cpp:1613) and stops at its
+    // named definition-scope function. Rust flattens both declarations into
+    // one chain, so the appended function must skip the global node.
+    let mut target = Engine::new();
+    target.add_script(
+        Script::compile(
+            "#strict\n\
+             public func Probe() { return 1; }\n\
+             global func Probe() { return 1000; }",
+        )
+        .expect("compiles"),
+    );
+
+    let mut append = Engine::new();
+    append.add_script(
+        Script::compile("#strict\npublic func Probe() { return 100 + inherited(); }")
+            .expect("compiles"),
+    );
+
+    target.append_overrides_from(&append);
+    assert_eq!(
+        target.call("Probe", &[]).expect("call succeeds"),
+        Value::Int(101),
+        "the append reaches the target's own func, not its engine-owned twin"
+    );
+}
+
+#[test]
 fn appended_scripts_bring_new_functions_but_not_globals() {
     let mut target = Engine::new();
     target.add_script(Script::compile("public func Own() { return 1; }").expect("compiles"));
