@@ -3567,6 +3567,79 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
 }
 
 #[test]
+fn abandoned_join_password_prompt_keeps_the_netdlg_search_running() {
+    // C4StartupNetDlg owns DiscoverClient for the dialog's whole lifetime: it
+    // is constructed with the dialog and closed only in the destructor, and a
+    // join password dialog merely stops OnSec1Timer while it is up
+    // (oracle-src-pinned src/C4StartupNetDlg.cpp:737-738,752,1116-1120).
+    let mut app = new_classic_menu_app(800, 600);
+    let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics {
+        caption_back_extent: 51,
+        text_ip_extent: 18,
+        text_line_height: 22,
+        caption_line_height: 25,
+        title_line_height: 34,
+    };
+    let mut network_dialog = clonk_frontend::startup_netdlg::NetDlgController::new(
+        clonk_frontend::startup_netdlg::NetDlgConfig {
+            masterserver_signup: false,
+            record: false,
+        },
+        metrics,
+    );
+    network_dialog.resize(800, 600);
+    app.startup_view = StartupView::NetworkGame;
+    app.startup_network_dialog = Some(network_dialog);
+    app.startup_game_search = Some(
+        clonk_network::StartupGameSearch::start(clonk_network::NetworkGameSearchConfig {
+            internet_enabled: false,
+            use_alternate_server: false,
+            master_server_url: String::new(),
+            discovery_port: 0,
+        })
+        .expect("start network search"),
+    );
+    let reference = clonk_network::NetworkGameReference {
+        title: "Passworded game".to_string(),
+        password_needed: true,
+        source_address: "127.0.0.1:11111".parse().unwrap(),
+        ..Default::default()
+    };
+
+    app.activate_network_reference_join(reference.clone())
+        .expect("password-protected reference prompts before joining");
+    assert!(app.game_option_input_dialog.is_some());
+
+    app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
+        .expect("cancel password prompt");
+
+    assert!(app.pending_network_join.is_none());
+    assert!(
+        app.startup_game_search.is_some(),
+        "a cancelled password prompt must leave the dialog's search running"
+    );
+    app.request_startup_network_refresh()
+        .expect("refresh the retained search");
+    assert!(
+        app.message_dialogs.is_empty(),
+        "refresh must not report a search that was never stopped"
+    );
+
+    // An empty password aborts the join exactly like Cancel does.
+    app.activate_network_reference_join(reference)
+        .expect("second attempt prompts again");
+    app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(String::new())])
+        .expect("empty password aborts the join");
+
+    assert!(app.pending_network_join.is_none());
+    assert!(app.startup_network_connection.is_none());
+    assert!(
+        app.startup_game_search.is_some(),
+        "an empty password must leave the dialog's search running"
+    );
+}
+
+#[test]
 fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
     let mut app = new_classic_menu_app(800, 600);
     let attempts = vec![
@@ -5088,8 +5161,16 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
 
     for (binding, key, modifiers) in [
         ("Left", VirtualKeyCode::ArrowLeft, ModifiersState::empty()),
-        ("Shift+Right", VirtualKeyCode::ArrowRight, ModifiersState::SHIFT),
-        ("Ctrl+Left", VirtualKeyCode::ArrowLeft, ModifiersState::CONTROL),
+        (
+            "Shift+Right",
+            VirtualKeyCode::ArrowRight,
+            ModifiersState::SHIFT,
+        ),
+        (
+            "Ctrl+Left",
+            VirtualKeyCode::ArrowLeft,
+            ModifiersState::CONTROL,
+        ),
         (
             "Ctrl+Shift+Right",
             VirtualKeyCode::ArrowRight,
@@ -5123,9 +5204,8 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         ),
     );
     assert!(observer_menu.primary_physical_viewport_is_no_owner());
-    assert!(
-        !observer_menu.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
-    );
+    assert!(!observer_menu
+        .handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed));
 
     let mut irc = configured("F8");
     irc.show_external_irc_dialog()
@@ -5156,7 +5236,9 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         .expect("standalone IRC controller")
         .force_chat_mode_and_focus();
     irc_edit.keyboard_modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
-    assert!(!irc_edit.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed));
+    assert!(
+        !irc_edit.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
+    );
 
     let mut irc_connect = configured("Up");
     irc_connect
@@ -5201,9 +5283,8 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
             .and_then(GameOverState::focused),
         Some(GameOverFocus::PlayerList(_))
     ));
-    assert!(
-        !game_over_list.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
-    );
+    assert!(!game_over_list
+        .handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed));
 
     let mut vote = configured("Alt+Y");
     vote.push_message_dialog(
