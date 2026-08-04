@@ -4,6 +4,37 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-04
+
+### Bug fixes
+
+- Keep the startup game search running when a join password prompt is abandoned (#154)
+- Report an operating-system key repeat on every target, including macOS (#152)
+- Render a failed client join without a duplicated connect caption (#149)
+- Draw the product logo on ClonkMars upper boards (#148)
+- Demote the unresolvable-sound-name log to debug like C4SoundSystem (#147)
+- Resolve a global func body against the engine, not its declaring host (#143)
+- Resolve inherited against the owner list C4Aul searches (#140)
+- Keep network peers on one material order by loading packed resource images (#139)
+
+### Documentation
+
+- Point the test globs at the renamed tests (#151)
+- Replace private tracker audit ids with the facts they stand for (#146)
+- Qualify every issue reference with its owner and repository (#144)
+
+### Features
+
+- Show the running order total and the player's wealth while ordering (#156)
+- Step a Menu2 range with the arrow keys and price its order before delivery (#155)
+- Collapse a ClonkMars order row to one row per product (#153)
+- Report an unresolvable inherited call at link time like C4Aul (#145)
+
+### Refactoring
+
+- Name tests for the behaviour they pin, not the item that prompted them (#150)
+- Remove the unreachable startup-menu frame cache (#141)
+
 ## [0.6.5] - 2026-08-04
 
 ### Bug fixes
