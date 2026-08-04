@@ -4019,20 +4019,24 @@ impl Engine {
                 }
             }
             COM_MENU_LEFT => {
-                let delta = if menu.selection - 1 < 0 {
-                    menu.items.len() as i32 - 1 - menu.selection
-                } else {
-                    -1
-                };
-                self.move_object_menu_selection(index, delta)?;
+                if !self.object_menu_step(object_id, &menu, -1)? {
+                    let delta = if menu.selection - 1 < 0 {
+                        menu.items.len() as i32 - 1 - menu.selection
+                    } else {
+                        -1
+                    };
+                    self.move_object_menu_selection(index, delta)?;
+                }
             }
             COM_MENU_RIGHT => {
-                let delta = if menu.selection + 1 >= menu.items.len() as i32 {
-                    -menu.selection
-                } else {
-                    1
-                };
-                self.move_object_menu_selection(index, delta)?;
+                if !self.object_menu_step(object_id, &menu, 1)? {
+                    let delta = if menu.selection + 1 >= menu.items.len() as i32 {
+                        -menu.selection
+                    } else {
+                        1
+                    };
+                    self.move_object_menu_selection(index, delta)?;
+                }
             }
             COM_MENU_UP => {
                 let columns = menu.columns;
@@ -4214,6 +4218,50 @@ impl Engine {
         }
         self.set_object_menu_selection(index, selection)?;
         Ok(true)
+    }
+
+    /// clonk-rs divergence: offer a horizontal menu com to the script before
+    /// it becomes a selection move. Once `Columns == 1` — which every style
+    /// but `C4MN_Style_Normal` forces (C4Menu.cpp:359-365) —
+    /// `C4Menu::Control` gives COM_MenuLeft/Right exactly the deltas
+    /// COM_MenuUp/Down already carry (C4Menu.cpp:433-457), so the horizontal
+    /// pair says nothing the vertical pair does not. A user menu's own
+    /// command object may claim them by implementing `OnMenuStep(iDelta,
+    /// pMenuObject)` and returning true. Everything else — a menu that is not
+    /// script-created, more than one column, no such function, a falsy
+    /// return, a script error — falls through to the shipped selection move
+    /// unchanged, so this is inert for content that does not ask for it.
+    /// Dispatch mirrors `set_object_menu_selection` below, which ports
+    /// `C4ObjectMenu::OnSelectionChanged` (C4ObjectMenu.cpp:93-104).
+    fn object_menu_step(
+        &mut self,
+        object_id: ObjectId,
+        menu: &crate::ObjectMenuState,
+        delta: i32,
+    ) -> Result<bool, EngineError> {
+        if !menu.user_menu || menu.columns != 1 {
+            return Ok(false);
+        }
+        let args = vec![Value::Int(delta), compat::object_reference_value(object_id)];
+        let handled = if menu.scenario_callbacks {
+            self.call_scenario_script_value("OnMenuStep", &args)?
+        } else {
+            let Some(command_object) = menu.command_object else {
+                return Ok(false);
+            };
+            let Some(command_index) =
+                self.find_object_index(command_object)
+                    .filter(|&command_index| {
+                        self.definitions
+                            .get(&self.objects[command_index].definition_id)
+                            .is_some_and(|definition| definition.has_function("OnMenuStep"))
+                    })
+            else {
+                return Ok(false);
+            };
+            tolerate_script_error(self.call_object_function(command_index, "OnMenuStep", args))?
+        };
+        Ok(handled.is_some_and(|value| value.as_bool()))
     }
 
     /// `C4Menu::SetSelection(..., fDoCalls=true)` +
@@ -16509,6 +16557,156 @@ public func ContextMagic(object caller)
             );
             prior_runtime_id = menu.runtime_id;
         }
+    }
+
+    /// A script that opens a one-column Context menu and counts the steps it
+    /// is offered, reporting `handled` for each.
+    fn step_menu_script(handled: &str) -> String {
+        format!(
+            r#"#strict
+            local steps;
+            func OnMenuStep(int iDelta, object pMenuObject) {{
+              steps = steps + iDelta;
+              return {handled};
+            }}
+            func Open(int iStyle) {{
+              CreateMenu(CLNK, this(), this(), 0, "Choose", 0, iStyle);
+              AddMenuItem("A", "Nop()", CLNK, this());
+              AddMenuItem("B", "Nop()", CLNK, this());
+              AddMenuItem("C", "Nop()", CLNK, this());
+              return SelectMenuItem(1, this());
+            }}
+            func Nop() {{ return 1; }}
+            "#
+        )
+    }
+
+    fn open_step_menu(engine: &mut Engine, style: i32) -> ObjectId {
+        let crew = spawn_crew(engine, "CLNK", 1);
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine
+            .call_object_function(index, "Open", vec![Value::Int(style)])
+            .expect("menu opens");
+        crew
+    }
+
+    fn step_count(engine: &Engine, crew: ObjectId) -> Value {
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[index]
+            .state
+            .local_vars
+            .get("steps")
+            .cloned()
+            .unwrap_or(Value::Nil)
+    }
+
+    #[test]
+    fn a_one_column_script_menu_offers_left_and_right_as_a_step_before_moving() {
+        // C4Menu::Control gives Left/Right exactly the deltas Up/Down already
+        // have once Columns == 1 (C4Menu.cpp:433-457), so they carry no
+        // distinct meaning in a Context menu. The port offers them to the
+        // menu's own command object as ~OnMenuStep first, modelled on
+        // C4ObjectMenu::OnSelectionChanged (C4ObjectMenu.cpp:93-104); a
+        // truthy return means the script consumed the input and the
+        // selection stays put.
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", &step_menu_script("true"));
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = open_step_menu(&mut engine, 1);
+
+        engine
+            .player_in_com(1, COM_MENU_RIGHT, 0)
+            .expect("menu right runs");
+        engine
+            .player_in_com(1, COM_MENU_LEFT, 0)
+            .expect("menu left runs");
+        engine
+            .player_in_com(1, COM_MENU_LEFT, 0)
+            .expect("menu left runs again");
+
+        assert_eq!(
+            step_count(&engine, crew),
+            Value::Int(-1),
+            "right offers +1 and left -1"
+        );
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("the menu stays open")
+                .selection,
+            1,
+            "a handled step must not also move the selection"
+        );
+    }
+
+    #[test]
+    fn an_unclaimed_step_still_moves_the_selection_exactly_as_it_did() {
+        // A falsy return means the script looked at the com and did not want
+        // it, so COM_MenuLeft/Right must behave as C4Menu::Control always did
+        // — including the wrap at either end (C4Menu.cpp:444-457).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", &step_menu_script("false"));
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = open_step_menu(&mut engine, 1);
+        let selection = |engine: &Engine| {
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("the menu stays open")
+                .selection
+        };
+
+        for (com, expected) in [
+            (COM_MENU_RIGHT, 2),
+            (COM_MENU_RIGHT, 0), // wraps off the end
+            (COM_MENU_LEFT, 2),  // wraps off the front
+            (COM_MENU_LEFT, 1),
+        ] {
+            engine.player_in_com(1, com, 0).expect("menu com runs");
+            assert_eq!(selection(&engine), expected);
+        }
+        assert_eq!(
+            step_count(&engine, crew),
+            Value::Int(0),
+            "the script was still offered every step: +1 +1 -1 -1"
+        );
+    }
+
+    #[test]
+    fn a_multi_column_menu_never_offers_a_step() {
+        // Left/Right are real horizontal navigation once Columns > 1, which
+        // is C4MN_Style_Normal's five-wide grid (C4Menu.cpp:359-365). The
+        // callback must not take them away from it.
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", &step_menu_script("true"));
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = open_step_menu(&mut engine, 0);
+
+        engine
+            .player_in_com(1, COM_MENU_RIGHT, 0)
+            .expect("menu right runs");
+
+        assert_eq!(
+            step_count(&engine, crew),
+            Value::Nil,
+            "OnMenuStep is never reached in a grid"
+        );
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("the menu stays open")
+                .selection,
+            2,
+            "the grid keeps its own horizontal move"
+        );
     }
 
     #[test]
