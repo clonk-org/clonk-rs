@@ -288,7 +288,8 @@ native segments during retained capture — the previous strip-era recording
 used the `DrawFrameDw` loop, which wrongly painted the divider's bottom-right
 corner); `ingame_menu`/`object_menu` frame outlines route through the engine
 line rasterizer for both CPU and capture, so the pinned software oracle now
-carries line-identical bytes (`m06_l034_*` tests pin the capture values, and
+carries line-identical bytes (the `*_per_cpp_capture` tests pin the capture
+values, and
 the re-pinned Dragon Rock hashes embed them end to end).
 
 ## Remaining limits and review rules
