@@ -1779,11 +1779,12 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   gives Dialog-style menus vertical auto-enlargement and explicitly **no** bar;
   the ticket's first criterion lists Dialog among the barred styles, which is
   wrong against the oracle. This chassis has only Normal and Context, so the
-  distinction does not bite yet. Two hazards recorded on the ticket: the
-  in-game menu render is cached and version-gated, so a newly interactive
-  element must bump `menu_render_version` or the frame goes stale; and
-  `object_menu.rs` already reserves a scrollbar column, so check the reserved
-  extent matches `SCROLLBAR_EXTENT` before drawing into it.
+  distinction does not bite yet. One hazard recorded on the ticket still
+  stands: `object_menu.rs` already reserves a scrollbar column, so check the
+  reserved extent matches `SCROLLBAR_EXTENT` before drawing into it. A second
+  one — "the in-game menu render is cached and version-gated, so a newly
+  interactive element must bump `menu_render_version`" — was never true of the
+  in-game menu and is now false everywhere; see the frame-cache removal below.
 
 - Closed 2026-07-29: **`c4group` command-line utility.** The C++ product builds
   and installs a standalone `c4group` (`CMakeLists.txt:431-437,749-750`); the
@@ -2362,6 +2363,29 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   zeroes its velocity. The C++-cited `ObjectUpdate` regression is in
   `lib_tests/command_contact_regression.rs`; real terrain movement remains
   responsible for pixel-grid contact.
+- Closed 2026-08-04: the **startup-menu frame cache** (`MenuFrameCache`,
+  `menu_render_version`, `mark_menu_dirty`, 209 production call sites and 19
+  invalidations) was removed. It never engaged in the shipping presentation
+  path: `render_retained_gpu_frame` enters either the ordered-native branch,
+  which begins clonk-text capture, or `begin_gpu_scene_capture`, and
+  `cache_eligible` requires *neither* flag. That disqualifier is load-bearing
+  rather than an oversight — the retained path passes a 4-byte
+  `ignored_cpu_pixel` as its `frame`, so a cache write there would have stored
+  a 4-byte "frame" whose length then matched on the next pass and short-
+  circuited all GPU scene recording. The CPU presenter does not reach it
+  either: `ordered_native_text` is true in `AppMode::Menu` whenever the
+  scale-matched native atlas exists. Measured on this tree (test profile,
+  `render_retained_gpu_frame` p50 over 40 samples) the recompose the cache
+  would have saved is 52 µs at 1280x720 and 62 µs at 3840x2160 for the main
+  menu, 25 µs for the scenario browser, 29/40 µs for player selection, and
+  269 µs for About (1118 commands) — against a CPU-path *cached replay* of
+  46 µs at 720p and 435 µs at 4K. Under retained capture the composition is
+  command recording, not the software blit the original 15-21 ms → 0.7-2.1 ms
+  figures were measured against, so restoring the cache was worth at most
+  1.6% of one frame while making every future interactive menu element
+  depend on remembering to invalidate. Do not reintroduce it; if menu
+  presentation cost ever matters again, the lead is the renderer's persistent
+  `composition.texture`, which could re-run only the present pass.
 - Intentional divergence from C++ (2026-07-24), not a gap to close: the port
   ships **no trademark notice**. C++ draws `FANPROJECTTEXT " " TRADEMARKTEXT`
   (`C4Version.h:21-22`) in the main-menu and About footers
