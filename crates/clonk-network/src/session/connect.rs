@@ -292,7 +292,7 @@ pub(crate) fn selected_puncher_addresses(addresses: &[SocketAddr]) -> Vec<Socket
         .collect()
 }
 
-enum ClientDialStream {
+pub(crate) enum ClientDialStream {
     Tcp(TcpStream),
     Udp(crate::ReliableUdpPeerStream),
 }
@@ -364,7 +364,19 @@ impl ClientDialRace {
         self.attempts.is_empty()
     }
 
-    async fn next(
+    /// Abandons every attempt still open at the dial deadline, leaving each
+    /// one holding its own timeout so no open address goes unreported.
+    pub(crate) fn expire(&mut self) {
+        for attempt in &mut self.attempts {
+            attempt.future = None;
+            attempt.result = Some(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "connection attempt timed out",
+            )));
+        }
+    }
+
+    pub(crate) async fn next(
         &mut self,
     ) -> Option<(
         usize,
@@ -408,16 +420,13 @@ impl ClientDialRace {
                 Some((attempt.index, attempt.address, result))
             }
             Err(_) => {
-                let attempt = self.attempts.remove(0);
-                self.attempts.clear();
-                Some((
-                    attempt.index,
-                    attempt.address,
-                    Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "connection attempt timed out",
-                    )),
-                ))
+                self.expire();
+                let mut attempt = self.attempts.remove(0);
+                let result = attempt
+                    .result
+                    .take()
+                    .expect("an expired attempt holds its timeout");
+                Some((attempt.index, attempt.address, result))
             }
         }
     }

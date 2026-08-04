@@ -9127,6 +9127,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_expired_dial_race_times_out_every_open_address() {
+        // The deadline abandons every attempt that is still open, so each of
+        // them owes its own timeout; reporting one and dropping the rest
+        // leaves those endpoints out of the join failure
+        // (clonk-org/clonk-rs#109).
+        let first = crate::NetworkAddress::new(
+            crate::NetworkProtocol::Tcp,
+            SocketAddr::from(([127, 0, 0, 1], 31_114)),
+        );
+        let second = crate::NetworkAddress::new(
+            crate::NetworkProtocol::Tcp,
+            SocketAddr::from(([127, 0, 0, 1], 31_115)),
+        );
+        let mut race = ClientDialRace::new([first, second], true, None);
+
+        race.expire();
+
+        let mut reported = Vec::new();
+        while let Some((_, address, result)) = race.next().await {
+            assert_eq!(
+                result.err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::TimedOut)
+            );
+            reported.push(address);
+        }
+        assert_eq!(reported, vec![first, second]);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn exclusive_join_defers_welcome_until_the_active_route_fails() {
         // InitClient opens every prepared route together, but exclusive mode
