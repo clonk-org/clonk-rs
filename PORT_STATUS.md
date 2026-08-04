@@ -2581,6 +2581,66 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **A one-column script menu may claim the horizontal controls as a step**
+  (`Engine::object_menu_step`, `crates/clonk-engine/src/direct_com.rs`; no key,
+  opt-in per menu; C++ `C4Menu::Control`, LegacyClonk 7d43b47
+  src/C4Menu.cpp:433-457). Approved 2026-08-04, follows
+  clonk-org/clonk-rs#119. Every style but `C4MN_Style_Normal` forces
+  `Columns = 1` (`C4Menu.cpp:359-365`), and at one column `COM_MenuLeft` and
+  `COM_MenuRight` compute *exactly* the deltas `COM_MenuUp`/`Down` already
+  carry, wrap included — so the horizontal pair is dead weight in every Context
+  menu C++ has. Before turning one into a selection move the port now offers it
+  to the menu's own command object (or the scenario script, matching
+  `C4ObjectMenu::OnSelectionChanged`'s target choice, `C4ObjectMenu.cpp:78-104`)
+  as `~OnMenuStep(iDelta, pMenuObject)`; a truthy return consumes it. Anything
+  else — a menu that is not script-created, more than one column, no such
+  function, a falsy return, a script error — runs the shipped move unchanged,
+  so the observable behaviour of every menu in every pack that does not
+  implement `OnMenuStep` is byte-identical. That is the whole existing corpus:
+  the callback is new, so nothing outside this repository can be reached by it.
+  This buys the horizontal-axis-adjusts-the-selected-value convention that list
+  UIs are expected to have, which is what a quantity row needs and what a
+  hidden right mouse button cannot give a keyboard or gamepad player.
+  **Blast radius.** Menu coms are synchronized like any other control, and the
+  callback runs on the same tick in the same order for every peer, so this
+  cannot desync a port-to-port game; against a stock LegacyClonk client the
+  scripts that implement it do not exist, because they ship in
+  `planet/System.c4g`, which is the port's own engine data. `parity verify`
+  and `engine-snapshots verify` execute no menu control at all. Pinned by
+  `a_one_column_script_menu_offers_left_and_right_as_a_step_before_moving`,
+  `an_unclaimed_step_still_moves_the_selection_exactly_as_it_did` and
+  `a_multi_column_menu_never_offers_a_step`.
+
+- **A capsule order is priced before it is delivered**
+  (`planet/System.c4g/MarsOrderCapsule.c`, `#appendto BASE`; departs from
+  `content/ClonkMars.c4d/Structures.c4d/Base.c4d/Script.c:133-155`). Approved
+  2026-08-04, follows clonk-org/clonk-rs#119. The shipped commit spends the
+  player's money one item at a time with no check and no report: `Buy` is
+  called without `fShowErrors`, so `C4Player::Buy` takes its silent branch and
+  neither `IDS_PLR_NOWEALTH` nor the Error sound is produced
+  (`C4Player.cpp:849-853`); the first item that does not fit makes the loop
+  `return true`, abandoning every product still to come; and because the hash
+  iterates in bucket order (`ClonkMars.c4d/System.c4g/HashTable.c:173-189`),
+  *which* half of the order arrives is unrelated to the order on screen. The
+  capsule is created before any of that, so the one-capsule allowance and its
+  five-minute cooldown are spent either way. Cerberus Fossae starts the player
+  on `Wealth=30` against 186 clunkers of stock
+  (`01_Fossae.c4s/Scenario.txt:17,21`), so filling the order page is the
+  ordinary outcome, not an edge case. The append prices the order first —
+  through the same `GetValue` the rows are captioned with, under the same stock
+  re-clamp the commit applies — refuses it whole when it cannot be paid for and
+  says so, reports what was sent when it can, and passes `fShowErrors` so
+  anything that still slips through gets the engine's own message. `Buy`'s own
+  arithmetic, `CapsuleCheck` and its refusals, `CreateCapsule` and the SellOnly
+  branch are untouched.
+  **Blast radius.** Wealth and homebase stock are synchronized, and this
+  changes *how many* `Buy` calls happen in the refused case — from a partial
+  run to none — so a port peer and a stock LegacyClonk peer would diverge on
+  an unaffordable order. `planet/System.c4g` never reaches a stock client. No
+  draw site is added or removed. Pinned by
+  `an_order_over_the_players_wealth_is_refused_whole` and
+  `an_affordable_order_is_delivered`.
+
 - **A Menu2 range is one row that adds on a primary and takes back on a
   secondary activation** (`planet/System.c4g/MenuRangeRow.c`, `#appendto MS4C`;
   departs from `content/ClonkMars.c4d/Helpers.c4d/Menu2.c4d/Menu.c4d/
@@ -2637,6 +2697,46 @@ an ordered-map model gap.
   `collapsing_the_rows_spends_no_synchronized_draw`,
   `colour_markup_in_a_context_caption_costs_no_row_width` and
   `the_row_hint_is_localized_from_the_system_group`.
+  **Extended 2026-08-04** after the reporter could not reach `-1` at all in
+  play. Nothing on screen names the right mouse button, so five further
+  changes make the page usable without it, all in the same append:
+  the left/right controls step the selected range through the `OnMenuStep`
+  callback above; an **undo row** appears above the closing row as soon as a
+  value moves, names what it will take back, and is reached by an ordinary
+  activation, so no part of composing an order needs a hidden control; the
+  quantity stays on screen at zero via `C4MN_Add_ForceCount`, where
+  `C4Script.cpp:1726` would substitute `C4MN_Item_NoCount` and hide the column
+  entirely; the closing row says **Back** on a submenu and **Finished** at the
+  root, which shipped Menu2 captions identically although one leaves a page and
+  the other spends money (`Menu.c4d/Script.c:54,206-228`); Escape abandons the
+  order from any page, where `MenuQueryCancel` used to pop one level so the
+  ordering UI could not be dismissed from the Order page at all; and an
+  unchosen enum row is left blank instead of taking the whole red-cross cell
+  from Menu2's sheet (`Menu.c4d/Script.c:255-261`), which beside "Only Sell"
+  read as forbidden rather than as the other half of a radio pair. `ShowMenu`
+  and `ShowEnum` are now rebuilt rather than inherited, so the closing row and
+  the radio symbols are ours; the MS4C index constants are spelled as literals
+  with citations, because Menu2's own `System.c4g` is not registered when
+  `planet/System.c4g` parses. One trap this uncovered and the append guards:
+  re-rendering a page with `CreateMenu` while the menu is **open** asks the
+  owner whether the close is denied (`C4Script.cpp:1525`), and Menu2 answers by
+  aborting the template — row commands never hit it because `C4Menu::Enter`
+  closes a non-permanent menu first (`C4Menu.cpp:517`), but a step control does.
+  Also pinned by `mars_order_row_steps_with_the_left_and_right_controls`,
+  `mars_order_arrows_still_navigate_off_a_product_row`,
+  `the_order_page_offers_undo_only_once_there_is_something_to_undo`,
+  `the_undo_row_stays_on_the_page_its_change_belongs_to`,
+  `every_product_shows_its_quantity_even_at_zero`,
+  `the_closing_row_says_which_of_its_two_jobs_it_is_doing`,
+  `escape_abandons_the_order_from_the_order_page`,
+  `an_unchosen_mode_row_is_blank_rather_than_crossed_out` and, through the real
+  app input layer,
+  `context_style_script_menu_reaches_command2_by_right_click_and_special2`.
+  **Still open:** the page shows no running total and the player's wealth stays
+  hidden while composing — `CreateMenu` passes `iExtra = 0`, where
+  `C4MN_Extra_Value` would draw a script-supplied figure and un-hide the wealth
+  HUD (`C4Menu.cpp:898-906`). The refusal message now reports cost against
+  wealth, but only after the fact.
 
 - **A refused default-interface multicast join falls back to per-interface
   joins** (`join_discovery_multicast`, `multicast_targets`,

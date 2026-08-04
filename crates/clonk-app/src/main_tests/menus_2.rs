@@ -2534,6 +2534,93 @@ fn engine_info_menu_renders_the_classic_style_instead_of_a_fallback() {
 }
 
 #[test]
+fn context_style_script_menu_reaches_command2_by_right_click_and_special2() {
+    // The Menu2 order page is C4MN_Style_Context with one column, and -1 lives
+    // on Command2. Coverage for the secondary activation was all either
+    // engine-level or on internal Contents menus, so nothing exercised the
+    // shape ClonkMars actually ships through the real input layer. Both routes
+    // C4Menu offers a player are checked here: right-up (C4Menu.cpp:228-232)
+    // and Special2 (C4Menu.cpp:1053).
+    clonk_logging::init();
+    for use_keyboard in [false, true] {
+        let mut app = new_classic_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.style = 1; // C4MN_Style_Context (C4Menu.h:40)
+        menu.items[1].command2 = "SetComDir(COMD_Right())".to_string();
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu.clone())),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install context script menu");
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish viewport layout");
+
+        let second_item = {
+            let fallback = app.assets.font_arc();
+            let font = clonk_frontend::hud::HudFont::from_set(
+                app.assets.clonk_fonts.as_deref(),
+                fallback.as_ref(),
+            );
+            let area = app
+                .graphics
+                .viewport_rect(app.local_owner)
+                .expect("local viewport");
+            object_menu::engine_script_menu_layout(
+                area,
+                &font,
+                &menu,
+                app.display_flags.show_commands,
+            )
+            .item_rect(1)
+            .expect("second item rect")
+        };
+        let second_point = PhysicalPosition::new(
+            f64::from(second_item.x) + 4.0,
+            f64::from(second_item.y) + 4.0,
+        );
+        app.handle_cursor_moved(second_point)
+            .expect("hover the second row");
+        assert_eq!(
+            app.engine
+                .debug_object_menu(cursor.as_u64())
+                .expect("cursor")
+                .expect("menu")
+                .selection,
+            1,
+            "a one-column Context row is hit-tested like any other"
+        );
+
+        if use_keyboard {
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::KeyF)
+                .expect("physical Special2 runs Command2");
+        } else {
+            app.handle_right_mouse_button(ElementState::Pressed)
+                .expect("right mouse down");
+            app.handle_right_mouse_button(ElementState::Released)
+                .expect("right mouse up");
+        }
+
+        assert_eq!(
+            app.engine
+                .object_snapshot(cursor)
+                .expect("cursor survives the secondary activation")
+                .command_direction,
+            CommandDirection::Right,
+            "Command2 must run (keyboard: {use_keyboard})"
+        );
+    }
+}
+
+#[test]
 fn engine_script_menu_pointer_selects_enters_and_closes_like_cpp() {
     // C4MenuItem::MouseEnter selects a selectable item, left-up enters
     // it, and Dialog's Ico_Close queues COM_MenuClose
