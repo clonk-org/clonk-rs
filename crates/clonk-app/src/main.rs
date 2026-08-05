@@ -37,6 +37,7 @@ mod dock_icon;
 use clonk_app_render::draw_commands;
 mod game_message;
 mod gamepad;
+mod gpu_instance;
 use clonk_app_menus::ingame_menu;
 use clonk_app_netplay::host_game_resource_sources;
 use clonk_app_render::gpu_renderer;
