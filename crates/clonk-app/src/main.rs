@@ -2279,6 +2279,7 @@ impl GameApp {
             startup_game_search_test_events: VecDeque::new(),
             startup_network_last_refresh: None,
             startup_masterserver_next_query_at: None,
+            startup_masterserver_request_timeout_at: None,
             startup_network_refresh_waiting_for_clear: false,
             startup_network_ignore_redirect: false,
             startup_game_references: Vec::new(),

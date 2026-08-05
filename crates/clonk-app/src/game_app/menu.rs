@@ -2914,9 +2914,10 @@ impl GameApp {
                         self.startup_network_last_refresh = Some(now);
                         self.startup_masterserver_next_query_at =
                             now.checked_add(clonk_network::GAME_SEARCH_INTERVAL);
-                        self.reset_startup_masterserver_entry();
+                        self.reset_startup_masterserver_entry_at(now);
                     } else {
                         self.startup_masterserver_next_query_at = None;
+                        self.startup_masterserver_request_timeout_at = None;
                     }
                     // `OnBtnInternet` flips the flag in memory only; the file
                     // is written once at shutdown (C4StartupNetDlg.cpp:840-845).
@@ -3573,6 +3574,9 @@ impl GameApp {
         } else {
             None
         };
+        self.startup_masterserver_request_timeout_at = masterserver_enabled
+            .then(|| now.checked_add(clonk_network::REFERENCE_QUERY_TIMEOUT))
+            .flatten();
     }
 
     /// C4StartupNetDlg::OnShown refreshes the Internet icon and query-row
@@ -3590,13 +3594,14 @@ impl GameApp {
         }
         if !masterserver_signup {
             self.startup_masterserver_next_query_at = None;
+            self.startup_masterserver_request_timeout_at = None;
         }
         if recreate_masterserver {
             let now = Instant::now();
             self.startup_network_last_refresh = Some(now);
             self.startup_masterserver_next_query_at =
                 now.checked_add(clonk_network::GAME_SEARCH_INTERVAL);
-            self.reset_startup_masterserver_entry();
+            self.reset_startup_masterserver_entry_at(now);
         }
     }
 

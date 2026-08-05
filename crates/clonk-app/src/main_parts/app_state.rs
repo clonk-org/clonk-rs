@@ -156,6 +156,11 @@ pub(crate) struct GameApp {
     /// C4StartupNetListEntry::iTimeout for the masterserver row. Unlike
     /// tLastRefresh, this response-relative deadline must not throttle F5.
     pub(crate) startup_masterserver_next_query_at: Option<Instant>,
+    /// C4StartupNetListEntry::iRequestTimeout for the masterserver row. The
+    /// worker owns the transport deadline, but native also bounds how long the
+    /// row may display IDS_NET_INFOQUERY, so a query whose outcome never
+    /// reaches the dialog still resolves (src/C4StartupNetDlg.cpp:182,216-223).
+    pub(crate) startup_masterserver_request_timeout_at: Option<Instant>,
     /// Reject pre-refresh events until the worker acknowledges the new
     /// generation with Cleared, so deleted rows cannot flash back into view.
     pub(crate) startup_network_refresh_waiting_for_clear: bool,

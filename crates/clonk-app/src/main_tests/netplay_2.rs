@@ -2657,6 +2657,61 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
 }
 
 #[test]
+fn masterserver_row_reports_a_reference_request_timeout_when_no_reply_arrives() {
+    use clonk_frontend::startup_netdlg::NetDlgRowIcon;
+
+    // `C4StartupNetListEntry::Execute` bounds how long the masterserver row may
+    // sit on IDS_NET_INFOQUERY: once the request has been outstanding for
+    // `C4NetRefRequestTimeout` it becomes an IDS_NET_ERR_REFREQTIMEOUT error row
+    // and `SetTimeout(TT_RefReqWait)` schedules the next query one
+    // `C4NetMasterServerQueryInterval` later (pinned oracle 7d43b47b
+    // src/C4StartupNetDlg.cpp:182,216-223,525; src/C4StartupNetDlg.h:27-28).
+    let mut app = new_classic_menu_app(800, 600);
+    attach_l040_network_dialog(&mut app);
+    // The helper leaves `startup_game_search` unset, so no worker reply can ever
+    // arrive — the state the native watchdog exists to recover from.
+    let armed_at = Instant::now();
+    app.reset_startup_masterserver_entry_at(armed_at);
+    assert_eq!(
+        app.startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .masterserver_entry()
+            .row_icon,
+        NetDlgRowIcon::Query
+    );
+
+    app.tick_startup_network_query_rows_at(
+        armed_at + clonk_network::REFERENCE_QUERY_TIMEOUT - Duration::from_secs(1),
+    );
+    assert_eq!(
+        app.startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .masterserver_entry()
+            .row_icon,
+        NetDlgRowIcon::Query,
+        "the row keeps querying until the native request timeout elapses"
+    );
+
+    let timed_out_at = armed_at + clonk_network::REFERENCE_QUERY_TIMEOUT;
+    app.tick_startup_network_query_rows_at(timed_out_at);
+    let entry = app
+        .startup_network_dialog
+        .as_ref()
+        .expect("network dialog")
+        .masterserver_entry()
+        .clone();
+    assert_eq!(entry.row_icon, NetDlgRowIcon::Error);
+    assert_eq!(entry.details, "Reference request timed out");
+    assert_eq!(
+        app.startup_masterserver_next_query_at,
+        Some(timed_out_at + clonk_network::GAME_SEARCH_INTERVAL),
+        "the timed-out row schedules the next masterserver query"
+    );
+}
+
+#[test]
 fn network_game_list_wheel_and_held_arrow_route_through_app() {
     use clonk_frontend::startup_netdlg::{
         net_dlg_layout, NetDlgConfig, NetDlgController, NetDlgFontMetrics, NetDlgGameEntry,
