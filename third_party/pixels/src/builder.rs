@@ -1,11 +1,29 @@
 use crate::renderers::{ScalingMatrix, ScalingRenderer};
 use crate::{Error, Pixels, PixelsContext, ScalingMode, SurfaceSize, SurfaceTexture, TextureError};
 
+/// Create an instance exactly as [`PixelsBuilder::build`] would create its own.
+///
+/// Exposed so an application that opens several windows can create *one*
+/// instance and pass it to every [`PixelsBuilder::instance`], rather than
+/// letting each pixel buffer create and later destroy its own. NVIDIA's
+/// Wayland WSI keeps the libwayland-client entry points it resolves in a
+/// process-global dispatch table whose lifetime is tied to a single
+/// `VkInstance`: destroying one while another window still holds a swapchain
+/// nulls the table, and the surviving window's next `vkAcquireNextImageKHR`
+/// calls through the nulled slot.
+pub fn create_instance(backends: wgpu::Backends) -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
+        ..wgpu::InstanceDescriptor::new_without_display_handle().with_env()
+    })
+}
+
 /// A builder to help create customized pixel buffers.
 pub struct PixelsBuilder<'req, 'dev, 'win, W: wgpu::WindowHandle + 'win> {
     request_adapter_options: Option<wgpu::RequestAdapterOptions<'req, 'win>>,
     device_descriptor: Option<wgpu::DeviceDescriptor<'dev>>,
     backend: wgpu::Backends,
+    instance: Option<wgpu::Instance>,
     width: u32,
     height: u32,
     _pixel_aspect_ratio: f64,
@@ -54,6 +72,7 @@ impl<'req, 'dev, 'win, W: wgpu::WindowHandle + raw_window_handle::HasDisplayHand
             request_adapter_options: None,
             device_descriptor: None,
             backend: wgpu::Backends::from_env().unwrap_or_else(wgpu::Backends::all),
+            instance: None,
             width,
             height,
             _pixel_aspect_ratio: 1.0,
@@ -88,6 +107,21 @@ impl<'req, 'dev, 'win, W: wgpu::WindowHandle + raw_window_handle::HasDisplayHand
     /// The default enables all backends, including the backends with "best effort" support in wgpu.
     pub fn wgpu_backend(mut self, backend: wgpu::Backends) -> Self {
         self.backend = backend;
+        self
+    }
+
+    /// Build against an instance the caller owns instead of creating one.
+    ///
+    /// A `wgpu::Instance` is a `VkInstance`, and a multi-window application
+    /// that builds one per window destroys one whenever a window closes. Some
+    /// drivers do not survive that — see [`create_instance`] — so let the
+    /// caller keep a single instance alive for the whole process and hand a
+    /// clone of it to every pixel buffer.
+    ///
+    /// Supersedes [`PixelsBuilder::wgpu_backend`], which only describes how to
+    /// create an instance this builder no longer creates.
+    pub fn instance(mut self, instance: wgpu::Instance) -> Self {
+        self.instance = Some(instance);
         self
     }
 
@@ -269,11 +303,11 @@ impl<'req, 'dev, 'win, W: wgpu::WindowHandle + raw_window_handle::HasDisplayHand
     /// # Errors
     ///
     /// Returns an error when a [`wgpu::Adapter`] cannot be found.
-    async fn build_impl(self) -> Result<Pixels<'win>, Error> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: self.backend,
-            ..wgpu::InstanceDescriptor::new_without_display_handle().with_env()
-        });
+    async fn build_impl(mut self) -> Result<Pixels<'win>, Error> {
+        let instance = self
+            .instance
+            .take()
+            .unwrap_or_else(|| create_instance(self.backend));
 
         // TODO: Use `options.pixel_aspect_ratio` to stretch the scaled texture
         let surface = instance.create_surface(self.surface_texture.window)?;
