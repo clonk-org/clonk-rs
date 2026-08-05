@@ -2306,6 +2306,38 @@ impl GameApp {
         }
     }
 
+    /// Ready control ticks the client may hold before a fast-forward is the
+    /// right answer.
+    ///
+    /// C++ `CtrlOverflow` (src/C4GameControlNetwork.h:124) tests the ready
+    /// frontier against the executing tick alone, and `C4ControlOverflowLimit`
+    /// is 3. That is a backlog measure only while the lookahead is shallow:
+    /// `CtrlNeeded` submits local control through `getCtrlTick(FrameCounter +
+    /// PreSend)` (src/C4GameControlNetwork.cpp:147-155), so a client running
+    /// PreSend `p` at ControlRate `r` has *itself* asked for `p / r` ticks
+    /// beyond the one it is about to execute, and the host cannot complete a
+    /// tick nobody submitted for. Once `p / r` reaches the limit the client's
+    /// own jitter buffer reads as permanent backlog, every frame runs unpaced,
+    /// and the session settles at whatever speed drains the buffer back to the
+    /// limit — the fast-forward reported as clonk-org/clonk-rs#90.
+    ///
+    /// The horizon this port asks for is the reason that matters here: PreSend
+    /// is sized from the delivery-time *tail* rather than C++'s mean (see
+    /// `ControlLatencyEstimator`), so a jittery link buys a buffer deliberately
+    /// deeper than the typical delivery — and then burns it. Allowing exactly
+    /// the horizon keeps C++'s number wherever C++'s shallow lookahead applies
+    /// (`p / r + 1` is 1 or 2 for every PreSend up to 5 at ControlRate 2) and
+    /// only relaxes where the buffer is one this client paid input latency for.
+    fn network_control_catch_up_limit(&self) -> u32 {
+        let horizon_ticks = self.network_control_clock.map_or(0, |clock| {
+            let rate = u32::try_from(clock.control_rate()).unwrap_or(1).max(1);
+            let presend = u32::try_from(clock.control_presend()).unwrap_or(0);
+            presend / rate
+        });
+        // `behind` counts inclusively, so the tick about to execute is the +1.
+        NETWORK_CONTROL_OVERFLOW_LIMIT.max(horizon_ticks.saturating_add(1))
+    }
+
     pub(crate) fn network_control_pacing(&mut self) -> NetworkControlPacing {
         if self.mode != AppMode::Running
             || self.network.is_none()
@@ -2346,7 +2378,7 @@ impl GameApp {
             }
             _ => behind,
         };
-        let overflow = behind > NETWORK_CONTROL_OVERFLOW_LIMIT;
+        let overflow = behind > self.network_control_catch_up_limit();
         let skip_render = if overflow && behind >= NETWORK_RENDER_SKIP_BEHIND {
             let divisor = behind.saturating_add(15) / 20;
             !self.engine.frame().is_multiple_of(u64::from(divisor))

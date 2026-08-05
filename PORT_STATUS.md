@@ -3547,6 +3547,75 @@ an ordered-map model gap.
   many chunks we chose to have outstanding, so this is invisible to a stock C++
   peer.
 
+- **The catch-up test brackets the lookahead the client asked for**
+  (`GameApp::network_control_catch_up_limit`,
+  `crates/clonk-app/src/game_app/network.rs`; `NETWORK_CONTROL_OVERFLOW_LIMIT`
+  stays C++'s 3 and becomes a floor). Approved 2026-08-05, fixes
+  clonk-org/clonk-rs#90.
+  C++ `CtrlOverflow` tests the ready frontier against the executing tick alone —
+  `iControlReady >= iTick + C4ControlOverflowLimit`, limit 3
+  (C4GameControlNetwork.h:124) — and `Game.GameGo` then short-circuits the
+  application timer for as long as it holds (C4GameControl.cpp:334-342,
+  C4Game.cpp:1919). That is a backlog measure only while the lookahead is
+  shallow. `CtrlNeeded` submits local control through `getCtrlTick(FrameCounter
+  + PreSend)` (C4GameControlNetwork.cpp:147-155), so a client running PreSend
+  `p` at ControlRate `r` has *itself* asked for `p / r` ticks beyond the one it
+  is about to execute, and the host cannot complete a tick nobody submitted for.
+  Once `p / r` reaches 3 the client's own jitter buffer reads as permanent
+  backlog and every frame runs unpaced.
+  Arithmetic, from the constants: with a delivery delay `D` and a wall-clock
+  frame period `fp`, the ready frontier sits `p / r - D / (r * fp)` ticks ahead,
+  so the client keeps fast-forwarding until `fp = D / (p - 2r)`. `PreSend` is
+  `38 * budget + 1` (C4GameControlNetwork.cpp:437), so at ControlRate 2 the
+  threshold is a delivery budget of ~132 ms, and a link that then delivers in
+  80 ms settles at 10 ms per frame against the nominal 28 — the round runs at
+  ~2.8x speed until the budget decays back under the threshold. That is the
+  sporadic fast-forward reported in clonk-org/clonk-rs#90, and one peer on a bad
+  link is enough to put *everyone* over the threshold, because the horizon is
+  sized from `max(ping, measured lateness)` and the host's wait for a straggler
+  is charged to every client's lateness.
+  So the port is on the wrong side of this inequality far more often than C++
+  is: this port deliberately sizes PreSend from the delivery-time *tail* rather
+  than C++'s mean (see the `ControlLatencyEstimator` entry), which is precisely
+  a request for a buffer deeper than typical delivery — and C++'s test then
+  burns it. On a steady link both engines cross the threshold at the same ping;
+  what is new here is how readily the tail-sized horizon gets there. The
+  measurement is already on record two entries below: on the impaired chaos
+  profiles the median horizon is **~378 ms**, i.e. PreSend at or near the 1..15
+  clamp, which is a lookahead of 7 ticks against a limit of 3. One bad peer is
+  enough to put a *healthy* client there, because the horizon takes
+  `max(ping, measured lateness)` and the host's wait for a straggler is charged
+  to every other client's lateness.
+  `clonk_network::sim`'s own playout model never executes before
+  `CONTROL_PERIOD * tick + lookahead` (`replay_lockstep`, sim.rs:519-543), so
+  every frozen-time and input-latency figure recorded for the PreSend divergence
+  was measured against a client that *holds* its horizon. This makes the engine
+  behave the way those measurements assumed.
+  The limit therefore becomes `max(3, p / r + 1)` — the largest ready queue the
+  client's own submissions can explain, `+ 1` because `behind` counts the tick
+  about to execute. `p / r + 1` is 1 or 2 for every PreSend up to 5 at
+  ControlRate 2, so wherever C++'s shallow lookahead applies the number is
+  unchanged and every pre-existing catch-up test passes untouched; it relaxes
+  only where the buffer is one this client already paid input latency for.
+  Substituting the allowance back into the inequality above leaves
+  `-D / (r * fp) > 0`, so a *legitimate* horizon can no longer trigger a
+  fast-forward at any PreSend, while control the client never submitted for —
+  the shipped async mode packs a tick without a straggler, a deactivated client
+  submits none at all, a rejoining client starts behind — still does.
+  **Blast radius.** Local wall-clock pacing only, in the same family as
+  `RenderFloor` and the `RenderInactive` default: it changes *when* this client
+  executes a frame, never which frame, in what order, or with what content.
+  Nothing on the path reads or writes `C4Fixed`, `C4Random`, movement or control
+  ordering, the reported `behind` stays C++'s inclusive `GetBehind` for the F4
+  list and the diagnostics overlay, and the decision is per-client local state no
+  peer can observe — so a mixed session with a stock LegacyClonk client stays in
+  lockstep, and in fact paces that client correctly too, since its speed is
+  bounded by our submissions. `parity verify` and `engine-snapshots verify`
+  cannot see it; neither runs a network session.
+  Pinned by `control_buffered_inside_the_presend_horizon_is_not_a_catch_up_backlog`
+  and `a_backlog_beyond_the_presend_horizon_still_catches_up`. Before the change
+  the first of those executed 8 frames in a pass where 1 was due.
+
 - **Drawing has a floor while catching up**
   (`crates/clonk-app/src/main_parts/app_state.rs`, `apply_render_floor`;
   `NETWORK_RENDER_FLOOR_FRAMES` = 18). Approved 2026-07-27. No C++ equivalent.
