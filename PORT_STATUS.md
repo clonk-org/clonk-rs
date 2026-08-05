@@ -2263,13 +2263,55 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   <NAME>` and up to 100 `backtrace_symbols_fd` frames to stderr and to the
   session log's raw descriptor, then restores `SIG_DFL` and reraises so the
   process keeps its original signal exit status and core-dump behaviour
-  (`C4WinMain.cpp:179-213`). The handler uses only async-signal-safe calls;
-  `clonk-logging` `dup(2)`s the log descriptor out from behind the buffered
-  tracing writer so the banner never touches it. Because the log does not exist
-  when the handlers are installed, an early crash is stderr-only, exactly as
-  C++'s `GetLogFD` sentinel yields. Pinned by the subprocess test
+  (`C4WinMain.cpp:179-213`). The handler uses only async-signal-safe calls —
+  `backtrace` only after `install` resolves it once, because glibc loads it out
+  of libgcc on first use and that allocates. `clonk-logging` `dup(2)`s the log
+  descriptor out from behind the buffered tracing writer so the banner never
+  touches it. Because the log does not exist when the handlers are installed,
+  an early crash is stderr-only, exactly as C++'s `GetLogFD` sentinel yields.
+  Pinned by the subprocess test
   `unix_fatal_signal_writes_diagnostics_then_reraises`, which asserts the child
   dies *from* SIGABRT rather than exiting.
+
+  Amended 2026-08-05: the handlers go in with `sigaction(2)` and `SA_ONSTACK`
+  on a 128 KiB alternate stack, **not** C++'s `signal(2)`
+  (`C4WinMain.cpp:257-264`). A handler with no alternate stack cannot be
+  entered once the stack is exhausted, so `signal(2)` made a stack overflow
+  kill the process having written nothing at all — and worse than inheriting
+  C++'s behaviour, it *replaced* the `SA_ONSTACK` handler the Rust runtime
+  installs before `main`, so the port also lost the `has overflowed its stack`
+  line stock Rust prints. Reproduced against the shipped crate: with the
+  handlers installed an overflow wrote zero bytes and died on a signal; without
+  them the runtime reported it. The signal set, the banner and the reraise are
+  unchanged. Pinned by `unix_stack_overflow_still_reaches_the_crash_banner`.
+  Threads not created by Rust — an audio or GPU-driver callback thread — have
+  no alternate stack from anyone, so their overflows stay mute; that limit is
+  std's too. Signals outside the C++ set of 8 (`SIGHUP`, `SIGTRAP`, `SIGXCPU`,
+  `SIGSYS`) still terminate with no banner, deliberately.
+
+- Closed 2026-08-05: **Session-shutdown diagnostics** (clonk-org/clonk-rs#40).
+  Nothing marked a shutdown, so a session log that stopped mid-stream read
+  identically whether the player quit on purpose or the process was destroyed —
+  and every "the game just vanished" report stalled on exactly that fork.
+  `clonk-logging::log_shutdown_banner` now writes `stopping clonk` with a
+  reason as the last line of the `Event::LoopExiting` pass, after the config
+  and console persistence that can still `warn!`; `GameApp::request_exit` takes
+  a `&'static str` naming which of its 12 exits ran, so a bare Escape on the
+  main menu is distinguishable from a window close or an update hand-off.
+  `log_fatal_error` routes an `Err` out of `run()` through the log before
+  `main` returns it: the Rust runtime prints a returned error to stderr alone,
+  which a windowed build has nowhere to show, and winit's Wayland loop reaches
+  that path after a failed `Connection::flush` without logging anything itself
+  (`winit-0.30.13/src/platform_impl/linux/wayland/event_loop/mod.rs:284-287`),
+  so a lost compositor connection used to end the session with an empty-looking
+  log. It also covers a startup-initializer failure, where the handler is never
+  installed and the `LoopExiting` teardown — and so the banner — never runs.
+  Pinned by `the_shutdown_banner_records_that_the_session_ended_on_purpose`,
+  `a_fatal_error_reaches_the_session_log` and
+  `quitting_from_the_main_menu_records_why_the_session_ended`. Still silent by
+  construction: `SIGKILL` (OOM killer), and the `process::exit` in the
+  `LC_APP_PRESENTATION_BENCHMARK` path and the root-privilege refusal, both of
+  which run before or outside the session log.
 
 - Closed 2026-07-29: **macOS app translocation.** A quarantined bundle runs from
   a read-only `AppTranslocation` mount whose siblings are absent, so resource
