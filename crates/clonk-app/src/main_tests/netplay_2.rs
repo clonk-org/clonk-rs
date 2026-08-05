@@ -2657,6 +2657,61 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
 }
 
 #[test]
+fn masterserver_row_reports_a_reference_request_timeout_when_no_reply_arrives() {
+    use clonk_frontend::startup_netdlg::NetDlgRowIcon;
+
+    // `C4StartupNetListEntry::Execute` bounds how long the masterserver row may
+    // sit on IDS_NET_INFOQUERY: once the request has been outstanding for
+    // `C4NetRefRequestTimeout` it becomes an IDS_NET_ERR_REFREQTIMEOUT error row
+    // and `SetTimeout(TT_RefReqWait)` schedules the next query one
+    // `C4NetMasterServerQueryInterval` later (pinned oracle 7d43b47b
+    // src/C4StartupNetDlg.cpp:182,216-223,525; src/C4StartupNetDlg.h:27-28).
+    let mut app = new_classic_menu_app(800, 600);
+    attach_l040_network_dialog(&mut app);
+    // The helper leaves `startup_game_search` unset, so no worker reply can ever
+    // arrive — the state the native watchdog exists to recover from.
+    let armed_at = Instant::now();
+    app.reset_startup_masterserver_entry_at(armed_at);
+    assert_eq!(
+        app.startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .masterserver_entry()
+            .row_icon,
+        NetDlgRowIcon::Query
+    );
+
+    app.tick_startup_network_query_rows_at(
+        armed_at + clonk_network::REFERENCE_QUERY_TIMEOUT - Duration::from_secs(1),
+    );
+    assert_eq!(
+        app.startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .masterserver_entry()
+            .row_icon,
+        NetDlgRowIcon::Query,
+        "the row keeps querying until the native request timeout elapses"
+    );
+
+    let timed_out_at = armed_at + clonk_network::REFERENCE_QUERY_TIMEOUT;
+    app.tick_startup_network_query_rows_at(timed_out_at);
+    let entry = app
+        .startup_network_dialog
+        .as_ref()
+        .expect("network dialog")
+        .masterserver_entry()
+        .clone();
+    assert_eq!(entry.row_icon, NetDlgRowIcon::Error);
+    assert_eq!(entry.details, "Reference request timed out");
+    assert_eq!(
+        app.startup_masterserver_next_query_at,
+        Some(timed_out_at + clonk_network::GAME_SEARCH_INTERVAL),
+        "the timed-out row schedules the next masterserver query"
+    );
+}
+
+#[test]
 fn network_game_list_wheel_and_held_arrow_route_through_app() {
     use clonk_frontend::startup_netdlg::{
         net_dlg_layout, NetDlgConfig, NetDlgController, NetDlgFontMetrics, NetDlgGameEntry,
@@ -3636,6 +3691,85 @@ fn abandoned_join_password_prompt_keeps_the_netdlg_search_running() {
     assert!(
         app.startup_game_search.is_some(),
         "an empty password must leave the dialog's search running"
+    );
+}
+
+#[test]
+fn cancelling_a_launched_join_restores_the_netdlg_search() {
+    use clonk_frontend::startup_netdlg::NetDlgRowIcon;
+
+    // Starting a join ends the C++ startup loop, so `DoStartup` destroys the
+    // dialog together with its DiscoverClient and pMasterserverClient; aborting
+    // the attempt re-enters `DoStartup`, which builds a fresh C4StartupNetDlg
+    // whose OnShown -> UpdateMasterserver starts querying again (pinned oracle
+    // 7d43b47b src/C4StartupNetDlg.cpp:737-738,752,771-777,851-866;
+    // src/C4Startup.cpp:196-198). The port retains the dialog across that
+    // round trip, so the search it owns has to come back with it.
+    let mut app = new_classic_menu_app(800, 600);
+    let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics {
+        caption_back_extent: 51,
+        text_ip_extent: 18,
+        text_line_height: 22,
+        caption_line_height: 25,
+        title_line_height: 34,
+    };
+    let mut network_dialog = clonk_frontend::startup_netdlg::NetDlgController::new(
+        clonk_frontend::startup_netdlg::NetDlgConfig {
+            masterserver_signup: false,
+            record: false,
+        },
+        metrics,
+    );
+    network_dialog.resize(800, 600);
+    app.startup_view = StartupView::NetworkGame;
+    app.startup_network_dialog = Some(network_dialog);
+    app.startup_game_search = Some(
+        clonk_network::StartupGameSearch::start(clonk_network::NetworkGameSearchConfig {
+            internet_enabled: false,
+            use_alternate_server: false,
+            master_server_url: String::new(),
+            discovery_port: 0,
+        })
+        .expect("start network search"),
+    );
+
+    app.activate_network_reference_join(clonk_network::NetworkGameReference {
+        title: "Unreachable game".to_string(),
+        source_address: "127.0.0.1:1".parse().unwrap(),
+        ..Default::default()
+    })
+    .expect("a reference without a password joins immediately");
+    assert!(
+        app.startup_game_search.is_none(),
+        "a join that actually launches stops the search"
+    );
+    assert!(matches!(
+        app.message_dialogs.last().map(|dialog| &dialog.continuation),
+        Some(MessageDialogContinuation::StartupNetworkConnectProgress)
+    ));
+
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+        .expect("cancel the connection attempt");
+
+    assert!(app.startup_network_connection.is_none());
+    assert!(app.pending_network_join.is_none());
+    assert!(
+        app.startup_game_search.is_some(),
+        "the netdlg must never be left on screen without its search"
+    );
+    app.request_startup_network_refresh()
+        .expect("refresh the restored search");
+    assert!(
+        app.message_dialogs.is_empty(),
+        "refresh must not report a search that was restored"
+    );
+    assert_eq!(
+        app.startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .masterserver_entry()
+            .row_icon,
+        NetDlgRowIcon::Query
     );
 }
 

@@ -4994,6 +4994,10 @@ impl GameApp {
                 )?;
             }
             Err(error) => {
+                // A join that never starts leaves C4StartupNetDlg on screen
+                // with its search intact, because nothing has torn the dialog
+                // down yet (src/C4StartupNetDlg.cpp:737-738,752).
+                self.restore_startup_game_search();
                 self.status_text = format!("Unable to start network worker: {error}");
             }
         }

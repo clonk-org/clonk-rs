@@ -1162,19 +1162,39 @@ impl GameApp {
     }
 
     pub(crate) fn reset_startup_masterserver_entry(&mut self) {
+        self.reset_startup_masterserver_entry_at(Instant::now());
+    }
+
+    /// `C4StartupNetListEntry::QueryReferences` arms iRequestTimeout in the same
+    /// step that puts the row back on IDS_NET_INFOQUERY
+    /// (src/C4StartupNetDlg.cpp:168-184,199-204).
+    pub(crate) fn reset_startup_masterserver_entry_at(&mut self, now: Instant) {
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let entry = Self::startup_masterserver_query_entry(
             &self.startup_tooltip_resources,
             &settings.master_server_url,
         );
+        // UpdateMasterserver only keeps the row — and therefore its request
+        // deadline — while MasterServerSignUp is set (src/C4StartupNetDlg.cpp:851-866).
+        self.startup_masterserver_request_timeout_at = self
+            .startup_network_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.config().masterserver_signup)
+            .then(|| now.checked_add(clonk_network::REFERENCE_QUERY_TIMEOUT))
+            .flatten();
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
             dialog.set_masterserver_entry(entry);
         }
     }
 
     pub(crate) fn set_startup_masterserver_error(&mut self, message: String) {
+        self.set_startup_masterserver_error_at(Instant::now(), message);
+    }
+
+    pub(crate) fn set_startup_masterserver_error_at(&mut self, now: Instant, message: String) {
         self.startup_masterserver_next_query_at =
-            Instant::now().checked_add(clonk_network::GAME_SEARCH_INTERVAL);
+            now.checked_add(clonk_network::GAME_SEARCH_INTERVAL);
+        self.startup_masterserver_request_timeout_at = None;
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let mut entry = Self::startup_masterserver_query_entry(
             &self.startup_tooltip_resources,
@@ -1193,6 +1213,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         self.startup_masterserver_next_query_at =
             Instant::now().checked_add(clonk_network::GAME_SEARCH_INTERVAL);
+        self.startup_masterserver_request_timeout_at = None;
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let entry = Self::startup_masterserver_reply_entry(
             &self.startup_tooltip_resources,
@@ -1630,13 +1651,28 @@ impl GameApp {
             .startup_network_dialog
             .as_ref()
             .is_some_and(|dialog| dialog.config().masterserver_signup);
-        if masterserver_enabled
-            && self
-                .startup_masterserver_next_query_at
-                .is_some_and(|next_query_at| now >= next_query_at)
+        if !masterserver_enabled {
+            return;
+        }
+        if self
+            .startup_masterserver_next_query_at
+            .is_some_and(|next_query_at| now >= next_query_at)
         {
+            // C4StartupNetListEntry::Execute clears iTimeout, re-queries and
+            // returns before the iRequestTimeout check, so the fresh request
+            // gets its full deadline (src/C4StartupNetDlg.cpp:191-207).
             self.startup_masterserver_next_query_at = None;
-            self.reset_startup_masterserver_entry();
+            self.reset_startup_masterserver_entry_at(now);
+        } else if self
+            .startup_masterserver_request_timeout_at
+            .is_some_and(|timeout_at| now >= timeout_at)
+        {
+            // A request still outstanding after C4NetRefRequestTimeout is
+            // cancelled and reported, and TT_RefReqWait schedules the next
+            // masterserver query (src/C4StartupNetDlg.cpp:216-223,525).
+            let message = self
+                .runtime_resource_text("IDS_NET_ERR_REFREQTIMEOUT", "Reference request timed out");
+            self.set_startup_masterserver_error_at(now, message);
         }
     }
 
@@ -2252,6 +2288,7 @@ impl GameApp {
                 self.startup_game_search = None;
                 self.startup_network_last_refresh = None;
                 self.startup_masterserver_next_query_at = None;
+                self.startup_masterserver_request_timeout_at = None;
                 self.startup_network_dialog = None;
                 self.restore_startup_dialog(StartupDialog::ScenarioBrowser(
                     ScenarioSelectorMode::NetworkHost,
@@ -4883,6 +4920,7 @@ impl GameApp {
         self.startup_game_search = None;
         self.startup_network_last_refresh = None;
         self.startup_masterserver_next_query_at = None;
+        self.startup_masterserver_request_timeout_at = None;
         self.startup_network_refresh_waiting_for_clear = false;
         self.startup_game_references.clear();
         self.startup_discovery_reference_queries.clear();
