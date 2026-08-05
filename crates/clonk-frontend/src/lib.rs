@@ -12113,6 +12113,135 @@ mod tests {
     }
 
     #[test]
+    fn shipped_fire2_particles_draw_with_the_additive_blit() {
+        // The engine's burning-object emitter makes three quarters of every
+        // double set the `Fire2` def (src/C4Effect.cpp:749-759), and that def
+        // is additive by content. `C4GFXBLIT_ADDITIVE` maps to
+        // `glBlendFunc(GL_SRC_ALPHA, GL_ONE)` (src/StdGL.cpp:908), so the
+        // flame adds to what is behind it instead of replacing it — which is
+        // what makes engine fire read as a glow rather than a boxy sprite.
+        // The sibling `Fire` def is opaque and must stay a normal blit.
+        let load_shipped = |name: &str| {
+            let path = crate::test_support::repo_root()
+                .join("content/Objects.c4d/Effects.c4d/Particles.c4d")
+                .join(format!("{name}.c4d"));
+            let group = clonk_resources::Group::open(&path)
+                .unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
+            clonk_resources::ParticleDefinition::load(&group)
+                .unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+        };
+
+        let mut definitions = HashMap::new();
+        for name in ["Fire", "Fire2"] {
+            let shipped = load_shipped(name);
+            let core = ParticleDefCore::from(&shipped.core);
+            assert_eq!(
+                core.name, name,
+                "SetDefParticles resolves pFire1/pFire2 by this name \
+                 (src/C4Particles.cpp:485-486)",
+            );
+            // One flat opaque phase, so the blend is the only variable.
+            definitions.insert(
+                name.to_string(),
+                ParticleRenderDefinition {
+                    image: ImageData::new(1, 1, vec![100, 0, 0, 255]),
+                    facet: ParticleFacet::new(0, 0, 1, 1),
+                    length: 1,
+                    aspect: 1.0,
+                    core,
+                    draw_proc: ParticleDrawProc::Std,
+                },
+            );
+        }
+        assert_eq!(
+            definitions["Fire2"].core.additive, 1,
+            "the shipped Fire2 Particle.txt carries Additive=1",
+        );
+        assert_eq!(
+            definitions["Fire"].core.additive, 0,
+            "the shipped Fire underlay is an ordinary alpha blit",
+        );
+
+        // Engine fire is dealt to the burning object's own lists with
+        // Attach=1, so the stored position is relative to that object
+        // (src/C4Particles.cpp:404-408).
+        let owner_id = ObjectId::new(1);
+        let mut owner = make_snapshot().objects.remove(0);
+        owner.id = owner_id;
+        owner.definition_id = "FlameOwner".to_string();
+        owner.position = Vector2::new(8, 8);
+        owner.crew_member = false;
+        let objects = vec![owner];
+        let object_sprites: HashMap<_, _> = (*solid_sprite(
+            "FlameOwner",
+            6,
+            6,
+            Color::opaque(0, 0, 220),
+            Some(DefinitionRect::new(-3, -3, 6, 6)),
+            false,
+        ))
+        .clone();
+
+        let particle = |name: &str, x: f32| ParticleSnapshot {
+            definition_id: name.to_string(),
+            position: FloatVector2::new(x - 8.0, 10.0),
+            velocity: FloatVector2::new(0.0, 0.0),
+            life: 0,
+            parameter_a: 1.0,
+            parameter_b: 0x00ff_ffff,
+            layer: ParticleLayer::ObjectBack(owner_id),
+            pxs_fixed: None,
+            pxs_slot: None,
+        };
+        let particles = vec![particle("Fire2", 31.0), particle("Fire", 41.0)];
+
+        let mut graphics = GraphicsSystem::new(
+            64,
+            24,
+            24,
+            "shipped fire particle blending",
+            test_font(),
+            Arc::new(object_sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_particle_sprites(Arc::new(definitions));
+        graphics.set_renderer_config(true, true, false);
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        for x in [31, 41] {
+            graphics
+                .surface_mut()
+                .set_pixel(x, 18, Color::opaque(50, 20, 30))
+                .expect("seed the destination behind each flame");
+        }
+
+        graphics.draw_objects_at_frame(
+            0,
+            &objects,
+            &[],
+            &HashMap::new(),
+            &particles,
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(31, 18),
+            Some(Color::opaque(150, 20, 30)),
+            "Fire2 adds src*srcAlpha to the destination",
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(41, 18),
+            Some(Color::opaque(100, 0, 0)),
+            "Fire replaces the destination through the ordinary alpha blit",
+        );
+    }
+
+    #[test]
     fn std_particles_apply_aspect_parallax_velocity_rotation_and_packed_modulation() {
         fn definition(
             name: &str,
