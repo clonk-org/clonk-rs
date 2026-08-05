@@ -5114,8 +5114,10 @@ func FxFireTimer(object target, int number, int time)
         // The smoke arm lives in ExecFire, which both feeders port, so a
         // script FxFireTimer overload chaining inherited() must smoke on the
         // same cadence rather than losing it (C4Object.cpp:785-793).
+        // Global, not definition-scope: the engine Fire effect carries no
+        // command target, so only a global overload shadows the timer.
         let script = "#strict\n\
-             func FxFireTimer(pObj, iNumber, iTime)\n\
+             global func FxFireTimer(pObj, iNumber, iTime)\n\
              {\n\
                  return inherited(pObj, iNumber, iTime);\n\
              }\n";
@@ -5138,35 +5140,43 @@ func FxFireTimer(object target, int number, int time)
         let mut hut = Definition::from_script("SMK2", "Overloaded hut", script)?;
         hut.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         hut.set_fire_properties(0, true, true);
+        hut.set_c4_callback_convention(true);
         engine.register_definition(hut)?;
         let object =
             engine.spawn_object(SpawnConfig::new("SMK2").with_category(CATEGORY_STRUCTURE))?;
         let index = engine.find_object_index(object).expect("hut exists");
         assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
 
+        // Sample per tick: a global-layer particle's survival is its own
+        // (well covered) story, and what this test is about is how often the
+        // compat feeder emits.
+        let mut puffs = 0;
+        let mut level = None;
+        let mut layer_ok = true;
         for _ in 0..15 {
+            let before = engine.particle_system().particles().len();
             engine.tick_without_snapshot()?;
-        }
-        let smoke: Vec<_> = engine
-            .particle_system()
-            .particles()
-            .iter()
-            .filter(|particle| particle.def_name == "Smoke")
-            .collect();
-        assert!(
-            !smoke.is_empty(),
-            "the inherited chain keeps the ExecFire smoke arm",
-        );
-        assert!(
-            smoke
+            if let Some(particle) = engine
+                .particle_system()
+                .particles()
                 .iter()
-                .all(|particle| particle.a.to_bits() == 10.0f32.to_bits()),
+                .find(|particle| particle.def_name == "Smoke")
+            {
+                if engine.particle_system().particles().len() > before {
+                    puffs += 1;
+                    level = Some(particle.a);
+                    layer_ok &= matches!(particle.layer, ParticleLayer::Global);
+                }
+            }
+        }
+        assert!(puffs > 0, "the inherited chain keeps the ExecFire smoke arm");
+        assert_eq!(
+            level.map(f32::to_bits),
+            Some(10.0f32.to_bits()),
             "2 * Shape.Wdt / 3, same level as the native path",
         );
         assert!(
-            smoke
-                .iter()
-                .all(|particle| matches!(particle.layer, ParticleLayer::Global)),
+            layer_ok,
             "Smoke() passes no target, so it uses the global list",
         );
 
@@ -5176,13 +5186,55 @@ func FxFireTimer(object target, int number, int time)
         // 16 wide at the default SmokeRate, so both smoke on a period of 5
         // whatever phase their object number puts them on.
         let (mut native, _) = burning_smoker(74, 16, 100)?;
+        let mut native_puffs = 0;
         for _ in 0..15 {
+            let before = native.particle_system().particles().len();
             native.tick_without_snapshot()?;
+            if native.particle_system().particles().len() > before {
+                native_puffs += 1;
+            }
         }
         assert_eq!(
-            smoke.len(),
-            native.particle_system().particles().len(),
+            puffs, native_puffs,
             "the inherited chain smokes exactly once per execution",
+        );
+
+        // Non-vacuity: an overload that swallows the call instead of chaining
+        // produces no smoke at all, so the assertions above are answering for
+        // the compat feeder rather than the native one.
+        let swallow = "#strict\n\
+             global func FxFireTimer(pObj, iNumber, iTime) { return -1; }\n";
+        let mut silent = Engine::with_seed(77);
+        silent
+            .register_particle_definition(
+                particles::ParticleDefCore {
+                    name: "Smoke".into(),
+                    init_fn: "StdInit".into(),
+                    exec_fn: "StdExec".into(),
+                    draw_fn: "Std".into(),
+                    delay: 1,
+                    repeats: 1000,
+                    ..Default::default()
+                },
+                10,
+                1.0,
+            )
+            .expect("smoke def registers");
+        let mut swallowed = Definition::from_script("SMK4", "Swallowed", swallow)?;
+        swallowed.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        swallowed.set_fire_properties(0, true, true);
+        swallowed.set_c4_callback_convention(true);
+        silent.register_definition(swallowed)?;
+        let quiet =
+            silent.spawn_object(SpawnConfig::new("SMK4").with_category(CATEGORY_STRUCTURE))?;
+        let index = silent.find_object_index(quiet).expect("object exists");
+        assert!(silent.incinerate_object(index, OWNER_NONE, false, None)?);
+        for _ in 0..15 {
+            silent.tick_without_snapshot()?;
+        }
+        assert!(
+            silent.particle_system().particles().is_empty(),
+            "a swallowing overload replaces the engine arm entirely",
         );
         Ok(())
     }
@@ -5396,7 +5448,7 @@ func FxFireTimer(object target, int number, int time)
         // `|| Abs(xdir) > 2` escape pinned too — the native path's tests say
         // nothing about it.
         let script = "#strict\n\
-             func FxFireTimer(pObj, iNumber, iTime)\n\
+             global func FxFireTimer(pObj, iNumber, iTime)\n\
              {\n\
                  return inherited(pObj, iNumber, iTime);\n\
              }\n";
@@ -5421,6 +5473,7 @@ func FxFireTimer(object target, int number, int time)
             definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
             definition.set_fire_properties(0, true, true);
             definition.set_smoke_rate(smoke_rate);
+            definition.set_c4_callback_convention(true);
             engine.register_definition(definition)?;
             let object =
                 engine.spawn_object(SpawnConfig::new("SMK3").with_category(CATEGORY_STRUCTURE))?;
@@ -5612,8 +5665,15 @@ func FxFireTimer(object target, int number, int time)
         // compat::effects::fx_fire_timer instead of Engine::exec_object_fire
         // (registration.rs registers the host function). Both feed the one
         // emitter, so the overload must not cost the object its particles.
+        //
+        // The overload has to be GLOBAL: C4Object::Incinerate builds the Fire
+        // effect with no command target (C4Object.cpp:1266), so
+        // C4Effect::GetCallbackScript resolves the timer on the engine script
+        // (C4Effect.cpp:42-57). A definition-scope FxFireTimer is never
+        // dispatched for it, and a test written that way silently exercises
+        // the native feeder instead.
         let script = "#strict\n\
-             func FxFireTimer(pObj, iNumber, iTime)\n\
+             global func FxFireTimer(pObj, iNumber, iTime)\n\
              {\n\
                  return inherited(pObj, iNumber, iTime);\n\
              }\n";
@@ -5621,6 +5681,7 @@ func FxFireTimer(object target, int number, int time)
         let mut hut = Definition::from_script("HUT1", "Hut", script)?;
         hut.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         hut.set_fire_properties(0, true, true);
+        hut.set_c4_callback_convention(true);
         engine.register_definition(hut)?;
         let object = engine.spawn_object(
             SpawnConfig::new("HUT1")
