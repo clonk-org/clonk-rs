@@ -12,45 +12,22 @@ use std::ffi::c_void;
 
 /// The set `C4WinMain` installs (`C4WinMain.cpp:257-264`), in that order.
 const HANDLED_SIGNALS: [(i32, &str); 8] = [
-    (SIGBUS, "SIGBUS"),
-    (SIGILL, "SIGILL"),
-    (SIGSEGV, "SIGSEGV"),
-    (SIGABRT, "SIGABRT"),
-    (SIGINT, "SIGINT"),
-    (SIGQUIT, "SIGQUIT"),
-    (SIGFPE, "SIGFPE"),
-    (SIGTERM, "SIGTERM"),
+    (libc::SIGBUS, "SIGBUS"),
+    (libc::SIGILL, "SIGILL"),
+    (libc::SIGSEGV, "SIGSEGV"),
+    (libc::SIGABRT, "SIGABRT"),
+    (libc::SIGINT, "SIGINT"),
+    (libc::SIGQUIT, "SIGQUIT"),
+    (libc::SIGFPE, "SIGFPE"),
+    (libc::SIGTERM, "SIGTERM"),
 ];
 
-#[cfg(target_os = "macos")]
-const SIGBUS: i32 = 10;
-#[cfg(target_os = "macos")]
-const SIGSEGV: i32 = 11;
-#[cfg(target_os = "macos")]
-const SIGQUIT: i32 = 3;
-#[cfg(not(target_os = "macos"))]
-const SIGBUS: i32 = 7;
-#[cfg(not(target_os = "macos"))]
-const SIGSEGV: i32 = 11;
-#[cfg(not(target_os = "macos"))]
-const SIGQUIT: i32 = 3;
-const SIGILL: i32 = 4;
-const SIGABRT: i32 = 6;
-const SIGINT: i32 = 2;
-const SIGFPE: i32 = 8;
-const SIGTERM: i32 = 15;
-
-const STDERR_FILENO: i32 = 2;
-const SIG_DFL: usize = 0;
 /// `void *stack[100]` (C4WinMain.cpp:203).
 const MAX_FRAMES: usize = 100;
 
-type SignalHandler = extern "C" fn(i32);
-
+// `backtrace(3)` lives in glibc's `execinfo.h`, which the libc crate declares
+// only for Apple and the BSDs, so these two stay hand-written.
 extern "C" {
-    fn write(fd: i32, buf: *const c_void, count: usize) -> isize;
-    fn signal(sig: i32, handler: usize) -> usize;
-    fn raise(sig: i32) -> i32;
     fn backtrace(buffer: *mut *mut c_void, size: i32) -> i32;
     fn backtrace_symbols_fd(buffer: *const *mut c_void, size: i32, fd: i32);
 }
@@ -66,7 +43,8 @@ fn write_all(fd: i32, bytes: &[u8]) {
     let mut written = 0;
     while written < bytes.len() {
         // SAFETY: the slice outlives the call and the length is in range.
-        let result = unsafe { write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        let result =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
         if result <= 0 {
             return;
         }
@@ -83,7 +61,7 @@ extern "C" fn crash_handler(signo: i32) {
 
     // C++ writes the banner to stderr, then to the log descriptor, then stops.
     let log_fd = LOG_DESCRIPTOR.load(std::sync::atomic::Ordering::Acquire);
-    for fd in [STDERR_FILENO, log_fd] {
+    for fd in [libc::STDERR_FILENO, log_fd] {
         if fd < 0 {
             continue;
         }
@@ -99,7 +77,7 @@ extern "C" fn crash_handler(signo: i32) {
     unsafe {
         let count = backtrace(frames.as_mut_ptr(), MAX_FRAMES as i32);
         if count > 0 {
-            backtrace_symbols_fd(frames.as_ptr(), count, STDERR_FILENO);
+            backtrace_symbols_fd(frames.as_ptr(), count, libc::STDERR_FILENO);
             if log_fd >= 0 {
                 backtrace_symbols_fd(frames.as_ptr(), count, log_fd);
             }
@@ -107,8 +85,8 @@ extern "C" fn crash_handler(signo: i32) {
         // Restore the default action and reraise, so the process exits with the
         // original signal status and dumps core if it would have
         // (C4WinMain.cpp:210-211).
-        signal(signo, SIG_DFL);
-        raise(signo);
+        libc::signal(signo, libc::SIG_DFL);
+        libc::raise(signo);
     }
 }
 
@@ -117,12 +95,12 @@ extern "C" fn crash_handler(signo: i32) {
 /// negative value when there is no log yet.
 pub fn install(log_descriptor: i32) {
     LOG_DESCRIPTOR.store(log_descriptor, std::sync::atomic::Ordering::Release);
-    let handler: SignalHandler = crash_handler;
+    let handler: extern "C" fn(i32) = crash_handler;
     for (signo, _) in HANDLED_SIGNALS {
         // SAFETY: `crash_handler` has the C signal-handler signature and uses
         // only async-signal-safe calls.
         unsafe {
-            signal(signo, handler as usize);
+            libc::signal(signo, handler as libc::sighandler_t);
         }
     }
 }
@@ -165,7 +143,7 @@ mod tests {
             install(1); // stdout doubles as the "log" descriptor for the child
                         // SAFETY: deliberately raising a handled signal.
             unsafe {
-                raise(SIGABRT);
+                libc::raise(libc::SIGABRT);
             }
             unreachable!("the handler must reraise and terminate the process");
         }
@@ -220,7 +198,7 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(
             status.signal(),
-            Some(SIGABRT),
+            Some(libc::SIGABRT),
             "child must die from the original signal, got {status:?}"
         );
         assert!(status.code().is_none());

@@ -16,6 +16,13 @@ default = []
 clonk-core = { path = "../clonk-core" }
 thiserror = "2"
 
+[target.'cfg(unix)'.dependencies]
+# `struct sigaction` and `stack_t` differ between Linux and macOS down to field
+# order, and the signal numbers and `SA_*` values differ again, so the crash
+# handler takes them from libc rather than declaring its own. Already in the
+# graph via clonk-core.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
