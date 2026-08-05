@@ -2777,7 +2777,7 @@ struct LegacyTeamBuilder {
     name: Vec<u8>,
     player_start_index: i32,
     player_count: i32,
-    player_ids: Vec<i32>,
+    players: String,
     color: u32,
     icon_spec: Vec<u8>,
     max_players: i32,
@@ -2791,10 +2791,12 @@ impl LegacyTeamBuilder {
                 self.id, self.player_count
             ))
         })?;
+        // mkArrayAdaptS defaults each missing or unreadable element to -1 and
+        // fills the tail once a separator is missing (StdAdaptors.h:365-392;
+        // C4Teams.cpp:144).
         let mut player_ids = vec![-1; player_count];
-        for (target, source) in player_ids.iter_mut().zip(self.player_ids) {
-            *target = source;
-        }
+        let defaults = vec![-1; player_count];
+        compile_defaulted_i32_components(&self.players, &mut player_ids, &defaults, true);
         Ok(InitialNetworkTeam {
             id: self.id,
             name: team_legacy_cstring(truncate_team_name(self.name), "Name")?,
@@ -2983,7 +2985,7 @@ fn apply_legacy_team_list_field(
                 metadata.auto_generate_teams = value;
             }
         }
-        "LastTeamID" => metadata.last_team_id = parse_team_i32(key, value, line)?,
+        "LastTeamID" => metadata.last_team_id = parse_team_i32(value),
         "TeamDistribution" => {
             let (distribution, unsupported) = parse_team_distribution(value);
             if let Some(distribution) = distribution {
@@ -2999,7 +3001,7 @@ fn apply_legacy_team_list_field(
             }
         }
         "MaxScriptPlayers" => {
-            metadata.max_script_players = parse_team_i32(key, value, line)?;
+            metadata.max_script_players = parse_team_i32(value);
         }
         "ScriptPlayerNames" => {
             metadata.script_player_names = team_legacy_cstring(
@@ -3008,7 +3010,7 @@ fn apply_legacy_team_list_field(
             )?;
         }
         "RandomTeamCount" => {
-            metadata.random_team_count = parse_team_i32(key, value, line)?;
+            metadata.random_team_count = parse_team_i32(value);
         }
         _ => {}
     }
@@ -3022,30 +3024,19 @@ fn apply_legacy_team_field(
     line: usize,
 ) -> Result<(), ScenarioError> {
     match key {
-        "id" => team.id = parse_team_i32(key, value, line)?,
+        "id" => team.id = parse_team_i32(value),
         "Name" => {
             team.name = latin1_string_as_bytes(value.trim_start_matches([' ', '\t']), line, key)?;
         }
-        "PlrStartIndex" => team.player_start_index = parse_team_i32(key, value, line)?,
-        "PlayerCount" => team.player_count = parse_team_i32(key, value, line)?,
-        "Players" => {
-            team.player_ids = value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| parse_team_i32(key, value, line))
-                .collect::<Result<_, _>>()?;
-        }
-        "Color" => {
-            let parsed = parse_i64(value).map_err(|error| {
-                team_parse_error(line, format!("invalid {key} `{value}`: {error}"))
-            })?;
-            team.color = u32::try_from(parsed).map_err(|_| {
-                team_parse_error(line, format!("{key} `{value}` is outside uint32"))
-            })?;
-        }
+        "PlrStartIndex" => team.player_start_index = parse_team_i32(value),
+        "PlayerCount" => team.player_count = parse_team_i32(value),
+        // The element defaults and the array length both come from
+        // PlayerCount, which C4Team::CompileFunc reads first regardless of file
+        // order, so the raw text is expanded in `finish` instead of here.
+        "Players" => team.players = value.to_string(),
+        "Color" => team.color = parse_std_u32(value).unwrap_or(0),
         "IconSpec" => team.icon_spec = parse_team_escaped_bytes(value, line, key)?,
-        "MaxPlayer" => team.max_players = parse_team_i32(key, value, line)?,
+        "MaxPlayer" => team.max_players = parse_team_i32(value),
         _ => {}
     }
     Ok(())
@@ -3907,9 +3898,14 @@ fn parse_std_bool(raw: &str) -> Option<bool> {
     }
 }
 
-fn parse_team_i32(key: &str, value: &str, line: usize) -> Result<i32, ScenarioError> {
-    parse_i32(value)
-        .map_err(|error| team_parse_error(line, format!("invalid {key} `{value}`: {error}")))
+/// Every numeric field in Teams.txt is read through `StdCompilerINIRead::ReadNum`
+/// (StdCompiler.h:705-723) under a defaulting naming adaptor, so text that
+/// strtol cannot start reading raises `notFound("Number")` and takes the
+/// field's default (StdAdaptors.h:44-60, 99-131) rather than failing the load.
+/// C4Team and C4TeamList default all of theirs to 0 (C4Teams.cpp:139-150,
+/// 556-579).
+fn parse_team_i32(value: &str) -> i32 {
+    parse_std_i32(value).unwrap_or(0)
 }
 
 pub(in crate::scenario) fn parse_team_distribution(
