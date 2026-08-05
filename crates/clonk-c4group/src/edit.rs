@@ -7,7 +7,8 @@
 //! The rebuild is metadata-preserving: each entry keeps its timestamp and
 //! executable bit, and a nested group is re-added as an already-packed child
 //! with its stored CRC, so it is never unpacked and repacked. An untouched
-//! rebuild therefore round-trips.
+//! rebuild therefore reproduces every entry core and payload byte, changing
+//! only the header creation stamp that `C4Group::Close` restamps on any save.
 
 use clonk_resources::group_writer::MutableGroup;
 use clonk_resources::Group;
@@ -143,8 +144,44 @@ pub fn write_back(mutable: &MutableGroup, path: &std::path::Path) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clonk_resources::compress_c4group_image;
 
-    fn fixture(directory: &std::path::Path) -> std::path::PathBuf {
+    const GROUP_HEADER_SIZE: usize = 204;
+    /// `C4GroupHeader::Creation` (`C4Group.h:87-95`), the only field whose value
+    /// a rewrite cannot carry over from the group it read.
+    const CREATION_FIELD: std::ops::Range<usize> = 104..108;
+    /// A creation stamp no rebuild can produce, so the fixture and its rebuild
+    /// always disagree there whatever second the test runs in.
+    const FIXTURE_CREATION: i32 = 0x0bad_f00d;
+
+    /// `MemScramble` (`C4Group.cpp:529-542`), which is its own inverse.
+    fn mem_scramble(buffer: &mut [u8]) {
+        buffer.iter_mut().for_each(|byte| *byte ^= 237);
+        for index in (0..buffer.len().saturating_sub(2)).step_by(3) {
+            buffer.swap(index, index + 2);
+        }
+    }
+
+    /// A packed image carrying `creation`. The header is stored scrambled, so
+    /// the field is reached by unscrambling it and scrambling it back.
+    fn with_creation_stamp(image: &[u8], creation: i32) -> Vec<u8> {
+        let mut image = image.to_vec();
+        mem_scramble(&mut image[..GROUP_HEADER_SIZE]);
+        image[CREATION_FIELD].copy_from_slice(&creation.to_le_bytes());
+        mem_scramble(&mut image[..GROUP_HEADER_SIZE]);
+        image
+    }
+
+    fn creation_stamp(image: &[u8]) -> i32 {
+        let mut header = [0_u8; GROUP_HEADER_SIZE];
+        header.copy_from_slice(&image[..GROUP_HEADER_SIZE]);
+        mem_scramble(&mut header);
+        i32::from_le_bytes(header[CREATION_FIELD].try_into().expect("creation stamp"))
+    }
+
+    /// Returns the fixture's path alongside the uncompressed image written to
+    /// it, which is what a rebuild has to reproduce.
+    fn fixture(directory: &std::path::Path) -> (std::path::PathBuf, Vec<u8>) {
         let mut child = MutableGroup::new("Child.c4g");
         child
             .add_file("Inner.txt", b"inner".to_vec())
@@ -157,28 +194,37 @@ mod tests {
         group
             .add_child("Child.c4g", child)
             .expect("add child group");
+        let image = with_creation_stamp(&group.pack_raw().expect("pack"), FIXTURE_CREATION);
         let path = directory.join("Fixture.c4g");
-        std::fs::write(&path, group.pack().expect("pack")).expect("write");
-        path
+        std::fs::write(&path, compress_c4group_image(&image).expect("compress")).expect("write");
+        (path, image)
     }
 
-    // A rebuild that changes nothing must reproduce the group byte for byte,
-    // or every mutating command would silently rewrite unrelated entries.
+    // A rebuild that changes nothing must reproduce every entry core and every
+    // payload byte, or a mutating command would silently rewrite unrelated
+    // entries. The creation stamp is the one exception: `C4Group::Close` sets
+    // `Head.Creation` to the current time on every save (`C4Group.cpp:937-939`),
+    // so comparing it would only pin which second the test ran in.
     #[test]
-    fn untouched_rebuild_round_trips_byte_for_byte() {
+    fn an_untouched_rebuild_changes_nothing_but_the_creation_stamp() {
         let directory = tempfile::tempdir().expect("temp dir");
-        let path = fixture(directory.path());
-        let original = std::fs::read(&path).expect("read original");
+        let (path, original) = fixture(directory.path());
 
         let group = Group::open(&path).expect("open");
         let mutable = to_mutable(&group, "Fixture.c4g").expect("rebuild");
         drop(group);
         write_back(&mutable, &path).expect("write back");
+        let rebuilt = mutable.pack_raw().expect("repack");
 
+        assert_ne!(
+            creation_stamp(&rebuilt),
+            FIXTURE_CREATION,
+            "a save stamps the current time rather than carrying the old one over"
+        );
         assert_eq!(
-            std::fs::read(&path).expect("read rebuilt"),
-            original,
-            "an untouched rebuild must not alter the packed bytes"
+            with_creation_stamp(&rebuilt, 0),
+            with_creation_stamp(&original, 0),
+            "an untouched rebuild must not alter any other packed byte"
         );
     }
 
@@ -186,7 +232,7 @@ mod tests {
     #[test]
     fn delete_preserves_the_remaining_entries() {
         let directory = tempfile::tempdir().expect("temp dir");
-        let path = fixture(directory.path());
+        let (path, _) = fixture(directory.path());
 
         let group = Group::open(&path).expect("open");
         let mut mutable = to_mutable(&group, "Fixture.c4g").expect("rebuild");
@@ -231,7 +277,7 @@ mod tests {
     #[test]
     fn rename_keeps_the_payload() {
         let directory = tempfile::tempdir().expect("temp dir");
-        let path = fixture(directory.path());
+        let (path, _) = fixture(directory.path());
 
         let group = Group::open(&path).expect("open");
         let mut mutable = to_mutable(&group, "Fixture.c4g").expect("rebuild");
