@@ -5002,6 +5002,512 @@ func FxFireTimer(object target, int number, int time)
         Ok(())
     }
 
+    #[test]
+    fn burning_object_smokes_on_the_defs_smoke_rate_cadence() -> Result<(), EngineError> {
+        // C4Object::ExecFire's "Effects" arm (C4Object.cpp:785-793):
+        //   smoke_level = 2 * Shape.Wdt / 3
+        //   smoke_rate  = 50 * smoke_level / Def->SmokeRate
+        //   smoke when (FrameCounter + Number * 7) % max(smoke_rate, 3) == 0
+        // A 16-wide object at the default SmokeRate=100 gives smoke_level 10
+        // and a period of 5. Smoke() itself is the "Smoke" particle
+        // (C4Effect.cpp:859-865), whose `a` is that level.
+        let mut engine = Engine::with_seed(70);
+        engine
+            .register_particle_definition(
+                particles::ParticleDefCore {
+                    name: "Smoke".into(),
+                    init_fn: "StdInit".into(),
+                    exec_fn: "StdExec".into(),
+                    draw_fn: "Std".into(),
+                    delay: 1,
+                    repeats: 1000,
+                    ..Default::default()
+                },
+                10,
+                1.0,
+            )
+            .expect("smoke def registers");
+        let mut hut = Definition::from_script("SMK1", "Smoky hut", "")?;
+        hut.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        hut.set_fire_properties(0, true, true);
+        engine.register_definition(hut)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("SMK1").with_category(CATEGORY_STRUCTURE))?;
+        let index = engine.find_object_index(object).expect("hut exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+
+        let mut smoking_frames = Vec::new();
+        for _ in 0..15 {
+            let before = engine.particle_system().particles().len();
+            engine.tick_without_snapshot()?;
+            if engine.particle_system().particles().len() > before {
+                smoking_frames.push(engine.frame());
+            }
+        }
+
+        assert!(
+            !smoking_frames.is_empty(),
+            "a burning object with a SmokeRate smokes",
+        );
+        let period = 5;
+        let phase = smoking_frames[0] % period;
+        for frame in &smoking_frames {
+            assert_eq!(
+                frame % period,
+                phase,
+                "smoke lands on one residue class of the SmokeRate period: {smoking_frames:?}",
+            );
+        }
+        assert!(
+            smoking_frames.len() >= 2,
+            "the cadence repeats within 15 frames: {smoking_frames:?}",
+        );
+        let level = engine
+            .particle_system()
+            .particles()
+            .iter()
+            .find(|particle| particle.def_name == "Smoke")
+            .map(|particle| particle.a)
+            .expect("a Smoke particle exists");
+        assert_eq!(level.to_bits(), 10.0f32.to_bits(), "2 * Shape.Wdt / 3");
+        Ok(())
+    }
+
+    #[test]
+    fn a_zero_smoke_rate_definition_never_smokes_while_burning() -> Result<(), EngineError> {
+        // `if (smoke_rate)` (C4Object.cpp:788): SmokeRate=0 is the opt-out,
+        // and it must not divide by zero on the way there.
+        let mut engine = Engine::with_seed(71);
+        engine
+            .register_particle_definition(
+                particles::ParticleDefCore {
+                    name: "Smoke".into(),
+                    init_fn: "StdInit".into(),
+                    exec_fn: "StdExec".into(),
+                    draw_fn: "Std".into(),
+                    delay: 1,
+                    repeats: 1000,
+                    ..Default::default()
+                },
+                10,
+                1.0,
+            )
+            .expect("smoke def registers");
+        let mut hut = Definition::from_script("SMK0", "Smokeless hut", "")?;
+        hut.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        hut.set_fire_properties(0, true, true);
+        hut.set_smoke_rate(0);
+        engine.register_definition(hut)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("SMK0").with_category(CATEGORY_STRUCTURE))?;
+        let index = engine.find_object_index(object).expect("hut exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+        for _ in 0..15 {
+            engine.tick_without_snapshot()?;
+        }
+        assert!(engine.particle_system().particles().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_inherited_fx_fire_timer_smokes_like_the_native_path() -> Result<(), EngineError> {
+        // The smoke arm lives in ExecFire, which both feeders port, so a
+        // script FxFireTimer overload chaining inherited() must smoke on the
+        // same cadence rather than losing it (C4Object.cpp:785-793).
+        // Global, not definition-scope: the engine Fire effect carries no
+        // command target, so only a global overload shadows the timer.
+        let script = "#strict\n\
+             global func FxFireTimer(pObj, iNumber, iTime)\n\
+             {\n\
+                 return inherited(pObj, iNumber, iTime);\n\
+             }\n";
+        let mut engine = Engine::with_seed(72);
+        engine
+            .register_particle_definition(
+                particles::ParticleDefCore {
+                    name: "Smoke".into(),
+                    init_fn: "StdInit".into(),
+                    exec_fn: "StdExec".into(),
+                    draw_fn: "Std".into(),
+                    delay: 1,
+                    repeats: 1000,
+                    ..Default::default()
+                },
+                10,
+                1.0,
+            )
+            .expect("smoke def registers");
+        let mut hut = Definition::from_script("SMK2", "Overloaded hut", script)?;
+        hut.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        hut.set_fire_properties(0, true, true);
+        hut.set_c4_callback_convention(true);
+        engine.register_definition(hut)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("SMK2").with_category(CATEGORY_STRUCTURE))?;
+        let index = engine.find_object_index(object).expect("hut exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+
+        // Sample per tick: a global-layer particle's survival is its own
+        // (well covered) story, and what this test is about is how often the
+        // compat feeder emits.
+        let mut puffs = 0;
+        let mut level = None;
+        let mut layer_ok = true;
+        for _ in 0..15 {
+            let before = engine.particle_system().particles().len();
+            engine.tick_without_snapshot()?;
+            if let Some(particle) = engine
+                .particle_system()
+                .particles()
+                .iter()
+                .find(|particle| particle.def_name == "Smoke")
+            {
+                if engine.particle_system().particles().len() > before {
+                    puffs += 1;
+                    level = Some(particle.a);
+                    layer_ok &= matches!(particle.layer, ParticleLayer::Global);
+                }
+            }
+        }
+        assert!(puffs > 0, "the inherited chain keeps the ExecFire smoke arm");
+        assert_eq!(
+            level.map(f32::to_bits),
+            Some(10.0f32.to_bits()),
+            "2 * Shape.Wdt / 3, same level as the native path",
+        );
+        assert!(
+            layer_ok,
+            "Smoke() passes no target, so it uses the global list",
+        );
+
+        // The two feeders are mutually exclusive per fire effect
+        // (engine/tick.rs's `native_fire` branch), so the overload must
+        // produce the SAME amount of smoke, not double it. Both objects are
+        // 16 wide at the default SmokeRate, so both smoke on a period of 5
+        // whatever phase their object number puts them on.
+        let (mut native, _) = burning_smoker(74, 16, 100)?;
+        let mut native_puffs = 0;
+        for _ in 0..15 {
+            let before = native.particle_system().particles().len();
+            native.tick_without_snapshot()?;
+            if native.particle_system().particles().len() > before {
+                native_puffs += 1;
+            }
+        }
+        assert_eq!(
+            puffs, native_puffs,
+            "the inherited chain smokes exactly once per execution",
+        );
+
+        // Non-vacuity: an overload that swallows the call instead of chaining
+        // produces no smoke at all, so the assertions above are answering for
+        // the compat feeder rather than the native one.
+        let swallow = "#strict\n\
+             global func FxFireTimer(pObj, iNumber, iTime) { return -1; }\n";
+        let mut silent = Engine::with_seed(77);
+        silent
+            .register_particle_definition(
+                particles::ParticleDefCore {
+                    name: "Smoke".into(),
+                    init_fn: "StdInit".into(),
+                    exec_fn: "StdExec".into(),
+                    draw_fn: "Std".into(),
+                    delay: 1,
+                    repeats: 1000,
+                    ..Default::default()
+                },
+                10,
+                1.0,
+            )
+            .expect("smoke def registers");
+        let mut swallowed = Definition::from_script("SMK4", "Swallowed", swallow)?;
+        swallowed.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        swallowed.set_fire_properties(0, true, true);
+        swallowed.set_c4_callback_convention(true);
+        silent.register_definition(swallowed)?;
+        let quiet =
+            silent.spawn_object(SpawnConfig::new("SMK4").with_category(CATEGORY_STRUCTURE))?;
+        let index = silent.find_object_index(quiet).expect("object exists");
+        assert!(silent.incinerate_object(index, OWNER_NONE, false, None)?);
+        for _ in 0..15 {
+            silent.tick_without_snapshot()?;
+        }
+        assert!(
+            silent.particle_system().particles().is_empty(),
+            "a swallowing overload replaces the engine arm entirely",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn switching_fire_particles_off_still_lets_script_create_them(
+    ) -> Result<(), EngineError> {
+        // C++ `FireParticles=false` only leaves pFire1/pFire2 null
+        // (C4Particles.cpp:483-489), which stops `FnFxFireTimer`'s automatic
+        // emitter. `CreateParticle("Fire2", ...)` looks the def up itself
+        // (C4Script.cpp FnCreateParticle) and is unaffected — so the switch
+        // must never become a blanket hide.
+        let script = "#strict\n\
+             func Flare()\n\
+             {\n\
+                 return CreateParticle(\"Fire2\", 0, 0, 0, -10, 20, 0);\n\
+             }\n";
+        let mut engine = engine_with_fire_particle_defs(73);
+        engine.set_fire_particles(false);
+        let mut torch = Definition::from_script("TRC2", "Torch", script)?;
+        torch.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        torch.set_fire_properties(0, true, true);
+        engine.register_definition(torch)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("TRC2").with_category(CATEGORY_STRUCTURE))?;
+        let index = engine.find_object_index(object).expect("torch exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+        for _ in 0..8 {
+            engine.tick_without_snapshot()?;
+        }
+        assert!(
+            engine.particle_system().particles().is_empty(),
+            "the automatic emitter is silenced",
+        );
+
+        let index = engine.find_object_index(object).expect("torch survives");
+        engine.call_object_function(index, "Flare", Vec::new())?;
+        engine.tick_without_snapshot()?;
+        assert!(
+            engine
+                .particle_system()
+                .particles()
+                .iter()
+                .any(|particle| particle.def_name == "Fire2"),
+            "script-created Fire2 is unaffected by the switch",
+        );
+        Ok(())
+    }
+
+    /// An engine with only the `Smoke` particle def registered, plus a
+    /// burning `SMKT` structure of the given shape width and SmokeRate.
+    fn burning_smoker(
+        seed: u64,
+        shape_width: i32,
+        smoke_rate: i32,
+    ) -> Result<(Engine, ObjectId), EngineError> {
+        let mut engine = Engine::with_seed(seed);
+        engine
+            .register_particle_definition(
+                particles::ParticleDefCore {
+                    name: "Smoke".into(),
+                    init_fn: "StdInit".into(),
+                    exec_fn: "StdExec".into(),
+                    draw_fn: "Std".into(),
+                    delay: 1,
+                    repeats: 1000,
+                    ..Default::default()
+                },
+                10,
+                1.0,
+            )
+            .expect("smoke def registers");
+        let mut definition = Definition::from_script("SMKT", "Smoker", "")?;
+        definition.set_shape_rect(Some(DefinitionRect::new(
+            -shape_width / 2,
+            -8,
+            shape_width,
+            16,
+        )));
+        definition.set_fire_properties(0, true, true);
+        definition.set_smoke_rate(smoke_rate);
+        engine.register_definition(definition)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("SMKT").with_category(CATEGORY_STRUCTURE))?;
+        let index = engine.find_object_index(object).expect("smoker exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+        Ok((engine, object))
+    }
+
+    #[test]
+    fn a_narrow_burning_object_floors_its_smoke_period_at_three_frames(
+    ) -> Result<(), EngineError> {
+        // `std::max<int32_t>(smoke_rate, 3)` (C4Object.cpp:791) is what keeps
+        // the modulus away from zero. An 8-wide object computes level 5 and a
+        // raw period of 2; a 1-wide one computes level 0 and a raw period of
+        // 0, which would be a divide by zero without the floor.
+        for (width, level) in [(8, 5), (1, 0)] {
+            let (mut engine, _) = burning_smoker(80 + width as u64, width, 100)?;
+            let mut smoking_frames = Vec::new();
+            for _ in 0..12 {
+                let before = engine.particle_system().particles().len();
+                engine.tick_without_snapshot()?;
+                if engine.particle_system().particles().len() > before {
+                    smoking_frames.push(engine.frame());
+                }
+            }
+            assert!(
+                !smoking_frames.is_empty(),
+                "width {width} still smokes on the floored period",
+            );
+            let phase = smoking_frames[0] % 3;
+            for frame in &smoking_frames {
+                assert_eq!(frame % 3, phase, "width {width}: {smoking_frames:?}");
+            }
+            assert_eq!(
+                engine
+                    .particle_system()
+                    .particles()
+                    .first()
+                    .expect("a Smoke particle exists")
+                    .a
+                    .to_bits(),
+                (level as f32).to_bits(),
+                "width {width}: 2 * Shape.Wdt / 3",
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_fast_burning_object_smokes_on_every_execution() -> Result<(), EngineError> {
+        // `|| (Abs(xdir) > 2)` (C4Object.cpp:791) short-circuits the cadence
+        // for a fast mover. The comparison is against `itofix(2)` on the raw
+        // fixed value (Fixed.h:185), and it is strict — a port that rounded
+        // through `fixtoi` would fire one step early and silently.
+        let sample = |seed: u64, xdir: C4Fixed| -> Result<usize, EngineError> {
+            let (mut engine, object) = burning_smoker(seed, 16, 100)?;
+            let index = engine.find_object_index(object).expect("smoker exists");
+            let mut smoking = 0;
+            for _ in 0..6 {
+                let index = engine.find_object_index(object).unwrap_or(index);
+                engine.objects[index].set_fixed_velocity(FixedVec2::new(xdir, C4Fixed::ZERO));
+                let before = engine.particle_system().particles().len();
+                engine.tick_without_snapshot()?;
+                if engine.particle_system().particles().len() > before {
+                    smoking += 1;
+                }
+            }
+            Ok(smoking)
+        };
+
+        // Exactly itofix(2) is NOT greater than itofix(2): cadence only.
+        let at_threshold = sample(90, itofix(2))?;
+        // One raw unit past it is.
+        let past_threshold = sample(91, C4Fixed::from_raw(itofix(2).val() + 1))?;
+        assert_eq!(
+            past_threshold, 6,
+            "a fast object smokes on every execution",
+        );
+        assert!(
+            at_threshold < past_threshold,
+            "the comparison is strict: {at_threshold} at the threshold vs \
+             {past_threshold} past it",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_smoke_cadence_wraps_like_cpp_int32_instead_of_trapping(
+    ) -> Result<(), EngineError> {
+        // `2 * Shape.Wdt` and `50 * smoke_level` are plain int32_t
+        // (C4Object.cpp:786,790), and a negative SmokeRate divides straight
+        // through. C++ wraps and keeps drawing; Rust must not trap on a path
+        // a script-set shape or DefCore can reach.
+        for smoke_rate in [i32::MIN, -1, 1, i32::MAX] {
+            let (mut engine, _) = burning_smoker(95, i32::MAX, smoke_rate)?;
+            for _ in 0..6 {
+                engine.tick_without_snapshot()?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_burning_object_smokes_without_the_fire_particle_defs_loaded(
+    ) -> Result<(), EngineError> {
+        // The smoke arm lives in ExecFire, which runs before
+        // `IsFireParticleLoaded` is consulted (C4Effect.cpp:658 then :660-661),
+        // so an installation with no Fire/Fire2 defs still smokes.
+        let (mut engine, _) = burning_smoker(92, 16, 100)?;
+        assert!(!engine.particle_system().is_fire_particle_loaded());
+        for _ in 0..12 {
+            engine.tick_without_snapshot()?;
+        }
+        assert!(
+            engine
+                .particle_system()
+                .particles()
+                .iter()
+                .any(|particle| particle.def_name == "Smoke"),
+            "smoke does not depend on the fire particle defs",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_inherited_smoke_arm_honours_the_opt_out_and_the_fast_mover_branch(
+    ) -> Result<(), EngineError> {
+        // Both feeder paths carry their own copy of C4Object.cpp:788-791, so
+        // the compat one needs its `if (smoke_rate)` opt-out and its
+        // `|| Abs(xdir) > 2` escape pinned too — the native path's tests say
+        // nothing about it.
+        let script = "#strict\n\
+             global func FxFireTimer(pObj, iNumber, iTime)\n\
+             {\n\
+                 return inherited(pObj, iNumber, iTime);\n\
+             }\n";
+        let build = |seed: u64, smoke_rate: i32| -> Result<(Engine, ObjectId), EngineError> {
+            let mut engine = Engine::with_seed(seed);
+            engine
+                .register_particle_definition(
+                    particles::ParticleDefCore {
+                        name: "Smoke".into(),
+                        init_fn: "StdInit".into(),
+                        exec_fn: "StdExec".into(),
+                        draw_fn: "Std".into(),
+                        delay: 1,
+                        repeats: 1000,
+                        ..Default::default()
+                    },
+                    10,
+                    1.0,
+                )
+                .expect("smoke def registers");
+            let mut definition = Definition::from_script("SMK3", "Overloaded", script)?;
+            definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+            definition.set_fire_properties(0, true, true);
+            definition.set_smoke_rate(smoke_rate);
+            definition.set_c4_callback_convention(true);
+            engine.register_definition(definition)?;
+            let object =
+                engine.spawn_object(SpawnConfig::new("SMK3").with_category(CATEGORY_STRUCTURE))?;
+            let index = engine.find_object_index(object).expect("object exists");
+            assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+            Ok((engine, object))
+        };
+
+        // SmokeRate=0 opts the overload out exactly as it does the native path.
+        let (mut silent, _) = build(75, 0)?;
+        for _ in 0..15 {
+            silent.tick_without_snapshot()?;
+        }
+        assert!(silent.particle_system().particles().is_empty());
+
+        // Past itofix(2) the cadence is bypassed and it smokes every tick.
+        let (mut fast, object) = build(76, 100)?;
+        let index = fast.find_object_index(object).expect("object exists");
+        for _ in 0..5 {
+            let index = fast.find_object_index(object).unwrap_or(index);
+            fast.objects[index].set_fixed_velocity(FixedVec2::new(
+                C4Fixed::from_raw(itofix(2).val() + 1),
+                C4Fixed::ZERO,
+            ));
+            fast.tick_without_snapshot()?;
+        }
+        assert_eq!(
+            fast.particle_system().particles().len(),
+            5,
+            "the overload's fast-mover escape fires on every execution",
+        );
+        Ok(())
+    }
+
     /// A definition-less engine wired with the stock `Fire`/`Fire2` particle
     /// defs, so `IsFireParticleLoaded` (C4Particles.h:214) answers true.
     fn engine_with_fire_particle_defs(seed: u64) -> Engine {
@@ -5159,8 +5665,15 @@ func FxFireTimer(object target, int number, int time)
         // compat::effects::fx_fire_timer instead of Engine::exec_object_fire
         // (registration.rs registers the host function). Both feed the one
         // emitter, so the overload must not cost the object its particles.
+        //
+        // The overload has to be GLOBAL: C4Object::Incinerate builds the Fire
+        // effect with no command target (C4Object.cpp:1266), so
+        // C4Effect::GetCallbackScript resolves the timer on the engine script
+        // (C4Effect.cpp:42-57). A definition-scope FxFireTimer is never
+        // dispatched for it, and a test written that way silently exercises
+        // the native feeder instead.
         let script = "#strict\n\
-             func FxFireTimer(pObj, iNumber, iTime)\n\
+             global func FxFireTimer(pObj, iNumber, iTime)\n\
              {\n\
                  return inherited(pObj, iNumber, iTime);\n\
              }\n";
@@ -5168,6 +5681,7 @@ func FxFireTimer(object target, int number, int time)
         let mut hut = Definition::from_script("HUT1", "Hut", script)?;
         hut.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         hut.set_fire_properties(0, true, true);
+        hut.set_c4_callback_convention(true);
         engine.register_definition(hut)?;
         let object = engine.spawn_object(
             SpawnConfig::new("HUT1")
@@ -6797,4 +7311,3 @@ func CatchBlow(level, by)
         assert_eq!(engine.physics().gravity, 44);
         Ok(())
     }
-

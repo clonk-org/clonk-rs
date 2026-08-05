@@ -3233,10 +3233,15 @@ an ordered-map model gap.
   player sets once. A Pi needs them chosen for it, because the player cannot
   know in advance which scenario will exceed the budget.
   After `DETAIL_STEP_DOWN_PASSES` (30) consecutive graphics passes over the
-  simulation interval the governor drops fire particles — a step that only
-  became a real saving once the engine emitter landed; the renderer still has
-  to read `fire_particles_enabled()` for it to bite (clonk-org/clonk-rs#106) —
-  then the monitor-gamma
+  simulation interval the governor drops fire particles — `GraphicsSystem`
+  skips the `Fire`/`Fire2` draws belonging to a *burning* object, one
+  unbatched call each, which is a real saving now that the engine emits them.
+  The predicate stops short of "every `Fire`/`Fire2` particle" because
+  shipped content builds standalone flames from the same defs on objects that
+  are not alight (the Western falling stars globally, the ClonkMars oil rig's
+  `Overburn` flare on itself), and blacking those out is not a detail
+  reduction. A particle carries no provenance, so script fire on an object
+  that *is* alight goes with the rest of that blaze. Then the monitor-gamma
   resolve pass — a second full-screen fill doing three dependent texture
   fetches per pixel. It restores one step at a time after
   `DETAIL_STEP_UP_PASSES` (120) passes under half the budget; the deadband
@@ -3244,9 +3249,15 @@ an ordered-map model gap.
   while the round's frozen `Graphics.AutoFrameSkip` allows automatic
   degradation, and clearing that flag restores full detail immediately.
   Both steps are presentation-only, so two clients running at different detail
-  levels stay in lockstep. Pinned by
-  `presentation_detail_steps_down_only_on_a_sustained_overrun` and
-  `presentation_detail_recovers_only_with_real_headroom`.
+  levels stay in lockstep. That is why the fire rung suppresses the *draw*
+  rather than driving `Engine::set_fire_particles`: an engine gate keyed to
+  measured frame cost would put wall-clock timing inside `Engine::snapshot()`,
+  whose particle list feeds the dev-replay hash. The static
+  `Config.Graphics.FireParticles` is a separate signal and does reach the
+  engine, where C++ applies it. Pinned by
+  `presentation_detail_steps_down_only_on_a_sustained_overrun`,
+  `presentation_detail_recovers_only_with_real_headroom` and
+  `the_fire_detail_rung_skips_only_a_burning_objects_own_flames`.
 
 - **Framebuffer creation widens the GPU backend set instead of aborting**
   (`build_framebuffer` / `framebuffer_backend_attempts`,

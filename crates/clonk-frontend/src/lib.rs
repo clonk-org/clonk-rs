@@ -10443,7 +10443,7 @@ mod tests {
         splitscreen_dividers: bool,
     ) -> Vec<SurfaceRect> {
         let mut graphics = test_graphics(width, height, height as i32, "Viewport layout");
-        graphics.set_renderer_config(true, splitscreen_dividers, true);
+        graphics.set_renderer_config(true, splitscreen_dividers);
         graphics.layout_viewports(count)
     }
 
@@ -12071,7 +12071,7 @@ mod tests {
             empty_hud_graphics(),
         );
         graphics.set_particle_sprites(Arc::new(definitions));
-        graphics.set_renderer_config(true, true, false);
+        graphics.set_renderer_config(true, true);
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         graphics
             .surface_mut()
@@ -12253,7 +12253,7 @@ mod tests {
             empty_hud_graphics(),
         );
         graphics.set_particle_sprites(Arc::new(definitions));
-        graphics.set_renderer_config(true, true, false);
+        graphics.set_renderer_config(true, true);
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         for x in [31, 41] {
             graphics
@@ -12417,9 +12417,128 @@ mod tests {
     }
 
     #[test]
+    fn the_fire_detail_rung_skips_only_a_burning_objects_own_flames() {
+        // The `NoFireParticles` presentation-detail rung exists to reclaim
+        // the unbatched per-particle draw calls the stock fire defs cost, so
+        // it has to actually skip them. Everything else keeps drawing: the
+        // rung is about fire, not about particles in general.
+        fn solid(name: &str) -> ParticleRenderDefinition {
+            ParticleRenderDefinition {
+                image: ImageData::new(1, 1, vec![200, 0, 0, 255]),
+                facet: ParticleFacet::new(0, 0, 1, 1),
+                length: 1,
+                aspect: 1.0,
+                core: ParticleDefCore {
+                    name: name.to_string(),
+                    ..ParticleDefCore::default()
+                },
+                draw_proc: ParticleDrawProc::Std,
+            }
+        }
+        let particle = |name: &str, x: f32, owner: ObjectId| ParticleSnapshot {
+            definition_id: name.to_string(),
+            position: FloatVector2::new(x, 8.0),
+            velocity: FloatVector2::new(0.0, 0.0),
+            life: 0,
+            parameter_a: 1.0,
+            parameter_b: 0x00ff_ffff,
+            layer: ParticleLayer::ObjectBack(owner),
+            pxs_fixed: None,
+            pxs_slot: None,
+        };
+        let definitions: HashMap<_, _> = ["Fire", "Fire2", "Smoke2"]
+            .iter()
+            .map(|name| (name.to_string(), solid(name)))
+            .collect();
+        let burning = ObjectId::new(1);
+        let cold = ObjectId::new(2);
+        let particles = vec![
+            particle("Fire", 4.0, burning),
+            particle("Fire2", 12.0, burning),
+            particle("Smoke2", 20.0, burning),
+            // Script fire: the EkeReloaded flamethrower projectile and the
+            // Baldoon torches build their flame from CreateParticle on an
+            // object that is not alight. Suppressing those would erase a
+            // damaging projectile, not trim frame cost.
+            particle("Fire2", 26.0, cold),
+        ];
+
+        // The particle pass runs inside the object draw, so the viewport
+        // needs at least one object; it sits clear of the sampled pixels.
+        let mut owner = make_snapshot().objects.remove(0);
+        owner.id = burning;
+        owner.definition_id = "ParticleOwner".to_string();
+        owner.position = Vector2::new(30, 14);
+        owner.crew_member = false;
+        owner.on_fire = true;
+        let mut unlit = owner.clone();
+        unlit.id = cold;
+        unlit.position = Vector2::new(30, 2);
+        unlit.on_fire = false;
+        let objects = vec![owner, unlit];
+        let object_sprites: HashMap<_, _> = (*solid_sprite(
+            "ParticleOwner",
+            2,
+            2,
+            Color::opaque(0, 0, 220),
+            Some(DefinitionRect::new(-1, -1, 2, 2)),
+            false,
+        ))
+        .clone();
+
+        let render = |fire_particles: bool| {
+            let mut graphics = GraphicsSystem::new(
+                32,
+                16,
+                16,
+                "fire particle suppression",
+                test_font(),
+                Arc::new(object_sprites.clone()),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_particle_sprites(Arc::new(definitions.clone()));
+            graphics.set_renderer_config(true, true);
+            graphics.set_fire_particle_detail(fire_particles);
+            graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+            graphics.draw_objects_at_frame(
+                0,
+                &objects,
+                &[],
+                &HashMap::new(),
+                &particles,
+                &[],
+                OWNER_NONE,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                None,
+            );
+            [4, 12, 20, 26].map(|x| graphics.surface().get_pixel(x, 8))
+        };
+
+        let drawn = Color::opaque(200, 0, 0);
+        let blank = Color::opaque(0, 0, 0);
+        assert_eq!(
+            render(true),
+            [Some(drawn), Some(drawn), Some(drawn), Some(drawn)],
+            "at full detail every particle draws",
+        );
+        assert_eq!(
+            render(false),
+            [Some(blank), Some(blank), Some(drawn), Some(drawn)],
+            "the rung skips the burning object's Fire and Fire2, and leaves \
+             both other defs and script fire on an unlit object alone",
+        );
+    }
+
+    #[test]
     fn disabling_extended_fire_particles_keeps_simple_fire_facet() {
-        // FireParticles gates automatic emission only; the simple object
-        // Fire.png facet and script-created registry particles remain visible.
+        // The detail rung suppresses flame *particles* only. The simple
+        // object Fire.png facet is unconditional in C++ (C4Object.cpp:2387,
+        // "always draw, even if particles are drawn as well") and stays so
+        // here, which is what keeps a burning object legible at the lowest
+        // detail level.
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(6, 6);
         object.crew_member = false;
@@ -12452,8 +12571,9 @@ mod tests {
             empty_cursor_atlas(),
             hud,
         );
-        graphics.set_renderer_config(true, true, false);
-        assert!(!graphics.fire_particles_enabled());
+        graphics.set_renderer_config(true, true);
+        graphics.set_fire_particle_detail(false);
+        assert!(!graphics.draws_fire_particles());
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
 
         graphics.draw_object_fire(
@@ -15539,7 +15659,7 @@ mod tests {
                 energy_bars: Some(ImageData::new(6, 3, pixels)),
                 ..HudGraphics::default()
             });
-            graphics.set_renderer_config(always, true, true);
+            graphics.set_renderer_config(always, true);
             graphics.render_frame(
                 &snapshot,
                 &[ViewportInput::from_focus(&snapshot.objects[0])],

@@ -72,6 +72,7 @@ impl Engine {
                                     definition,
                                 ),
                                 fire_top: definition.fire_top(),
+                                smoke_rate: definition.smoke_rate(),
                                 lift_top: definition.lift_top(),
                                 blast_incinerate: definition.blast_incinerate(),
                                 burn_turn_to: definition.burn_turn_to().map(str::to_string),

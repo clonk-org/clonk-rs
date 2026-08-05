@@ -2779,10 +2779,15 @@ impl AutomaticFrameSkip {
 /// How much presentation detail a machine that cannot draw fast enough gives
 /// up so the frame budget goes to simulation instead.
 ///
-/// Both steps are things C++ already exposes as static `[Graphics]` config
+/// Both steps mirror something C++ exposes as static `[Graphics]` config
 /// (`FireParticles`, `DisableGamma`); the divergence is choosing them
-/// automatically from measured cost. Nothing here reaches the simulation, so
-/// two clients at different detail levels stay in lockstep.
+/// automatically from measured cost. The fire step also differs in *where* it
+/// applies: C++'s switch nulls `pFire1`/`pFire2` so the engine stops emitting,
+/// while this one skips the draw for a burning object's flames — the engine
+/// must not depend on local frame timing, since its particle list feeds the
+/// dev-replay hash. Script-created fire is untouched either way. Nothing here
+/// reaches the simulation, so two clients at different detail levels stay in
+/// lockstep.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PresentationDetail {
     #[default]

@@ -1798,7 +1798,7 @@ impl Engine {
     /// `Smoke()` (C4Effect.cpp:859-865): create a "Smoke" particle if the def
     /// is loaded. (The FXS1 object fallback for missing particle defs is not
     /// ported.) `level/2` is integer division like the C++ call.
-    fn spawn_smoke(&mut self, x: i32, y: i32, level: i32) {
+    pub(crate) fn spawn_smoke(&mut self, x: i32, y: i32, level: i32) {
         self.particle_system.create(
             "Smoke",
             x as f32,
