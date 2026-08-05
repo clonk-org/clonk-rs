@@ -1025,7 +1025,7 @@ fn run() -> Result<()> {
             }
             // Read before the match, which moves out of `event`, and acted on
             // after the shell borrow below has ended.
-            let releases_developer_windows = matches!(event, Event::LoopExiting);
+            let loop_is_exiting = matches!(event, Event::LoopExiting);
             let shell_window_host::ShellWindowHost {
                 window,
                 pixels: pixels_slot,
@@ -1815,7 +1815,7 @@ fn run() -> Result<()> {
             // cancellation-free join — would run nested inside the OS's own
             // quit, where a slow worker hangs termination and a panicking drop
             // unwinds across an `extern "C"` boundary and aborts.
-            if releases_developer_windows {
+            if loop_is_exiting {
                 let destroyed = developer_windows.release_all();
                 tracing::debug!(
                     windows = destroyed.len(),
