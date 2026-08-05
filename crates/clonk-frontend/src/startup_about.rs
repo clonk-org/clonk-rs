@@ -362,7 +362,7 @@ impl StartupAboutDialog {
         draw_text(
             surface,
             &title_rect,
-            "ISC License",
+            "MIT License",
             TEXT_SECONDARY_COLOR,
             CAPTION_FONT_SIZE,
             6.0,

@@ -323,13 +323,14 @@ pub struct AboutLicense {
     pub text: &'static str,
 }
 
-/// The baseline source notice compiled into Clonk Rust. The ISC entry applies
-/// to source only; bundled game content retains its separate CC BY-NC notices.
-/// Optional dependency licenses are intentionally not fabricated when
-/// `deps/licenses.cmake` is absent.
+/// The baseline source notice compiled into Clonk Rust. The MIT entry applies
+/// to source only; bundled game content retains its separate CC BY-NC notices,
+/// and the file-type icons recovered from the C++ engine keep the ISC notice in
+/// `clonk-icon/res/COPYING`. Optional dependency licenses are intentionally not
+/// fabricated when `deps/licenses.cmake` is absent.
 pub static ABOUT_LICENSES: [AboutLicense; 1] = [AboutLicense {
     title: "Clonk Rust",
-    license_title: "ISC",
+    license_title: "MIT",
     text: include_str!("../../../COPYING"),
 }];
 
@@ -1928,12 +1929,15 @@ mod tests {
         assert_eq!(ABOUT_LICENSES.len(), 1);
         assert_eq!(
             license_display_title(&ABOUT_LICENSES[0]),
-            "Clonk Rust (ISC)"
+            "Clonk Rust (MIT)"
         );
         assert_eq!(ABOUT_LICENSES[0].text, include_str!("../../../COPYING"));
         assert!(ABOUT_LICENSES[0]
             .text
-            .contains("Permission to use, copy, modify"));
+            .contains("Permission is hereby granted, free of charge"));
+        // The sublicense grant is what separates MIT from the ISC notice this
+        // workspace shipped before; the icon resources stay ISC on their own.
+        assert!(ABOUT_LICENSES[0].text.contains("sublicense"));
         assert!(ABOUT_LICENSES[0]
             .text
             .contains("Copyright (c) 2026, Clonk Rust contributors"));
@@ -2411,7 +2415,7 @@ mod tests {
         state.handle_pointer_down(advance_point);
         state.handle_pointer_up(advance_point);
 
-        // Only the ISC entry remains, so row 0 is the whole list; the
+        // Only the MIT entry remains, so row 0 is the whole list; the
         // inter-row navigation this test used to cover no longer has a
         // second row to move to.
         let tabs = license_tabs_viewport(&layout);
@@ -2480,7 +2484,7 @@ mod tests {
         state.handle_wheel(text_point, -i32::MAX, &fonts);
         assert_eq!(state.license_scroll_offset(), metrics.max_scroll);
 
-        // Only the ISC page remains, so the cross-license clamp this test used
+        // Only the MIT page remains, so the cross-license clamp this test used
         // to assert has no second entry to switch to.
         let before_up = state.license_scroll_offset();
         state.handle_wheel(text_point, 60, &fonts);
