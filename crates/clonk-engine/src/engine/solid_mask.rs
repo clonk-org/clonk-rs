@@ -209,7 +209,7 @@ impl Engine {
                 // used for restore.
                 let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
                 bake.buffer[(cy * width + cx) as usize] = old;
-                landscape.grid_write_byte(lx, ly, vehicle);
+                landscape.grid_write_mask_byte(lx, ly, vehicle);
             }
         }
         self.objects[index].solid_mask_bake = Some(bake);
@@ -323,7 +323,7 @@ impl Engine {
                     // just will not be used for restore.
                     let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
                     bake.buffer[(cy * width + cx) as usize] = old;
-                    landscape.grid_write_byte(lx, ly, vehicle);
+                    landscape.grid_write_mask_byte(lx, ly, vehicle);
                 }
                 // Cells the rotated mask misses keep the MCVehic marker
                 // the buffer was initialized with (C4SolidMask.cpp:165-167).
@@ -432,7 +432,7 @@ impl Engine {
                 let lx = bake.x + cx;
                 let ly = bake.y + cy;
                 if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
-                    landscape.grid_write_byte(lx, ly, saved);
+                    landscape.grid_write_mask_byte(lx, ly, saved);
                 }
                 // C++ probes every mask-used pixel when requested, whether
                 // or not the restore write happened. Object synchronization

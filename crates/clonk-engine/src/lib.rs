@@ -8145,7 +8145,7 @@ impl SolidMaskBake {
                 let x = self.x + cx;
                 let y = self.y + cy;
                 if landscape.grid_byte_at(x, y) == Some(vehicle) {
-                    landscape.grid_write_byte(x, y, saved);
+                    landscape.grid_write_mask_byte(x, y, saved);
                 }
             }
         }
@@ -8177,7 +8177,7 @@ impl SolidMaskBake {
                 if current != vehicle {
                     self.buffer[((ly - self.y) * self.width + (lx - self.x)) as usize] = current;
                 }
-                landscape.grid_write_byte(lx, ly, vehicle);
+                landscape.grid_write_mask_byte(lx, ly, vehicle);
             }
         }
     }
@@ -8247,7 +8247,7 @@ fn put_solid_mask_raster(
                 // that buffer slot for restoration (C4SolidMask.cpp:92-96).
                 let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
                 bake.buffer[(cy * width + cx) as usize] = old;
-                landscape.grid_write_byte(lx, ly, vehicle);
+                landscape.grid_write_mask_byte(lx, ly, vehicle);
             }
         }
         return Some(bake);
@@ -8321,7 +8321,7 @@ fn put_solid_mask_raster(
                 let ly = rect_y + cy;
                 let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
                 bake.buffer[(cy * width + cx) as usize] = old;
-                landscape.grid_write_byte(lx, ly, vehicle);
+                landscape.grid_write_mask_byte(lx, ly, vehicle);
             }
             xa += ma1;
             xb += mb1;
