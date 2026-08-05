@@ -106,6 +106,15 @@ const ALTERNATE_STACK_SIZE: usize = 128 * 1024;
 ///
 /// Leaked deliberately: it has to outlive every frame in the process, and it
 /// is allocated exactly once.
+///
+/// `sigaltstack(2)` is per-thread, so this covers the thread that installs —
+/// the one running the engine and the script VM, and so the one an overflow
+/// is most likely to happen on. Worker threads keep the alternate stack the
+/// Rust runtime gives them, which is smaller but still several times the
+/// handler's measured high-water mark; it keeps installing one per thread
+/// because it latches that decision before `main`, ahead of us. Threads Rust
+/// did not create — an audio or GPU-driver callback — have no alternate stack
+/// from anyone and stay mute, exactly as they are under stock Rust.
 fn install_alternate_signal_stack() {
     let size = ALTERNATE_STACK_SIZE.max(libc::MINSIGSTKSZ);
     let stack = Box::leak(vec![0u8; size].into_boxed_slice());
