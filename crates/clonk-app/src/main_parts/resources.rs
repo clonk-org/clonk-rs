@@ -3840,10 +3840,17 @@ pub(crate) fn load_verbose_object_loading(paths: Option<&AppPaths>) -> i32 {
 pub(crate) const RENDER_INACTIVE_FULLSCREEN: u32 = 1 << 0;
 pub(crate) const RENDER_INACTIVE_CONSOLE: u32 = 1 << 1;
 
-/// `Graphics.RenderInactive`, a bitmask whose adapted default is `Console`
-/// alone (C4Config.cpp:481). `StartDrawing` refuses to draw while the
-/// application is inactive unless the bit for the *active shell* is set
+/// `Graphics.RenderInactive`, a bitmask consulted by `StartDrawing` before it
+/// draws into an inactive window: the bit for the *active shell* must be set
 /// (C4GraphicsSystem.cpp:96-106).
+///
+/// **Deliberate divergence** (PORT_STATUS.md): the default carries *both* bits
+/// where C++ adapts `Console` alone (C4Config.cpp:481), so an Alt-Tabbed game
+/// keeps drawing. Only the graphics half of `C4Application::Execute` is gated
+/// on activity (C4Application.cpp:451-478) — the round runs on, and in a
+/// network game it must — so the oracle default stops the picture at the moment
+/// of deactivation and snaps it forward on refocus (clonk-org/clonk-rs#57). A
+/// value the player writes is still honoured verbatim, in both directions.
 pub(crate) fn load_render_inactive_mask(paths: Option<&AppPaths>) -> u32 {
     native_config_text(
         &load_native_config_bytes(paths),
@@ -3852,7 +3859,10 @@ pub(crate) fn load_render_inactive_mask(paths: Option<&AppPaths>) -> u32 {
     )
     .as_deref()
     .and_then(|value| crate::parse_startup_config_integer(value.as_bytes()))
-    .map_or(RENDER_INACTIVE_CONSOLE, |value| value as u32)
+    .map_or(
+        RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE,
+        |value| value as u32,
+    )
 }
 
 /// `Application.Active` as `C4Application::DoInit` leaves it: set, until an OS
@@ -3876,13 +3886,26 @@ pub(crate) const fn initial_window_active() -> bool {
 /// withholding frame *one* is unrecoverable: no frame, no map, no focus, no
 /// frame. The gate therefore guards repaints of a window already on screen,
 /// which is exactly what `StartDrawing` guards on Windows.
+///
+/// `window_occluded` carries the other. C++ conflates inactive with invisible
+/// because Win32 deactivation minimizes the fullscreen window
+/// (C4FullScreen.cpp:139-145); once the port draws an unfocused window (see
+/// [`load_render_inactive_mask`]) the two come apart, and a window the display
+/// server has hidden outright is the case that keeps deserving the refusal.
 pub(crate) fn render_inactive_allows_drawing(
     mask: u32,
     window_active: bool,
     console_shell: bool,
     has_presented: bool,
+    window_occluded: bool,
 ) -> bool {
-    if window_active || !has_presented {
+    if !has_presented {
+        return true;
+    }
+    if window_occluded {
+        return false;
+    }
+    if window_active {
         return true;
     }
     let bit = if console_shell {

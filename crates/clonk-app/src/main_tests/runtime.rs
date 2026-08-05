@@ -7820,14 +7820,13 @@
             load_render_inactive_mask(Some(&paths))
         };
 
-        // The adapted default is Console alone, and survives an unparsable
-        // value or an absent key.
-        assert_eq!(mask(None), RENDER_INACTIVE_CONSOLE);
-        assert_eq!(mask(Some("[Graphics]\nName=Tester\n")), RENDER_INACTIVE_CONSOLE);
-        assert_eq!(
-            mask(Some("[Graphics]\nRenderInactive=always\n")),
-            RENDER_INACTIVE_CONSOLE
-        );
+        // The shipped default survives an unparsable value or an absent key. It
+        // carries both bits rather than C++'s Console alone; see
+        // `the_shipped_default_keeps_an_unfocused_game_window_drawing`.
+        let shipped = RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE;
+        assert_eq!(mask(None), shipped);
+        assert_eq!(mask(Some("[Graphics]\nName=Tester\n")), shipped);
+        assert_eq!(mask(Some("[Graphics]\nRenderInactive=always\n")), shipped);
         // Explicit masks, including hex, are honoured verbatim.
         assert_eq!(mask(Some("[Graphics]\nRenderInactive=0\n")), 0);
         assert_eq!(mask(Some("[Graphics]\nRenderInactive=1\n")), 1);
@@ -7838,15 +7837,15 @@
         for shell_is_console in [false, true] {
             for configured in [0, 1, 2, 3] {
                 assert!(
-                    render_inactive_allows_drawing(configured, true, shell_is_console, true),
+                    render_inactive_allows_drawing(configured, true, shell_is_console, true, false),
                     "an active window always draws (mask={configured}, console={shell_is_console})"
                 );
             }
         }
 
         // Inactive: each shell consults only its own bit.
-        let game = |mask| render_inactive_allows_drawing(mask, false, false, true);
-        let console = |mask| render_inactive_allows_drawing(mask, false, true, true);
+        let game = |mask| render_inactive_allows_drawing(mask, false, false, true, false);
+        let console = |mask| render_inactive_allows_drawing(mask, false, true, true, false);
         assert!(!game(0) && !console(0), "an empty mask suppresses both");
         assert!(game(RENDER_INACTIVE_FULLSCREEN));
         assert!(!console(RENDER_INACTIVE_FULLSCREEN));
@@ -7855,11 +7854,75 @@
         let both = RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE;
         assert!(game(both) && console(both));
 
-        // The shipped default therefore keeps an unfocused game window from
+        // The oracle default therefore keeps an unfocused game window from
         // drawing while the developer console still repaints.
         assert!(!game(RENDER_INACTIVE_CONSOLE));
         assert!(console(RENDER_INACTIVE_CONSOLE));
-    
+
+}
+
+    /// The *shipped* default carries the Fullscreen bit as well, so an
+    /// Alt-Tabbed game keeps drawing (clonk-org/clonk-rs#57; recorded under
+    /// PORT_STATUS.md "Deliberate divergences").
+    ///
+    /// Only the graphics half of `C4Application::Execute` is gated on activity
+    /// (C4Application.cpp:451-478): the round keeps executing, and in a network
+    /// game it must, because every other peer is waiting on this one's control.
+    /// With C++'s Console-only default (C4Config.cpp:481) the picture therefore
+    /// stops at the moment of deactivation while the world runs on, and refocus
+    /// snaps it forward — a freeze followed by a fast-forward, over a session
+    /// that never actually stalled. A player who writes the key still gets the
+    /// oracle behaviour, in both directions.
+    #[test]
+    fn the_shipped_default_keeps_an_unfocused_game_window_drawing() {
+        let mask = |body: Option<&str>| {
+            let root = tempdir().expect("render-inactive config root");
+            let user_data = tempdir().expect("render-inactive user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            if let Some(body) = body {
+                fs::write(paths.config_file(), body).expect("write fixture config");
+            }
+            load_render_inactive_mask(Some(&paths))
+        };
+
+        let shipped = mask(None);
+        assert_eq!(
+            shipped,
+            RENDER_INACTIVE_FULLSCREEN | RENDER_INACTIVE_CONSOLE,
+            "both shells draw while inactive unless the player says otherwise"
+        );
+        assert!(
+            render_inactive_allows_drawing(shipped, false, false, true, false),
+            "an Alt-Tabbed game window keeps its picture current"
+        );
+        assert!(
+            render_inactive_allows_drawing(shipped, false, true, true, false),
+            "the developer console keeps repainting exactly as C++ does"
+        );
+
+        // The oracle default remains reachable, and still withholds the game.
+        let oracle = mask(Some("[Graphics]\nRenderInactive=2\n"));
+        assert_eq!(oracle, RENDER_INACTIVE_CONSOLE);
+        assert!(!render_inactive_allows_drawing(
+            oracle, false, false, true, false
+        ));
+
+        // The advanced-config editor materializes what the engine actually
+        // does, so opening the dialog and saving cannot write the oracle
+        // default back in as an explicit key.
+        let row = crate::advanced_config::sections(&Config::new())
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.name == "RenderInactive")
+            .expect("RenderInactive row");
+        assert_eq!(row.value.serialized(), "3");
+
 }
 
     /// The gate withholds frames from a window the display server is already
@@ -7876,7 +7939,13 @@
         for shell_is_console in [false, true] {
             for configured in [0, 1, 2, 3] {
                 assert!(
-                    render_inactive_allows_drawing(configured, false, shell_is_console, false),
+                    render_inactive_allows_drawing(
+                        configured,
+                        false,
+                        shell_is_console,
+                        false,
+                        false
+                    ),
                     "frame one maps the window (mask={configured}, console={shell_is_console})"
                 );
             }
@@ -7887,7 +7956,57 @@
             RENDER_INACTIVE_CONSOLE,
             false,
             false,
-            true
+            true,
+            false
+        ));
+    }
+
+    /// A window the display server has hidden entirely gets no frames, whatever
+    /// the mask says.
+    ///
+    /// This is the guard that makes drawing-while-inactive affordable: C++ never
+    /// needed one because Win32 deactivation *minimizes* the fullscreen window
+    /// (C4FullScreen.cpp:139-145), so its inactive gate already covered the
+    /// hidden case. Once the port keeps an unfocused window current, "inactive"
+    /// and "invisible" come apart — a second monitor still shows the game, a
+    /// minimized one shows nothing — and only the second deserves the refusal.
+    /// `WindowEvent::Occluded` is how the backends that can say so report it:
+    /// macOS from the window's occlusion state, X11 from a
+    /// `VisibilityFullyObscured` notify. Wayland and Windows never send it, and
+    /// there a hidden window keeps drawing exactly as if it were visible, which
+    /// costs a repaint nobody sees rather than risking a stall.
+    #[test]
+    fn a_hidden_window_draws_no_frames_however_the_mask_is_set() {
+        for active in [false, true] {
+            for console_shell in [false, true] {
+                for configured in [0, 1, 2, 3] {
+                    assert!(
+                        !render_inactive_allows_drawing(
+                            configured,
+                            active,
+                            console_shell,
+                            true,
+                            true
+                        ),
+                        "an occluded window has no picture to keep fresh \
+                         (mask={configured}, active={active}, console={console_shell})"
+                    );
+                }
+            }
+        }
+
+        // Frame one still maps the window: the same deadlock
+        // `the_inactive_gate_never_withholds_the_first_frame` describes applies
+        // to any refusal here.
+        assert!(render_inactive_allows_drawing(0, false, false, false, true));
+
+        // Revealing it draws again on the very next opportunity.
+        assert!(render_inactive_allows_drawing(
+            RENDER_INACTIVE_FULLSCREEN,
+            false,
+            false,
+            true,
+            false
         ));
     }
 
@@ -7903,7 +8022,8 @@
             RENDER_INACTIVE_CONSOLE,
             initial_window_active(),
             false,
-            true
+            true,
+            false
         ));
     }
 

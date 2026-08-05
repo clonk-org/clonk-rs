@@ -32,7 +32,8 @@ Duplicate real paths retain separate infos but the later join is rejected like
 controls independently. Focus loss runs only the nonfatal UI/pointer
 cleanup: no native backend clears player controls there
 (C4FullScreen.cpp:139-145,310-315,432-447), so Alt-Tab adds nothing to a
-synchronized session. Scenario
+synchronized session, and the window now keeps drawing while it is unfocused so
+the picture cannot fall behind the round it is still playing. Scenario
 definition lists use classic quoted/numbered parsing and load explicit global
 packs before ancestor-local packs; later folder-local ID collisions overload
 the global definition, while packed parent graphics and materials resolve
@@ -3080,6 +3081,49 @@ an ordered-map model gap.
   `the_measured_horizon_inputs_are_readable_after_a_control_tick`,
   `the_diagnostics_overlay_is_inert_until_it_is_given_text` and
   `the_diagnostics_overlay_stands_clear_of_the_network_status_block`.
+
+- **An unfocused window keeps drawing, and a hidden one stops**
+  (`load_render_inactive_mask` + `render_inactive_allows_drawing` +
+  `GameApp::window_occluded`, `crates/clonk-app`; the `Graphics.RenderInactive`
+  default becomes Fullscreen|Console, and `WindowEvent::Occluded` gates every
+  mask). Approved 2026-08-05, fixes clonk-org/clonk-rs#57.
+  `C4GraphicsSystem::StartDrawing` refuses to draw an inactive window unless the
+  active shell's bit is set (C4GraphicsSystem.cpp:96-106) and `C4Config` adapts
+  the default to `Console` alone (C4Config.cpp:481), so Alt-Tab stops a
+  fullscreen game's picture. Only the *graphics* half of
+  `C4Application::Execute` is gated on activity, though — `Game.Execute()` is
+  not (C4Application.cpp:451-478) — so the round runs on, and in a network game
+  it must: lockstep means every other peer is waiting on this client's control.
+  The oracle default therefore freezes the picture at the moment of
+  deactivation, advances the world behind it, and snaps forward on refocus,
+  which reads as the fast-forward filed as clonk-org/clonk-rs#56 over a session
+  that never stalled. Measured before this change on macOS: an inactive shell
+  presented **1 frame in 197 s while the simulation executed 7062**. The
+  divergence is the *default* only; a `RenderInactive` the player writes is
+  honoured verbatim in both directions, and `RenderInactive=2` restores C++
+  exactly. C++ needed no notion of a hidden window because Win32 deactivation
+  minimizes its fullscreen window (C4FullScreen.cpp:139-145) — its inactive gate
+  already covered that case, and once the port draws while unfocused the two
+  come apart, so occlusion now refuses on its own (macOS occlusion state, X11
+  `VisibilityFullyObscured`; Wayland and Windows do not report it and keep
+  drawing). Both refusals re-arm `RenderFloor::note_refused_presentation`, so
+  neither can bank the graphics-deadline debt that `2dd4d6a65` removed.
+  **Blast radius.** Presentation-only, and in the safe direction: this adds
+  frames, never removes a simulation step. Nothing on the path reads or writes
+  `C4Fixed`, `C4Random`, movement or control ordering, and the gate is
+  per-client local state that no peer can observe, so two clients configured
+  differently stay in lockstep and cross-play against a stock LegacyClonk client
+  is unaffected. `parity verify` and `engine-snapshots verify` cannot see it;
+  neither presents. The composited in-frame pointer is still withheld while
+  inactive (`platform_cursor_visible`), so an unfocused window draws the world
+  without claiming to own the cursor. Pinned by
+  `the_shipped_default_keeps_an_unfocused_game_window_drawing` and
+  `a_hidden_window_draws_no_frames_however_the_mask_is_set`;
+  `render_inactive_bitmask_gates_unfocused_fullscreen_and_console_redraw`,
+  `the_inactive_gate_never_withholds_the_first_frame` and
+  `startup_activity_matches_native_rather_than_the_windowing_systems_focus_report`
+  keep the per-bit behaviour, the first-frame exemption and the seeded activity
+  flag unchanged.
 
 - **The sky gradient may be dithered below the 8-bit step**
   (`GpuSolidStyle::dither` + `SOLID_SHADER`, `crates/clonk-app-render`; opt-in

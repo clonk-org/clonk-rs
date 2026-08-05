@@ -695,6 +695,12 @@ pub(crate) struct GameApp {
     /// C4MouseControl::LeftDoubleIgnoreUp.
     pub(crate) ingame_ignore_left_up: bool,
     pub(crate) window_active: bool,
+    /// The display server has hidden the window outright — minimized, or fully
+    /// covered by another one (`WindowEvent::Occluded`). C++ has no equivalent
+    /// because Win32 deactivation minimizes its fullscreen window
+    /// (C4FullScreen.cpp:139-145), so its inactive gate already covered this.
+    /// Backends that cannot report occlusion leave it clear.
+    pub(crate) window_occluded: bool,
     pub(crate) exit_requested: bool,
     /// A confirmed `Config.Default()` reset owns shutdown persistence. Keep
     /// this latched after `take_exit_request` so the event-loop tail cannot
