@@ -146,7 +146,7 @@ const FANPROJECT_TEXT: &str = "Clonk Rust is a fan project based on Clonk Rage."
 
 // Keep the source notice authoritative and separate from the CC BY-NC game
 // content terms shipped alongside the relevant content groups.
-const ISC_LICENSE: &str = include_str!("../../../COPYING");
+const SOURCE_LICENSE: &str = include_str!("../../../COPYING");
 
 impl StartupAboutDialog {
     pub fn new(font: Arc<dyn TextFont>) -> Self {
@@ -362,7 +362,7 @@ impl StartupAboutDialog {
         draw_text(
             surface,
             &title_rect,
-            "ISC License",
+            "MIT License",
             TEXT_SECONDARY_COLOR,
             CAPTION_FONT_SIZE,
             6.0,
@@ -374,7 +374,7 @@ impl StartupAboutDialog {
         let line_height = LICENSE_FONT_SIZE * 1.4;
         let mut y = text_y;
 
-        for line in ISC_LICENSE.lines() {
+        for line in SOURCE_LICENSE.lines() {
             let line_rect = GuiRect::new(
                 layout.licenses_area.origin.x + 16.0,
                 y,
@@ -627,11 +627,11 @@ impl StartupAboutDialog {
 
 #[cfg(test)]
 mod tests {
-    use super::ISC_LICENSE;
+    use super::SOURCE_LICENSE;
 
     #[test]
     fn legacy_about_uses_the_root_source_license_without_content_terms() {
-        assert_eq!(ISC_LICENSE, include_str!("../../../COPYING"));
-        assert!(!ISC_LICENSE.contains("NonCommercial"));
+        assert_eq!(SOURCE_LICENSE, include_str!("../../../COPYING"));
+        assert!(!SOURCE_LICENSE.contains("NonCommercial"));
     }
 }

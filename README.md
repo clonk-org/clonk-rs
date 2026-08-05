@@ -87,7 +87,7 @@ Contributor documentation lives in [`AGENTS.md`](AGENTS.md) and
 
 ## Licensing
 
-The Rust source in this workspace is available under the ISC license in
+The Rust source in this workspace is available under the MIT license in
 [`COPYING`](COPYING). That does **not** relicense the bundled game data:
 graphics, audio, scripts, text, and other assets under [`planet/`](planet/) and
 the [`content/`](content/) submodule remain under their own `COPYING` files,
