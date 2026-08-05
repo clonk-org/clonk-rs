@@ -2906,6 +2906,10 @@ impl GameApp {
                     self.open_network_host_scenario_browser();
                 }
                 NetDlgAction::MasterserverSignupChanged(enabled) => {
+                    // UpdateMasterserver creates the query object it is about
+                    // to enable, so the icon can never read "on" with nothing
+                    // behind it (src/C4StartupNetDlg.cpp:851-866).
+                    self.restore_startup_game_search();
                     if let Some(search) = self.startup_game_search.as_ref() {
                         let _ = search.set_internet_enabled(enabled);
                     }
@@ -3546,6 +3550,39 @@ impl GameApp {
             };
     }
 
+    /// `C4StartupNetDlg` cannot be on screen without the clients that search
+    /// for games: DiscoverClient is constructed with the dialog and closed only
+    /// by its destructor, and OnShown -> UpdateMasterserver recreates
+    /// pMasterserverClient whenever MasterServerSignUp is set and it is missing
+    /// (src/C4StartupNetDlg.cpp:737-738,752,771-777,851-866). Every C++ route
+    /// that stops the search also destroys the dialog, so a port path that
+    /// keeps the dialog has to bring the worker back with it.
+    pub(crate) fn restore_startup_game_search(&mut self) {
+        let Some(masterserver_enabled) = self
+            .startup_network_dialog
+            .as_ref()
+            .map(|dialog| dialog.config().masterserver_signup)
+        else {
+            return;
+        };
+        if self.startup_game_search.is_some() {
+            return;
+        }
+        // The dialog's own flag is the in-memory `Config.Network.MasterServerSignUp`
+        // that OnBtnInternet writes; the file only catches up at shutdown
+        // (src/C4StartupNetDlg.cpp:838-845).
+        let mut search_config = load_network_search_settings(self.app_paths.as_ref());
+        search_config.internet_enabled = masterserver_enabled;
+        self.startup_network_refresh_waiting_for_clear = false;
+        self.start_startup_game_search(search_config);
+        let now = Instant::now();
+        self.startup_network_last_refresh = Some(now);
+        self.startup_masterserver_next_query_at = masterserver_enabled
+            .then(|| now.checked_add(clonk_network::GAME_SEARCH_INTERVAL))
+            .flatten();
+        self.reset_startup_masterserver_entry_at(now);
+    }
+
     pub(crate) fn open_network_game_dialog(&mut self) {
         self.external_irc_dialog_visible = false;
         self.external_irc_dialog = None;
@@ -3590,6 +3627,9 @@ impl GameApp {
     /// presence from Config; its Record icon intentionally retains the
     /// controller's older value.
     pub(crate) fn refresh_retained_network_dialog_internet(&mut self) {
+        // OnShown runs UpdateMasterserver before the first OnSec1Timer, so a
+        // re-shown dialog always searches (src/C4StartupNetDlg.cpp:771-777).
+        self.restore_startup_game_search();
         let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
         let recreate_masterserver = self.startup_network_dialog.as_mut().is_some_and(|dialog| {
             let recreate = !dialog.config().masterserver_signup && masterserver_signup;
@@ -4172,6 +4212,7 @@ impl GameApp {
                     self.pending_host_rejoin = None;
                     self.status_text.clear();
                     self.resume_startup_music_after_failed_open_game();
+                    self.restore_startup_game_search();
                 }
             }
             MessageDialogContinuation::StartupIrcConnectWarning { login } => {
