@@ -1187,6 +1187,22 @@ impl GameApp {
         }
     }
 
+    /// The masterserver branch of `C4StartupNetListEntry::Execute` re-queries
+    /// without calling `UpdateText`/`UpdateSmallState`, so the labels keep the
+    /// previous reply — its game count, message of the day and hyperlink — and
+    /// only the icon returns to the animated `fctNetGetRef` facet. The re-query
+    /// still arms `iRequestTimeout` through `QueryReferences`
+    /// (src/C4StartupNetDlg.cpp:182,191-207).
+    pub(crate) fn begin_startup_masterserver_requery_at(&mut self, now: Instant) {
+        self.startup_masterserver_request_timeout_at =
+            now.checked_add(clonk_network::REFERENCE_QUERY_TIMEOUT);
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            let mut entry = dialog.masterserver_entry().clone();
+            entry.row_icon = clonk_frontend::startup_netdlg::NetDlgRowIcon::Query;
+            dialog.set_masterserver_entry(entry);
+        }
+    }
+
     pub(crate) fn set_startup_masterserver_error(&mut self, message: String) {
         self.set_startup_masterserver_error_at(Instant::now(), message);
     }
@@ -1662,7 +1678,7 @@ impl GameApp {
             // returns before the iRequestTimeout check, so the fresh request
             // gets its full deadline (src/C4StartupNetDlg.cpp:191-207).
             self.startup_masterserver_next_query_at = None;
-            self.reset_startup_masterserver_entry_at(now);
+            self.begin_startup_masterserver_requery_at(now);
         } else if self
             .startup_masterserver_request_timeout_at
             .is_some_and(|timeout_at| now >= timeout_at)

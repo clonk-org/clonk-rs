@@ -2657,6 +2657,71 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
 }
 
 #[test]
+fn the_periodic_masterserver_requery_keeps_the_reply_it_is_refreshing() {
+    use clonk_frontend::startup_netdlg::{NetDlgRowIcon, NetDlgTextLine};
+
+    // The masterserver branch of `C4StartupNetListEntry::Execute` re-queries
+    // without calling UpdateText or UpdateSmallState — the only call sites are
+    // :161, :267, :280, :298-299, :359, :503 and :513 — so the labels keep the
+    // previous reply's game count, message of the day and hyperlink, and only
+    // the icon returns to the animated fctNetGetRef facet (pinned oracle
+    // 7d43b47b src/C4StartupNetDlg.cpp:191-207).
+    let mut app = new_classic_menu_app(800, 600);
+    attach_l040_network_dialog(&mut app);
+    app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::MasterserverReply(
+        clonk_network::MasterserverReplyInfo {
+            motd: "Update available.".to_string(),
+            motd_url: "https://clonkspot.example/lc-en".to_string(),
+            game_count: 3,
+            player_count: 5,
+            ..Default::default()
+        },
+    ))
+    .expect("project a masterserver reply with a message of the day");
+
+    let replied = app
+        .startup_network_dialog
+        .as_ref()
+        .expect("network dialog")
+        .masterserver_entry()
+        .clone();
+    assert_eq!(replied.details, "3 game(s) found.");
+    assert_eq!(replied.row_icon, NetDlgRowIcon::QueryStatic);
+    assert!(matches!(
+        replied.extra_lines.as_slice(),
+        [NetDlgTextLine::Plain(_), NetDlgTextLine::Hyperlink { .. }]
+    ));
+
+    let requery_at = app
+        .startup_masterserver_next_query_at
+        .expect("a reply schedules the next masterserver query");
+    app.tick_startup_network_query_rows_at(requery_at);
+
+    let requerying = app
+        .startup_network_dialog
+        .as_ref()
+        .expect("network dialog")
+        .masterserver_entry();
+    assert_eq!(
+        requerying.row_icon,
+        NetDlgRowIcon::Query,
+        "the re-query animates the icon"
+    );
+    assert_eq!(
+        requerying.details, replied.details,
+        "the re-query leaves the previous game count on screen"
+    );
+    assert_eq!(
+        requerying.extra_lines, replied.extra_lines,
+        "the re-query keeps the message of the day and its hyperlink"
+    );
+    assert_eq!(
+        requerying.title, replied.title,
+        "the re-query leaves sInfoText[0] alone"
+    );
+}
+
+#[test]
 fn masterserver_row_reports_a_reference_request_timeout_when_no_reply_arrives() {
     use clonk_frontend::startup_netdlg::NetDlgRowIcon;
 
