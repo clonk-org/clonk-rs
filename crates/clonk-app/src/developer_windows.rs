@@ -208,6 +208,41 @@ impl<H: DeveloperWindowHost> DeveloperWindows<H> {
         }
     }
 
+    /// Destroys every record, the child windows before the console shell, and
+    /// returns the keys in the order they were destroyed.
+    ///
+    /// This is shutdown, not a close: the toolbox is destroyed here rather than
+    /// hidden, because there is nothing left for its pages to survive for.
+    ///
+    /// `C4Application::Clear` tears the same graphics down in the same order —
+    /// `Game.Clear()` reaches `C4GraphicsSystem::Clear`'s `Viewports.clear()`
+    /// (`C4GraphicsSystem.cpp:61-73`), each `~C4Viewport` deleting its own GL
+    /// context before its window (`C4Viewport.cpp:816-834`), and only then does
+    /// `delete DDraw` destroy the device the main window draws through
+    /// (`C4Application.cpp:306,326`). Dropping the registry instead leaves the
+    /// order to a `HashMap`, which is neither that nor the same twice.
+    pub fn release_all(&mut self) -> Vec<WindowId> {
+        let mut destroyed: Vec<WindowId> = self
+            .records
+            .keys()
+            .copied()
+            .filter(|id| *id != SHELL_WINDOW)
+            .collect();
+        destroyed.sort_unstable();
+        destroyed.extend(
+            self.records
+                .contains_key(&SHELL_WINDOW)
+                .then_some(SHELL_WINDOW),
+        );
+        for id in &destroyed {
+            // Each record — its window, surface and renderer — dies here, at a
+            // point the caller chose, rather than wherever the registry itself
+            // happens to be dropped.
+            drop(self.records.remove(id));
+        }
+        destroyed
+    }
+
     /// Closes a record. Viewports and the object list are destroyed; the
     /// toolbox is only hidden so its pages survive; the shell is never removed
     /// by this path — a child close must not take the console down with it.
@@ -332,6 +367,71 @@ mod tests {
         host.request_redraw();
         host.set_visible(host.visible());
         let _: Result<(), String> = host.present(app);
+    }
+
+    // C4Application::Clear clears the viewport list first — `Viewports.clear()`
+    // (`C4GraphicsSystem.cpp:61-73`), each `~C4Viewport` deleting its own GL
+    // context before its window (`C4Viewport.cpp:816-834`) — and only then
+    // deletes the drawing device the main window draws through
+    // (`C4Application.cpp:326`). A `HashMap`'s iteration order is not that.
+    #[test]
+    fn shutdown_destroys_the_viewport_windows_before_the_console_shell() {
+        struct DropProbe {
+            id: WindowId,
+            destroyed: std::rc::Rc<std::cell::RefCell<Vec<WindowId>>>,
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.destroyed.borrow_mut().push(self.id);
+            }
+        }
+
+        impl DeveloperWindowHost for DropProbe {
+            fn resize(&mut self, _width: u32, _height: u32) {}
+            fn request_redraw(&mut self) {}
+            fn set_visible(&mut self, _visible: bool) {}
+            fn visible(&self) -> bool {
+                true
+            }
+        }
+
+        let destroyed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut windows = DeveloperWindows::new();
+        let mut register = |id: WindowId, purpose: HostPurpose| {
+            windows.insert(
+                id,
+                purpose,
+                DropProbe {
+                    id,
+                    destroyed: std::rc::Rc::clone(&destroyed),
+                },
+            );
+        };
+        register(SHELL_WINDOW, HostPurpose::Shell);
+        register(WindowId(2), HostPurpose::Viewport { viewport: 0 });
+        register(WindowId(1), HostPurpose::Viewport { viewport: 1 });
+        register(
+            WindowId(3),
+            HostPurpose::Toolbox {
+                page: ToolboxPage::Tools,
+            },
+        );
+
+        let released = windows.release_all();
+
+        // Every window goes, in a deterministic order that ends at the shell —
+        // a hidden toolbox owns a surface exactly like a visible viewport does.
+        assert_eq!(
+            released,
+            vec![WindowId(1), WindowId(2), WindowId(3), SHELL_WINDOW]
+        );
+        assert_eq!(*destroyed.borrow(), released);
+        assert!(windows.is_empty());
+
+        // Releasing an already-empty registry is not an error: the runner asks
+        // on the way out whether or not a console ever opened a window.
+        assert!(windows.release_all().is_empty());
     }
 
     #[test]

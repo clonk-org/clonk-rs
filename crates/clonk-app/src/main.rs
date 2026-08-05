@@ -1015,6 +1015,9 @@ fn run() -> Result<()> {
                     return;
                 }
             }
+            // Read before the match, which moves out of `event`, and acted on
+            // after the shell borrow below has ended.
+            let releases_developer_windows = matches!(event, Event::LoopExiting);
             let shell_window_host::ShellWindowHost {
                 window,
                 pixels: pixels_slot,
@@ -1768,6 +1771,33 @@ fn run() -> Result<()> {
                 if let Err(error) = store_console_window_position(paths.as_ref(), x, y) {
                     tracing::warn!(%error, "could not store the console window position");
                 }
+            }
+            // Last, because everything above still draws from or writes about
+            // these windows. `run_app` consumes the event loop
+            // (`winit-0.30.13/src/event_loop.rs:264`) and winit vouches for the
+            // platform display only while the loop is alive (`:489`), offering
+            // `OwnedDisplayHandle` for surfaces meant to outlive it — which
+            // these are not. Left to the closure's own drop, every surface in
+            // the process would be destroyed after the loop that owned the
+            // display it was created from, which is where the console-quit
+            // fault landed (clonk-org/clonk-rs#54).
+            //
+            // Only the windows. Releasing the whole handler here would be
+            // simpler and is wrong: on macOS this event is dispatched from
+            // inside `applicationWillTerminate:`
+            // (`winit-0.30.13/src/platform_impl/macos/app_state.rs:166-172`),
+            // an AppKit callback that never returns to `run_app`, so the rest
+            // of the graph — `NetworkManager::drop`'s unbounded
+            // `blocking_send` + `join`, the lobby preload worker's
+            // cancellation-free join — would run nested inside the OS's own
+            // quit, where a slow worker hangs termination and a panicking drop
+            // unwinds across an `extern "C"` boundary and aborts.
+            if releases_developer_windows {
+                let destroyed = developer_windows.release_all();
+                tracing::debug!(
+                    windows = destroyed.len(),
+                    "released the developer windows before the event loop returned"
+                );
             }
         }))
     });
