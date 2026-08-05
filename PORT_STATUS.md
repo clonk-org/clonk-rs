@@ -2649,8 +2649,23 @@ an ordered-map model gap.
   (`crates/clonk-app-netplay/src/network.rs:4856-4865`) and the lobby preload
   worker's cancellation-free join inside the OS's own quit, where a slow worker
   hangs termination and a panicking drop unwinds across `extern "C"` and aborts.
-  `clonk-launcher-shell` still has the untouched ordering
-  (clonk-org/clonk-rs#174).
+  `clonk-launcher-shell` releases its runtime from the same event
+  (clonk-org/clonk-rs#174) and *may* drop the whole thing there, where the game
+  may not: it owns no threads, channels or sockets, so the heaviest drop on
+  that path flushes a `LineWriter`.
+
+  Open in the launcher: it builds its framebuffer with plain `Pixels::new`, so
+  the surface-lost rebuild in `LauncherRuntime::rebuild_framebuffer` destroys a
+  `wgpu::Instance` and builds another, rather than reusing a retained one. Left
+  that way deliberately — the process opens one window and holds one instance,
+  so nothing else is presenting when that `vkDestroyInstance` runs, which is not
+  the shape of clonk-org/clonk-rs#53 — and because the registry lives inside the
+  `clonk-app` *binary* (`crates/clonk-app/src/gpu_instance.rs`), out of reach of
+  another crate: `clonk-app-render` is the only shared crate that depends on
+  `pixels`, and it would pull `clonk-engine` and `clonk-frontend` into the
+  launcher with it. Sharing it needs a new `pixels`-only crate, which is worth
+  doing if a second window, or a driver that cannot re-initialise after its last
+  instance goes, ever makes the launcher present through two of them.
 
 ## Deliberate divergences from the oracle
 
