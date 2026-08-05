@@ -478,6 +478,11 @@ pub(crate) struct GameApp {
     /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
     pub(crate) frames_per_second: i32,
     pub(crate) frames_since_second: i32,
+    /// Port-only presentation counters, sampled by the same one-second timer.
+    /// C++ presents once per game tick, so `frames_per_second` is its render
+    /// rate too; this port decouples the two and needs both numbers to say
+    /// which half of a slow session is actually slow.
+    pub(crate) presentation_stats: PresentationStats,
     /// C4Game::FullSpeed and FrameSkip are transient per-game scheduler
     /// controls. They are deliberately excluded from save capture/restore.
     pub(crate) full_speed: bool,
@@ -2963,6 +2968,74 @@ impl RenderFloor {
     pub(crate) fn must_present(&mut self, now: Instant) -> bool {
         let since = *self.last_presented.get_or_insert(now);
         now.saturating_duration_since(since) >= MAX_TIME_BETWEEN_RENDERS
+    }
+}
+
+/// Graphics-pass samples one second of [`PresentationStats`] may retain. Four
+/// hundred covers any real present rate; the cap exists so a path that stops
+/// driving the one-second timer cannot turn the accumulator into a leak.
+pub(crate) const PRESENTATION_STATS_MAX_SAMPLES: usize = 400;
+
+/// Live per-second presentation counters for the opt-in diagnostics overlay.
+///
+/// [`PresentationBenchmark`] already derives these numbers from the same
+/// events, but only once, at the end of a fixed window, behind an environment
+/// variable. This keeps them running for the whole session so the overlay can
+/// report the half of the frame budget `frames_per_second` (C4Game::FPS)
+/// structurally cannot see: that counter counts executed *game* frames, and
+/// presentation in this port is deliberately decoupled from the game tick.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PresentationStats {
+    presentations_since_second: u32,
+    presentations_per_second: u32,
+    skips_since_second: u32,
+    skips_per_second: u32,
+    last_graphics: Duration,
+    graphics_samples: Vec<Duration>,
+    graphics_p95: Duration,
+}
+
+impl PresentationStats {
+    pub(crate) fn record_presentation(&mut self, graphics_duration: Duration) {
+        self.presentations_since_second = self.presentations_since_second.saturating_add(1);
+        self.last_graphics = graphics_duration;
+        if self.graphics_samples.len() < PRESENTATION_STATS_MAX_SAMPLES {
+            self.graphics_samples.push(graphics_duration);
+        }
+    }
+
+    pub(crate) fn record_automatic_graphics_skip(&mut self) {
+        self.skips_since_second = self.skips_since_second.saturating_add(1);
+    }
+
+    /// Close the current second, exactly as `C4Game::Sec1Timer` samples cFPS.
+    pub(crate) fn sample_second(&mut self) {
+        self.presentations_per_second = std::mem::take(&mut self.presentations_since_second);
+        self.skips_per_second = std::mem::take(&mut self.skips_since_second);
+        let samples = std::mem::take(&mut self.graphics_samples);
+        if !samples.is_empty() {
+            (_, self.graphics_p95, _) = graphics_pass_percentiles(&samples);
+        }
+    }
+
+    pub(crate) const fn presentations_per_second(&self) -> u32 {
+        self.presentations_per_second
+    }
+
+    pub(crate) const fn automatic_graphics_skips_per_second(&self) -> u32 {
+        self.skips_per_second
+    }
+
+    pub(crate) const fn last_graphics(&self) -> Duration {
+        self.last_graphics
+    }
+
+    pub(crate) const fn graphics_p95(&self) -> Duration {
+        self.graphics_p95
+    }
+
+    pub(crate) fn retained_graphics_samples(&self) -> usize {
+        self.graphics_samples.len()
     }
 }
 

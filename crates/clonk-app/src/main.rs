@@ -1299,6 +1299,7 @@ fn run() -> Result<()> {
                     ) =>
                 {
                     tracing::trace!("automatic frame skip consumed one graphics pass");
+                    app.presentation_stats.record_automatic_graphics_skip();
                     if let Some(benchmark) = presentation_benchmark.as_mut() {
                         benchmark.record_automatic_graphics_skip();
                     }
@@ -1347,6 +1348,8 @@ fn run() -> Result<()> {
                                 );
                                 render_floor
                                     .record_presentation(graphics_started, graphics_duration);
+                                app.presentation_stats
+                                    .record_presentation(graphics_duration);
                                 presentation_detail.record_graphics_pass(
                                     app.mode == AppMode::Running && app.auto_frame_skip,
                                     graphics_duration,
@@ -1602,6 +1605,8 @@ fn run() -> Result<()> {
                                 frame_schedule.simulation_interval,
                             );
                             render_floor.record_presentation(graphics_started, graphics_duration);
+                            app.presentation_stats
+                                .record_presentation(graphics_duration);
                             presentation_detail.record_graphics_pass(
                                 app.mode == AppMode::Running && app.auto_frame_skip,
                                 graphics_duration,
@@ -2394,6 +2399,7 @@ impl GameApp {
             network_stream_address,
             frames_per_second: 0,
             frames_since_second: 0,
+            presentation_stats: PresentationStats::default(),
             full_speed: false,
             frame_skip: 1,
             auto_frame_skip: configured_auto_frame_skip(&native_config),
@@ -6838,6 +6844,7 @@ impl GameApp {
         self.engine.sec1_timer();
         let after = self.engine.game_time();
         self.frames_per_second = std::mem::take(&mut self.frames_since_second);
+        self.presentation_stats.sample_second();
         self.record_network_stats_second();
         let client_list_changed = self.refresh_runtime_client_list_on_sec1();
         if after != before {
@@ -8172,6 +8179,7 @@ impl GameApp {
         self.ingame_ignore_left_up = false;
         self.frames_per_second = 0;
         self.frames_since_second = 0;
+        self.presentation_stats = PresentationStats::default();
         self.full_speed = false;
         self.frame_skip = 1;
         self.network_stats = Some(NetworkStats::new());

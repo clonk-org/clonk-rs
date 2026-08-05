@@ -7,6 +7,67 @@
 use super::*;
 
 impl GameApp {
+    /// Compose the port's opt-in diagnostics overlay (`Graphics.ShowStats`).
+    ///
+    /// C++ has no counterpart, so this is a divergence and is recorded as one
+    /// in `PORT_STATUS.md`. It exists because the upper board's readout is
+    /// `C4Game::FPS`, which counts executed *game* frames
+    /// (C4Game.cpp:1915-1916): C++ presents once per tick so that number is
+    /// also its render rate, while this port deliberately decouples the two
+    /// and therefore has a second rate with nowhere to appear. Composing
+    /// nothing is the whole gate — with the key off no draw site exists.
+    ///
+    /// Every value read here is presentation-only. Nothing on this path
+    /// touches `C4Fixed`, `C4Random`, control ordering or any other
+    /// determinism-critical state.
+    pub(crate) fn update_diagnostics_overlay(&mut self) {
+        if !self.display_flags.show_stats {
+            self.graphics.set_diagnostics_overlay_text(None);
+            return;
+        }
+        let format_ms = |duration: Duration| format!("{:.1} ms", duration.as_secs_f64() * 1_000.0);
+        let stats = &self.presentation_stats;
+        let mut lines = vec![
+            format!(
+                "Sim {} FPS, Render {} FPS",
+                self.frames_per_second,
+                stats.presentations_per_second(),
+            ),
+            format!(
+                "Draw {} (p95 {}), skips {}",
+                format_ms(stats.last_graphics()),
+                format_ms(stats.graphics_p95()),
+                stats.automatic_graphics_skips_per_second(),
+            ),
+        ];
+        if let Some(clock) = self.network_control_clock {
+            // `runtime_connections` needs a live worker, so a session without
+            // one reports no route rather than an invented zero.
+            let route = self
+                .network
+                .as_ref()
+                .and_then(|network| network.runtime_connections().ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|connection| (connection.ping_ms, connection.packet_loss))
+                .reduce(|worst, route| (worst.0.max(route.0), worst.1.max(route.1)));
+            if let Some((ping_ms, packet_loss)) = route {
+                lines.push(format!("Ping {ping_ms} ms, loss {packet_loss}"));
+            }
+            let behind = self.network_control_pacing().behind;
+            let lateness = clock
+                .control_lateness_ms()
+                .map_or_else(|| "-".to_string(), |lateness| format!("{lateness} ms"));
+            lines.push(format!(
+                "Behind {behind}, PreSend {}, late {lateness}, budget {}",
+                clock.control_presend(),
+                format_ms(clock.control_latency_budget()),
+            ));
+        }
+        self.graphics
+            .set_diagnostics_overlay_text(Some(lines.join("|")));
+    }
+
     pub(crate) fn current_hud_graphics(&self) -> Arc<HudGraphics> {
         self.active_game_graphics
             .as_ref()
@@ -3179,6 +3240,7 @@ impl GameApp {
         let scoreboard_font_images = self.preflight_visible_scoreboard()?;
         let message_board = self.advance_message_board_overlay();
         self.update_network_status_overlay();
+        self.update_diagnostics_overlay();
         let viewports =
             collect_viewport_inputs_from_physical_state(&self.snapshot, &self.physical_viewports)
                 .map_err(|reason| {
@@ -4204,6 +4266,13 @@ impl GameApp {
         // overlay (menus, messages, controls and mouse), but before the
         // process-global GUI layers below.
         if self.graphics.draw_network_status(Some(&frame_gamma)) && ordered_native {
+            self.next_pending_native_overlay();
+        }
+
+        // The port's own overlay follows the status it yields to. It composes
+        // nothing unless `Graphics.ShowStats` is on, so with the key unset
+        // this adds no draw site and the frame stays oracle-exact.
+        if self.graphics.draw_diagnostics_overlay(Some(&frame_gamma)) && ordered_native {
             self.next_pending_native_overlay();
         }
 

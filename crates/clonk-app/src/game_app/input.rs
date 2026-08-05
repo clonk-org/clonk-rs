@@ -3054,6 +3054,32 @@ impl GameApp {
         true
     }
 
+    /// Runs the port's own default-unbound diagnostics toggle
+    /// (`Graphics.ShowStats`). It is registered after every C++ action and
+    /// yields the chord to all of them — including the two that already share
+    /// this shape — so enabling it can never reassign a shipped binding.
+    /// Like `ToggleShowNetStatus` it has no `Game.DebugMode` guard and
+    /// flashes no message.
+    pub(crate) fn handle_runtime_stats_toggle_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> bool {
+        if !matches!(self.mode, AppMode::Running)
+            || !self.runtime_keyboard_binding_matches("StatsToggle", key, false)
+            || self.runtime_keyboard_binding_matches("ChartToggle", key, false)
+            || self.runtime_keyboard_binding_matches("NetStatsToggle", key, false)
+            || self.local_player_key_binding_in_scope(key)
+        {
+            return false;
+        }
+        if state != ElementState::Pressed {
+            return false;
+        }
+        self.display_flags.show_stats = !self.display_flags.show_stats;
+        true
+    }
+
     pub(crate) fn handle_runtime_fullscreen_menu_key(
         &mut self,
         key: VirtualKeyCode,
@@ -4444,6 +4470,9 @@ impl GameApp {
                     return Ok(());
                 }
                 if self.handle_runtime_net_stats_toggle_key(key, state) {
+                    return Ok(());
+                }
+                if self.handle_runtime_stats_toggle_key(key, state) {
                     return Ok(());
                 }
                 if let Some(key) = unsupported_running_shortcut.filter(|_| !denied_debug_callback) {

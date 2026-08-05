@@ -3721,6 +3721,89 @@ mod tests {
     }
 
     #[test]
+    fn the_diagnostics_overlay_is_inert_until_it_is_given_text() {
+        // The port's own overlay (clonk-org/clonk-rs#118) has no C++
+        // counterpart, so the whole gate is the app declining to compose text:
+        // with none set the frame must be byte-identical to the oracle's.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(80, 60);
+        let render = |text: Option<&str>| {
+            let mut graphics = test_graphics(180, 110, 120, "diagnostics overlay");
+            graphics.set_diagnostics_overlay_text(text.map(str::to_string));
+            graphics.render_frame(
+                &snapshot,
+                &[ViewportInput::from_focus(&snapshot.objects[0])],
+            );
+            let drawn = graphics.draw_diagnostics_overlay(None);
+            (drawn, graphics.surface().pixels().to_vec())
+        };
+
+        let (drawn_without, without) = render(None);
+        let (drawn_with, with) = render(Some("Sim 36 FPS|Render 9 FPS|Draw 32.5 ms"));
+        assert!(!drawn_without, "no text means no draw site at all");
+        assert!(drawn_with);
+        assert_ne!(without, with);
+    }
+
+    #[test]
+    fn the_diagnostics_overlay_stands_clear_of_the_network_status_block() {
+        // `C4Network2::DrawStatus` owns (+20,+50) in every viewport and its
+        // placement is pinned to the oracle. The port-only overlay is the one
+        // that yields, so turning it on can never move a C++-parity draw.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(80, 60);
+        let render = |show_net_status| {
+            let mut graphics = test_graphics(180, 220, 120, "diagnostics overlay");
+            graphics.set_debug_draw_flags(DebugDrawFlags {
+                show_net_status,
+                ..DebugDrawFlags::default()
+            });
+            graphics.set_network_status_text(Some(
+                "Local: Active host Alice (ID 0)|Game Status: go (tick 7) reached ack".to_string(),
+            ));
+            graphics.set_diagnostics_overlay_text(Some(
+                "Sim 36 FPS|Render 9 FPS|Draw 32.5 ms".to_string(),
+            ));
+            graphics.render_frame(
+                &snapshot,
+                &[ViewportInput::from_focus(&snapshot.objects[0])],
+            );
+            let baseline = graphics.surface().pixels().to_vec();
+            graphics.draw_network_status(None);
+            let with_status = graphics.surface().pixels().to_vec();
+            graphics.draw_diagnostics_overlay(None);
+            let width = graphics.surface().width() as usize;
+            let top_row = |before: &[u8], after: &[u8]| {
+                before
+                    .chunks_exact(4)
+                    .zip(after.chunks_exact(4))
+                    .position(|(before, after)| before != after)
+                    .map(|index| index / width)
+            };
+            (
+                top_row(&with_status, graphics.surface().pixels()),
+                top_row(&baseline, &with_status),
+            )
+        };
+
+        let (alone, no_status) = render(false);
+        let (below, status_top) = render(true);
+        assert_eq!(no_status, None, "the flag still gates the network status");
+        let alone = alone.expect("the overlay draws on its own");
+        let below = below.expect("the overlay still draws beside the status");
+        let status_top = status_top.expect("the network status drew its own text");
+        assert_eq!(
+            alone, status_top,
+            "with nothing above it the overlay takes the same anchor"
+        );
+        assert!(
+            below > alone,
+            "a visible network status pushes the overlay below it: \
+             alone at row {alone}, beside it at row {below}"
+        );
+    }
+
+    #[test]
     fn solid_mask_mode_uses_surface8_and_suppresses_the_object_sprite() {
         let mut snapshot = make_snapshot();
         let object = &mut snapshot.objects[0];
