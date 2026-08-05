@@ -3088,6 +3088,8 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(state.attribution_caused_by),
         )?;
     }
+    // Effects: SmokeRate smoke (C4Object.cpp:785-793).
+    register_object_fire_smoke(target, frame);
     // Background effects: Tick5 over valid landscape material — extinguish
     // in extinguisher material, then the unconditional Random(3) inflame
     // draw (C4Object.cpp:794-809).
@@ -3129,6 +3131,56 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     register_object_fire_particles(target, fire_number, effect_time);
     Ok(Value::Int(0))
+}
+
+/// `C4Object::ExecFire`'s "Effects" arm (C4Object.cpp:785-793) on the staged
+/// seam: a burning object trails smoke on a period derived from its live
+/// shape width and the definition's `SmokeRate`, or on every execution once
+/// it is moving faster than two pixels a frame. The cadence is deterministic;
+/// only the particle it queues is presentation.
+fn register_object_fire_smoke(target: ObjectId, frame: u64) {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let Some(scope) = context.object_scope(target) else {
+            return;
+        };
+        let position = scope.effective_position();
+        let velocity = scope.fixed_velocity();
+        let smoke_rate = effective_definition_id(context, target)
+            .and_then(|id| context.definition_metadata(&id))
+            .map_or(0, |metadata| metadata.fire.smoke_rate);
+        // `if (smoke_rate)` — SmokeRate=0 opts out, and guards the divide.
+        if smoke_rate == 0 {
+            return;
+        }
+        let shape_width = live_object_shape(context, target).unwrap_or_default().width;
+        let smoke_level = 2 * shape_width / 3;
+        let period = (50 * smoke_level / smoke_rate).max(3);
+        let phase = (frame as i32).wrapping_add((target.as_u64() as i32).wrapping_mul(7));
+        // `Abs(xdir) > 2` compares the raw fixed velocity against itofix(2)
+        // (Fixed.h:185, the int32 spaceship wrapper).
+        let fast = velocity.x.abs() > crate::math::itofix(2);
+        if phase.rem_euclid(period) != 0 && !fast {
+            return;
+        }
+        // Smoke() (C4Effect.cpp:859-865): a global "Smoke" particle half a
+        // level above the object, sized by the level, with no color.
+        if context.particle_def_known("Smoke") == Some(false) {
+            return;
+        }
+        context.register_particle(ParticleCommand::Create(ParticleConfig {
+            definition_id: "Smoke".to_string(),
+            position: FloatVector2::new(position.x as f32, (position.y - smoke_level / 2) as f32),
+            velocity: FloatVector2::new(0.0, 0.0),
+            life: 0,
+            parameter_a: smoke_level as f32,
+            parameter_b: 0,
+            layer: ParticleLayer::Global,
+        }));
+    });
 }
 
 /// The particle half of `FnFxFireTimer` (C4Effect.cpp:660-769): the three

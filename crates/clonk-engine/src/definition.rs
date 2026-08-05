@@ -2096,6 +2096,16 @@ impl Definition {
         self.fire_top
     }
 
+    /// DefCore `SmokeRate` (C4Def.cpp:407, default 100): the divisor in
+    /// `C4Object::ExecFire`'s smoke cadence. Zero opts out entirely.
+    pub fn smoke_rate(&self) -> i32 {
+        self.smoke_rate
+    }
+
+    pub fn set_smoke_rate(&mut self, smoke_rate: i32) {
+        self.smoke_rate = smoke_rate;
+    }
+
     pub fn set_fire_top(&mut self, fire_top: i32) {
         self.fire_top = fire_top;
     }

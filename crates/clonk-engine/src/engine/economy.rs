@@ -368,6 +368,10 @@ impl Engine {
                 crate::object::log_engine_error_call_frames(&error);
             }
         }
+        // Effects: SmokeRate smoke (C4Object.cpp:785-793). The cadence is
+        // fully deterministic — frame, object number and def fields — so only
+        // the particle it spawns is presentation.
+        self.exec_object_fire_smoke(idx, frame);
         // Background effects: Tick5 over valid landscape material
         // (C4Object.cpp:791-806) — extinguish in extinguisher material, then
         // the unconditional Random(3) landscape-inflame draw.
@@ -408,6 +412,34 @@ impl Engine {
         }
         self.exec_object_fire_particles(idx, fire_number, effect_time);
         stop_events
+    }
+
+    /// `C4Object::ExecFire`'s "Effects" arm (C4Object.cpp:785-793): a burning
+    /// object trails smoke on a period derived from its live shape width and
+    /// the definition's `SmokeRate`, or on every execution once it is moving
+    /// faster than two pixels a frame. `Number * 7` staggers the phase so a
+    /// row of identical burning objects does not puff in lockstep.
+    fn exec_object_fire_smoke(&mut self, idx: usize, frame: u64) {
+        let object = &self.objects[idx];
+        let smoke_rate = self
+            .definitions
+            .get(&object.definition_id)
+            .map_or(0, Definition::smoke_rate);
+        // `if (smoke_rate)` — SmokeRate=0 opts out, and guards the divide.
+        if smoke_rate == 0 {
+            return;
+        }
+        let shape_width = object.current_shape_rect().unwrap_or_default().width;
+        let smoke_level = 2 * shape_width / 3;
+        let period = (50 * smoke_level / smoke_rate).max(3);
+        let phase = (frame as i32).wrapping_add((object.id.as_u64() as i32).wrapping_mul(7));
+        // `Abs(xdir) > 2` compares the raw fixed velocity against itofix(2)
+        // (Fixed.h:185, the int32 spaceship wrapper).
+        let fast = object.fixed_velocity.x.abs() > crate::math::itofix(2);
+        if phase.rem_euclid(period) == 0 || fast {
+            let position = object.state.position;
+            self.spawn_smoke(position.x, position.y, smoke_level);
+        }
     }
 
     /// One `Fire` effect variable, read through the C4Value int conversion

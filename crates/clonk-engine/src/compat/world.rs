@@ -112,6 +112,9 @@ pub(crate) struct DefinitionFireMetadata {
     pub def_core_values: DefCoreValueStore,
     /// C4Shape::FireTop, reflected through GetDefCoreVal.
     pub fire_top: i32,
+    /// DefCore SmokeRate (default 100): the divisor in ExecFire's smoke
+    /// cadence (C4Object.cpp:787-790). Zero opts out.
+    pub smoke_rate: i32,
     /// DefCore LiftTop, reflected for System.c4g's GetDefLiftTop helper.
     pub lift_top: i32,
     /// BlastIncinerate threshold (0 = off).
