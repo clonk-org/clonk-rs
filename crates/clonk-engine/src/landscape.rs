@@ -209,14 +209,17 @@ impl PixelGridDirtyGeneration {
             .chain(sparse.into_iter().flatten().copied())
     }
 
+    /// A landscape change: it both widens the serialized bounds and enters the
+    /// runtime rectangle list the frontend redraws.
     fn add_rect(&mut self, rect: PixelGridDirtyRect) {
         if self.renders_nothing {
-            // Everything recorded so far was a solid-mask byte. The first real
-            // landscape change owns the bounds outright: relighting the mask
-            // box too would redraw pixels C++ never even marks.
+            // Everything recorded so far was a solid-mask byte, which the
+            // serialized bounds already cover but nothing redraws. The runtime
+            // list starts here so the mask box cannot join it.
             self.renders_nothing = false;
-            self.rect = rect;
             self.rects.clear();
+            self.rects.push(rect);
+            self.rect = self.rect.union(rect);
             return;
         }
         let overlap_area = rect.set_pix_overlap_area();
@@ -228,6 +231,21 @@ impl PixelGridDirtyGeneration {
             self.rects.push(self.rect);
         }
         Self::add_capped_rect(&mut self.rects, rect);
+        self.rect = self.rect.union(rect);
+    }
+
+    /// A `C4SolidMask` byte: it belongs in the serialized bounds like any other
+    /// write, because `rect` is hashed engine state that the replay checkpoint
+    /// covers, but never in the runtime list, because C++ relights with every
+    /// mask temporarily removed (C4Landscape.cpp:2497,2501) and so never
+    /// redraws one.
+    fn widen_bounds(&mut self, rect: PixelGridDirtyRect) {
+        if !self.renders_nothing && self.rects.is_empty() {
+            // The generation's single real rectangle is still held in `rect`,
+            // which is about to grow over a mask byte. Move it into the runtime
+            // list first, or the frontend would redraw the mask box with it.
+            self.rects.push(self.rect);
+        }
         self.rect = self.rect.union(rect);
     }
 
@@ -962,8 +980,12 @@ impl PixelGrid {
             generation.token = token;
             // A solid-mask byte still advances the lineage — the plane really
             // did change, and a consumer that missed it must not be told
-            // "nothing happened" — but it contributes no rectangle to redraw.
-            if !renders_nothing {
+            // "nothing happened" — and it still counts towards the serialized
+            // bounds, which are hashed engine state. It contributes no
+            // rectangle to redraw.
+            if renders_nothing {
+                generation.widen_bounds(rect);
+            } else {
                 generation.add_rect(rect);
             }
         } else {
@@ -8855,6 +8877,40 @@ func MoveMask(int x, int y)
         assert!(
             rects.is_empty(),
             "a put and removed mask leaves the rendered landscape unchanged, got {rects:?}"
+        );
+    }
+
+    #[test]
+    fn a_solid_mask_write_still_widens_the_serialized_dirty_bounds() {
+        // `PixelGridDirtyGeneration::rect` is serialized engine state, and the
+        // replay checkpoint hashes the whole snapshot the landscape sits in
+        // (`snapshot_hash`, crates/clonk-engine/tests/it/support/dev_feedback.rs).
+        // Keeping mask bytes out of the *rendered* rectangles is a presentation
+        // concern and lives in `rects`, which is `#[serde(skip)]`; the legacy
+        // bounding rectangle must keep covering every write, mask or not.
+        let mut grid = PixelGrid::new(
+            64,
+            4,
+            vec![0; 256],
+            vec![0; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+
+        grid.set_byte(10, 1, 1);
+        grid.write_mask_byte(50, 2, 2);
+
+        let value = serde_json::to_value(&grid).expect("grid serializes");
+        let rect = &value["dirty_generations"][0]["rect"];
+        assert_eq!(rect["x"], 10, "bounds start at the dug pixel: {rect}");
+        assert_eq!(rect["y"], 1, "bounds start at the dug pixel: {rect}");
+        assert_eq!(
+            rect["width"], 41,
+            "bounds still reach the mask pixel: {rect}"
+        );
+        assert_eq!(
+            rect["height"], 2,
+            "bounds still reach the mask pixel: {rect}"
         );
     }
 
