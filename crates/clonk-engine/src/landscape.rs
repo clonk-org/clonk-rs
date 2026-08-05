@@ -64,16 +64,20 @@ fn initial_render_token(width: u32, height: u32, bytes: &[u8]) -> u64 {
     render_token_bytes(token, bytes.iter().copied())
 }
 
-/// Which C4Landscape pixel write this is. `SetPix` notes the pixel for
-/// relighting (C4Landscape.cpp:755-761); the raw `_SetPix` does not, and
-/// leaves that to the `PrepareChange`/`FinishChange` caller that relights the
-/// whole changed rectangle (C4Landscape.cpp:2851-2880).
+/// Which C4Landscape pixel write this is. C++ splits the same three ways:
+/// `SetPix` notes the pixel for relighting (C4Landscape.cpp:755-761), the raw
+/// `_SetPix` does not but its `PrepareChange`/`FinishChange` caller relights
+/// the whole changed rectangle (C4Landscape.cpp:2851-2880), and `C4SolidMask`
+/// reaches `_SetPix` through `_SBackPix` (C4Wrappers.h:94) with no relight at
+/// either level — a mask byte is collision truth that is never drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PixelWrite {
     /// `C4Landscape::SetPix`.
     SetPix,
-    /// `C4Landscape::_SetPix`.
+    /// `C4Landscape::_SetPix` under a caller that relights the rectangle.
     Raw,
+    /// `C4SolidMask`'s `_SBackPix`.
+    SolidMask,
 }
 
 /// A clipped half-open rectangle whose current texmap bytes must be
@@ -187,15 +191,34 @@ struct PixelGridDirtyGeneration {
     /// retains the legacy bounding rectangle so replay hashes remain stable.
     #[serde(skip)]
     rects: Vec<PixelGridDirtyRect>,
+    /// The generation carries only `C4SolidMask` bytes, which `_SBackPix`
+    /// writes to Surface8 alone (C4Wrappers.h:94, C4Landscape.cpp:846) and
+    /// which therefore never redraw anything. Runtime-only for the same reason
+    /// as `rects`: a deserialized generation falls back to over-rendering
+    /// `rect`, which is safe.
+    #[serde(skip)]
+    renders_nothing: bool,
 }
 
 impl PixelGridDirtyGeneration {
     fn rects(&self) -> impl Iterator<Item = PixelGridDirtyRect> + '_ {
-        let legacy = self.rects.is_empty().then_some(self.rect);
-        legacy.into_iter().chain(self.rects.iter().copied())
+        let legacy = (!self.renders_nothing && self.rects.is_empty()).then_some(self.rect);
+        let sparse = (!self.renders_nothing).then_some(&self.rects);
+        legacy
+            .into_iter()
+            .chain(sparse.into_iter().flatten().copied())
     }
 
     fn add_rect(&mut self, rect: PixelGridDirtyRect) {
+        if self.renders_nothing {
+            // Everything recorded so far was a solid-mask byte. The first real
+            // landscape change owns the bounds outright: relighting the mask
+            // box too would redraw pixels C++ never even marks.
+            self.renders_nothing = false;
+            self.rect = rect;
+            self.rects.clear();
+            return;
+        }
         let overlap_area = rect.set_pix_overlap_area();
         if self.rects.is_empty() {
             if self.rect.overlaps(overlap_area) {
@@ -512,6 +535,14 @@ impl PixelGrid {
     /// Raw plane write (C4SolidMask's _SBackPix): bumps the revision on change.
     pub fn write_byte(&mut self, x: i32, y: i32, byte: u8) {
         self.set_byte_impl(x, y, byte, PixelWrite::Raw);
+    }
+
+    /// `C4SolidMask`'s `_SBackPix`, which `C4Wrappers.h:94` defines as
+    /// `C4Landscape::_SetPix` — "set 8bpp-surface only!"
+    /// (C4Landscape.cpp:846). It registers no relight, so the mask byte is
+    /// collision truth without ever reaching the rendered landscape.
+    pub fn write_mask_byte(&mut self, x: i32, y: i32, byte: u8) {
+        self.set_byte_impl(x, y, byte, PixelWrite::SolidMask);
     }
 
     /// `CSurface8::Circle` (`src/StdSurface8.cpp:231-239`). Its bottom and
@@ -875,6 +906,7 @@ impl PixelGrid {
         base_revision: u64,
         base_token: u64,
         rect: PixelGridDirtyRect,
+        renders_nothing: bool,
         storage_was_shared: bool,
     ) {
         Self::record_lineage_change(
@@ -884,6 +916,7 @@ impl PixelGrid {
             base_revision,
             base_token,
             rect,
+            renders_nothing,
             storage_was_shared,
         );
     }
@@ -902,6 +935,7 @@ impl PixelGrid {
             base_revision,
             base_token,
             rect,
+            false,
             storage_was_shared,
         );
     }
@@ -913,6 +947,7 @@ impl PixelGrid {
         base_revision: u64,
         base_token: u64,
         rect: PixelGridDirtyRect,
+        renders_nothing: bool,
         storage_was_shared: bool,
     ) {
         let can_extend = !storage_was_shared
@@ -925,7 +960,12 @@ impl PixelGrid {
                 .expect("checked dirty generation exists");
             generation.revision = revision;
             generation.token = token;
-            generation.add_rect(rect);
+            // A solid-mask byte still advances the lineage — the plane really
+            // did change, and a consumer that missed it must not be told
+            // "nothing happened" — but it contributes no rectangle to redraw.
+            if !renders_nothing {
+                generation.add_rect(rect);
+            }
         } else {
             generations.push_back(PixelGridDirtyGeneration {
                 base_revision,
@@ -934,6 +974,7 @@ impl PixelGrid {
                 token,
                 rect,
                 rects: Vec::new(),
+                renders_nothing,
             });
         }
         while generations.len() > MAX_RENDER_DIRTY_GENERATIONS {
@@ -1170,7 +1211,7 @@ impl PixelGrid {
         self.adjust_material_counts_in_rect(rect, true);
         self.revision = self.revision.wrapping_add(1);
         self.render_token = self.advance_rect_render_token(base_token, self.revision, rect);
-        self.record_render_change(base_revision, base_token, rect, storage_was_shared);
+        self.record_render_change(base_revision, base_token, rect, false, storage_was_shared);
     }
 
     /// C4Landscape::DrawChunks' single clipped Surface8 batch
@@ -1239,7 +1280,7 @@ impl PixelGrid {
         self.adjust_material_counts_in_rect(rect, true);
         self.revision = self.revision.wrapping_add(1);
         self.render_token = self.advance_rect_render_token(base_token, self.revision, rect);
-        self.record_render_change(base_revision, base_token, rect, storage_was_shared);
+        self.record_render_change(base_revision, base_token, rect, false, storage_was_shared);
     }
 
     /// The first texmap index carrying the given material (the
@@ -1355,6 +1396,7 @@ impl PixelGrid {
                 base_revision,
                 base_token,
                 PixelGridDirtyRect::single(x, y),
+                write == PixelWrite::SolidMask,
                 storage_was_shared,
             );
         }
@@ -3495,7 +3537,7 @@ impl Landscape {
                         let buffer_index = ((y - bake.y) * bake.width + (x - bake.x)) as usize;
                         let saved = bake.buffer[buffer_index];
                         if saved != vehicle {
-                            self.grid_write_byte(x, y, saved);
+                            self.grid_write_mask_byte(x, y, saved);
                         }
                     }
                 }
@@ -3517,7 +3559,7 @@ impl Landscape {
                             continue;
                         }
                         bake.buffer[buffer_index] = self.grid_byte_at(x, y).unwrap_or(0);
-                        self.grid_write_byte(x, y, vehicle);
+                        self.grid_write_mask_byte(x, y, vehicle);
                     }
                 }
             }
@@ -4053,6 +4095,14 @@ impl Landscape {
     pub fn grid_write_byte(&mut self, x: i32, y: i32, byte: u8) {
         if let Some(grid) = self.pixels.as_mut() {
             grid.write_byte(x, y, byte);
+        }
+    }
+
+    /// The `C4SolidMask` half of [`Self::grid_write_byte`]: the byte is put or
+    /// restored for collision only and never redraws the landscape.
+    pub fn grid_write_mask_byte(&mut self, x: i32, y: i32, byte: u8) {
+        if let Some(grid) = self.pixels.as_mut() {
+            grid.write_mask_byte(x, y, byte);
         }
     }
 
@@ -6537,7 +6587,7 @@ impl crate::Engine {
                             continue;
                         }
                         debug_assert_eq!(landscape.grid_byte_at(x, y), Some(vehicle));
-                        landscape.grid_write_byte(x, y, saved);
+                        landscape.grid_write_mask_byte(x, y, saved);
                     }
                 }
             }
@@ -6561,7 +6611,7 @@ impl crate::Engine {
                             continue;
                         }
                         bake.buffer[buffer_index] = landscape.grid_byte_at(x, y).unwrap_or(0);
-                        landscape.grid_write_byte(x, y, vehicle);
+                        landscape.grid_write_mask_byte(x, y, vehicle);
                     }
                 }
             }
@@ -8771,7 +8821,7 @@ func MoveMask(int x, int y)
         let was_tunnel = landscape.is_tunnel_at(0, 2);
         let revision = landscape.pixel_grid().expect("grid").revision();
 
-        landscape.grid_write_byte(0, 0, 2);
+        landscape.grid_write_mask_byte(0, 0, 2);
 
         assert_eq!(landscape.grid_byte_at(0, 0), Some(2));
         assert_eq!(landscape.surface(), surface);
@@ -8780,6 +8830,61 @@ func MoveMask(int x, int y)
         assert_eq!(
             landscape.pixel_grid().expect("grid").revision(),
             revision + 1
+        );
+    }
+
+    #[test]
+    fn a_solid_mask_never_dirties_the_rendered_landscape() {
+        // C4SolidMask writes through _SBackPix, which C4Wrappers.h:94 defines
+        // as C4Landscape::_SetPix — "set 8bpp-surface only!"
+        // (C4Landscape.cpp:846). Only the bounds-checked SetPix fills
+        // Relights[] (C4Landscape.cpp:755-761), so a mask put or removal
+        // leaves DoRelights with nothing to do (C4Landscape.cpp:2477-2479)
+        // and a mask byte never reaches the rendered landscape.
+        let mut landscape = raster_grid_landscape(1, 4, vec![0, 0, 3 | 0x80, 1]);
+        let rendered = landscape.pixel_grid().expect("grid").clone();
+
+        landscape.grid_write_mask_byte(0, 0, 2);
+        landscape.grid_write_mask_byte(0, 0, 0);
+
+        let rects = landscape
+            .pixel_grid()
+            .expect("grid")
+            .render_dirty_rects_since(&rendered)
+            .expect("mask writes keep the render lineage intact");
+        assert!(
+            rects.is_empty(),
+            "a put and removed mask leaves the rendered landscape unchanged, got {rects:?}"
+        );
+    }
+
+    #[test]
+    fn a_landscape_change_beside_a_solid_mask_reports_only_its_own_rectangle() {
+        // FinishChange relights the rectangle that actually changed
+        // (C4Landscape.cpp:2851-2880) after PrepareChange took the masks out;
+        // the mask bytes put back around it are _SBackPix writes and add
+        // nothing to Relights[].
+        let mut landscape = raster_grid_landscape(64, 4, vec![0; 256]);
+        let rendered = landscape.pixel_grid().expect("grid").clone();
+
+        landscape.grid_write_mask_byte(0, 0, 2);
+        landscape.grid_set_byte(40, 2, 1);
+        landscape.grid_write_mask_byte(63, 3, 2);
+
+        let rects = landscape
+            .pixel_grid()
+            .expect("grid")
+            .render_dirty_rects_since(&rendered)
+            .expect("mask writes keep the render lineage intact");
+        assert_eq!(rects.len(), 1, "only the dug pixel is dirty, got {rects:?}");
+        assert_eq!(
+            (
+                rects[0].x(),
+                rects[0].y(),
+                rects[0].width(),
+                rects[0].height()
+            ),
+            (40, 2, 1, 1)
         );
     }
 
