@@ -10,7 +10,7 @@
 //! structure), not the random streams themselves.
 
 use crate::math::{fixtof, C4Fixed};
-use crate::ParticleLayer;
+use crate::{ObjectId, ParticleLayer};
 use clonk_resources::GraphicsImage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -348,6 +348,11 @@ pub struct ParticleSystem {
     /// Scales every def's MaxCount in `create` — a per-client setting, which
     /// is why particle counts are not sync-relevant in C++ either.
     pub smoke_level: i32,
+    /// Local `Config.Graphics.FireParticles` (default true, C4Config.cpp:484).
+    /// `SetDefParticles` leaves pFire1/pFire2 null when it is off
+    /// (C4Particles.cpp:483-489), which is what `is_fire_particle_loaded`
+    /// reports — also a per-client setting.
+    pub fire_particles: bool,
 }
 
 impl Default for ParticleSystem {
@@ -357,8 +362,50 @@ impl Default for ParticleSystem {
             particles: Vec::new(),
             safe_rng: SafeRng::default(),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
+            fire_particles: DEFAULT_FIRE_PARTICLES,
         }
     }
+}
+
+/// `Config.Graphics.FireParticles` default (C4Config.cpp:484).
+pub const DEFAULT_FIRE_PARTICLES: bool = true;
+
+/// The stock fire particle def names `SetDefParticles` resolves into
+/// pFire1/pFire2 (C4Particles.cpp:485-486).
+pub const FIRE_DEF_NAME: &str = "Fire";
+pub const FIRE2_DEF_NAME: &str = "Fire2";
+
+/// One burning object's state, snapshotted where `FnFxFireTimer` reads it
+/// (C4Effect.cpp:701-727) so the emitter can run at the particle system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectFireEmission {
+    /// The burning object; owns the back/front particle lists C++ deals to.
+    pub object: ObjectId,
+    /// `C4Fx_FireMode_*`, read back from the effect's Var 0.
+    pub fire_mode: i32,
+    /// `Def->Shape.Wdt` / `Def->Shape.Hgt` / `Def->Shape.FireTop`.
+    pub def_width: i32,
+    pub def_height: i32,
+    pub fire_top: i32,
+    /// `GetCon()`, in `FullCon` units.
+    pub con: i32,
+    /// `Def->GrowthType` — false pins `iWdtCon` at 100 below full con.
+    pub growth_type: bool,
+    /// `pObj->x` / `pObj->y`, also the Attach offset origin.
+    pub x: i32,
+    pub y: i32,
+    /// The live instance `Shape` rect, object-relative.
+    pub shape_x: i32,
+    pub shape_y: i32,
+    pub shape_width: i32,
+    pub shape_height: i32,
+    /// `pObj->r` in degrees and `Def->Rotateable`.
+    pub rotation: i32,
+    pub rotateable: bool,
+    /// `fixtof(pObj->xdir)` / `fixtof(pObj->ydir)` — the raw fixed velocity,
+    /// which C++ scales by 3 and truncates toward zero.
+    pub xdir: f32,
+    pub ydir: f32,
 }
 
 impl ParticleSystem {
@@ -744,6 +791,149 @@ impl ParticleSystem {
             );
         }
         true
+    }
+
+    /// `C4ParticleSystem::IsFireParticleLoaded` (C4Particles.h:214):
+    /// `pFire1 && pFire2`. `SetDefParticles` (C4Particles.cpp:475-489) only
+    /// resolves those two when `Config.Graphics.FireParticles` is set, so the
+    /// per-client switch folds into the same answer.
+    pub fn is_fire_particle_loaded(&self) -> bool {
+        self.fire_particles
+            && self.get_def(FIRE_DEF_NAME).is_some()
+            && self.get_def(FIRE2_DEF_NAME).is_some()
+    }
+
+    /// The particle half of `FnFxFireTimer` (C4Effect.cpp:701-786): a double
+    /// set of particles per execution, the first quarter the normal `Fire`
+    /// def and the remaining three quarters the additive `Fire2`, dealt to
+    /// the object's back list three times out of four. Returns how many were
+    /// actually created — `create`'s MaxCount arm can refuse some.
+    ///
+    /// The loop lives here rather than beside the ported effect body because
+    /// C++ draws it from the process-global `SafeRandom` stream that
+    /// `C4ParticleSystem::Create` also consumes (C4Particles.cpp:394);
+    /// keeping both on one `SafeRng` preserves that interleaving. C++ is
+    /// explicit that this stream is deliberately unsynchronized
+    /// (C4Effect.cpp:743-745), so it must never be the synced `Random`.
+    pub fn create_object_fire(&mut self, emission: &ObjectFireEmission) -> i32 {
+        // some constant effect parameters for this object (C4Effect.cpp:706-712)
+        let width = emission.def_width.max(1);
+        let height = emission.def_height;
+        let mut y_off = height / 2 - emission.fire_top;
+        const BASE_PARTICLE_SIZE: i32 = 30;
+        const PARTICLE_SIZE_DIFF: i32 = 10;
+        const REL_PARTICLE_SIZE: i32 = 12;
+
+        // get remaining size (%) (C4Effect.cpp:718-722)
+        let con = ((100 * emission.con) / crate::FULL_CON).max(1);
+        let mut wdt_con = con;
+        // fixed width for not-stretched-objects
+        if !emission.growth_type && wdt_con < 100 {
+            wdt_con = 100;
+        }
+
+        // regard non-center object offsets (C4Effect.cpp:724-726)
+        let x = emission.x + emission.shape_x + emission.shape_width / 2;
+        let y = emission.y + emission.shape_y + emission.shape_height / 2;
+
+        // apply rotation (C4Effect.cpp:728-737)
+        let mut rot = [1.0f32, 0.0, 0.0, 1.0];
+        if emission.rotation != 0 && emission.rotateable {
+            // `cosf(static_cast<float>(r * pi_v<float> / 180.0))`: the
+            // multiply is float, the divide widens to double, and the cast
+            // narrows back before the call.
+            let radians = ((emission.rotation as f32 * std::f32::consts::PI) as f64 / 180.0) as f32;
+            rot[0] = radians.cos();
+            rot[1] = -radians.sin();
+            rot[2] = -rot[1];
+            rot[3] = rot[0];
+            // rotated objects usually better burn from the center
+            if y_off > 0 {
+                y_off = 0;
+            }
+        }
+
+        // Adjust particle number by con (C4Effect.cpp:740)
+        let count = (((width * height) as f64).sqrt() / 4.0) as i32;
+        let count = (count * wdt_con / 100).max(2);
+
+        // calc base for particle size parameter (C4Effect.cpp:743)
+        let size_base = ((((width * height) as f64).sqrt() * f64::from(con + 20) / 120.0).sqrt()
+            * f64::from(REL_PARTICLE_SIZE)) as i32;
+
+        let attach_origin = Some((emission.x, emission.y));
+        let mut created = 0;
+        for index in 0..count * 2 {
+            // calc actual size to be used in this frame (C4Effect.cpp:748-752)
+            let size = self.safe_rng.random(PARTICLE_SIZE_DIFF + 1) + BASE_PARTICLE_SIZE
+                - PARTICLE_SIZE_DIFF / 2
+                - 1
+                + size_base;
+
+            // get particle target list (C4Effect.cpp:755)
+            let layer = if self.safe_rng.random(4) != 0 {
+                ParticleLayer::ObjectBack(emission.object)
+            } else {
+                ParticleLayer::ObjectFront(emission.object)
+            };
+
+            // get particle def and color (C4Effect.cpp:758-768)
+            let (def_name, mut color) = if index < count / 2 {
+                (
+                    FIRE_DEF_NAME,
+                    0x3200_4000u32.wrapping_add((self.safe_rng.random(59) as u32 + 196) << 16),
+                )
+            } else {
+                (FIRE2_DEF_NAME, 0x00ff_ffffu32)
+            };
+            if emission.fire_mode == crate::C4FX_FIRE_MODE_OBJECT {
+                color = color.wrapping_add(0x6200_0000);
+            }
+
+            // get particle creation pos... (C4Effect.cpp:771-777)
+            let rand_x = self.safe_rng.random(width + 1) - width / 2 - 1;
+            let px = rand_x * wdt_con / 100;
+            let mut py = y_off * con / 100;
+            if emission.fire_mode == crate::C4FX_FIRE_MODE_LIVING_VEG {
+                // parable form particle pos on livings
+                py -= px * px * 100 / width / wdt_con;
+            }
+
+            // ...and movement speed (C4Effect.cpp:779-793)
+            let (x_dir, y_dir) = if emission.fire_mode != crate::C4FX_FIRE_MODE_OBJECT {
+                // ...for normal fire proc
+                (
+                    rand_x * con / 400 - (px / 3) - (emission.xdir * 3.0) as i32,
+                    -self.safe_rng.random(15 + height * con / 300)
+                        - 1
+                        - (emission.ydir * 3.0) as i32,
+                )
+            } else {
+                // ...for objects
+                let x_dir = -((emission.xdir * 3.0) as i32);
+                let mut y_dir = -((emission.ydir * 3.0) as i32);
+                if y_dir == 0 {
+                    y_dir = -self.safe_rng.random(13 + height / 4) - 1;
+                }
+                (x_dir, y_dir)
+            };
+
+            // OK; create it! (C4Effect.cpp:796)
+            if self.create(
+                def_name,
+                x as f32 + rot[0] * px as f32 + rot[1] * py as f32,
+                y as f32 + rot[2] * px as f32 + rot[3] * py as f32,
+                x_dir as f32 / 10.0,
+                y_dir as f32 / 10.0,
+                size as f32 / 10.0,
+                color as i32,
+                layer,
+                attach_origin,
+            ) {
+                created += 1;
+            }
+        }
+        created
     }
 
     /// `C4ParticleSystem::Push` (C4Particles.cpp:494-519): add a velocity
@@ -1393,6 +1583,443 @@ mod tests {
             crate::ParticleLayer::Global,
             None,
         ));
+    }
+
+    #[test]
+    fn object_fire_emits_a_double_set_split_one_quarter_fire_and_three_quarters_fire2() {
+        // FnFxFireTimer's emitter loop (C4Effect.cpp:738-786) runs
+        // `iCount * 2` times; `i < iCount / 2` picks pFire1 ("Fire"), the
+        // rest pFire2 ("Fire2"). For a 16x16 full-con object iCount is
+        // `int(sqrt(16*16) / 4)` = 4, so 8 particles: 2 Fire, 6 Fire2.
+        let mut system = ParticleSystem::default();
+        system
+            .register_def(std_core("Fire"), 10, 1.0)
+            .expect("registers");
+        system
+            .register_def(std_core("Fire2"), 10, 1.0)
+            .expect("registers");
+
+        let created = system.create_object_fire(&ObjectFireEmission {
+            object: crate::ObjectId::new(7),
+            fire_mode: crate::C4FX_FIRE_MODE_STRUCT_VEH,
+            def_width: 16,
+            def_height: 16,
+            fire_top: 0,
+            con: crate::FULL_CON,
+            growth_type: false,
+            x: 100,
+            y: 200,
+            shape_x: -8,
+            shape_y: -8,
+            shape_width: 16,
+            shape_height: 16,
+            rotation: 0,
+            rotateable: false,
+            xdir: 0.0,
+            ydir: 0.0,
+        });
+
+        assert_eq!(created, 8, "iCount * 2 particles per execution");
+        let names: Vec<&str> = system
+            .particles()
+            .iter()
+            .map(|particle| particle.def_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Fire", "Fire", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2"],
+        );
+    }
+
+    #[test]
+    fn object_fire_consumes_safe_random_draws_in_cpp_order() {
+        // C4Effect.cpp:746-796 draws, per particle: size, target list,
+        // then the Fire-only color draw, then the x offset, then (outside
+        // C4Fx_FireMode_Object) the upward speed — followed by fxStdInit's
+        // life draw inside Create.
+        let mut system = ParticleSystem::default();
+        system
+            .register_def(std_core("Fire"), 10, 1.0)
+            .expect("registers");
+        system
+            .register_def(std_core("Fire2"), 10, 1.0)
+            .expect("registers");
+        system.safe_rng = SafeRng::new(4242);
+
+        // Independent mirror of the expected draw sequence. For a 16x16
+        // full-con object: count = 4, wdt_con = con = 100, y_off = 8, and
+        // size_base = int(sqrt(sqrt(256) * 120 / 120) * 12) = 48.
+        let mut mirror = SafeRng::new(4242);
+        let mut expected = Vec::new();
+        for index in 0..8 {
+            let size = mirror.random(11) + 30 - 5 - 1 + 48;
+            let layer = if mirror.random(4) != 0 {
+                ParticleLayer::ObjectBack(crate::ObjectId::new(7))
+            } else {
+                ParticleLayer::ObjectFront(crate::ObjectId::new(7))
+            };
+            let color = if index < 2 {
+                0x3200_4000u32 + ((mirror.random(59) as u32 + 196) << 16)
+            } else {
+                0x00ff_ffff
+            };
+            let rand_x = mirror.random(17) - 8 - 1;
+            let px = rand_x;
+            let py = 8;
+            let x_dir = rand_x * 100 / 400 - px / 3;
+            let y_dir = -mirror.random(15 + 16 * 100 / 300) - 1;
+            let life = mirror.random(10); // fxStdInit inside Create
+            expected.push((size, layer, color, px, py, x_dir, y_dir, life));
+        }
+
+        assert_eq!(
+            system.create_object_fire(&ObjectFireEmission {
+                object: crate::ObjectId::new(7),
+                fire_mode: crate::C4FX_FIRE_MODE_STRUCT_VEH,
+                def_width: 16,
+                def_height: 16,
+                fire_top: 0,
+                con: crate::FULL_CON,
+                growth_type: false,
+                x: 100,
+                y: 200,
+                shape_x: -8,
+                shape_y: -8,
+                shape_width: 16,
+                shape_height: 16,
+                rotation: 0,
+                rotateable: false,
+                xdir: 0.0,
+                ydir: 0.0,
+            }),
+            8,
+        );
+
+        for (particle, (size, layer, color, px, py, x_dir, y_dir, life)) in
+            system.particles().iter().zip(expected.iter())
+        {
+            assert_eq!(particle.x.to_bits(), (100.0 + *px as f32).to_bits());
+            assert_eq!(particle.y.to_bits(), (200.0 + *py as f32).to_bits());
+            assert_eq!(particle.xdir.to_bits(), (*x_dir as f32 / 10.0).to_bits());
+            assert_eq!(particle.ydir.to_bits(), (*y_dir as f32 / 10.0).to_bits());
+            assert_eq!(particle.a.to_bits(), (*size as f32 / 10.0).to_bits());
+            assert_eq!(particle.b, *color as i32);
+            assert_eq!(particle.life, *life);
+            assert_eq!(&particle.layer, layer);
+        }
+    }
+
+    #[test]
+    fn object_fire_mode_object_bumps_alpha_and_trails_the_objects_own_velocity() {
+        // C4Effect.cpp:768 adds 0x62000000 to every color in
+        // C4Fx_FireMode_Object, and :787-793 replaces the spread velocity
+        // with the object's own, only drawing an upward speed when that
+        // leaves iYDir at zero.
+        let mut system = ParticleSystem::default();
+        system
+            .register_def(std_core("Fire"), 10, 1.0)
+            .expect("registers");
+        system
+            .register_def(std_core("Fire2"), 10, 1.0)
+            .expect("registers");
+        system.safe_rng = SafeRng::new(11);
+
+        let mut mirror = SafeRng::new(11);
+        let mut expected = Vec::new();
+        for index in 0..8 {
+            let _size = mirror.random(11);
+            let _layer = mirror.random(4);
+            let color = if index < 2 {
+                0x3200_4000u32 + ((mirror.random(59) as u32 + 196) << 16)
+            } else {
+                0x00ff_ffff
+            } + 0x6200_0000;
+            let _rand_x = mirror.random(17);
+            let _life = mirror.random(10);
+            expected.push(color);
+        }
+
+        assert_eq!(
+            system.create_object_fire(&ObjectFireEmission {
+                object: crate::ObjectId::new(3),
+                fire_mode: crate::C4FX_FIRE_MODE_OBJECT,
+                def_width: 16,
+                def_height: 16,
+                fire_top: 0,
+                con: crate::FULL_CON,
+                growth_type: false,
+                x: 0,
+                y: 0,
+                shape_x: 0,
+                shape_y: 0,
+                shape_width: 0,
+                shape_height: 0,
+                rotation: 0,
+                rotateable: false,
+                xdir: 1.0,
+                ydir: 2.0,
+            }),
+            8,
+        );
+
+        for (particle, color) in system.particles().iter().zip(expected.iter()) {
+            assert_eq!(particle.b, *color as i32, "alpha-bumped object-mode color");
+            // -int(fixtof(xdir) * 3) / 10, -int(fixtof(ydir) * 3) / 10
+            assert_eq!(particle.xdir.to_bits(), (-3.0f32 / 10.0).to_bits());
+            assert_eq!(particle.ydir.to_bits(), (-6.0f32 / 10.0).to_bits());
+        }
+    }
+
+    #[test]
+    fn object_fire_mode_object_draws_an_upward_speed_only_when_the_object_is_still() {
+        // C4Effect.cpp:791-792: a resting object leaves iYDir at zero, which
+        // is the one case that consumes SafeRandom(13 + iHeight / 4).
+        let mut system = ParticleSystem::default();
+        system
+            .register_def(std_core("Fire"), 10, 1.0)
+            .expect("registers");
+        system
+            .register_def(std_core("Fire2"), 10, 1.0)
+            .expect("registers");
+        system.safe_rng = SafeRng::new(11);
+
+        let mut mirror = SafeRng::new(11);
+        let mut expected = Vec::new();
+        for index in 0..8 {
+            let _size = mirror.random(11);
+            let _layer = mirror.random(4);
+            if index < 2 {
+                let _color = mirror.random(59);
+            }
+            let _rand_x = mirror.random(17);
+            let y_dir = -mirror.random(13 + 16 / 4) - 1;
+            let _life = mirror.random(10);
+            expected.push(y_dir);
+        }
+
+        assert_eq!(
+            system.create_object_fire(&ObjectFireEmission {
+                object: crate::ObjectId::new(3),
+                fire_mode: crate::C4FX_FIRE_MODE_OBJECT,
+                def_width: 16,
+                def_height: 16,
+                fire_top: 0,
+                con: crate::FULL_CON,
+                growth_type: false,
+                x: 0,
+                y: 0,
+                shape_x: 0,
+                shape_y: 0,
+                shape_width: 0,
+                shape_height: 0,
+                rotation: 0,
+                rotateable: false,
+                xdir: 0.0,
+                ydir: 0.0,
+            }),
+            8,
+        );
+
+        for (particle, y_dir) in system.particles().iter().zip(expected.iter()) {
+            assert_eq!(particle.xdir.to_bits(), 0.0f32.to_bits());
+            assert_eq!(particle.ydir.to_bits(), (*y_dir as f32 / 10.0).to_bits());
+        }
+    }
+
+    #[test]
+    fn object_fire_mode_living_veg_bends_the_emission_row_into_a_parabola() {
+        // C4Effect.cpp:776-777: livings emit along a downward parabola,
+        // `iPy -= iPx * iPx * 100 / iWidth / iWdtCon`, so the row sags away
+        // from the center by the square of the horizontal offset.
+        let mut system = ParticleSystem::default();
+        system
+            .register_def(std_core("Fire"), 10, 1.0)
+            .expect("registers");
+        system
+            .register_def(std_core("Fire2"), 10, 1.0)
+            .expect("registers");
+        system.safe_rng = SafeRng::new(2024);
+
+        let mut mirror = SafeRng::new(2024);
+        let mut expected = Vec::new();
+        for index in 0..8 {
+            let _size = mirror.random(11);
+            let _layer = mirror.random(4);
+            if index < 2 {
+                let _color = mirror.random(59);
+            }
+            let rand_x = mirror.random(17) - 8 - 1;
+            let px = rand_x;
+            let py = 8 - px * px * 100 / 16 / 100;
+            let _y_dir = mirror.random(15 + 16 * 100 / 300);
+            let _life = mirror.random(10);
+            expected.push((px, py));
+        }
+
+        assert_eq!(
+            system.create_object_fire(&ObjectFireEmission {
+                object: crate::ObjectId::new(9),
+                fire_mode: crate::C4FX_FIRE_MODE_LIVING_VEG,
+                def_width: 16,
+                def_height: 16,
+                fire_top: 0,
+                con: crate::FULL_CON,
+                growth_type: false,
+                x: 100,
+                y: 200,
+                shape_x: 0,
+                shape_y: 0,
+                shape_width: 0,
+                shape_height: 0,
+                rotation: 0,
+                rotateable: false,
+                xdir: 0.0,
+                ydir: 0.0,
+            }),
+            8,
+        );
+
+        assert!(
+            expected.iter().any(|(px, _)| *px != 0),
+            "the sample must include off-center offsets to exercise the term",
+        );
+        for (particle, (px, py)) in system.particles().iter().zip(expected.iter()) {
+            assert_eq!(particle.x.to_bits(), (100.0 + *px as f32).to_bits());
+            assert_eq!(particle.y.to_bits(), (200.0 + *py as f32).to_bits());
+        }
+    }
+
+    #[test]
+    fn object_fire_rotates_the_offsets_and_recenters_a_rotateable_object() {
+        // C4Effect.cpp:729-737: a rotated Rotateable object spins the (px,py)
+        // offset through the r matrix, and "rotated objects usually better
+        // burn from the center" clamps a positive iYOff to zero.
+        let mut system = ParticleSystem::default();
+        system
+            .register_def(std_core("Fire"), 10, 1.0)
+            .expect("registers");
+        system
+            .register_def(std_core("Fire2"), 10, 1.0)
+            .expect("registers");
+        system.safe_rng = SafeRng::new(77);
+
+        let radians = ((90.0f32 * std::f32::consts::PI) as f64 / 180.0) as f32;
+        let rot = [radians.cos(), -radians.sin(), radians.sin(), radians.cos()];
+        let mut mirror = SafeRng::new(77);
+        let mut expected = Vec::new();
+        for index in 0..8 {
+            let _size = mirror.random(11);
+            let _layer = mirror.random(4);
+            if index < 2 {
+                let _color = mirror.random(59);
+            }
+            let rand_x = mirror.random(17) - 8 - 1;
+            let _y_dir = mirror.random(15 + 16 * 100 / 300);
+            let _life = mirror.random(10);
+            // iYOff would be 8, but rotation clamps it to 0.
+            expected.push((rand_x, 0));
+        }
+
+        assert_eq!(
+            system.create_object_fire(&ObjectFireEmission {
+                object: crate::ObjectId::new(4),
+                fire_mode: crate::C4FX_FIRE_MODE_STRUCT_VEH,
+                def_width: 16,
+                def_height: 16,
+                fire_top: 0,
+                con: crate::FULL_CON,
+                growth_type: false,
+                x: 50,
+                y: 60,
+                shape_x: 0,
+                shape_y: 0,
+                shape_width: 0,
+                shape_height: 0,
+                rotation: 90,
+                rotateable: true,
+                xdir: 0.0,
+                ydir: 0.0,
+            }),
+            8,
+        );
+
+        for (particle, (px, py)) in system.particles().iter().zip(expected.iter()) {
+            let expected_x = 50.0f32 + rot[0] * *px as f32 + rot[1] * *py as f32;
+            let expected_y = 60.0f32 + rot[2] * *px as f32 + rot[3] * *py as f32;
+            assert_eq!(particle.x.to_bits(), expected_x.to_bits());
+            assert_eq!(particle.y.to_bits(), expected_y.to_bits());
+        }
+    }
+
+    #[test]
+    fn object_fire_holds_width_at_full_con_unless_the_def_stretches() {
+        // C4Effect.cpp:719-722: iCon follows GetCon(), but a def without
+        // GrowthType keeps iWdtCon pinned at 100 so a half-built structure
+        // still burns across its full width — and :740 floors the count at 2.
+        let emission = |growth_type: bool| ObjectFireEmission {
+            object: crate::ObjectId::new(1),
+            fire_mode: crate::C4FX_FIRE_MODE_STRUCT_VEH,
+            def_width: 16,
+            def_height: 16,
+            fire_top: 0,
+            con: crate::FULL_CON / 10, // 10%
+            growth_type,
+            x: 0,
+            y: 0,
+            shape_x: 0,
+            shape_y: 0,
+            shape_width: 0,
+            shape_height: 0,
+            rotation: 0,
+            rotateable: false,
+            xdir: 0.0,
+            ydir: 0.0,
+        };
+
+        let mut fixed_width = ParticleSystem::default();
+        fixed_width
+            .register_def(std_core("Fire"), 10, 1.0)
+            .expect("registers");
+        fixed_width
+            .register_def(std_core("Fire2"), 10, 1.0)
+            .expect("registers");
+        // iWdtCon pinned to 100 → count stays int(sqrt(256) / 4) = 4.
+        assert_eq!(fixed_width.create_object_fire(&emission(false)), 8);
+
+        let mut stretched = ParticleSystem::default();
+        stretched
+            .register_def(std_core("Fire"), 10, 1.0)
+            .expect("registers");
+        stretched
+            .register_def(std_core("Fire2"), 10, 1.0)
+            .expect("registers");
+        // iWdtCon = 10 → 4 * 10 / 100 = 0, floored to the minimum 2.
+        assert_eq!(stretched.create_object_fire(&emission(true)), 4);
+    }
+
+    #[test]
+    fn fire_particles_are_loaded_only_when_both_defs_and_the_local_switch_are_present() {
+        // IsFireParticleLoaded is `pFire1 && pFire2` (C4Particles.h:214), and
+        // SetDefParticles only resolves the pair when
+        // Config.Graphics.FireParticles is set (C4Particles.cpp:483-489).
+        let mut system = ParticleSystem::default();
+        assert!(!system.is_fire_particle_loaded(), "no defs registered yet");
+
+        system
+            .register_def(std_core("Fire"), 10, 1.0)
+            .expect("registers");
+        assert!(!system.is_fire_particle_loaded(), "Fire2 still missing");
+
+        system
+            .register_def(std_core("Fire2"), 10, 1.0)
+            .expect("registers");
+        assert!(system.is_fire_particle_loaded());
+
+        system.fire_particles = false;
+        assert!(
+            !system.is_fire_particle_loaded(),
+            "the local FireParticles switch leaves pFire1/pFire2 null",
+        );
     }
 
     #[test]
