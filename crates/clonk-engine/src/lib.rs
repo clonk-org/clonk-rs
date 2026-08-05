@@ -2252,6 +2252,11 @@ pub enum ParticleCommand {
         dxdir: f32,
         dydir: f32,
     },
+    /// One execution of FnFxFireTimer's emitter (C4Effect.cpp:660-769). The
+    /// burning object's state is snapshotted where the effect reads it; the
+    /// SafeRandom draws happen at the particle system, which owns that
+    /// stream, and are skipped entirely when the fire defs are not loaded.
+    ObjectFire(particles::ObjectFireEmission),
 }
 
 #[derive(Debug, Clone)]

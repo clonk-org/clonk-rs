@@ -297,9 +297,12 @@ pub struct GraphicsSystem {
     show_player_hud_always: bool,
     /// `Config.Graphics.SplitscreenDividers` (src/C4GraphicsSystem.cpp:389-394).
     splitscreen_dividers: bool,
-    /// `Config.Graphics.FireParticles` gates C++'s extended Fire/Fire2 pass.
-    /// The Rust renderer currently has only the simple object fire facet,
-    /// which remains unconditional as C++'s fallback does.
+    /// `Config.Graphics.FireParticles`, combined with the presentation-detail
+    /// governor's fire step. The static half of that answer already reaches
+    /// the engine (`Engine::set_fire_particles`), where C++ folds it into
+    /// `SetDefParticles` and where the emitter now honours it; this copy is
+    /// what a renderer-side suppression pass would read. The object fire
+    /// facet stays unconditional either way, as C++'s does.
     fire_particles: bool,
     /// `Config.Graphics.ShowPortraits` / `ShowCommands` / `ShowCommandKeys`
     /// (src/C4Config.cpp:448-450, default true).

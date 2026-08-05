@@ -1314,6 +1314,7 @@ impl GameApp {
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
         engine.set_smoke_level(self.graphics_smoke_level);
+        engine.set_fire_particles(self.display_flags.fire_particles);
         let frozen_startup_player_count = if replay {
             replay_startup_player_count
         } else {
@@ -1986,6 +1987,8 @@ impl GameApp {
         self.clear_physical_viewport_states();
         self.physical_viewports_authoritative = false;
         self.engine.set_smoke_level(self.graphics_smoke_level);
+        self.engine
+            .set_fire_particles(self.display_flags.fire_particles);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_network_control_mode(self.network.is_some());

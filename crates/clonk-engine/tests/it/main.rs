@@ -32,6 +32,7 @@ shard_modules!(
     action_procedure,
     activate_entrance_native,
     bird_flight,
+    burning_clonk_fire_particles,
     component_natives,
     component_order,
     construction_check_feedback,

@@ -3233,7 +3233,10 @@ an ordered-map model gap.
   player sets once. A Pi needs them chosen for it, because the player cannot
   know in advance which scenario will exceed the budget.
   After `DETAIL_STEP_DOWN_PASSES` (30) consecutive graphics passes over the
-  simulation interval the governor drops fire particles, then the monitor-gamma
+  simulation interval the governor drops fire particles — a step that only
+  became a real saving once the engine emitter landed; the renderer still has
+  to read `fire_particles_enabled()` for it to bite (clonk-org/clonk-rs#106) —
+  then the monitor-gamma
   resolve pass — a second full-screen fill doing three dependent texture
   fetches per pixel. It restores one step at a time after
   `DETAIL_STEP_UP_PASSES` (120) passes under half the budget; the deadband

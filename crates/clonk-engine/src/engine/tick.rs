@@ -1570,9 +1570,34 @@ impl Engine {
             }
         }
         self.detach_destroyed_objects()?;
-        let object_count_before_retain = self.objects.len();
-        self.objects.retain(|object| !object.destroyed);
-        if self.objects.len() != object_count_before_retain {
+        let mut removed_ids: Vec<ObjectId> = Vec::new();
+        self.objects.retain(|object| {
+            if object.destroyed {
+                removed_ids.push(object.id);
+                false
+            } else {
+                true
+            }
+        });
+        if !removed_ids.is_empty() {
+            // C4Object::Clear drops both attached particle lists
+            // (C4Object.cpp:272-273). Without it a removed object's
+            // particles are never executed again — nothing iterates their
+            // layer — so they leak and their def's Count climbs until
+            // MaxCount refuses every new particle of that kind. Engine fire
+            // makes that reachable in ordinary play: burning objects decay
+            // to nothing while still emitting.
+            for id in &removed_ids {
+                self.particle_system
+                    .remove(None, &crate::ParticleScope::Object(*id));
+                self.particles.retain(|particle| {
+                    !matches!(
+                        particle.snapshot.layer,
+                        ParticleLayer::ObjectFront(layer_id) | ParticleLayer::ObjectBack(layer_id)
+                            if layer_id == *id
+                    )
+                });
+            }
             self.note_objects_changed();
         }
         self.rebuild_sectors();

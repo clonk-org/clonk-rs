@@ -1951,6 +1951,7 @@ impl GameApp {
 
         // Engine starts with default materials; will be updated when boot loading finishes
         let graphics_smoke_level = load_graphics_smoke_level(paths);
+        let display_flags = load_display_flags(paths);
         let mission_access = paths
             .and_then(|paths| match load_configured_mission_access(paths) {
                 Ok(access) => Some(MissionAccessStore::new(access)),
@@ -1978,6 +1979,7 @@ impl GameApp {
         engine.set_show_commands_request_store(show_commands_requests.clone());
         engine.set_control_key_names(configured_control_key_names(&bindings));
         engine.set_smoke_level(graphics_smoke_level);
+        engine.set_fire_particles(display_flags.fire_particles);
         engine.set_control_host(!matches!(
             network_mode.as_ref(),
             Some(NetworkMode::Client(_))
@@ -2255,7 +2257,7 @@ impl GameApp {
             runtime_player_big_icon_misses: HashSet::new(),
             script_menu_presentations: BTreeMap::new(),
             menu_viewport_rects: BTreeMap::new(),
-            display_flags: load_display_flags(paths),
+            display_flags,
             white_lobby_chat: load_white_lobby_chat(paths),
             show_log_timestamps: load_show_log_timestamps(paths),
             graphics_smoke_level,
@@ -7643,6 +7645,8 @@ impl GameApp {
         self.clear_physical_viewport_states();
         self.physical_viewports_authoritative = false;
         self.engine.set_smoke_level(self.graphics_smoke_level);
+        self.engine
+            .set_fire_particles(self.display_flags.fire_particles);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_network_control_mode(self.network.is_some());

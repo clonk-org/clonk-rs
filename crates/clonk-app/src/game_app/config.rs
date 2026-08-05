@@ -1359,6 +1359,8 @@ impl GameApp {
         self.startup_view_flags.fair_crew = load_fair_crew_flag(paths);
         self.graphics_smoke_level = load_graphics_smoke_level(paths);
         self.engine.set_smoke_level(self.graphics_smoke_level);
+        self.engine
+            .set_fire_particles(self.display_flags.fire_particles);
         self.mission_access = paths
             .and_then(|paths| match load_configured_mission_access(paths) {
                 Ok(access) => Some(MissionAccessStore::new(access)),
