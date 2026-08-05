@@ -3236,11 +3236,12 @@ an ordered-map model gap.
   simulation interval the governor drops fire particles — `GraphicsSystem`
   skips the `Fire`/`Fire2` draws belonging to a *burning* object, one
   unbatched call each, which is a real saving now that the engine emits them.
-  Only the emitter's own output goes: script `CreateParticle("Fire2", ...)`
-  is global or hangs off an object that is not alight, and content relies on
-  it being drawn — the EkeReloaded flamethrower projectile has a deliberately
-  transparent facet and exists on screen only as global `Fire2`. Then the
-  monitor-gamma
+  The predicate stops short of "every `Fire`/`Fire2` particle" because
+  shipped content builds standalone flames from the same defs on objects that
+  are not alight (the Western falling stars globally, the ClonkMars oil rig's
+  `Overburn` flare on itself), and blacking those out is not a detail
+  reduction. A particle carries no provenance, so script fire on an object
+  that *is* alight goes with the rest of that blaze. Then the monitor-gamma
   resolve pass — a second full-screen fill doing three dependent texture
   fetches per pixel. It restores one step at a time after
   `DETAIL_STEP_UP_PASSES` (120) passes under half the budget; the deadband

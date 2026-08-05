@@ -2922,7 +2922,8 @@ pub(crate) fn fx_fire_start(args: &[Value]) -> Result<Value, RuntimeError> {
 /// deterministic arms (phase, decay, Tick10 damage, Tick5 energy,
 /// extinguisher, the Random(3) inflame draw) run in C++ ledger order, then
 /// the unsynchronized particle emitter (C4Effect.cpp:660-769) is queued for
-/// the particle system. SmokeRate smoke and sounds remain open.
+/// the particle system, and the SmokeRate smoke arm runs alongside them.
+/// Sounds remain open.
 pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     let target = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -3157,8 +3158,15 @@ fn register_object_fire_smoke(target: ObjectId, frame: u64) {
             return;
         }
         let shape_width = live_object_shape(context, target).unwrap_or_default().width;
-        let smoke_level = 2 * shape_width / 3;
-        let period = (50 * smoke_level / smoke_rate).max(3);
+        // C++ is plain int32_t here (C4Object.cpp:786,790); a script-set shape
+        // can make these products overflow, where C++ wraps and keeps drawing.
+        let smoke_level = 2i32.wrapping_mul(shape_width) / 3;
+        // `wrapping_div` also covers a negative SmokeRate of -1 against a
+        // wrapped INT_MIN level, which would otherwise trap.
+        let period = 50i32
+            .wrapping_mul(smoke_level)
+            .wrapping_div(smoke_rate)
+            .max(3);
         let phase = (frame as i32).wrapping_add((target.as_u64() as i32).wrapping_mul(7));
         // `Abs(xdir) > 2` compares the raw fixed velocity against itofix(2)
         // (Fixed.h:185, the int32 spaceship wrapper).

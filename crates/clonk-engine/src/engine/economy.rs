@@ -275,12 +275,11 @@ impl Engine {
         Ok(incinerated)
     }
 
-    /// `C4Object::ExecFire` (C4Object.cpp:766-810), run by the fire
+    /// `C4Object::ExecFire` (C4Object.cpp:768-812), run by the fire
     /// effect's timer (FnFxFireTimer, C4Effect.cpp:643-771), followed by
     /// that function's particle emitter. Returns the deferred Fx*Stop
-    /// events of effects an extinguish killed. Still open: SmokeRate smoke
-    /// (visual), and death/removal callbacks from the energy and damage
-    /// changes.
+    /// events of effects an extinguish killed. Still open: death/removal
+    /// callbacks from the energy and damage changes.
     #[doc(hidden)]
     pub fn exec_object_fire(
         &mut self,
@@ -316,7 +315,7 @@ impl Engine {
         } else {
             OWNER_NONE
         };
-        // Fire Phase (C4Object.cpp:769)
+        // Fire Phase (C4Object.cpp:770-771)
         {
             let object = &mut self.objects[idx];
             object.state.fire_phase = (object.state.fire_phase + 1) % MAX_FIRE_PHASE;
@@ -346,7 +345,7 @@ impl Engine {
             .get(&self.objects[idx].definition_id)
             .map(|definition| (definition.no_burn_decay(), definition.no_burn_damage()))
             .unwrap_or((false, false));
-        // Decay: DoCon(-100) every frame (C4Object.cpp:776-778); burned away
+        // Decay: DoCon(-100) every frame (C4Object.cpp:778-780); burned away
         // at zero construction (C4Object::DoCon removal)
         if !no_burn_decay {
             if let Err(error) = self.do_con(idx, -100) {
@@ -354,14 +353,14 @@ impl Engine {
                 crate::object::log_engine_error_call_frames(&error);
             }
         }
-        // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
+        // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:781-782)
         if frame.is_multiple_of(10) && !no_burn_damage {
             if let Err(error) = self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, caused_by) {
                 tracing::error!(%error, "fire damage callback failed; continuing");
                 crate::object::log_engine_error_call_frames(&error);
             }
         }
-        // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
+        // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:783-784)
         if frame.is_multiple_of(5) {
             if let Err(error) = self.change_object_energy(idx, -1, C4FX_CALL_ENG_FIRE, caused_by) {
                 tracing::error!(%error, "fire energy callback failed; continuing");
@@ -373,7 +372,7 @@ impl Engine {
         // the particle it spawns is presentation.
         self.exec_object_fire_smoke(idx, frame);
         // Background effects: Tick5 over valid landscape material
-        // (C4Object.cpp:791-806) — extinguish in extinguisher material, then
+        // (C4Object.cpp:794-808) — extinguish in extinguisher material, then
         // the unconditional Random(3) landscape-inflame draw.
         if frame.is_multiple_of(5) {
             let position = self.objects[idx].state.position;
@@ -389,12 +388,12 @@ impl Engine {
                     .unwrap_or(false);
                 if extinguisher {
                     // Extinguish(iFireNumber) kills THIS fire effect
-                    // (C4Object.cpp:799-801); the Pshshsh sound is
+                    // (C4Object.cpp:801-803); the Pshshsh sound is
                     // presentation-only.
                     let (_, events) = self.extinguish_object(idx, fire_number);
                     stop_events.extend(events);
                 }
-                // Inflame (C4Object.cpp:803-804)
+                // Inflame (C4Object.cpp:806-807)
                 if self.rng.random(3) == 0 {
                     let _ = self.spawn_fire_at(position.x, position.y);
                 }
@@ -430,8 +429,15 @@ impl Engine {
             return;
         }
         let shape_width = object.current_shape_rect().unwrap_or_default().width;
-        let smoke_level = 2 * shape_width / 3;
-        let period = (50 * smoke_level / smoke_rate).max(3);
+        // C++ is plain int32_t here (C4Object.cpp:786,790); a script-set shape
+        // can make these products overflow, where C++ wraps and keeps drawing.
+        let smoke_level = 2i32.wrapping_mul(shape_width) / 3;
+        // `wrapping_div` also covers a negative SmokeRate of -1 against a
+        // wrapped INT_MIN level, which would otherwise trap.
+        let period = 50i32
+            .wrapping_mul(smoke_level)
+            .wrapping_div(smoke_rate)
+            .max(3);
         let phase = (frame as i32).wrapping_add((object.id.as_u64() as i32).wrapping_mul(7));
         // `Abs(xdir) > 2` compares the raw fixed velocity against itofix(2)
         // (Fixed.h:185, the int32 spaceship wrapper).

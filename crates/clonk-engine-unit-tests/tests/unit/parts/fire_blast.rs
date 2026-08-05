@@ -5002,8 +5002,6 @@ func FxFireTimer(object target, int number, int time)
         Ok(())
     }
 
-    /// A definition-less engine wired with the stock `Fire`/`Fire2` particle
-    /// defs, so `IsFireParticleLoaded` (C4Particles.h:214) answers true.
     #[test]
     fn burning_object_smokes_on_the_defs_smoke_rate_cadence() -> Result<(), EngineError> {
         // C4Object::ExecFire's "Effects" arm (C4Object.cpp:785-793):
@@ -5353,6 +5351,22 @@ func FxFireTimer(object target, int number, int time)
     }
 
     #[test]
+    fn the_smoke_cadence_wraps_like_cpp_int32_instead_of_trapping(
+    ) -> Result<(), EngineError> {
+        // `2 * Shape.Wdt` and `50 * smoke_level` are plain int32_t
+        // (C4Object.cpp:786,790), and a negative SmokeRate divides straight
+        // through. C++ wraps and keeps drawing; Rust must not trap on a path
+        // a script-set shape or DefCore can reach.
+        for smoke_rate in [i32::MIN, -1, 1, i32::MAX] {
+            let (mut engine, _) = burning_smoker(95, i32::MAX, smoke_rate)?;
+            for _ in 0..6 {
+                engine.tick_without_snapshot()?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn a_burning_object_smokes_without_the_fire_particle_defs_loaded(
     ) -> Result<(), EngineError> {
         // The smoke arm lives in ExecFire, which runs before
@@ -5374,6 +5388,75 @@ func FxFireTimer(object target, int number, int time)
         Ok(())
     }
 
+    #[test]
+    fn the_inherited_smoke_arm_honours_the_opt_out_and_the_fast_mover_branch(
+    ) -> Result<(), EngineError> {
+        // Both feeder paths carry their own copy of C4Object.cpp:788-791, so
+        // the compat one needs its `if (smoke_rate)` opt-out and its
+        // `|| Abs(xdir) > 2` escape pinned too — the native path's tests say
+        // nothing about it.
+        let script = "#strict\n\
+             func FxFireTimer(pObj, iNumber, iTime)\n\
+             {\n\
+                 return inherited(pObj, iNumber, iTime);\n\
+             }\n";
+        let build = |seed: u64, smoke_rate: i32| -> Result<(Engine, ObjectId), EngineError> {
+            let mut engine = Engine::with_seed(seed);
+            engine
+                .register_particle_definition(
+                    particles::ParticleDefCore {
+                        name: "Smoke".into(),
+                        init_fn: "StdInit".into(),
+                        exec_fn: "StdExec".into(),
+                        draw_fn: "Std".into(),
+                        delay: 1,
+                        repeats: 1000,
+                        ..Default::default()
+                    },
+                    10,
+                    1.0,
+                )
+                .expect("smoke def registers");
+            let mut definition = Definition::from_script("SMK3", "Overloaded", script)?;
+            definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+            definition.set_fire_properties(0, true, true);
+            definition.set_smoke_rate(smoke_rate);
+            engine.register_definition(definition)?;
+            let object =
+                engine.spawn_object(SpawnConfig::new("SMK3").with_category(CATEGORY_STRUCTURE))?;
+            let index = engine.find_object_index(object).expect("object exists");
+            assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+            Ok((engine, object))
+        };
+
+        // SmokeRate=0 opts the overload out exactly as it does the native path.
+        let (mut silent, _) = build(75, 0)?;
+        for _ in 0..15 {
+            silent.tick_without_snapshot()?;
+        }
+        assert!(silent.particle_system().particles().is_empty());
+
+        // Past itofix(2) the cadence is bypassed and it smokes every tick.
+        let (mut fast, object) = build(76, 100)?;
+        let index = fast.find_object_index(object).expect("object exists");
+        for _ in 0..5 {
+            let index = fast.find_object_index(object).unwrap_or(index);
+            fast.objects[index].set_fixed_velocity(FixedVec2::new(
+                C4Fixed::from_raw(itofix(2).val() + 1),
+                C4Fixed::ZERO,
+            ));
+            fast.tick_without_snapshot()?;
+        }
+        assert_eq!(
+            fast.particle_system().particles().len(),
+            5,
+            "the overload's fast-mover escape fires on every execution",
+        );
+        Ok(())
+    }
+
+    /// A definition-less engine wired with the stock `Fire`/`Fire2` particle
+    /// defs, so `IsFireParticleLoaded` (C4Particles.h:214) answers true.
     fn engine_with_fire_particle_defs(seed: u64) -> Engine {
         let mut engine = Engine::with_seed(seed);
         for name in ["Fire", "Fire2"] {
@@ -7167,4 +7250,3 @@ func CatchBlow(level, by)
         assert_eq!(engine.physics().gravity, 44);
         Ok(())
     }
-

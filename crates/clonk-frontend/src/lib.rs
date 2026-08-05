@@ -12534,8 +12534,11 @@ mod tests {
 
     #[test]
     fn disabling_extended_fire_particles_keeps_simple_fire_facet() {
-        // FireParticles gates automatic emission only; the simple object
-        // Fire.png facet and script-created registry particles remain visible.
+        // The detail rung suppresses flame *particles* only. The simple
+        // object Fire.png facet is unconditional in C++ (C4Object.cpp:2387,
+        // "always draw, even if particles are drawn as well") and stays so
+        // here, which is what keeps a burning object legible at the lowest
+        // detail level.
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(6, 6);
         object.crew_member = false;

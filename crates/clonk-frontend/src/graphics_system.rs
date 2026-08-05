@@ -4146,15 +4146,17 @@ impl GraphicsSystem {
         // `Config.Graphics.FireParticles` is honoured engine-side instead,
         // where C++ puts it (`SetDefParticles`).
         //
-        // Only the engine emitter's own output is suppressed, which is why
-        // the burning target is part of the predicate: `FnFxFireTimer` deals
-        // every particle to a *burning* object's back/front list, while
-        // script `CreateParticle("Fire2", ...)` output is global or hangs off
-        // an object that is not alight. Content leans on that — the
-        // EkeReloaded flamethrower projectile has a deliberately transparent
-        // facet and exists on screen only as global `Fire2` — so a
-        // name-only gate would erase a damaging projectile rather than trim
-        // frame cost.
+        // The predicate is "flames on a burning object", which is where
+        // `FnFxFireTimer` puts every particle it makes. It deliberately
+        // stops short of "every Fire/Fire2 particle": shipped content builds
+        // standalone flames out of the same defs on objects that are not
+        // alight — the Western falling stars spawn them globally
+        // (`Stars.c4d/0Star_Black.c4d/Script.c:11-12`) and the ClonkMars oil
+        // rig hangs them off itself (`Rig.c4d/Script.c:74-77`) — and a
+        // name-only gate would black those out instead of trimming frame
+        // cost. There is no provenance flag on a particle, so script fire on
+        // an object that *is* alight is suppressed too; that is intended,
+        // since it renders as part of the same blaze.
         if !self.draws_fire_particles
             && target.is_some_and(|object| object.on_fire)
             && matches!(
