@@ -1732,16 +1732,6 @@ fn run() -> Result<()> {
                             }
                         }
                     }
-                    // Last, and after every other teardown line, so a log that
-                    // ends here ended on purpose. Nothing else marked a
-                    // shutdown, which left "the log stops and the process is
-                    // gone" reading identically whether the player quit or the
-                    // process was destroyed (clonk-org/clonk-rs#40). This is
-                    // the app's final controlled point on both platforms: on
-                    // macOS `run_app` never returns from here.
-                    clonk_logging::log_shutdown_banner(
-                        app.exit_reason.unwrap_or("the event loop ended"),
-                    );
                 }
                 _ => {}
             }
@@ -1820,6 +1810,19 @@ fn run() -> Result<()> {
                 tracing::debug!(
                     windows = destroyed.len(),
                     "released the developer windows before the event loop returned"
+                );
+                // After every other teardown line, so a log ending here ended
+                // on purpose. Nothing marked a shutdown before, which left
+                // "the log stops and the process is gone" reading identically
+                // whether the player quit or the process was destroyed
+                // (clonk-org/clonk-rs#40). It follows the config and console
+                // persistence above deliberately: those can still `warn!`, and
+                // a marker printed ahead of them would call a session clean
+                // that then died saving its own config. This is the last point
+                // the app controls on both platforms — on macOS `run_app`
+                // never returns past here.
+                clonk_logging::log_shutdown_banner(
+                    app.exit_reason.unwrap_or("the event loop ended"),
                 );
             }
         }))
