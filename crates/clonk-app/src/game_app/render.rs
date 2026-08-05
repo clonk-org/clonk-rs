@@ -3056,8 +3056,15 @@ impl GameApp {
         self.graphics.set_renderer_config(
             self.display_flags.show_player_hud_always,
             self.display_flags.splitscreen_dividers,
-            self.display_flags.fire_particles && self.presentation_detail.draws_fire_particles(),
         );
+        // Only the measured-cost governor suppresses the flame draws. The
+        // static `Config.Graphics.FireParticles` is honoured engine-side by
+        // `Engine::set_fire_particles`, where C++ folds it into
+        // `SetDefParticles`: it stops the automatic emitter without hiding
+        // script-created Fire/Fire2 particles, which a renderer gate on the
+        // same flag would.
+        self.graphics
+            .set_fire_particle_detail(self.presentation_detail.draws_fire_particles());
         // C4Viewport suppresses only its gameplay overlays for a film replay;
         // game messages and C4GraphicsSystem-owned chrome remain independent.
         let viewport_overlays_visible = !self.engine.film_replay();

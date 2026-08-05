@@ -297,13 +297,16 @@ pub struct GraphicsSystem {
     show_player_hud_always: bool,
     /// `Config.Graphics.SplitscreenDividers` (src/C4GraphicsSystem.cpp:389-394).
     splitscreen_dividers: bool,
-    /// `Config.Graphics.FireParticles`, combined with the presentation-detail
-    /// governor's fire step. The static half of that answer already reaches
-    /// the engine (`Engine::set_fire_particles`), where C++ folds it into
-    /// `SetDefParticles` and where the emitter now honours it; this copy is
-    /// what a renderer-side suppression pass would read. The object fire
-    /// facet stays unconditional either way, as C++'s does.
-    fire_particles: bool,
+    /// The presentation-detail governor's `NoFireParticles` rung. False skips
+    /// the `Fire` and `Fire2` draws in [`Self::draw_definition_particle`] —
+    /// one unbatched call each, which is the cost that rung exists to
+    /// reclaim. The static `Config.Graphics.FireParticles` deliberately does
+    /// *not* feed this: it is honoured engine-side by
+    /// `Engine::set_fire_particles`, where C++ folds it into
+    /// `SetDefParticles`, so it stops the automatic emitter without hiding
+    /// script-created fire. The object fire facet stays unconditional either
+    /// way, as C++'s does.
+    draws_fire_particles: bool,
     /// `Config.Graphics.ShowPortraits` / `ShowCommands` / `ShowCommandKeys`
     /// (src/C4Config.cpp:448-450, default true).
     pub(crate) show_portraits: bool,
@@ -459,7 +462,7 @@ impl GraphicsSystem {
             upper_board_text_width: None,
             show_player_hud_always: true,
             splitscreen_dividers: true,
-            fire_particles: true,
+            draws_fire_particles: true,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -1992,19 +1995,26 @@ impl GraphicsSystem {
         &mut self,
         show_player_hud_always: bool,
         splitscreen_dividers: bool,
-        fire_particles: bool,
     ) {
         self.show_player_hud_always = show_player_hud_always;
-        self.fire_particles = fire_particles;
         if self.splitscreen_dividers != splitscreen_dividers {
             self.splitscreen_dividers = splitscreen_dividers;
             self.relayout_active_viewports();
         }
     }
 
-    /// Whether the optional extended Fire/Fire2 presentation pass is enabled.
-    pub fn fire_particles_enabled(&self) -> bool {
-        self.fire_particles
+    /// Engage or release the presentation-detail governor's `NoFireParticles`
+    /// rung. This is a measured-frame-cost decision and nothing else — in
+    /// particular it is **not** `Config.Graphics.FireParticles`, which the
+    /// engine already honours where C++ does (`SetDefParticles`) and which
+    /// must leave script-created fire visible.
+    pub fn set_fire_particle_detail(&mut self, draws_fire_particles: bool) {
+        self.draws_fire_particles = draws_fire_particles;
+    }
+
+    /// Whether flame particles are currently drawn at all.
+    pub fn draws_fire_particles(&self) -> bool {
+        self.draws_fire_particles
     }
 
     /// Stores the HUD state drawn by [`Self::render_frame`] — the Rust
@@ -4128,6 +4138,21 @@ impl GraphicsSystem {
         target: Option<&ObjectSnapshot>,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
+        // The `NoFireParticles` presentation-detail rung reclaims exactly
+        // these draws: one unbatched call per flame particle. It is the
+        // measured-cost governor's first step-down, so it is a renderer
+        // suppression rather than an engine gate — the engine must stay
+        // independent of local frame timing. The static
+        // `Config.Graphics.FireParticles` is honoured engine-side instead,
+        // where C++ puts it (`SetDefParticles`).
+        if !self.draws_fire_particles
+            && matches!(
+                particle.definition_id.as_str(),
+                clonk_engine::particles::FIRE_DEF_NAME | clonk_engine::particles::FIRE2_DEF_NAME
+            )
+        {
+            return;
+        }
         let Some(definition) = self.particle_sprites.get(&particle.definition_id).cloned() else {
             return;
         };

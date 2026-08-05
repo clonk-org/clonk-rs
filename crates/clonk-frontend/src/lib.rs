@@ -10443,7 +10443,7 @@ mod tests {
         splitscreen_dividers: bool,
     ) -> Vec<SurfaceRect> {
         let mut graphics = test_graphics(width, height, height as i32, "Viewport layout");
-        graphics.set_renderer_config(true, splitscreen_dividers, true);
+        graphics.set_renderer_config(true, splitscreen_dividers);
         graphics.layout_viewports(count)
     }
 
@@ -12071,7 +12071,7 @@ mod tests {
             empty_hud_graphics(),
         );
         graphics.set_particle_sprites(Arc::new(definitions));
-        graphics.set_renderer_config(true, true, false);
+        graphics.set_renderer_config(true, true);
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         graphics
             .surface_mut()
@@ -12253,7 +12253,7 @@ mod tests {
             empty_hud_graphics(),
         );
         graphics.set_particle_sprites(Arc::new(definitions));
-        graphics.set_renderer_config(true, true, false);
+        graphics.set_renderer_config(true, true);
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         for x in [31, 41] {
             graphics
@@ -12417,6 +12417,109 @@ mod tests {
     }
 
     #[test]
+    fn suppressing_fire_particles_skips_their_draw_and_spares_every_other_def() {
+        // The `NoFireParticles` presentation-detail rung exists to reclaim
+        // the unbatched per-particle draw calls the stock fire defs cost, so
+        // it has to actually skip them. Everything else keeps drawing: the
+        // rung is about fire, not about particles in general.
+        fn solid(name: &str) -> ParticleRenderDefinition {
+            ParticleRenderDefinition {
+                image: ImageData::new(1, 1, vec![200, 0, 0, 255]),
+                facet: ParticleFacet::new(0, 0, 1, 1),
+                length: 1,
+                aspect: 1.0,
+                core: ParticleDefCore {
+                    name: name.to_string(),
+                    ..ParticleDefCore::default()
+                },
+                draw_proc: ParticleDrawProc::Std,
+            }
+        }
+        let particle = |name: &str, x: f32| ParticleSnapshot {
+            definition_id: name.to_string(),
+            position: FloatVector2::new(x, 8.0),
+            velocity: FloatVector2::new(0.0, 0.0),
+            life: 0,
+            parameter_a: 1.0,
+            parameter_b: 0x00ff_ffff,
+            layer: ParticleLayer::ObjectBack(ObjectId::new(1)),
+            pxs_fixed: None,
+            pxs_slot: None,
+        };
+        let definitions: HashMap<_, _> = ["Fire", "Fire2", "Smoke2"]
+            .iter()
+            .map(|name| (name.to_string(), solid(name)))
+            .collect();
+        let particles = vec![
+            particle("Fire", 4.0),
+            particle("Fire2", 12.0),
+            particle("Smoke2", 20.0),
+        ];
+
+        // The particle pass runs inside the object draw, so the viewport
+        // needs at least one object; it sits clear of the sampled pixels.
+        let mut owner = make_snapshot().objects.remove(0);
+        owner.id = ObjectId::new(1);
+        owner.definition_id = "ParticleOwner".to_string();
+        owner.position = Vector2::new(28, 2);
+        owner.crew_member = false;
+        let objects = vec![owner];
+        let object_sprites: HashMap<_, _> = (*solid_sprite(
+            "ParticleOwner",
+            2,
+            2,
+            Color::opaque(0, 0, 220),
+            Some(DefinitionRect::new(-1, -1, 2, 2)),
+            false,
+        ))
+        .clone();
+
+        let render = |fire_particles: bool| {
+            let mut graphics = GraphicsSystem::new(
+                32,
+                16,
+                16,
+                "fire particle suppression",
+                test_font(),
+                Arc::new(object_sprites.clone()),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_particle_sprites(Arc::new(definitions.clone()));
+            graphics.set_renderer_config(true, true);
+            graphics.set_fire_particle_detail(fire_particles);
+            graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+            graphics.draw_objects_at_frame(
+                0,
+                &objects,
+                &[],
+                &HashMap::new(),
+                &particles,
+                &[],
+                OWNER_NONE,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                None,
+            );
+            [4, 12, 20].map(|x| graphics.surface().get_pixel(x, 8))
+        };
+
+        let drawn = Color::opaque(200, 0, 0);
+        let blank = Color::opaque(0, 0, 0);
+        assert_eq!(
+            render(true),
+            [Some(drawn), Some(drawn), Some(drawn)],
+            "at full detail every particle draws",
+        );
+        assert_eq!(
+            render(false),
+            [Some(blank), Some(blank), Some(drawn)],
+            "the rung skips Fire and Fire2 and leaves other defs alone",
+        );
+    }
+
+    #[test]
     fn disabling_extended_fire_particles_keeps_simple_fire_facet() {
         // FireParticles gates automatic emission only; the simple object
         // Fire.png facet and script-created registry particles remain visible.
@@ -12452,8 +12555,9 @@ mod tests {
             empty_cursor_atlas(),
             hud,
         );
-        graphics.set_renderer_config(true, true, false);
-        assert!(!graphics.fire_particles_enabled());
+        graphics.set_renderer_config(true, true);
+        graphics.set_fire_particle_detail(false);
+        assert!(!graphics.draws_fire_particles());
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
 
         graphics.draw_object_fire(
@@ -15539,7 +15643,7 @@ mod tests {
                 energy_bars: Some(ImageData::new(6, 3, pixels)),
                 ..HudGraphics::default()
             });
-            graphics.set_renderer_config(always, true, true);
+            graphics.set_renderer_config(always, true);
             graphics.render_frame(
                 &snapshot,
                 &[ViewportInput::from_focus(&snapshot.objects[0])],
