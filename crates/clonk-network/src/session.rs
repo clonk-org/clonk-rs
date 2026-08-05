@@ -60,7 +60,7 @@ mod tests {
         ClientUpdateControlData, ControlPacket as EngineControlPacket, PlayerControlData,
         CLIENT_UPDATE_ACTIVATE,
     };
-    use clonk_resources::{c4group_file_crc, MutableGroup};
+    use clonk_resources::{c4group_file_crc, compress_c4group_image, Group, MutableGroup};
     use std::fs;
     use std::future::{pending, ready};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -6333,12 +6333,22 @@ mod tests {
             .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
             .unwrap();
         let contents_crc = player.contents_crc();
-        let player_standalone = player.pack().unwrap();
         let mut mother = MutableGroup::new("Players.c4f");
         mother
             .add_child_with_metadata("Shared.c4p", player, 1, false)
             .unwrap();
         fs::write(&mother_path, mother.pack().unwrap()).unwrap();
+        // The core describes the child image the mother actually stored,
+        // gzipped. Packing the player a second time would restamp
+        // Head.Creation with the current time and disagree across a second
+        // boundary (src/C4Group.cpp:937-939).
+        let player_standalone = compress_c4group_image(
+            &Group::open(&mother_path)
+                .unwrap()
+                .read_file("Shared.c4p")
+                .unwrap(),
+        )
+        .unwrap();
         let nested_player = mother_path.join("Shared.c4p");
         let core = clonk_engine::NetworkResourceCore {
             resource_type: crate::HostResourceType::Player as u8,

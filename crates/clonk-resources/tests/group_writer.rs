@@ -1170,8 +1170,11 @@ fn cpp_group_reader_exposes_the_raw_uncompressed_image() {
     mutable
         .add_file("ObjectInfo.txt", b"crew".to_vec())
         .unwrap();
+    // Wrapped from the one image rather than packed a second time: each pack
+    // restamps Head.Creation with the current time, so two of them differ
+    // whenever they straddle a second (src/C4Group.cpp:937-939).
     let raw = mutable.pack_raw().unwrap();
-    let packed = mutable.pack().unwrap();
+    let packed = compress_c4group_for_test(&raw).unwrap();
     let group = Group::from_memory(PathBuf::from("Crew.c4i"), packed).unwrap();
 
     assert_eq!(group.raw_image().unwrap(), raw);

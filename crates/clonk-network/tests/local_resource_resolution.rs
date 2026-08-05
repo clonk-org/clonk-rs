@@ -590,13 +590,20 @@ fn cpp_set_by_core_extracts_a_loadable_nested_child_to_a_real_standalone() {
         .add_file_with_metadata("Scenario.txt", b"[Head]\n".to_vec(), 1, false)
         .unwrap();
     let child_contents_crc = child.contents_crc();
-    let child_raw = child.pack_raw().unwrap();
-    let child_standalone = compress_c4group_image(&child_raw).unwrap();
     let mut mother = MutableGroup::new("Easy.c4f");
     mother
         .add_child_with_metadata("Castle.c4s", child, 1, false)
         .unwrap();
     fs::write(&mother_path, mother.pack().unwrap()).unwrap();
+    // The expected standalone is the child image the mother actually stored,
+    // gzipped. Packing the child a second time would restamp Head.Creation
+    // with the current time and disagree across a second boundary
+    // (src/C4Group.cpp:937-939).
+    let child_raw = Group::open(&mother_path)
+        .unwrap()
+        .read_file("Castle.c4s")
+        .unwrap();
+    let child_standalone = compress_c4group_image(&child_raw).unwrap();
     let candidate = mother_path.join("Castle.c4s");
     let core = core(
         b"Easy.c4f/Castle.c4s",
