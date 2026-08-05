@@ -12417,7 +12417,7 @@ mod tests {
     }
 
     #[test]
-    fn suppressing_fire_particles_skips_their_draw_and_spares_every_other_def() {
+    fn the_fire_detail_rung_skips_only_a_burning_objects_own_flames() {
         // The `NoFireParticles` presentation-detail rung exists to reclaim
         // the unbatched per-particle draw calls the stock fire defs cost, so
         // it has to actually skip them. Everything else keeps drawing: the
@@ -12435,14 +12435,14 @@ mod tests {
                 draw_proc: ParticleDrawProc::Std,
             }
         }
-        let particle = |name: &str, x: f32| ParticleSnapshot {
+        let particle = |name: &str, x: f32, owner: ObjectId| ParticleSnapshot {
             definition_id: name.to_string(),
             position: FloatVector2::new(x, 8.0),
             velocity: FloatVector2::new(0.0, 0.0),
             life: 0,
             parameter_a: 1.0,
             parameter_b: 0x00ff_ffff,
-            layer: ParticleLayer::ObjectBack(ObjectId::new(1)),
+            layer: ParticleLayer::ObjectBack(owner),
             pxs_fixed: None,
             pxs_slot: None,
         };
@@ -12450,20 +12450,32 @@ mod tests {
             .iter()
             .map(|name| (name.to_string(), solid(name)))
             .collect();
+        let burning = ObjectId::new(1);
+        let cold = ObjectId::new(2);
         let particles = vec![
-            particle("Fire", 4.0),
-            particle("Fire2", 12.0),
-            particle("Smoke2", 20.0),
+            particle("Fire", 4.0, burning),
+            particle("Fire2", 12.0, burning),
+            particle("Smoke2", 20.0, burning),
+            // Script fire: the EkeReloaded flamethrower projectile and the
+            // Baldoon torches build their flame from CreateParticle on an
+            // object that is not alight. Suppressing those would erase a
+            // damaging projectile, not trim frame cost.
+            particle("Fire2", 26.0, cold),
         ];
 
         // The particle pass runs inside the object draw, so the viewport
         // needs at least one object; it sits clear of the sampled pixels.
         let mut owner = make_snapshot().objects.remove(0);
-        owner.id = ObjectId::new(1);
+        owner.id = burning;
         owner.definition_id = "ParticleOwner".to_string();
-        owner.position = Vector2::new(28, 2);
+        owner.position = Vector2::new(30, 14);
         owner.crew_member = false;
-        let objects = vec![owner];
+        owner.on_fire = true;
+        let mut unlit = owner.clone();
+        unlit.id = cold;
+        unlit.position = Vector2::new(30, 2);
+        unlit.on_fire = false;
+        let objects = vec![owner, unlit];
         let object_sprites: HashMap<_, _> = (*solid_sprite(
             "ParticleOwner",
             2,
@@ -12502,20 +12514,21 @@ mod tests {
                 ObjectRenderPass::Normal,
                 None,
             );
-            [4, 12, 20].map(|x| graphics.surface().get_pixel(x, 8))
+            [4, 12, 20, 26].map(|x| graphics.surface().get_pixel(x, 8))
         };
 
         let drawn = Color::opaque(200, 0, 0);
         let blank = Color::opaque(0, 0, 0);
         assert_eq!(
             render(true),
-            [Some(drawn), Some(drawn), Some(drawn)],
+            [Some(drawn), Some(drawn), Some(drawn), Some(drawn)],
             "at full detail every particle draws",
         );
         assert_eq!(
             render(false),
-            [Some(blank), Some(blank), Some(drawn)],
-            "the rung skips Fire and Fire2 and leaves other defs alone",
+            [Some(blank), Some(blank), Some(drawn), Some(drawn)],
+            "the rung skips the burning object's Fire and Fire2, and leaves \
+             both other defs and script fire on an unlit object alone",
         );
     }
 

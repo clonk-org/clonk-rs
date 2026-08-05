@@ -3234,8 +3234,13 @@ an ordered-map model gap.
   know in advance which scenario will exceed the budget.
   After `DETAIL_STEP_DOWN_PASSES` (30) consecutive graphics passes over the
   simulation interval the governor drops fire particles — `GraphicsSystem`
-  skips the `Fire`/`Fire2` draws, one unbatched call each, which is a real
-  saving now that the engine emits them — then the monitor-gamma
+  skips the `Fire`/`Fire2` draws belonging to a *burning* object, one
+  unbatched call each, which is a real saving now that the engine emits them.
+  Only the emitter's own output goes: script `CreateParticle("Fire2", ...)`
+  is global or hangs off an object that is not alight, and content relies on
+  it being drawn — the EkeReloaded flamethrower projectile has a deliberately
+  transparent facet and exists on screen only as global `Fire2`. Then the
+  monitor-gamma
   resolve pass — a second full-screen fill doing three dependent texture
   fetches per pixel. It restores one step at a time after
   `DETAIL_STEP_UP_PASSES` (120) passes under half the budget; the deadband
@@ -3251,7 +3256,7 @@ an ordered-map model gap.
   engine, where C++ applies it. Pinned by
   `presentation_detail_steps_down_only_on_a_sustained_overrun`,
   `presentation_detail_recovers_only_with_real_headroom` and
-  `suppressing_fire_particles_skips_their_draw_and_spares_every_other_def`.
+  `the_fire_detail_rung_skips_only_a_burning_objects_own_flames`.
 
 - **Framebuffer creation widens the GPU backend set instead of aborting**
   (`build_framebuffer` / `framebuffer_backend_attempts`,

@@ -4145,7 +4145,18 @@ impl GraphicsSystem {
         // independent of local frame timing. The static
         // `Config.Graphics.FireParticles` is honoured engine-side instead,
         // where C++ puts it (`SetDefParticles`).
+        //
+        // Only the engine emitter's own output is suppressed, which is why
+        // the burning target is part of the predicate: `FnFxFireTimer` deals
+        // every particle to a *burning* object's back/front list, while
+        // script `CreateParticle("Fire2", ...)` output is global or hangs off
+        // an object that is not alight. Content leans on that — the
+        // EkeReloaded flamethrower projectile has a deliberately transparent
+        // facet and exists on screen only as global `Fire2` — so a
+        // name-only gate would erase a damaging projectile rather than trim
+        // frame cost.
         if !self.draws_fire_particles
+            && target.is_some_and(|object| object.on_fire)
             && matches!(
                 particle.definition_id.as_str(),
                 clonk_engine::particles::FIRE_DEF_NAME | clonk_engine::particles::FIRE2_DEF_NAME
