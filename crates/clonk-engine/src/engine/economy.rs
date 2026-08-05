@@ -436,7 +436,8 @@ impl Engine {
         // `Abs(xdir) > 2` compares the raw fixed velocity against itofix(2)
         // (Fixed.h:185, the int32 spaceship wrapper).
         let fast = object.fixed_velocity.x.abs() > crate::math::itofix(2);
-        if phase.rem_euclid(period) == 0 || fast {
+        // `%` matches C's truncated remainder; `period >= 3` keeps it safe.
+        if phase % period == 0 || fast {
             let position = object.state.position;
             self.spawn_smoke(position.x, position.y, smoke_level);
         }

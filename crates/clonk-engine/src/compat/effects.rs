@@ -3163,7 +3163,8 @@ fn register_object_fire_smoke(target: ObjectId, frame: u64) {
         // `Abs(xdir) > 2` compares the raw fixed velocity against itofix(2)
         // (Fixed.h:185, the int32 spaceship wrapper).
         let fast = velocity.x.abs() > crate::math::itofix(2);
-        if phase.rem_euclid(period) != 0 && !fast {
+        // `%` matches C's truncated remainder; `period >= 3` keeps it safe.
+        if phase % period != 0 && !fast {
             return;
         }
         // Smoke() (C4Effect.cpp:859-865): a global "Smoke" particle half a
