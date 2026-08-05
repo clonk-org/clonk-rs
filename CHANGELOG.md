@@ -4,6 +4,26 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-08-05
+
+### Bug fixes
+
+- Default unreadable Teams.txt numbers instead of failing the load (#180)
+- Stop a client's own control lookahead from forcing a fast-forward (#179)
+- Say why a session ended instead of ending the log mid-stream (#178)
+- Keep the game window drawing while it is unfocused (#177)
+- License the workspace source under MIT instead of ISC (#175)
+- Release the developer windows before the event loop returns (#173)
+- Share one wgpu instance across every window (#171)
+
+### Features
+
+- Add an opt-in diagnostics overlay for render rate and control latency (#176)
+
+### Testing
+
+- Pin that the shared instance lookup goes through the registry (#172)
+
 ## [0.8.0] - 2026-08-05
 
 ### Bug fixes
