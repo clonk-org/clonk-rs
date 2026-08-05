@@ -112,4 +112,27 @@ mod tests {
             "the registry must outlive every window that borrowed its instance"
         );
     }
+
+    // The two tests above pin `retained_entry`; this one pins the function
+    // `build_framebuffer` actually calls, so routing it around the registry
+    // cannot pass unnoticed. `Backends::empty()` loads no driver, which keeps
+    // the real instance and the real registry reachable without a GPU.
+    #[test]
+    fn asking_twice_for_a_backend_set_reaches_the_registry_rather_than_a_new_instance() {
+        let entries = || registry().lock().map_or(0, |registry| registry.len());
+        assert_eq!(entries(), 0, "the registry starts empty in a fresh process");
+
+        let first = retained_instance(wgpu::Backends::empty());
+        assert_eq!(entries(), 1);
+
+        // A second window asking for the same backend set, then both windows
+        // closing, must leave that one entry standing.
+        let second = retained_instance(wgpu::Backends::empty());
+        assert_eq!(entries(), 1);
+        drop((first, second));
+        assert_eq!(entries(), 1);
+
+        let _reopened = retained_instance(wgpu::Backends::empty());
+        assert_eq!(entries(), 1);
+    }
 }
