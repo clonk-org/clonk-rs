@@ -4,6 +4,16 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-05
+
+### Bug fixes
+
+- Emit engine fire particles from burning objects (#162)
+
+### Features
+
+- Trail SmokeRate smoke from burning objects and make the fire detail rung bite (#168)
+
 ## [0.7.1] - 2026-08-05
 
 ### Bug fixes
