@@ -542,6 +542,78 @@ fn network_control_within_overflow_limit_keeps_normal_pacing() {
 }
 
 #[test]
+fn control_buffered_inside_the_presend_horizon_is_not_a_catch_up_backlog() {
+    // `CtrlNeeded` submits local control through `getCtrlTick(FrameCounter +
+    // PreSend)` (src/C4GameControlNetwork.cpp:147-155), so a client with
+    // PreSend 12 at ControlRate 2 has itself asked for six control ticks
+    // beyond the one it is about to execute, and the host cannot complete a
+    // tick nobody submitted for. `CtrlOverflow` measures that queue against
+    // the executing tick alone (src/C4GameControlNetwork.h:124), so the
+    // client's own jitter buffer reads as permanent backlog and every frame
+    // then runs unpaced.
+    let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(7, 2);
+    let clock = app
+        .network_control_clock
+        .as_mut()
+        .expect("fixture installs a control clock");
+    clock.observe_control_send_time_ms(300);
+    assert_eq!(
+        clock.calculate_performance().map(|change| change.control_presend),
+        Some(12),
+        "a 300 ms link sizes the horizon at twelve frames"
+    );
+
+    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+        .expect("execute one timer-paced network frame");
+
+    assert_eq!(outcome.executed_frames, 1);
+    assert!(!app.network_control_pacing().overflow);
+}
+
+#[test]
+fn a_shallow_presend_horizon_keeps_the_cpp_overflow_limit() {
+    // Below the crossing the allowance is `C4ControlOverflowLimit` exactly: a
+    // 110 ms link sizes PreSend at 5, which at ControlRate 2 asks for two ticks
+    // beyond the one being executed and so stays inside C++'s 3. Every link
+    // C++'s mean-sized horizon describes fast-forwards exactly as C++ does.
+    let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(4, 2);
+    let clock = app
+        .network_control_clock
+        .as_mut()
+        .expect("fixture installs a control clock");
+    clock.observe_control_send_time_ms(110);
+    assert_eq!(
+        clock.calculate_performance().map(|change| change.control_presend),
+        Some(5)
+    );
+
+    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+        .expect("catch up a backlog C++ would also catch up");
+
+    assert!(outcome.executed_frames > 1);
+}
+
+#[test]
+fn a_backlog_beyond_the_presend_horizon_still_catches_up() {
+    // The horizon allowance must not disarm the recovery it brackets: in the
+    // shipped async control mode the host packs a tick without a straggler, so
+    // a client can hold far more ready control than it ever submitted for.
+    let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(12, 2);
+    let clock = app
+        .network_control_clock
+        .as_mut()
+        .expect("fixture installs a control clock");
+    clock.observe_control_send_time_ms(300);
+    clock.calculate_performance();
+
+    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+        .expect("catch up the control the horizon cannot explain");
+
+    assert!(outcome.executed_frames > 1);
+    assert!(!app.network_control_pacing().overflow);
+}
+
+#[test]
 fn completed_control_wakes_and_retries_only_the_blocked_boundary() {
     let mut app = new_running_sandbox_app();
     let (manager, events) = NetworkManager::test_stub();
