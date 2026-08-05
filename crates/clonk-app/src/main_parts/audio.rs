@@ -621,7 +621,11 @@ pub(crate) fn build_framebuffer(
     for backends in attempts {
         let surface = SurfaceTexture::new(size.width, size.height, Arc::clone(window));
         match PixelsBuilder::new(size.width, size.height, surface)
-            .wgpu_backend(backends)
+            // Every window shares the process's instance for this backend set.
+            // Building one per window meant closing a window destroyed a
+            // `VkInstance`, which is what took the console down in
+            // clonk-org/clonk-rs#53 — see `crate::gpu_instance`.
+            .instance(crate::gpu_instance::retained_instance(backends))
             // StdGLCtx::PageFlip calls SDL_GL_SwapWindow without ever selecting
             // a swap interval. Do not make drawable acquisition serialize the
             // independently scheduled simulation and graphics timers behind an
