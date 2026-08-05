@@ -138,6 +138,35 @@ impl ApplicationHandler for LauncherShell {
         }
     }
 
+    /// Releases the window and its GPU surface while the loop that owns their
+    /// display is still running.
+    ///
+    /// `run_app` takes the event loop by value
+    /// (`winit-0.30.13/src/event_loop.rs:264`) and winit vouches for the
+    /// platform display only while the loop is alive (`:489`), offering
+    /// `OwnedDisplayHandle` for surfaces meant to outlive it — which this one
+    /// is not. Left to `shell`'s own drop in `main`, both went afterwards; that
+    /// is the ordering that faulted on the game window
+    /// (clonk-org/clonk-rs#54, clonk-org/clonk-rs#174). The surface still dies
+    /// before the window it draws into, as in C++ (`~C4Viewport` deletes its GL
+    /// context before its window, `C4Viewport.cpp:816-834`): `Pixels` owns the
+    /// `Arc<Window>` clone it was built from, so releasing the runtime drops
+    /// this handle first and the window itself follows the surface.
+    ///
+    /// The whole runtime goes, where `clonk-app` releases only its window
+    /// registry, because on macOS this callback runs inside
+    /// `applicationWillTerminate:`
+    /// (`winit-0.30.13/src/platform_impl/macos/app_state.rs:166-172`), which
+    /// never returns to `run_app`, so nothing that blocks may drop here. The
+    /// launcher owns no threads, channels or sockets — its heaviest drop
+    /// flushes a `LineWriter` — while `GameApp`'s graph has unbounded blocking
+    /// joins.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if release_runtime(&mut self.runtime) {
+            tracing::debug!("released the launcher window before the event loop returned");
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(runtime) = self.runtime.as_mut() {
             match launcher_redraw_action(Instant::now(), runtime.surface_retry_at) {
@@ -243,6 +272,14 @@ fn launcher_redraw_action(now: Instant, surface_retry_at: Option<Instant>) -> La
         LauncherRedrawAction::Request,
         LauncherRedrawAction::WaitUntil,
     )
+}
+
+/// Destroys the launcher's runtime, reporting whether one was live.
+///
+/// Generic over the runtime so the release can be pinned without a window,
+/// which no test can build.
+fn release_runtime<T>(runtime: &mut Option<T>) -> bool {
+    runtime.take().is_some()
 }
 
 fn replace_after_drop<T, E>(
@@ -3896,6 +3933,37 @@ mod tests {
             .finish()
             .expect_err("the runtime error must survive event-loop shutdown");
         assert_eq!(error.to_string(), "failed to swap launcher buffers");
+    }
+
+    // The window and its GPU surface have to be destroyed while the event loop
+    // is still running: `run_app` takes the loop by value
+    // (`winit-0.30.13/src/event_loop.rs:264`) and winit vouches for the platform
+    // display only while that loop is alive (`:489`). Left to `LauncherShell`'s
+    // own drop they went afterwards, which is the ordering that faulted on the
+    // game window (clonk-org/clonk-rs#54, clonk-org/clonk-rs#174).
+    #[test]
+    fn the_launcher_destroys_its_window_when_the_event_loop_exits() {
+        struct DropProbe<'a>(&'a std::cell::Cell<bool>);
+
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let destroyed = std::cell::Cell::new(false);
+        let mut runtime = Some(DropProbe(&destroyed));
+
+        assert!(release_runtime(&mut runtime));
+        assert!(
+            destroyed.get(),
+            "the launcher window must die inside the exit callback, not after it"
+        );
+        assert!(runtime.is_none());
+
+        // A loop that exits before `resumed` built a window — an initialization
+        // failure does exactly that — has nothing to release.
+        assert!(!release_runtime(&mut runtime));
     }
 
     #[test]
