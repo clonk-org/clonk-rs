@@ -376,7 +376,7 @@ pub const FIRE_DEF_NAME: &str = "Fire";
 pub const FIRE2_DEF_NAME: &str = "Fire2";
 
 /// One burning object's state, snapshotted where `FnFxFireTimer` reads it
-/// (C4Effect.cpp:701-727) so the emitter can run at the particle system.
+/// (C4Effect.cpp:696-718) so the emitter can run at the particle system.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectFireEmission {
     /// The burning object; owns the back/front particle lists C++ deals to.
@@ -794,7 +794,7 @@ impl ParticleSystem {
     }
 
     /// `C4ParticleSystem::IsFireParticleLoaded` (C4Particles.h:214):
-    /// `pFire1 && pFire2`. `SetDefParticles` (C4Particles.cpp:475-489) only
+    /// `pFire1 && pFire2`. `SetDefParticles` (C4Particles.cpp:475-493) only
     /// resolves those two when `Config.Graphics.FireParticles` is set, so the
     /// per-client switch folds into the same answer.
     pub fn is_fire_particle_loaded(&self) -> bool {
@@ -803,7 +803,7 @@ impl ParticleSystem {
             && self.get_def(FIRE2_DEF_NAME).is_some()
     }
 
-    /// The particle half of `FnFxFireTimer` (C4Effect.cpp:701-786): a double
+    /// The particle half of `FnFxFireTimer` (C4Effect.cpp:677-786): a double
     /// set of particles per execution, the first quarter the normal `Fire`
     /// def and the remaining three quarters the additive `Fire2`, dealt to
     /// the object's back list three times out of four. Returns how many were
@@ -814,9 +814,9 @@ impl ParticleSystem {
     /// `C4ParticleSystem::Create` also consumes (C4Particles.cpp:394);
     /// keeping both on one `SafeRng` preserves that interleaving. C++ is
     /// explicit that this stream is deliberately unsynchronized
-    /// (C4Effect.cpp:743-745), so it must never be the synced `Random`.
+    /// (C4Effect.cpp:742-743), so it must never be the synced `Random`.
     pub fn create_object_fire(&mut self, emission: &ObjectFireEmission) -> i32 {
-        // some constant effect parameters for this object (C4Effect.cpp:706-712)
+        // some constant effect parameters for this object (C4Effect.cpp:696-704)
         let width = emission.def_width.max(1);
         let height = emission.def_height;
         let mut y_off = height / 2 - emission.fire_top;
@@ -824,7 +824,7 @@ impl ParticleSystem {
         const PARTICLE_SIZE_DIFF: i32 = 10;
         const REL_PARTICLE_SIZE: i32 = 12;
 
-        // get remaining size (%) (C4Effect.cpp:718-722)
+        // get remainign size (%) (C4Effect.cpp:710-714)
         let con = ((100 * emission.con) / crate::FULL_CON).max(1);
         let mut wdt_con = con;
         // fixed width for not-stretched-objects
@@ -832,11 +832,11 @@ impl ParticleSystem {
             wdt_con = 100;
         }
 
-        // regard non-center object offsets (C4Effect.cpp:724-726)
+        // regard non-center object offsets (C4Effect.cpp:716-718)
         let x = emission.x + emission.shape_x + emission.shape_width / 2;
         let y = emission.y + emission.shape_y + emission.shape_height / 2;
 
-        // apply rotation (C4Effect.cpp:728-737)
+        // apply rotation (C4Effect.cpp:720-730)
         let mut rot = [1.0f32, 0.0, 0.0, 1.0];
         if emission.rotation != 0 && emission.rotateable {
             // `cosf(static_cast<float>(r * pi_v<float> / 180.0))`: the
@@ -853,31 +853,31 @@ impl ParticleSystem {
             }
         }
 
-        // Adjust particle number by con (C4Effect.cpp:740)
+        // Adjust particle number by con (C4Effect.cpp:732-733)
         let count = (((width * height) as f64).sqrt() / 4.0) as i32;
         let count = (count * wdt_con / 100).max(2);
 
-        // calc base for particle size parameter (C4Effect.cpp:743)
+        // calc base for particle size parameter (C4Effect.cpp:735-736)
         let size_base = ((((width * height) as f64).sqrt() * f64::from(con + 20) / 120.0).sqrt()
             * f64::from(REL_PARTICLE_SIZE)) as i32;
 
         let attach_origin = Some((emission.x, emission.y));
         let mut created = 0;
         for index in 0..count * 2 {
-            // calc actual size to be used in this frame (C4Effect.cpp:748-752)
+            // calc actual size to be used in this frame (C4Effect.cpp:741-744)
             let size = self.safe_rng.random(PARTICLE_SIZE_DIFF + 1) + BASE_PARTICLE_SIZE
                 - PARTICLE_SIZE_DIFF / 2
                 - 1
                 + size_base;
 
-            // get particle target list (C4Effect.cpp:755)
+            // get particle target list (C4Effect.cpp:746-747)
             let layer = if self.safe_rng.random(4) != 0 {
                 ParticleLayer::ObjectBack(emission.object)
             } else {
                 ParticleLayer::ObjectFront(emission.object)
             };
 
-            // get particle def and color (C4Effect.cpp:758-768)
+            // get particle def and color (C4Effect.cpp:749-761)
             let (def_name, mut color) = if index < count / 2 {
                 (
                     FIRE_DEF_NAME,
@@ -890,7 +890,7 @@ impl ParticleSystem {
                 color = color.wrapping_add(0x6200_0000);
             }
 
-            // get particle creation pos... (C4Effect.cpp:771-777)
+            // get particle creation pos... (C4Effect.cpp:763-768)
             let rand_x = self.safe_rng.random(width + 1) - width / 2 - 1;
             let px = rand_x * wdt_con / 100;
             let mut py = y_off * con / 100;
@@ -899,7 +899,7 @@ impl ParticleSystem {
                 py -= px * px * 100 / width / wdt_con;
             }
 
-            // ...and movement speed (C4Effect.cpp:779-793)
+            // ...and movement speed (C4Effect.cpp:770-783)
             let (x_dir, y_dir) = if emission.fire_mode != crate::C4FX_FIRE_MODE_OBJECT {
                 // ...for normal fire proc
                 (
@@ -918,7 +918,7 @@ impl ParticleSystem {
                 (x_dir, y_dir)
             };
 
-            // OK; create it! (C4Effect.cpp:796)
+            // OK; create it! (C4Effect.cpp:785-786)
             if self.create(
                 def_name,
                 x as f32 + rot[0] * px as f32 + rot[1] * py as f32,

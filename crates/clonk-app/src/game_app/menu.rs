@@ -4804,6 +4804,8 @@ impl GameApp {
         self.default_rank_names = self.loaded_default_rank_names.clone();
         self.engine = Engine::new();
         self.engine.set_smoke_level(self.graphics_smoke_level);
+        self.engine
+            .set_fire_particles(self.display_flags.fire_particles);
         self.engine.set_local_players([self.local_owner]);
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));

@@ -703,6 +703,14 @@ impl Engine {
         self.particle_system.smoke_level = smoke_level;
     }
 
+    /// Set process-local `Config.Graphics.FireParticles`. C++ folds it into
+    /// `SetDefParticles` (C4Particles.cpp:483-489), leaving pFire1/pFire2
+    /// null, so switching it off silences the automatic fire emitter without
+    /// touching script-created `Fire`/`Fire2` particles or the fire facet.
+    pub fn set_fire_particles(&mut self, enabled: bool) {
+        self.particle_system.fire_particles = enabled;
+    }
+
     pub(crate) fn bubble_smoke_level(&self) -> i32 {
         if self.network_game || self.recording_active {
             SYNC_SMOKE_LEVEL

@@ -651,6 +651,7 @@ impl Engine {
         )
         .with_film_viewport_available(self.film_viewport_available)
         .with_smoke_level(self.bubble_smoke_level())
+        .with_fire_particles_loaded(self.particle_system.is_fire_particle_loaded())
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
         .with_fair_crew_physical_cache(Rc::clone(&self.fair_crew_physical_cache))

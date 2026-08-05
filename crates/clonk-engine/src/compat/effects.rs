@@ -1,4 +1,5 @@
 use super::*;
+use crate::particles::ObjectFireEmission;
 
 /// `FnReloadParticle` (`C4Script.cpp:5161-5165`) — it forwards straight to
 /// `Game.ReloadParticle(FnStringPar(szParticleName))` and returns its result
@@ -2915,12 +2916,13 @@ pub(crate) fn fx_fire_start(args: &[Value]) -> Result<Value, RuntimeError> {
     fire_effect_start_core(target, fire_number, caused_by, blasted, incinerating).map(Value::Int)
 }
 
-/// FnFxFireTimer (C4Effect.cpp:643-666; AddFunc C4Script.cpp:6995) →
+/// FnFxFireTimer (C4Effect.cpp:660-788; AddFunc C4Script.cpp:6995) →
 /// C4Object::ExecFire (C4Object.cpp:766-810) through the staged seam —
 /// a script FxFireTimer overload's inherited(...) chain lands here. The
 /// deterministic arms (phase, decay, Tick10 damage, Tick5 energy,
-/// extinguisher, the Random(3) inflame draw) run in C++ ledger order;
-/// fire particles, SmokeRate smoke, and sounds are presentation-only.
+/// extinguisher, the Random(3) inflame draw) run in C++ ledger order, then
+/// the unsynchronized particle emitter (C4Effect.cpp:677-786) is queued for
+/// the particle system. SmokeRate smoke and sounds remain open.
 pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     let target = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -2932,6 +2934,9 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(-1));
     };
     let fire_number = parse_optional_i32(args.get(1), "FxFireTimer", "number")?.unwrap_or(0);
+    // C++ `iTime` is the effect's own clock, distinct from the game frame the
+    // Tick5/Tick10 burn arms below read (C4Effect.cpp:660,349-355).
+    let effect_time = parse_optional_i32(args.get(2), "FxFireTimer", "time")?.unwrap_or(0);
     let frame = ENVIRONMENT_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -3110,7 +3115,8 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
     // FnFxFireTimer returns C4Fx_Execute_Kill once the flag is gone
-    // (C4Effect.cpp:663-666).
+    // (C4Effect.cpp:680-683); C++ tests it before the emitter, so a fire
+    // that just went out draws no particles.
     let still_burning = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -3118,7 +3124,91 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
             .and_then(|scope| scope.pending_update.staged_on_fire())
             .unwrap_or(true)
     });
-    Ok(Value::Int(if still_burning { 0 } else { -1 }))
+    if !still_burning {
+        return Ok(Value::Int(-1));
+    }
+    register_object_fire_particles(target, fire_number, effect_time);
+    Ok(Value::Int(0))
+}
+
+/// The particle half of `FnFxFireTimer` (C4Effect.cpp:677-786): the three
+/// gates, then a snapshot of the burning object queued for the particle
+/// system, which owns the unsynchronized `SafeRandom` stream the emitter
+/// draws from. The staged seam cannot reach that system directly, so the
+/// snapshot travels as a command; the emitter itself lives in one place.
+fn register_object_fire_particles(target: ObjectId, fire_number: i32, effect_time: i32) {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        // special effects only if loaded (C4Effect.cpp:677-678)
+        if !context.fire_particles_loaded() {
+            return;
+        }
+        let Some(scope) = context.object_scope(target) else {
+            return;
+        };
+        // get fire mode (C4Effect.cpp:687-688); an unset EffectVar reads as
+        // zero, which is no mode at all and takes the normal-fire arms.
+        let fire_mode = scope
+            .effects
+            .snapshot()
+            .iter()
+            .find(|effect| effect.number == fire_number)
+            .and_then(|effect| effect.vars.first())
+            .map(|value| match value {
+                EffectVarValue::Int(value) => *value,
+                EffectVarValue::Bool(value) => i32::from(*value),
+                EffectVarValue::RawBool(value) => *value as u32 as i32,
+                _ => 0,
+            })
+            .unwrap_or(0);
+        // special effects only each four frames, except for objects
+        // (C4Effect.cpp:690-691) — the effect's own clock, not the frame.
+        if effect_time % 4 != 0 && fire_mode != crate::C4FX_FIRE_MODE_OBJECT {
+            return;
+        }
+        // no gfx for contained (C4Effect.cpp:693-694)
+        if scope.container().is_some() {
+            return;
+        }
+        let position = scope.effective_position();
+        let con = scope.construction();
+        let rotation = scope.rotation();
+        let velocity = scope.fixed_velocity();
+        let Some(metadata) = effective_definition_id(context, target)
+            .and_then(|id| context.definition_metadata(&id))
+        else {
+            return;
+        };
+        let def_shape = metadata.shape.unwrap_or_default();
+        let (fire_top, growth_type, rotateable) = (
+            metadata.fire.fire_top,
+            metadata.stretch_growth,
+            metadata.rotateable != 0,
+        );
+        let shape = live_object_shape(context, target).unwrap_or(def_shape);
+        context.register_particle(ParticleCommand::ObjectFire(ObjectFireEmission {
+            object: target,
+            fire_mode,
+            def_width: def_shape.width,
+            def_height: def_shape.height,
+            fire_top,
+            con,
+            growth_type,
+            x: position.x,
+            y: position.y,
+            shape_x: shape.x,
+            shape_y: shape.y,
+            shape_width: shape.width,
+            shape_height: shape.height,
+            rotation,
+            rotateable,
+            xdir: crate::math::fixtof(velocity.x),
+            ydir: crate::math::fixtof(velocity.y),
+        }));
+    });
 }
 
 /// FnFxFireStop (C4Effect.cpp:775-792; AddFunc C4Script.cpp:6996): clear

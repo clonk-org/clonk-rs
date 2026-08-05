@@ -4933,6 +4933,273 @@ func FxFireTimer(object target, int number, int time)
     }
 
     #[test]
+    fn burning_object_emits_its_fire_particles_on_every_fourth_execution(
+    ) -> Result<(), EngineError> {
+        // FnFxFireTimer's emitter (C4Effect.cpp:686-786) runs after the burn
+        // arms, gated on `iTime % 4` outside C4Fx_FireMode_Object. A burning
+        // 16x16 structure therefore stays particle-free for three executions
+        // and then spawns its double set — 2 `Fire`, 6 additive `Fire2`.
+        let mut engine = Engine::with_seed(43);
+        for name in ["Fire", "Fire2"] {
+            engine
+                .register_particle_definition(
+                    particles::ParticleDefCore {
+                        name: name.into(),
+                        init_fn: "StdInit".into(),
+                        exec_fn: "StdExec".into(),
+                        draw_fn: "Std".into(),
+                        delay: 1, // no fxStdInit life draw, and no decay
+                        repeats: 1000,
+                        ..Default::default()
+                    },
+                    10,
+                    1.0,
+                )
+                .expect("fire def registers");
+        }
+        let mut barn = Definition::from_script("BARN", "Barn", "")?;
+        barn.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        barn.set_fire_properties(0, true, true);
+        engine.register_definition(barn)?;
+        let object = engine.spawn_object(
+            SpawnConfig::new("BARN")
+                .with_category(CATEGORY_STRUCTURE)
+                .with_position(Vector2::new(200, 300)),
+        )?;
+        let index = engine.find_object_index(object).expect("barn exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+
+        for execution in 1..4 {
+            engine.tick_without_snapshot()?;
+            assert!(
+                engine.particle_system().particles().is_empty(),
+                "execution {execution} is inside the iTime % 4 gate",
+            );
+        }
+        engine.tick_without_snapshot()?;
+
+        let names: Vec<&str> = engine
+            .particle_system()
+            .particles()
+            .iter()
+            .map(|particle| particle.def_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Fire", "Fire", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2"],
+        );
+        assert!(
+            engine
+                .particle_system()
+                .particles()
+                .iter()
+                .all(|particle| matches!(
+                    particle.layer,
+                    ParticleLayer::ObjectBack(id) | ParticleLayer::ObjectFront(id) if id == object
+                )),
+            "every particle is dealt to the burning object's own lists",
+        );
+        Ok(())
+    }
+
+    /// A definition-less engine wired with the stock `Fire`/`Fire2` particle
+    /// defs, so `IsFireParticleLoaded` (C4Particles.h:214) answers true.
+    fn engine_with_fire_particle_defs(seed: u64) -> Engine {
+        let mut engine = Engine::with_seed(seed);
+        for name in ["Fire", "Fire2"] {
+            engine
+                .register_particle_definition(
+                    particles::ParticleDefCore {
+                        name: name.into(),
+                        init_fn: "StdInit".into(),
+                        exec_fn: "StdExec".into(),
+                        draw_fn: "Std".into(),
+                        delay: 1, // no fxStdInit life draw, and no decay
+                        repeats: 1000,
+                        ..Default::default()
+                    },
+                    10,
+                    1.0,
+                )
+                .expect("fire def registers");
+        }
+        engine
+    }
+
+    #[test]
+    fn object_mode_fire_emits_particles_on_every_execution() -> Result<(), EngineError> {
+        // C4Effect.cpp:690-691 exempts C4Fx_FireMode_Object from the
+        // `iTime % 4` gate "except for objects (e.g.: Projectiles)", so a
+        // burning plain object trails fire on every single execution.
+        let mut engine = engine_with_fire_particle_defs(51);
+        let mut arrow = Definition::from_script("ARRW", "Arrow", "")?;
+        arrow.set_shape_rect(Some(DefinitionRect::new(-4, -4, 8, 8)));
+        arrow.set_fire_properties(0, true, true);
+        engine.register_definition(arrow)?;
+        let object = engine.spawn_object(
+            SpawnConfig::new("ARRW")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(10, 10)),
+        )?;
+        let index = engine.find_object_index(object).expect("arrow exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+
+        engine.tick_without_snapshot()?;
+        // iCount = int(sqrt(64) / 4) = 2, so the double set is 4.
+        assert_eq!(engine.particle_system().particles().len(), 4);
+        engine.tick_without_snapshot()?;
+        assert_eq!(
+            engine.particle_system().particles().len(),
+            8,
+            "the second execution emits again without waiting for iTime % 4",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn contained_burning_object_emits_no_fire_particles() -> Result<(), EngineError> {
+        // "no gfx for contained" (C4Effect.cpp:693-694): the burn arms still
+        // run inside a container, only the particles are suppressed.
+        let mut engine = engine_with_fire_particle_defs(52);
+        let mut torch = Definition::from_script("TRCH", "Torch", "")?;
+        torch.set_shape_rect(Some(DefinitionRect::new(-4, -4, 8, 8)));
+        torch.set_fire_properties(0, true, true);
+        engine.register_definition(torch)?;
+        let mut chest = Definition::from_script("CHST", "Chest", "")?;
+        chest.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        engine.register_definition(chest)?;
+
+        let container = engine.spawn_object(SpawnConfig::new("CHST"))?;
+        let torch = engine.spawn_object(SpawnConfig::new("TRCH").with_category(CATEGORY_OBJECT))?;
+        let torch_index = engine.find_object_index(torch).expect("torch exists");
+        engine.objects[torch_index].state.container = Some(container);
+        assert!(engine.incinerate_object(torch_index, OWNER_NONE, false, None)?);
+
+        let fire_phase = engine.objects[torch_index].state.fire_phase;
+        engine.tick_without_snapshot()?;
+        let torch_index = engine.find_object_index(torch).expect("torch survives");
+        assert!(
+            engine.particle_system().particles().is_empty(),
+            "a contained object draws no fire particles",
+        );
+        assert_ne!(
+            engine.objects[torch_index].state.fire_phase, fire_phase,
+            "ExecFire still ran; only the emitter returned early",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn burning_object_emits_nothing_when_fire_particles_are_switched_off(
+    ) -> Result<(), EngineError> {
+        // "special effects only if loaded" (C4Effect.cpp:677-678):
+        // SetDefParticles leaves pFire1/pFire2 null when
+        // Config.Graphics.FireParticles is off (C4Particles.cpp:483-489), so
+        // the emitter never runs — while the burn itself is unaffected.
+        let mut engine = engine_with_fire_particle_defs(53);
+        engine.set_fire_particles(false);
+        let mut barn = Definition::from_script("BARN", "Barn", "")?;
+        barn.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        barn.set_fire_properties(0, true, true);
+        engine.register_definition(barn)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("BARN").with_category(CATEGORY_STRUCTURE))?;
+        let index = engine.find_object_index(object).expect("barn exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+
+        for _ in 0..8 {
+            engine.tick_without_snapshot()?;
+        }
+        let index = engine.find_object_index(object).expect("barn survives");
+        assert!(engine.particle_system().particles().is_empty());
+        assert!(
+            engine.objects[index].state.on_fire,
+            "the object is still burning; only its particles are suppressed",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn burning_object_reads_its_fire_mode_from_the_effects_first_variable(
+    ) -> Result<(), EngineError> {
+        // FxFireVarMode is EffectVars[0] (C4Effect.cpp:687-688). Rewriting it
+        // to C4Fx_FireMode_Object lifts the `iTime % 4` gate for the next
+        // execution, which is the cheapest observable proof the emitter reads
+        // that variable rather than re-deriving the mode.
+        let mut engine = engine_with_fire_particle_defs(54);
+        let mut barn = Definition::from_script("BARN", "Barn", "")?;
+        barn.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        barn.set_fire_properties(0, true, true);
+        engine.register_definition(barn)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("BARN").with_category(CATEGORY_STRUCTURE))?;
+        let index = engine.find_object_index(object).expect("barn exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+        assert_eq!(
+            engine.objects[index].state.effects[0].vars.first(),
+            Some(&EffectVarValue::Int(C4FX_FIRE_MODE_STRUCT_VEH)),
+            "a C4D_Structure defaults to struct/vehicle mode",
+        );
+
+        engine.objects[index].state.effects[0]
+            .set_var(0, EffectVarValue::Int(C4FX_FIRE_MODE_OBJECT));
+        engine.tick_without_snapshot()?;
+        assert_eq!(
+            engine.particle_system().particles().len(),
+            8,
+            "object mode emits on the first execution, inside iTime % 4",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inherited_fx_fire_timer_emits_the_same_fire_particles_as_the_native_path(
+    ) -> Result<(), EngineError> {
+        // A script FxFireTimer overload that chains inherited() lands in
+        // compat::effects::fx_fire_timer instead of Engine::exec_object_fire
+        // (registration.rs registers the host function). Both feed the one
+        // emitter, so the overload must not cost the object its particles.
+        let script = "#strict\n\
+             func FxFireTimer(pObj, iNumber, iTime)\n\
+             {\n\
+                 return inherited(pObj, iNumber, iTime);\n\
+             }\n";
+        let mut engine = engine_with_fire_particle_defs(55);
+        let mut hut = Definition::from_script("HUT1", "Hut", script)?;
+        hut.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        hut.set_fire_properties(0, true, true);
+        engine.register_definition(hut)?;
+        let object = engine.spawn_object(
+            SpawnConfig::new("HUT1")
+                .with_category(CATEGORY_STRUCTURE)
+                .with_position(Vector2::new(120, 90)),
+        )?;
+        let index = engine.find_object_index(object).expect("hut exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+
+        for _ in 0..3 {
+            engine.tick_without_snapshot()?;
+            assert!(
+                engine.particle_system().particles().is_empty(),
+                "inside the iTime % 4 gate",
+            );
+        }
+        engine.tick_without_snapshot()?;
+        let names: Vec<&str> = engine
+            .particle_system()
+            .particles()
+            .iter()
+            .map(|particle| particle.def_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Fire", "Fire", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2"],
+            "the inherited chain reaches the same double set",
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fire_timer_normalizes_invalid_attribution_on_native_and_inherited_paths(
     ) -> Result<(), EngineError> {
         // FnFxFireTimer validates the stored fire-cause player for every

@@ -4,6 +4,8 @@
 //! Structural only: same crate, same type, same method bodies.
 
 use super::*;
+use crate::math::fixtof;
+use crate::particles::ObjectFireEmission;
 
 impl Engine {
     pub(crate) fn call_command_buy_value(
@@ -274,10 +276,11 @@ impl Engine {
     }
 
     /// `C4Object::ExecFire` (C4Object.cpp:766-810), run by the fire
-    /// effect's timer (FnFxFireTimer, C4Effect.cpp:643-658). Returns the
-    /// deferred Fx*Stop events of effects an extinguish killed. Still open:
-    /// SmokeRate smoke (visual), and death/removal callbacks from the energy
-    /// and damage changes.
+    /// effect's timer (FnFxFireTimer, C4Effect.cpp:660-788), followed by
+    /// that function's particle emitter. Returns the deferred Fx*Stop
+    /// events of effects an extinguish killed. Still open: SmokeRate smoke
+    /// (visual), and death/removal callbacks from the energy and damage
+    /// changes.
     #[doc(hidden)]
     pub fn exec_object_fire(
         &mut self,
@@ -288,6 +291,9 @@ impl Engine {
         if !self.objects[idx].state.on_fire {
             return Vec::new();
         }
+        // C++ takes iTime as an argument, fixed for the whole call, so read
+        // the effect's own clock before ExecFire can disturb the list.
+        let effect_time = self.object_fire_effect_var(idx, fire_number, |effect| effect.timer);
         let mut stop_events = Vec::new();
         // FnFxFireTimer reads Var(1), validates only the local copy and
         // passes NO_OWNER into ExecFire when that player no longer exists.
@@ -391,14 +397,87 @@ impl Engine {
             }
         }
         // FnFxFireTimer returns C4Fx_Execute_Kill once the flag is gone
-        // (C4Effect.cpp:663-666) — belt and braces when something cleared
-        // OnFire without killing the effect.
+        // (C4Effect.cpp:680-683) — belt and braces when something cleared
+        // OnFire without killing the effect. C++ checks it before the
+        // emitter, so a fire that just went out draws no particles.
         if !self.objects[idx].state.on_fire {
             if let Some(removed) = self.objects[idx].remove_effect_by_number(fire_number) {
                 stop_events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
             }
+            return stop_events;
         }
+        self.exec_object_fire_particles(idx, fire_number, effect_time);
         stop_events
+    }
+
+    /// One `Fire` effect variable, read through the C4Value int conversion
+    /// FnFxFireTimer applies to `FxFireVar*`.
+    fn object_fire_effect_var(
+        &self,
+        idx: usize,
+        fire_number: i32,
+        pick: impl Fn(&EffectState) -> i32,
+    ) -> i32 {
+        self.objects[idx]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.number == fire_number)
+            .map(pick)
+            .unwrap_or(0)
+    }
+
+    /// The particle half of `FnFxFireTimer` (C4Effect.cpp:677-786): the
+    /// three gates, then a snapshot of the burning object handed to the
+    /// particle system, which owns the unsynchronized `SafeRandom` stream
+    /// the emitter draws from.
+    fn exec_object_fire_particles(&mut self, idx: usize, fire_number: i32, effect_time: i32) {
+        // special effects only if loaded (C4Effect.cpp:677-678)
+        if !self.particle_system.is_fire_particle_loaded() {
+            return;
+        }
+        // get fire mode (C4Effect.cpp:687-688); an unset EffectVar reads as
+        // zero, which is no mode at all and takes the normal-fire arms.
+        let fire_mode =
+            self.object_fire_effect_var(idx, fire_number, |effect| match effect.vars.first() {
+                Some(EffectVarValue::Int(value)) => *value,
+                Some(EffectVarValue::Bool(value)) => i32::from(*value),
+                Some(EffectVarValue::RawBool(value)) => *value as u32 as i32,
+                _ => 0,
+            });
+        // special effects only each four frames, except for objects
+        // (C4Effect.cpp:690-691) — the effect's own clock, not the frame.
+        if effect_time % 4 != 0 && fire_mode != C4FX_FIRE_MODE_OBJECT {
+            return;
+        }
+        // no gfx for contained (C4Effect.cpp:693-694)
+        if self.objects[idx].state.container.is_some() {
+            return;
+        }
+        let object = &self.objects[idx];
+        let definition = self.definitions.get(&object.definition_id);
+        let def_shape = object.shape_template.rect.unwrap_or_default();
+        let shape = object.current_shape_rect().unwrap_or(def_shape);
+        let emission = ObjectFireEmission {
+            object: object.id,
+            fire_mode,
+            def_width: def_shape.width,
+            def_height: def_shape.height,
+            fire_top: definition.map_or(0, Definition::fire_top),
+            con: object.state.construction,
+            growth_type: definition.is_some_and(Definition::stretch_growth),
+            x: object.state.position.x,
+            y: object.state.position.y,
+            shape_x: shape.x,
+            shape_y: shape.y,
+            shape_width: shape.width,
+            shape_height: shape.height,
+            rotation: object.state.rotation,
+            rotateable: definition.is_some_and(|definition| definition.rotateable() != 0),
+            xdir: fixtof(object.fixed_velocity.x),
+            ydir: fixtof(object.fixed_velocity.y),
+        };
+        self.particle_system.create_object_fire(&emission);
     }
 
     /// `C4Object::Extinguish` (C4Object.cpp:1269-1301): a known fire number

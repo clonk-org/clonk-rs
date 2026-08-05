@@ -4088,6 +4088,11 @@ impl EffectHostContext {
         self.world.particle_def_known(name)
     }
 
+    /// `C4ParticleSystem::IsFireParticleLoaded` (C4Particles.h:214).
+    pub(crate) fn fire_particles_loaded(&self) -> bool {
+        self.world.fire_particles_loaded()
+    }
+
     pub(crate) fn register_transfer_zone_command(&mut self, command: TransferZoneCommand) {
         self.world.preview_transfer_zone_command(&command);
         self.transfer_zone_commands.push(command);

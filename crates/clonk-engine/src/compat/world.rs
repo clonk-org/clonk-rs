@@ -2037,6 +2037,10 @@ pub struct HostWorldContext {
     /// Effective `GetSmokeLevel` for sync-relevant FXU1 creation: 150 in
     /// network/recording sync mode, otherwise Config.Graphics.SmokeLevel.
     smoke_level: i32,
+    /// `C4ParticleSystem::IsFireParticleLoaded` (C4Particles.h:214). Unlike
+    /// `particle_def_known`, whose unknown answer is permissive, C++ starts
+    /// pFire1/pFire2 null, so the restrictive default is the correct one.
+    fire_particles_loaded: bool,
     /// Live `Game.Parameters.MaxPlayers`. Successful script writes update
     /// this preview before their deferred engine command is folded back.
     max_players: i32,
@@ -2208,6 +2212,7 @@ impl Default for HostWorldContext {
             network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
             viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
+            fire_particles_loaded: false,
             max_players: 0,
             use_fair_crew: false,
             fair_crew_strength: 1_000,
@@ -2589,6 +2594,7 @@ impl HostWorldContext {
             network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
             viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
+            fire_particles_loaded: false,
             max_players: 0,
             use_fair_crew: false,
             fair_crew_strength: 1_000,
@@ -3004,6 +3010,15 @@ impl HostWorldContext {
 
     pub(crate) fn smoke_level(&self) -> i32 {
         self.smoke_level
+    }
+
+    pub(crate) fn with_fire_particles_loaded(mut self, loaded: bool) -> Self {
+        self.fire_particles_loaded = loaded;
+        self
+    }
+
+    pub(crate) fn fire_particles_loaded(&self) -> bool {
+        self.fire_particles_loaded
     }
 
     pub(crate) fn with_max_players(mut self, max_players: i32) -> Self {
