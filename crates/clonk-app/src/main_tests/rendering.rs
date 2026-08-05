@@ -857,6 +857,36 @@ fn render_floor_reserves_a_share_of_the_wall_clock_for_drawing() {
 }
 
 #[test]
+fn a_simulation_burst_yields_when_the_next_graphics_opportunity_is_due() {
+    // `C4Application::Execute` runs at most one `Game.Execute()` per
+    // application pass and draws in that same pass
+    // (C4Application.cpp:451-478), so catch-up can never push drawing out.
+    // The port coalesces a backlog into one pass instead, and the reservation
+    // that bounds it is computed *from* the graphics cost — an expensive pass
+    // buys the simulation more wall clock, not less, which is backwards
+    // whenever drawing is the expensive half. The graphics deadline bounds the
+    // burst as well, so the screen keeps the cadence the timer asks for.
+    let now = Instant::now();
+    let reserved = Duration::from_millis(187);
+
+    assert_eq!(
+        simulation_burst_budget_before(reserved, now, now + Duration::from_millis(28)),
+        Duration::from_millis(28),
+        "a graphics opportunity coming due outranks the reservation"
+    );
+    assert_eq!(
+        simulation_burst_budget_before(reserved, now, now + Duration::from_millis(400)),
+        reserved,
+        "a deadline further out than the reservation leaves it alone"
+    );
+    assert_eq!(
+        simulation_burst_budget_before(reserved, now, now - Duration::from_millis(5)),
+        Duration::ZERO,
+        "an overdue opportunity yields after the one frame the pass always owes"
+    );
+}
+
+#[test]
 fn render_floor_forces_a_repaint_at_two_hertz_however_deep_the_skip() {
     // `/fast 500` and the network catch-up divisor can both suppress every
     // graphics opportunity for an unbounded number of frames. The floor is
