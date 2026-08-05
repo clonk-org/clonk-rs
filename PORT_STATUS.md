@@ -3191,8 +3191,25 @@ an ordered-map model gap.
   executed, unspent backlog stays in the accumulator, and the same simulation
   frames therefore run in the same order — only spread across more application
   passes. Nothing here is visible to script or to the control stream.
+  **The graphics deadline bounds the burst as well**
+  (`simulation_burst_budget_before`; added for clonk-org/clonk-rs#159).
+  The reservation above is derived from the *last graphics pass*, so it is the
+  right bound only while the simulation is the expensive half. When drawing is,
+  it inverts: an expensive draw buys the simulation more wall clock, not less.
+  Measured on `content/mods/Super_Mega_Ultra_Extrem_Wettlauf.c4s` at a 33 ms
+  graphics pass, the reservation was 187 ms of simulation per draw and
+  presentation fell to 0.93 FPS — the `must_present` floor — while
+  `simulation_fps` held 35.7. C++ cannot reach that state: `C4Application::
+  Execute` runs at most one `Game.Execute()` per pass and draws in the same pass
+  (C4Application.cpp:451-478), so drawing gets a slot every pass and an
+  overloaded machine runs the *game* slow instead. A pass therefore also stops
+  once the next graphics opportunity is due, which keeps the catch-up (every
+  frame that fits before the draw still coalesces into the one pass) while
+  restoring the oracle's ordering. Same determinism argument: still checked only
+  after a frame executed.
   Pinned by `a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent`,
-  `render_floor_reserves_a_share_of_the_wall_clock_for_drawing` and
+  `render_floor_reserves_a_share_of_the_wall_clock_for_drawing`,
+  `a_simulation_burst_yields_when_the_next_graphics_opportunity_is_due` and
   `render_floor_forces_a_repaint_at_two_hertz_however_deep_the_skip`.
   **Relationship to the frame-counted floor below.** The two were developed
   independently against the same Spring precedent and both survive, because

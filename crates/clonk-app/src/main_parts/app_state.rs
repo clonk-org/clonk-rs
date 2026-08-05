@@ -3445,6 +3445,36 @@ pub(crate) fn advance_graphics_deadline(
     }
 }
 
+/// How long one `advance_simulation_pass` may simulate: the wall-clock share
+/// [`RenderFloor::simulation_burst_budget`] reserves, and never past the moment
+/// the next graphics opportunity comes due.
+///
+/// The reservation alone is the right bound only while the *simulation* is the
+/// expensive half. It is derived from the last graphics pass, so an expensive
+/// draw hands the simulation `(100 - RENDER_RESERVE_PERCENT)/RENDER_RESERVE_PERCENT`
+/// times that cost before the pass will yield — the more drawing costs, the
+/// longer it waits. Measured on a 33 ms pass that is 187 ms of simulation per
+/// draw, which drops presentation onto [`MAX_TIME_BETWEEN_RENDERS`] while the
+/// simulation holds full rate.
+///
+/// C++ never reaches that state: `C4Application::Execute` runs at most one
+/// `Game.Execute()` per application pass and draws in the same pass
+/// (C4Application.cpp:451-478), so drawing gets a slot every pass and a machine
+/// that cannot keep up runs the *game* slow instead. Yielding at the deadline
+/// restores that ordering without giving up catch-up: the pass still coalesces
+/// every frame that fits before the next draw is due.
+///
+/// Determinism is unaffected for the same reason the reservation is: the budget
+/// is only tested after a frame executed, so a pass always advances at least
+/// one frame and unspent backlog stays in the accumulator.
+pub(crate) fn simulation_burst_budget_before(
+    reserved: Duration,
+    now: Instant,
+    next_graphics_deadline: Instant,
+) -> Duration {
+    reserved.min(next_graphics_deadline.saturating_duration_since(now))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NetworkControlPacing {
     pub(crate) behind: u32,

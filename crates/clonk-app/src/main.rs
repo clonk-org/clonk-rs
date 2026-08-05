@@ -1165,8 +1165,11 @@ fn run() -> Result<()> {
                         accumulator = Duration::ZERO;
                     }
 
-                    let burst_budget =
-                        render_floor.simulation_burst_budget(frame_schedule.simulation_interval);
+                    let burst_budget = simulation_burst_budget_before(
+                        render_floor.simulation_burst_budget(frame_schedule.simulation_interval),
+                        now,
+                        next_graphics_deadline,
+                    );
                     let simulation_pass = match advance_simulation_pass_within(
                         &mut app,
                         &mut frame_schedule,
