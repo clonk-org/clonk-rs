@@ -209,14 +209,17 @@ impl PixelGridDirtyGeneration {
             .chain(sparse.into_iter().flatten().copied())
     }
 
+    /// A landscape change: it both widens the serialized bounds and enters the
+    /// runtime rectangle list the frontend redraws.
     fn add_rect(&mut self, rect: PixelGridDirtyRect) {
         if self.renders_nothing {
-            // Everything recorded so far was a solid-mask byte. The first real
-            // landscape change owns the bounds outright: relighting the mask
-            // box too would redraw pixels C++ never even marks.
+            // Everything recorded so far was a solid-mask byte, which the
+            // serialized bounds already cover but nothing redraws. The runtime
+            // list starts here so the mask box cannot join it.
             self.renders_nothing = false;
-            self.rect = rect;
             self.rects.clear();
+            self.rects.push(rect);
+            self.rect = self.rect.union(rect);
             return;
         }
         let overlap_area = rect.set_pix_overlap_area();
@@ -228,6 +231,21 @@ impl PixelGridDirtyGeneration {
             self.rects.push(self.rect);
         }
         Self::add_capped_rect(&mut self.rects, rect);
+        self.rect = self.rect.union(rect);
+    }
+
+    /// A `C4SolidMask` byte: it belongs in the serialized bounds like any other
+    /// write, because `rect` is hashed engine state that the replay checkpoint
+    /// covers, but never in the runtime list, because C++ relights with every
+    /// mask temporarily removed (C4Landscape.cpp:2497,2501) and so never
+    /// redraws one.
+    fn widen_bounds(&mut self, rect: PixelGridDirtyRect) {
+        if !self.renders_nothing && self.rects.is_empty() {
+            // The generation's single real rectangle is still held in `rect`,
+            // which is about to grow over a mask byte. Move it into the runtime
+            // list first, or the frontend would redraw the mask box with it.
+            self.rects.push(self.rect);
+        }
         self.rect = self.rect.union(rect);
     }
 
@@ -367,6 +385,10 @@ pub struct PixelGrid {
     /// Surface32 writes inside one of these regions cannot survive that draw.
     #[serde(skip)]
     pending_surface32_relights: Vec<PixelGridDirtyRect>,
+    /// The material each currently-put `C4SolidMask` byte is covering, so the
+    /// rendered plane can answer as if the mask were not there.
+    #[serde(skip)]
+    mask_background: RuntimeMaskBackground,
     /// Pix2Dens: density per texmap index (IFT stripped); index 0 and
     /// unmapped entries are sky (density 0).
     densities: Vec<i32>,
@@ -467,6 +489,7 @@ impl PixelGrid {
             surface32_render_token: 0,
             surface32_dirty_generations: VecDeque::new(),
             pending_surface32_relights: Vec::new(),
+            mask_background: RuntimeMaskBackground::default(),
         }
     }
 
@@ -752,6 +775,28 @@ impl PixelGrid {
         self.slot(x, y).map(|slot| self.bytes[slot])
     }
 
+    /// The byte the landscape would show with every `C4SolidMask` lifted, which
+    /// is what `DoRelights` composes `Surface32` from (C4Landscape.cpp:
+    /// 2497,2501). Use this for anything that draws the landscape;
+    /// [`Self::byte_at`] stays the collision truth.
+    pub fn render_byte_at(&self, x: i32, y: i32) -> Option<u8> {
+        self.slot(x, y)
+            .map(|slot| self.render_byte_in_slot(slot, self.bytes[slot]))
+    }
+
+    /// [`Self::render_byte_at`] for a caller that already resolved the slot and
+    /// read the plane, so a composition loop pays one lookup per pixel instead
+    /// of repeating the bounds check.
+    pub fn render_byte_in_slot(&self, slot: usize, byte: u8) -> u8 {
+        self.mask_background.0.get(&slot).copied().unwrap_or(byte)
+    }
+
+    /// Whether any mask is currently put. A composition pass over a landscape
+    /// with none can read the plane directly.
+    pub fn has_mask_background(&self) -> bool {
+        !self.mask_background.0.is_empty()
+    }
+
     /// Raw C4 packed color written directly to the presentation-only
     /// Surface32 at this coordinate, if one has not since been relit.
     pub fn surface32_pixel_at(&self, x: i32, y: i32) -> Option<u32> {
@@ -962,8 +1007,12 @@ impl PixelGrid {
             generation.token = token;
             // A solid-mask byte still advances the lineage — the plane really
             // did change, and a consumer that missed it must not be told
-            // "nothing happened" — but it contributes no rectangle to redraw.
-            if !renders_nothing {
+            // "nothing happened" — and it still counts towards the serialized
+            // bounds, which are hashed engine state. It contributes no
+            // rectangle to redraw.
+            if renders_nothing {
+                generation.widen_bounds(rect);
+            } else {
                 generation.add_rect(rect);
             }
         } else {
@@ -1362,6 +1411,23 @@ impl PixelGrid {
             let old = self.bytes[slot];
             if old == byte {
                 return;
+            }
+            if write == PixelWrite::SolidMask {
+                // Put stores what it covers; Remove writes that byte back and
+                // hands the pixel to the plane again. Comparing against the
+                // stored background handles a mask put over another mask's
+                // MCVehic, which owns no background of its own
+                // (C4SolidMask.cpp:92-96).
+                let background = *self.mask_background.0.entry(slot).or_insert(old);
+                if byte == background {
+                    self.mask_background.0.remove(&slot);
+                }
+            } else {
+                // A real landscape change defines the new mask-free material.
+                // PrepareChange normally lifts the masks first
+                // (C4Landscape.cpp:2851-2880); one that lands anyway must not
+                // keep showing the byte a mask saved before it.
+                self.mask_background.0.remove(&slot);
             }
             if write == PixelWrite::SetPix {
                 self.schedule_surface32_relight_around(x, y);
@@ -2446,6 +2512,30 @@ struct LandscapeInitialPixels {
     height: u32,
     bytes: Arc<Vec<u8>>,
 }
+
+/// The background byte under every currently-put `C4SolidMask` pixel, keyed by
+/// plane slot — the port's `pSolidMaskMatBuff` seen from the landscape side.
+///
+/// C++ needs no such store on the landscape because the two planes are already
+/// separate: masks reach `Surface8` through `_SetPix` (C4Wrappers.h:94,
+/// C4Landscape.cpp:846) and never `Surface32`, and `DoRelights` recomputes
+/// `Surface32` with every mask temporarily removed (C4Landscape.cpp:2497,2501).
+/// The port composes its rendered landscape straight from the byte plane, so
+/// that plane has to be able to answer both questions.
+///
+/// Runtime-only, and ignored by equality for the same reason as the other
+/// `Runtime*` helpers: it is derived from live masks, it is not engine state,
+/// and it must not reach a savegame, a snapshot or a replay checkpoint hash.
+#[derive(Debug, Clone, Default)]
+struct RuntimeMaskBackground(HashMap<usize, u8>);
+
+impl PartialEq for RuntimeMaskBackground {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for RuntimeMaskBackground {}
 
 /// Runtime-only C4Landscape::pInitial storage. It is deliberately ignored by
 /// Landscape equality just like other non-serialized load/save helpers.
@@ -8855,6 +8945,125 @@ func MoveMask(int x, int y)
         assert!(
             rects.is_empty(),
             "a put and removed mask leaves the rendered landscape unchanged, got {rects:?}"
+        );
+    }
+
+    #[test]
+    fn a_put_solid_mask_is_invisible_to_the_rendered_byte_plane() {
+        // C4Landscape::DoRelights takes every C4SolidMask out with
+        // RemoveTemporary before recomputing Surface32 and puts them back
+        // afterwards (C4Landscape.cpp:2497,2501), so a mask byte is collision
+        // truth that is never drawn. The plane the frontend composes from has
+        // to answer the same way, whatever the collision plane says.
+        let mut grid = PixelGrid::new(
+            4,
+            4,
+            vec![1; 16],
+            vec![0; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+
+        grid.write_mask_byte(1, 1, 2);
+
+        assert_eq!(grid.byte_at(1, 1), Some(2), "collision sees the mask");
+        assert_eq!(
+            grid.render_byte_at(1, 1),
+            Some(1),
+            "the picture keeps the material the mask covers"
+        );
+
+        // C4SolidMask::Remove restores the saved background byte.
+        grid.write_mask_byte(1, 1, 1);
+
+        assert_eq!(grid.byte_at(1, 1), Some(1));
+        assert_eq!(grid.render_byte_at(1, 1), Some(1));
+    }
+
+    #[test]
+    fn overlapping_masks_keep_the_one_background_under_them() {
+        // Two masks over the same pixel: the second stores MCVehic over
+        // MCVehic and its own Remove restores MCVehic (C4SolidMask.cpp:92-96),
+        // so only the first mask owns the real background. The rendered plane
+        // must report that background throughout, and go back to the live byte
+        // only once the last mask is gone.
+        let mut grid = PixelGrid::new(
+            2,
+            2,
+            vec![3; 4],
+            vec![0; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+
+        grid.write_mask_byte(0, 0, 2);
+        grid.write_mask_byte(0, 0, 2);
+        assert_eq!(grid.render_byte_at(0, 0), Some(3));
+
+        grid.write_mask_byte(0, 0, 2);
+        assert_eq!(grid.render_byte_at(0, 0), Some(3));
+
+        grid.write_mask_byte(0, 0, 3);
+        assert_eq!(grid.render_byte_at(0, 0), Some(3));
+        assert_eq!(grid.byte_at(0, 0), Some(3));
+    }
+
+    #[test]
+    fn a_landscape_change_under_a_mask_becomes_the_new_rendered_byte() {
+        // PrepareChange/FinishChange take the masks out around a real change
+        // (C4Landscape.cpp:2851-2880), so the background the mask restores is
+        // the changed material. A SetPix that does land while a mask is still
+        // put must not keep reporting the stale background either.
+        let mut grid = PixelGrid::new(
+            2,
+            2,
+            vec![1; 4],
+            vec![0; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+
+        grid.write_mask_byte(0, 0, 2);
+        grid.set_byte(0, 0, 3);
+
+        assert_eq!(
+            grid.render_byte_at(0, 0),
+            Some(3),
+            "the dug material owns the pixel, not the byte the mask saved"
+        );
+    }
+
+    #[test]
+    fn a_solid_mask_write_still_widens_the_serialized_dirty_bounds() {
+        // `PixelGridDirtyGeneration::rect` is serialized engine state, and the
+        // replay checkpoint hashes the whole snapshot the landscape sits in
+        // (`snapshot_hash`, crates/clonk-engine/tests/it/support/dev_feedback.rs).
+        // Keeping mask bytes out of the *rendered* rectangles is a presentation
+        // concern and lives in `rects`, which is `#[serde(skip)]`; the legacy
+        // bounding rectangle must keep covering every write, mask or not.
+        let mut grid = PixelGrid::new(
+            64,
+            4,
+            vec![0; 256],
+            vec![0; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+
+        grid.set_byte(10, 1, 1);
+        grid.write_mask_byte(50, 2, 2);
+
+        let value = serde_json::to_value(&grid).expect("grid serializes");
+        let rect = &value["dirty_generations"][0]["rect"];
+        assert_eq!(rect["x"], 10, "bounds start at the dug pixel: {rect}");
+        assert_eq!(rect["y"], 1, "bounds start at the dug pixel: {rect}");
+        assert_eq!(
+            rect["width"], 41,
+            "bounds still reach the mask pixel: {rect}"
+        );
+        assert_eq!(
+            rect["height"], 2,
+            "bounds still reach the mask pixel: {rect}"
         );
     }
 
