@@ -1198,6 +1198,71 @@ RandomTeamCount=2
     }
 
     #[test]
+    fn legacy_team_metadata_defaults_numbers_strtol_cannot_read() {
+        // StdCompilerINIRead::ReadNum hands the raw text to strtol/strtoul and
+        // picks base 16 only when the number itself starts `0x`
+        // (StdCompiler.h:705-723), so an unprefixed hex literal reads no digits
+        // at all. The resulting notFound is caught by the naming adaptor's
+        // default handler (StdAdaptors.h:44-60, 99-131), leaving the field
+        // default instead of failing the load. Clonkparty.c4s ships
+        // `Color=fa1010`, and C4Team::CompileFunc defaults every one of these
+        // fields to 0 (C4Teams.cpp:139-150, 556-579).
+        let parsed = parse_legacy_team_metadata_source(concat!(
+            "[Teams]\n",
+            "Active=1\n",
+            "LastTeamID=none\n",
+            "MaxScriptPlayers=none\n",
+            "RandomTeamCount=none\n",
+            "\t[Team]\n",
+            "\tid=1\n",
+            "\tName=Spieler\n",
+            "\tPlrStartIndex=none\n",
+            "\tPlayerCount=none\n",
+            "\tColor=fa1010\n",
+            "\tMaxPlayer=none\n",
+        ))
+        .expect("unreadable team numbers default instead of failing the load");
+
+        assert_eq!(parsed.metadata.last_team_id, 1, "raised by the team id");
+        assert_eq!(parsed.metadata.max_script_players, 0);
+        assert_eq!(parsed.metadata.random_team_count, 0);
+        let team = &parsed.metadata.teams[0];
+        assert_eq!(team.player_start_index, 0);
+        assert_eq!(team.player_ids, Vec::<i32>::new());
+        assert_eq!(team.max_players, 0);
+        // The defaulted 0 then takes RecheckColor's id-indexed team colour
+        // (C4Teams.cpp:181-218).
+        assert_eq!(team.color, 0x00f4_0000);
+        assert_eq!(parsed.random_color_team_id, None);
+    }
+
+    #[test]
+    fn legacy_team_metadata_reads_colors_like_strtoul() {
+        // dwClr is uint32_t, so ReadNum uses strtoul: a literal `0x` prefix
+        // selects base 16, a leading sign keeps base 10, and a negative value
+        // is negated modulo the unsigned range before the uint32_t store
+        // (StdCompiler.cpp:648-653; C4Teams.cpp:147).
+        let colors = |source: &str| {
+            parse_legacy_team_metadata_source(source)
+                .expect("Teams.txt parses")
+                .metadata
+                .teams
+                .iter()
+                .map(|team| team.color)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            colors(concat!(
+                "[Teams]\n",
+                "\t[Team]\n\tid=1\n\tColor=0xfa1010\n",
+                "\t[Team]\n\tid=2\n\tColor=-1\n",
+                "\t[Team]\n\tid=3\n\tColor=16053492;\n",
+            )),
+            [0x00fa_1010, 0xffff_ffff, 16_053_492]
+        );
+    }
+
+    #[test]
     fn legacy_teams_bom_prefixed_root_header_is_skipped_like_cpp() {
         let plain = parse_legacy_teams_source(
             "[Teams]\nActive=0\nCustom=0\n  [Team]\n  id=7\n  Name=Visible\n",
@@ -1243,14 +1308,16 @@ RandomTeamCount=2
             );
         }
 
-        let invalid_lf = "[Teams]\n  [Team]\n  id=broken\n";
+        // An unreadable number defaults rather than failing, so the diagnostic
+        // this pins comes from a Name that has no CP1252 byte to compile to.
+        let invalid_lf = "[Teams]\n  [Team]\n  Name=\u{0100}\n";
         for (label, source) in [
             ("LF", invalid_lf.to_string()),
             ("CRLF", invalid_lf.replace('\n', "\r\n")),
             ("CR", invalid_lf.replace('\n', "\r")),
         ] {
             let error =
-                parse_legacy_team_metadata_source(&source).expect_err("invalid team id must fail");
+                parse_legacy_team_metadata_source(&source).expect_err("invalid team name must fail");
             assert!(
                 error.to_string().contains("Teams.txt line 3:"),
                 "{label} diagnostics preserve physical line numbers: {error}"
