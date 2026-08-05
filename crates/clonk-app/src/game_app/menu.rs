@@ -3523,6 +3523,29 @@ impl GameApp {
         editor.is_file().then_some(editor)
     }
 
+    /// Spawns the worker that stands in for `C4StartupNetDlg`'s DiscoverClient
+    /// and pMasterserverClient and issues their first query
+    /// (src/C4StartupNetDlg.cpp:737-738,864-865).
+    fn start_startup_game_search(&mut self, search_config: clonk_network::NetworkGameSearchConfig) {
+        let reference_config = load_reference_query_settings(self.app_paths.as_ref());
+        self.startup_game_search =
+            match clonk_network::StartupGameSearch::start_with_reference_config(
+                search_config,
+                reference_config,
+            ) {
+                Ok(search) => {
+                    if search.initial_refresh().is_err() {
+                        self.status_text = "Unable to start network game search".to_string();
+                    }
+                    Some(search)
+                }
+                Err(error) => {
+                    self.status_text = format!("Unable to start network game search: {error}");
+                    None
+                }
+            };
+    }
+
     pub(crate) fn open_network_game_dialog(&mut self) {
         self.external_irc_dialog_visible = false;
         self.external_irc_dialog = None;
@@ -3547,23 +3570,7 @@ impl GameApp {
             &self.startup_tooltip_resources,
             &search_config.master_server_url,
         ));
-        let reference_config = load_reference_query_settings(self.app_paths.as_ref());
-        self.startup_game_search =
-            match clonk_network::StartupGameSearch::start_with_reference_config(
-                search_config,
-                reference_config,
-            ) {
-                Ok(search) => {
-                    if search.initial_refresh().is_err() {
-                        self.status_text = "Unable to start network game search".to_string();
-                    }
-                    Some(search)
-                }
-                Err(error) => {
-                    self.status_text = format!("Unable to start network game search: {error}");
-                    None
-                }
-            };
+        self.start_startup_game_search(search_config);
         self.startup_network_dialog = Some(dialog);
         self.replace_startup_dialog(StartupView::NetworkGame, StartupDialog::NetworkGame);
         self.sync_startup_irc_snapshot();
